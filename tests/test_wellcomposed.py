@@ -3,7 +3,10 @@
 import numpy as np
 from scipy import ndimage as ndi
 
-from baillarger.topology import euler_6_26, euler_26_6
+from baillarger import phantoms as ph
+from baillarger.growth import grow_topological, seam_priority
+from baillarger.mesh import marching_tetrahedra, topology
+from baillarger.topology import CONN_26_6, euler_6_26, euler_26_6
 from baillarger.wellcomposed import critical_count, repair
 
 
@@ -37,3 +40,18 @@ def test_repair_keeps_topology_and_removes_critical_configurations() -> None:
             assert critical_count(r) == 0
             # well-composed: 6- and 26-connectivity agree
             assert euler_6_26(r) == euler_26_6(r)
+
+
+def test_repaired_growth_mesh_has_the_digital_topology() -> None:
+    for phantom in (ph.p1_kissing_banks, ph.p4_kissing_dark_line, ph.p5_wm_handle):
+        rim, flash, _ = phantom()
+        pri = seam_priority(rim, flash, ph.VOXEL_MM)
+        obj, seam, _ = grow_topological(rim == 2, rim == 3, pri, CONN_26_6)
+        r, _, left = repair(obj, (rim == 3) & obj, seam)
+        assert left == 0
+        assert euler_26_6(r) == euler_26_6(obj)
+        V, T = marching_tetrahedra(np.pad(r.astype(float), 1), 0.5)
+        top = topology(T, len(V))
+        # a closed surface of the object: chi(surface) = 2 chi(object)
+        assert top["boundary_loops"] == 0
+        assert top["chi"] == 2 * euler_26_6(r)

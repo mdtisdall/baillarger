@@ -33,12 +33,14 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.mypy]
 strict = true
 exclude = ["^\\.worktrees/"]
-# scikit-image ships py.typed but leaves most functions unannotated.
-untyped_calls_exclude = ["skimage"]
+# scikit-image ships py.typed but leaves most functions unannotated; numba
+# internals (numba.core.cgutils) are unannotated too.
+untyped_calls_exclude = ["skimage", "numba"]
 
-# numba has no type stubs. baillarger._jit gives njit a typed signature.
+# numba and llvmlite have no type stubs. baillarger._jit gives njit a typed
+# signature.
 [[tool.mypy.overrides]]
-module = ["numba", "numba.*"]
+module = ["numba", "numba.*", "llvmlite", "llvmlite.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
