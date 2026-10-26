@@ -608,6 +608,56 @@ def build_frame(
     )
 
 
+def path_exit(frame: Frame, tissue: Bool, fluid: Bool) -> F32:
+    """The depth (mm) at which each streamline leaves the tissue into fluid:
+    where the segment from its last point in tissue to its next point, in
+    fluid, enters the first fluid voxel (points labelled by their nearest
+    voxel; within 1/64 of the segment). NaN for a streamline that never
+    does: it ends inside the tissue (at a ridge in fused cortex, the crop, an
+    excision or d_max), or meets something else first."""
+    npath = len(frame.path_start) - 1
+    out = np.full(npath, np.nan, np.float32)
+    P = frame.path_points
+    if not len(P):
+        return out
+    vi = np.clip(np.floor(P + 0.5).astype(np.int64), 0, np.array(tissue.shape) - 1)
+    lab = np.zeros(len(P), np.int8)  # 0 other, 1 tissue, 2 fluid
+    lab[tissue[vi[:, 0], vi[:, 1], vi[:, 2]]] = 1
+    lab[fluid[vi[:, 0], vi[:, 1], vi[:, 2]]] = 2
+    pid = np.repeat(np.arange(npath), np.diff(frame.path_start))
+    q = np.arange(1, len(P))
+    same = pid[q] == pid[q - 1]
+    cross = q[same & (lab[q] == 2) & (lab[q - 1] == 1)]
+    # only a path's first crossing, and only if no point before it is
+    # anything but tissue (its start, on the white surface, may be in the WM)
+    first = np.full(npath, len(P), np.int64)
+    np.minimum.at(first, pid[cross], cross)
+    has = first < len(P)
+    bad = np.zeros(len(P), bool)
+    bad[1:] = (lab[1:] == 0) | (lab[1:] == 2)
+    bad[frame.path_start[:-1][np.diff(frame.path_start) > 0]] = False
+    nbad = np.concatenate([[0], np.cumsum(bad)])
+    ok = np.zeros(npath, bool)
+    j = np.flatnonzero(has)
+    start = frame.path_start[j]
+    ok[j] = nbad[first[j]] - nbad[start] == 0
+    k = np.flatnonzero(ok)
+    # refine within the crossing segment: the first of n_sub sub-points
+    # labelled fluid, less half a sub-step
+    n_sub = 32
+    q1 = first[k]
+    p0, p1 = P[q1 - 1].astype(np.float64), P[q1].astype(np.float64)
+    t = (np.arange(1, n_sub + 1) / n_sub)[None, :, None]
+    sub = p0[:, None, :] + t * (p1 - p0)[:, None, :]
+    si = np.clip(np.floor(sub + 0.5).astype(np.int64), 0, np.array(tissue.shape) - 1)
+    wet = fluid[si[..., 0], si[..., 1], si[..., 2]]
+    j1 = np.argmax(wet, axis=1)  # the last sub-point is fluid, so there is one
+    frac = (j1 + 0.5) / n_sub
+    a0, a1 = frame.path_arc[q1 - 1], frame.path_arc[q1]
+    out[k] = (a0 + frac * (a1 - a0)).astype(np.float32)
+    return out
+
+
 def column_thickness(frame: Frame, tissue: Bool) -> F64:
     """T_c of each column: the median, over its streamlines, of the depth of
     their last tissue voxel (NaN for a column with no tissue voxel). Cut
