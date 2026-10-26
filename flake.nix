@@ -23,6 +23,14 @@
           env = {
             UV_PYTHON = "${python}/bin/python3";
             UV_PYTHON_DOWNLOADS = "never";
+          } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            # Binary wheels from PyPI (numpy, scipy, numba) link to libstdc++
+            # and zlib, which NixOS and the Nix shell do not put on the
+            # loader path.
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.stdenv.cc.cc.lib
+              pkgs.zlib
+            ];
           };
         };
       });
