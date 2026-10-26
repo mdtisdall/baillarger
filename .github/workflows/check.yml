@@ -1,0 +1,96 @@
+# CI for a Python project on the dev-workflow. Copy to .github/workflows/check.yml.
+#
+# Pull request: scripts/affected-tests selects the tests that the change can
+#   affect. When the change has only docs or ignored files, the check job
+#   does not start. A newer push to the PR cancels the older run.
+# main, after each merge: all the tests. One run at a time: while a run is in
+#   progress, newer merges replace the queued run, so the next run tests all
+#   of them. A failure opens an issue with the label ci-main, or comments on
+#   the open one; the next pass closes it.
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      check: ${{ steps.select.outputs.check }}
+      tests: ${{ steps.select.outputs.tests }}
+      docs: ${{ steps.select.outputs.docs }}
+    steps:
+      # The PR merge commit and its first parent, the base branch.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      # The runner's python3 (3.12 on ubuntu-24.04). No project dependencies.
+      - id: select
+        run: python3 scripts/affected-tests --base HEAD^1 --github-output
+
+  check:
+    needs: changes
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' || needs.changes.outputs.check == 'run')
+    # For bash 3.2 and BSD tools, add a matrix with macos-latest. macOS
+    # minutes cost 10 times more.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: cachix/install-nix-action@v31
+      # The Nix store, in the GitHub Actions cache. Only main saves it: a
+      # cache from a PR branch is visible only to that branch.
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          save: ${{ github.event_name == 'push' }}
+          gc-max-store-size-linux: 2G
+          gc-max-store-size-macos: 2G
+      - name: scripts/check (the affected tests)
+        if: github.event_name == 'pull_request'
+        run: nix develop --command scripts/check --changed-since HEAD^1
+      - name: scripts/check (all tests)
+        if: github.event_name == 'push'
+        run: nix develop --command scripts/check
+
+  report-main:
+    needs: check
+    if: >-
+      always() && github.event_name == 'push' &&
+      (needs.check.result == 'success' || needs.check.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RESULT: ${{ needs.check.result }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - run: |
+          open="$(gh issue list --label ci-main --state open --json number --jq '.[0].number // empty')"
+          if [ "$RESULT" = failure ]; then
+            body="The full checks failed on main at $GITHUB_SHA: $RUN_URL"
+            if [ -n "$open" ]; then
+              gh issue comment "$open" --body "$body"
+            else
+              gh label create ci-main --color B60205 --description "The full checks fail on main" --force
+              gh issue create --title "main: the full checks fail" --label ci-main --body "$body"
+            fi
+          elif [ -n "$open" ]; then
+            gh issue close "$open" --comment "The full checks pass on main at $GITHUB_SHA: $RUN_URL"
+          fi

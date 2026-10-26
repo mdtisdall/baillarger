@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+"""Select the tests that a change can affect, for a Python project.
+
+    python3 scripts/affected-tests --base <ref> [--explain]
+    python3 scripts/affected-tests --base <ref> --run -- <test command...>
+    python3 scripts/affected-tests --base <ref> --github-output
+
+The change is the difference between the merge base of <ref> and HEAD, and
+the working tree, with untracked files. CI uses --base HEAD^1 on the merge
+commit of a pull request; locally, --base origin/main.
+
+Each changed file adds a requirement, and the largest one wins: ALL, then a
+list of test paths, then nothing.
+
+  - A file that matches `run-all` (dependency files, the pytest
+    configuration, CI, this script): ALL.
+  - A file that matches `map`: the paths that the map gives.
+  - A file that matches `ignore`: nothing.
+  - A .py file: each test file that reaches it through imports, conftest.py
+    files, package __init__.py files, or a string that names it (a
+    mock.patch target, a path).
+  - A file that matches `docs`: the tests that name it; the file itself when
+    it matches --doctest-glob; its directory when a pytest plugin that
+    collects tests from docs (Sybil, pytest-markdown-docs) is configured.
+  - Any other file: the tests that name it. When nothing names it: ALL.
+
+A file that loads modules by names computed at run time depends on every
+module of its top-level package (every module, outside a package). Names in string literals ("pkg.mod") count
+as imports. Any failure of the selection gives ALL.
+
+Default output: ALL, or one path on each line (no lines: no tests). --run
+runs the command with the selected paths as more arguments; with no affected
+tests it runs nothing. pytest exit 5 (no tests collected) is a pass when the
+command gets a selection. --github-output writes tests=all|some|none,
+check=run|skip, and docs=true|false to $GITHUB_OUTPUT.
+
+Settings, all optional, in pyproject.toml:
+
+    [tool.affected-tests]
+    run-all = ["data/schema.sql"]       # added to the defaults
+    ignore = ["notebooks/**"]           # added to the defaults
+    docs = ["*.md", "*.rst", "docs/**"] # replaces the default; [] = no docs
+    docs-skip-checks = true             # docs-only change: skip the checks
+    source-roots = ["src"]              # more import roots
+    [tool.affected-tests.map]
+    "fixtures/**" = ["tests/test_fixtures.py"]
+
+A pattern without `/` matches the file name in any directory. A pattern with
+`/` matches the path from the repository root, and `*` also matches `/`.
+
+Python 3.11 or newer, standard library only.
+"""
+
+import argparse
+import ast
+import configparser
+import fnmatch
+import os
+import posixpath
+import re
+import shlex
+import subprocess
+import sys
+
+RUN_ALL = [
+    "pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "pytest.ini",
+    "noxfile.py", "MANIFEST.in", ".python-version", ".envrc",
+    "requirements*.txt", "constraints*.txt", "uv.lock", "poetry.lock",
+    "pdm.lock", "Pipfile", "Pipfile.lock", "flake.nix", "flake.lock",
+    ".github/**", "scripts/check", "scripts/affected-tests",
+]
+IGNORE = [
+    "LICENSE*", "COPYING*", "NOTICE*", ".gitignore", ".editorconfig",
+    ".worktree-links", ".claude/settings.json", ".claude/gh-token-permissions",
+]
+DOCS = ["*.md", "*.rst", "docs/**"]
+PYTHON_FILES = ["test_*.py", "*_test.py"]
+# pytest plugins that collect tests from documentation files.
+DOC_PLUGINS = ["sybil", "markdown-docs", "markdown_docs", "codeblocks", "doctestplus"]
+# Functions that load modules by name or by path at run time.
+LOADERS = {
+    "import_module", "__import__", "load_module", "spec_from_file_location",
+    "run_module", "run_path", "iter_modules", "walk_packages", "entry_points",
+}
+DOTTED = re.compile(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)+$")
+IDENT = re.compile(r"^[A-Za-z_]\w*$")
+# A string that looks like a path pattern: "*.md", "docs/**/*.rst".
+GLOB = re.compile(r"^(?=.*\*)(?=.*[./])(?=.*[\w-])[\w.*/-]+$")
+
+
+class SelectAll(Exception):
+    pass
+
+
+def git(*args):
+    out = subprocess.run(["git", *args], check=True, capture_output=True)
+    return out.stdout.decode("utf-8", "surrogateescape")
+
+
+def matches(path, patterns):
+    name = posixpath.basename(path)
+    for p in patterns:
+        if fnmatch.fnmatchcase(path if "/" in p else name, p):
+            return p
+    return None
+
+
+def changed_files(base):
+    mb = git("merge-base", base, "HEAD").strip()
+    changed = {}
+    fields = git("diff", "--name-status", "--no-renames", "-z", mb).split("\0")
+    for status, path in zip(fields[0::2], fields[1::2]):
+        if path:
+            changed[path] = status[:1]
+    for path in git("ls-files", "--others", "--exclude-standard", "-z").split("\0"):
+        if path:
+            changed[path] = "A"
+    return changed
+
+
+def load_settings():
+    settings, pytest_cfg = {}, {}
+    if os.path.exists("pyproject.toml"):
+        try:
+            import tomllib
+        except ImportError:
+            raise SelectAll("pyproject.toml needs Python 3.11 or newer (tomllib)")
+        with open("pyproject.toml", "rb") as f:
+            data = tomllib.load(f)
+        tool = data.get("tool", {})
+        settings = tool.get("affected-tests", {})
+        pytest_cfg = tool.get("pytest", {}).get("ini_options", {})
+    for name, section in (("pytest.ini", "pytest"), ("tox.ini", "pytest"), ("setup.cfg", "tool:pytest")):
+        if pytest_cfg or not os.path.exists(name):
+            continue
+        cp = configparser.ConfigParser(interpolation=None)
+        cp.read(name)
+        if cp.has_section(section):
+            pytest_cfg = dict(cp.items(section))
+    return settings, pytest_cfg
+
+
+def as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return value.split()
+    return list(value)
+
+
+def addopts_values(addopts, option):
+    """The values of `option` in a pytest addopts string or list."""
+    words = shlex.split(addopts) if isinstance(addopts, str) else list(addopts)
+    values = []
+    for i, w in enumerate(words):
+        if w == option and i + 1 < len(words):
+            values.append(words[i + 1])
+        elif w.startswith(option + "="):
+            values.append(w[len(option) + 1:])
+    return values, words
+
+
+class Module:
+    def __init__(self, path):
+        self.path = path
+        self.imports = []  # (dotted parts, relative level)
+        self.strings = set()
+        self.dynamic = False
+
+
+def parse(path):
+    m = Module(path)
+    try:
+        with open(path, "rb") as f:
+            tree = ast.parse(f.read(), filename=path)
+    except (OSError, SyntaxError, ValueError):
+        m.dynamic = True
+        return m
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                m.imports.append((a.name.split("."), 0))
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module.split(".") if node.module else []
+            m.imports.append((base, node.level))
+            for a in node.names:
+                if a.name != "*":
+                    m.imports.append((base + [a.name], node.level))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            s = node.value
+            if 0 < len(s) <= 300 and "\n" not in s:
+                m.strings.add(s)
+                if DOTTED.match(s):
+                    m.imports.append((s.split("."), 0))
+        elif isinstance(node, ast.Call):
+            f = node.func
+            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+            if name in LOADERS:
+                arg = node.args[0] if node.args else None
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and IDENT.match(arg.value):
+                    m.imports.append(([arg.value], 0))
+                elif not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                    m.dynamic = True
+    return m
+
+
+class Graph:
+    def __init__(self, files, extra_roots, is_test):
+        self.files = files
+        self.is_test = is_test
+        self.py = sorted(p for p in files if p.endswith(".py"))
+        self.dirs = set()
+        for p in files:
+            d = posixpath.dirname(p)
+            while d:
+                self.dirs.add(d)
+                d = posixpath.dirname(d)
+        roots = {""} | {r.strip("/") for r in extra_roots}
+        if "src" in self.dirs:
+            roots.add("src")
+        for p in self.py:
+            roots.add(self.basedir(p))
+        self.roots = sorted(roots)
+        self.modules = {p: parse(p) for p in self.py if os.path.exists(p)}
+        # A module that loads modules by a computed name depends on each
+        # module of its top-level package. A file outside a package (a test,
+        # a script) depends on every module.
+        self.dynamic = [(p, self.package_top(p)) for p, m in self.modules.items() if m.dynamic]
+        self.importers = {}
+        self.by_string = {}
+        self.globs = []
+        for p, m in self.modules.items():
+            for target in self.resolve(p, m):
+                if target != p:
+                    self.importers.setdefault(target, set()).add(p)
+            for s in m.strings:
+                key = s[2:] if s.startswith("./") else s
+                key = key.rstrip("/")
+                if key and key != ".":
+                    self.by_string.setdefault(key, set()).add(p)
+                if GLOB.match(s):
+                    self.globs.append((s, p))
+
+    def basedir(self, path):
+        """The first ancestor directory without an __init__.py (pytest rootdir import)."""
+        d = posixpath.dirname(path)
+        while d and posixpath.join(d, "__init__.py") in self.files:
+            d = posixpath.dirname(d)
+        return d
+
+    def package_top(self, path):
+        """The directory of the top-level package of a module, with a trailing /.
+
+        "" (every file) for a module that is not in a package.
+        """
+        d = posixpath.dirname(path)
+        top = ""
+        while d and posixpath.join(d, "__init__.py") in self.files:
+            top = d
+            d = posixpath.dirname(d)
+        return top + "/" if top else ""
+
+    def resolve(self, path, module):
+        here = posixpath.dirname(path)
+        for parts, level in module.imports:
+            if level:
+                base = here
+                for _ in range(level - 1):
+                    base = posixpath.dirname(base)
+                bases = [base]
+            else:
+                bases = self.roots
+            for base in bases:
+                for i in range(1, len(parts) + 1):
+                    stem = posixpath.join(base, *parts[:i])
+                    for cand in (stem + ".py", posixpath.join(stem, "__init__.py")):
+                        if cand in self.files:
+                            yield cand
+                if level and not parts:
+                    cand = posixpath.join(base, "__init__.py")
+                    if cand in self.files:
+                        yield cand
+
+    def referrers(self, path):
+        """The modules with a string that names this file.
+
+        A string names a file when it is the path, a shorter suffix of it, or
+        the file name. For a file that is not Python, a directory above it
+        (a fixtures or docs directory that a test reads) also names it. The
+        name of a .py file alone (main.py) counts only in a test file.
+        """
+        found = set()
+        parts = path.split("/")
+        keys = {"/".join(parts[i:]) for i in range(len(parts) - 1)}
+        if path.endswith(".py"):
+            found |= {p for p in self.by_string.get(parts[-1], ()) if self.is_test(p)}
+        else:
+            keys.add(parts[-1])
+            keys |= {"/".join(parts[:i]) for i in range(1, len(parts))}
+        for k in keys:
+            found |= self.by_string.get(k, set())
+        name = posixpath.basename(path)
+        for pattern, p in self.globs:
+            if fnmatch.fnmatchcase(path, pattern) or fnmatch.fnmatchcase(name, pattern) \
+                    or fnmatch.fnmatchcase(path, "*/" + pattern):
+                found.add(p)
+        return found
+
+    def dependents(self, path):
+        out = set(self.importers.get(path, ())) | self.referrers(path)
+        if path.endswith(".py"):
+            out.update(p for p, top in self.dynamic if path.startswith(top))
+        name = posixpath.basename(path)
+        if name in ("conftest.py", "__init__.py"):
+            d = posixpath.dirname(path)
+            prefix = d + "/" if d else ""
+            out.update(p for p in self.py if p.startswith(prefix))
+        out.discard(path)
+        return out
+
+    def affected_tests(self, path):
+        """(test files that reach path, whether anything at all refers to it)."""
+        seen, todo = {path}, [path]
+        while todo:
+            for p in self.dependents(todo.pop()):
+                if p not in seen:
+                    seen.add(p)
+                    todo.append(p)
+        tests = {p for p in seen if self.is_test(p) and os.path.exists(p)}
+        return tests, len(seen) > 1
+
+
+def select(base, explain):
+    settings, pytest_cfg = load_settings()
+    run_all = RUN_ALL + as_list(settings.get("run-all"))
+    ignore = IGNORE + as_list(settings.get("ignore"))
+    docs = as_list(settings.get("docs", DOCS))
+    mapping = settings.get("map", {})
+    docs_skip_checks = settings.get("docs-skip-checks", True)
+
+    testpaths = [t.strip("/") for t in as_list(pytest_cfg.get("testpaths"))]
+    python_files = as_list(pytest_cfg.get("python_files")) or PYTHON_FILES
+    addopts = pytest_cfg.get("addopts", "")
+    doctest_globs, words = addopts_values(addopts, "--doctest-glob")
+    doctest_modules = "--doctest-modules" in words
+
+    def is_test(p):
+        if not p.endswith(".py") or not matches(p, python_files):
+            return False
+        return not testpaths or any(p == t or p.startswith(t + "/") for t in testpaths)
+
+    changed = changed_files(base)
+    on_disk = git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0")
+    files = {p for p in on_disk if p and os.path.isfile(p)} | set(changed)
+
+    config_text = ""
+    for p in files:
+        if os.path.exists(p) and (p in ("pyproject.toml", "setup.cfg", "tox.ini", "pytest.ini")
+                                  or posixpath.basename(p) == "conftest.py"
+                                  or fnmatch.fnmatchcase(posixpath.basename(p), "requirements*.txt")):
+            with open(p, encoding="utf-8", errors="replace") as f:
+                config_text += f.read()
+    doc_plugin = any(name in config_text for name in DOC_PLUGINS)
+
+    graph = Graph(files, as_list(settings.get("source-roots")), is_test)
+    selected, check, any_docs = set(), False, False
+
+    def note(path, text):
+        if explain:
+            print(f"{path}: {text}", file=sys.stderr)
+
+    for path in sorted(changed):
+        exists = os.path.exists(path)
+        rule = matches(path, run_all)
+        if rule:
+            raise SelectAll(f"{path} matches the run-all pattern {rule}")
+        rule = next((p for p in mapping if matches(path, [p])), None)
+        if rule:
+            selected.update(as_list(mapping[rule]))
+            check = True
+            note(path, f"map {rule} -> {', '.join(as_list(mapping[rule]))}")
+            continue
+        rule = matches(path, ignore)
+        if rule:
+            note(path, f"ignored ({rule})")
+            continue
+        tests, referred = graph.affected_tests(path)
+        if path.endswith(".py"):
+            check = True
+            if exists and doctest_modules and not is_test(path):
+                tests.add(path)
+        elif matches(path, docs):
+            any_docs = True
+            check = check or not docs_skip_checks
+            if exists and matches(path, doctest_globs):
+                tests.add(path)
+            elif doc_plugin and path.endswith((".md", ".rst")):
+                # pytest refuses a file that no plugin collects (exit 4), but
+                # it accepts a directory. Which files the plugin collects is
+                # in its own settings, so give pytest the directory.
+                d = posixpath.dirname(path)
+                if not d:
+                    raise SelectAll(f"{path}: a pytest docs plugin is configured, and the file is at the top")
+                tests.add(d)
+        elif not referred:
+            raise SelectAll(f"{path}: no rule matches it, and no module names it")
+        else:
+            check = True
+        if tests:
+            check = True
+        selected |= tests
+        note(path, f"{len(tests)} test path(s)")
+
+    all_tests = {p for p in files if is_test(p) and os.path.exists(p)}
+    if all_tests and all_tests <= selected:
+        raise SelectAll("every test file is affected")
+    return sorted(selected), check, any_docs
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Select the tests that a change can affect.")
+    ap.add_argument("--base", required=True, help="compare with the merge base of this ref and HEAD")
+    ap.add_argument("--explain", action="store_true", help="give the reason for each changed file")
+    ap.add_argument("--github-output", action="store_true", help="write tests, check, and docs to $GITHUB_OUTPUT")
+    ap.add_argument("--run", action="store_true", help="-- <command...>: run the command with the selection (last option)")
+    argv = sys.argv[1:]
+    command = None
+    if "--run" in argv:
+        i = argv.index("--run")
+        argv, command = argv[: i + 1], argv[i + 1:]
+        if command[:1] == ["--"]:
+            command = command[1:]
+        if not command:
+            ap.error("--run needs a command after --")
+    args = ap.parse_args(argv)
+    args.run = command
+    if args.run is not None and args.github_output:
+        ap.error("--run and --github-output cannot be used together")
+    if args.github_output and not os.environ.get("GITHUB_OUTPUT"):
+        ap.error("--github-output needs $GITHUB_OUTPUT (set by GitHub Actions)")
+
+    top = git("rev-parse", "--show-toplevel").strip()
+    os.chdir(top)
+    explain = args.explain or args.run is not None or args.github_output
+    try:
+        tests, check, docs = select(args.base, explain)
+        everything = False
+    except SelectAll as e:
+        print(f"affected-tests: ALL: {e}", file=sys.stderr)
+        tests, check, docs, everything = [], True, True, True
+    except Exception as e:  # noqa: BLE001 - any failure selects everything
+        print(f"affected-tests: ALL: the selection failed: {e!r}", file=sys.stderr)
+        tests, check, docs, everything = [], True, True, True
+
+    if args.github_output:
+        kind = "all" if everything else ("some" if tests else "none")
+        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"tests={kind}\ncheck={'run' if check else 'skip'}\ndocs={'true' if docs else 'false'}\n")
+        print(f"tests={kind} check={'run' if check else 'skip'} docs={'true' if docs else 'false'}")
+        return 0
+    if args.run is not None:
+        if everything:
+            print("affected-tests: running all tests", file=sys.stderr)
+            return subprocess.call(args.run)
+        if not tests:
+            print("affected-tests: no tests are affected", file=sys.stderr)
+            return 0
+        print(f"affected-tests: running {len(tests)} test path(s)", file=sys.stderr)
+        rc = subprocess.call(args.run + tests)
+        return 0 if rc == 5 else rc
+    if everything:
+        print("ALL")
+    elif tests:
+        print("\n".join(tests))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
