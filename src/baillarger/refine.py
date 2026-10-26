@@ -47,7 +47,9 @@ class Params:
     k_max: int = 8
     t_min: float = 0.05  # minimum band thickness
     kappa: float = 1.0  # gain/offset smoothness
-    lambda_z: float = 1.0  # TV on the boundaries
+    # TV on the boundaries; 5 since the edge zones are out: on V1V2 it halves
+    # the step between linked columns (0.010 to 0.005 of r) for 0.4 % data
+    lambda_z: float = 5.0
     eta: float = 10.0  # pull to the region's bands
     lambda_g: float = 0.5  # TV on the band values, group term
     lambda_l: float = 0.0  # TV on the band values, per-depth term
