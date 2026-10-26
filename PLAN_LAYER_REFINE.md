@@ -57,9 +57,10 @@ still has no exit (see the finding under **Columns and depth frame**).
    the stria's width) before step 7 builds on r. Done as an option
    (`column_data(depth=...)`, `--depth`); the default stays equidistant. The
    comparison on V1V2 (below, **Columns and depth frame**) is not conclusive: the data
-   term is lower with equivolume r, but the stria's position overcorrects for
-   the curvature. To do before the default changes: check div u (smoothing,
-   the size of the curvature proxy) against the mesh curvature.
+   term is lower with equivolume r, but on the raw profiles the correction
+   for the curvature is about twice too strong (div u checked against the
+   mesh curvature; smoothing does not help). To try next: a two-surface
+   equivolume (white and pial areas), with α-scaled div u as a baseline.
 2. A Hotelling T² test between the column profiles of two neighbouring
    regions: reported for each merge (which merges join distinct areas), and
    used in test A for each WM bin on its own (step 5).
@@ -320,13 +321,54 @@ voxels, d against r):
 | 64 | 213 | 0.35 / 0.33 | 0.28 / 0.44 | +0.32 / −0.73 |
 
 (curvature: the column's median of ln(V(T_p) / T_p), > 0 where the flow
-tubes widen, over crowns). The equidistant centre rises with the curvature,
-as Bok's principle predicts; the equivolume centre falls with it about as
-much or more, so the correction looks too strong. The curvature proxy is
-large (5–95 %: −1.09 to +1.02; a ball of WM radius 1.6 mm with 2 mm of
-cortex gives +1.02), so div u is probably too noisy at the voxel scale. The
-stria is found in fewer columns with equivolume r at levels 256–64 (649 vs
-1,613 at 256) and in more at 32 (168 vs 104).
+tubes widen, over crowns.) That test is circular: the curvature and the
+equivolume r both come from div u, so noise in div u alone can make the
+equivolume correlation negative. The checks after it:
+
+- div u against the white mesh. Per column, the mean div u over the first
+  0.3 mm of the streamlines against the area-weighted k1 + k2 of the white
+  mesh (cotangent Laplacian; the mesh vertices are in voxel units, so per mm
+  divide by 0.16): correlation 0.45, about the same spread (5–95 %: div u
+  −0.97 to +0.94 per mm, mesh −1.3 to +1.5). Over the whole column, the
+  curvature proxy above against the mesh curvature: Spearman 0.79, same
+  range. On the ball div u is unbiased (median error −0.04 per mm, 5–95 %
+  −0.42 to +0.32, against 2/R of 0.56 to 1.21). So div u is noisy point by
+  point but right at the scale of a column.
+- Smoothing does not help. Smoothing D's gradient more (σ 1.5, 2, 3 voxels)
+  or div u itself (normalized convolution, σ 1, 2, 3) lowers the point
+  noise (SD 1.9 to 0.6 per mm) but also the agreement with the mesh (r 0.45
+  to 0.35, slope 1.06 to 0.57). The code keeps σ = 1 and no smoothing of
+  div u.
+- The stria against the mesh curvature (independent of div u), same columns
+  as above: Spearman of the centre r: equidistant +0.11, +0.03, +0.15;
+  equivolume −0.19, −0.34, −0.41 (levels 256, 128, 64). Weaker than with
+  the proxy, but still reversed.
+- Without the model. On the 1,876 columns where either run finds the stria
+  at level 256, the mean echo-2 profile (z-scored per column, 25 bins of r)
+  in each quintile of mesh curvature, with div u scaled by α (α = 0 is
+  equidistant, α = 1 equivolume):
+
+  | α | stria minimum trend (r per quintile) | profile RMS between quintiles | R² of one profile for all |
+  |---|---|---|---|
+  | 0 | +0.011 | 0.130 | 0.329 |
+  | 0.25 | +0.006 | 0.098 | 0.351 |
+  | 0.5 | −0.006 | 0.087 | 0.353 |
+  | 0.75 | −0.020 | 0.091 | 0.337 |
+  | 1 | −0.024 | 0.108 | 0.311 |
+
+  The profiles line up best at α ≈ 0.25–0.5; full equivolume is worse than
+  equidistant on this test (though better on the model's data term).
+
+So the overcorrection is real and not noise: the flow tubes of the distance
+from the WM widen (or narrow) about twice as fast as the layers do. A likely
+reason: they follow the white surface's curvature only, while Waehnert et
+al.'s equivolume model uses the areas of both the white and the pial surface,
+and the pial surface is flatter than the WM over crowns and in fundi. To try
+before step 7 uses r: a two-surface equivolume (the tube's area at the pial
+end from the pial surface, or a Laplace field between the two surfaces), and
+a scaled div u (α = 0.5) only as an empirical baseline. The stria is found in
+fewer columns with equivolume r at levels 256–64 (649 vs 1,613 at 256) and
+in more at 32 (168 vs 104).
 
 **Columns in steps 1–6** (`columns.model_columns`): a column takes part when
 it has cortex voxels on streamlines that exit into fluid, is not cut by
