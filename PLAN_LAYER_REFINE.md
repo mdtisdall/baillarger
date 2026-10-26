@@ -55,13 +55,12 @@ still has no exit (see the finding under **Columns and depth frame**).
    the divergence of the streamlines' flow (the prototype's
    `surface_geometry.equivolume`); compare both on V1V2 (band sharpness, K_R,
    the stria's width) before step 7 builds on r. Done as an option
-   (`column_data(depth=...)`, `--depth`); the default stays equidistant. The
-   comparison on V1V2 (below, **Columns and depth frame**) is not conclusive: the data
-   term is lower with equivolume r, but on the raw profiles the correction
-   for the curvature is about twice too strong (div u checked against the
-   mesh curvature; smoothing does not help). All candidates in the full
-   model on V1V2 (below): the white mesh's curvature smoothed at 1 mm does
-   best; the pial surface's curvature is too noisy. To decide after review.
+   (`column_data(depth=...)`, `--depth`); the default stays equidistant
+   until the choice for step 7. div u (the first version) corrected about
+   twice too much for the curvature; of the candidates compared in the full
+   model on V1V2 (below, **Columns and depth frame**), the white mesh's
+   curvature smoothed at 1 mm (offset surfaces) did best, and is now the
+   method; the pial surface's curvature was too noisy.
 2. A Hotelling T² test between the column profiles of two neighbouring
    regions: reported for each merge (which merges join distinct areas), and
    used in test A for each WM bin on its own (step 5).
@@ -291,14 +290,24 @@ the loop:
   3b), the pull to Z_R, the TV on z and t_min use r.
 
 r is equidistant by default. `column_data(depth="equivolume")` gives the
-equivolume r of Waehnert et al. 2014 instead: along each streamline the
-cross-section A of a flow tube changes as d ln A / ds = div u (u: the unit
-direction of the streamlines, div u from central differences of the
-normalized gradient of D, clipped to ±10 per mm), V(s) = ∫ A ds, and
+equivolume r of Waehnert et al. 2014 instead. The method (chosen from the
+comparison below): the flow tube of each streamline is that of the surfaces
+offset from the white surface, A(s) = (1 + k1 s)(1 + k2 s), with k1, k2 the
+principal curvatures of the white mesh at its vertex (`frame.mesh_curvatures`:
+mean curvature from the cotangent Laplacian, Gaussian from the angle defect,
+both smoothed along the mesh over 1 mm, `build_frame(curv_mm=1.0)`), each
+factor floored at 0.1 past a focal point; V(s) = ∫ A ds, and
 r = V(d) / V(T_p) (r = D / V(T_p) in the WM). Tests: on a flat slab the two
-depths agree (< 0.01); round a WM ball (R0 1.6 mm, cortex to 3.6 mm, 0.16 mm
-voxels) the equivolume r is within 0.026 (median) and 0.117 (p99) of the
-exact (R³ − R0³) / (R1³ − R0³), against 0.15 / 0.21 for the equidistant r.
+depths agree (< 0.01); round a WM ball and a WM cylinder (R0 1.6 mm, cortex
+to 3.6 mm, 0.16 mm voxels) the equivolume r is within 0.010 (median) and
+0.065 / 0.051 (p99) of the exact (R^n − R0^n) / (R1^n − R0^n), against
+0.149 / 0.076 (median) for the equidistant r; the smoothed curvatures are
+within 0.04 per mm of 1 / R (and 0 along the cylinder).
+
+The first version integrated d ln A / ds = div u along the streamline (u:
+the unit direction of the streamlines, div u from central differences of the
+normalized gradient of D, clipped to ±10 per mm); its ball errors were
+0.026 (median) and 0.117 (p99). The comparisons that led to the change:
 
 Comparison on V1V2 (with step-0 seams; same voxels, same 11,922 columns;
 levels 256 to 5):
@@ -442,7 +451,8 @@ groups, the least step between regions, and keeps the stria at coarse
 levels (721 columns at level 16, against none with equidistant r). Its
 data term is 1 % above equidistant at level 256 and 3.6 % below at level 5.
 div u fits the data term best but turns the trend over. Proposed: the mesh
-offset as the equivolume method.
+offset as the equivolume method (done: `frame.mesh_curvatures`,
+`path_volume`).
 
 So the overcorrection is real and not noise: the flow tubes of the distance
 from the WM widen (or narrow) about twice as fast as the layers do. A likely

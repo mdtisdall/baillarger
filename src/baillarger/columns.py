@@ -33,13 +33,14 @@ and the WM voxels within wm_mm of the white surface, each with the column and
 the streamline of its nearest white vertex, at r = D / T_p < 0 (D is the
 signed distance of the frame, negative in the WM). With
 depth="equivolume", r is the equivolume depth instead (Waehnert et al. 2014):
-along a streamline the cross-section A of a flow tube changes as
-d ln A / ds = div u (frame.path_volume), so the tube's volume from the white
-surface is V(s) = integral of A ds, and r = V(d) / V(T_p) in the cortex,
-r = D / V(T_p) in the WM. On flat cortex (div u = 0) the two depths are the
-same; over a gyral crown (div u > 0) the equivolume r of a voxel is lower,
-in a sulcal fundus higher. The column thickness T_c
-is the median of T_p over the column's streamlines. The noise of each column is the
+the flow tube of a streamline is that of the surfaces offset from the white
+surface, with the white mesh's principal curvatures at its vertex smoothed
+over 1 mm, A(s) = (1 + k1 s)(1 + k2 s) (frame.path_volume); its volume from
+the white surface is V(s) = integral of A ds, and r = V(d) / V(T_p) in the
+cortex, r = D / V(T_p) in the WM. On flat cortex the two depths are the
+same; over a gyral crown (k1 + k2 > 0) the equivolume r of a voxel is lower,
+in a sulcal fundus higher. The column thickness T_c is the median of T_p
+over the column's streamlines. The noise of each column is the
 pooled variance, per echo, inside the cells of n_layers equal bins of r in
 the cortex (the fixed-K baseline's geometric layers): the model's noise is
 diagonal over the echoes.

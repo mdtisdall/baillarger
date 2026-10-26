@@ -40,13 +40,16 @@ surface, so it does not change in the outer loop (PLAN_LAYER_REFINE.md,
   (default 1.5 mm) bridges that. Voxels that no streamline comes within
   reach_mm of have column -1 and depth NaN.
 
-Equivolume depth: path_div holds div u, the divergence of the unit direction
-field of the streamlines, at each streamline point (central differences of
-the normalized gradient of D, set to 0 where the gradient is weak or near the
-edge of the domain, clipped to +-div_max per mm). path_volume integrates it
-along each streamline to the relative cross-section A and volume V of the
-flow tube, and volume_at reads V at any depth (baillarger.columns uses it for
-r = V(d) / V(T_p)).
+Equivolume depth: vertex_k1 and vertex_k2 are the principal curvatures of the
+white mesh at each vertex (so at the start of each streamline), smoothed
+along the mesh over about curv_mm (mesh_curvatures). The flow tube of a
+streamline is taken as that of the surfaces offset from the white surface,
+A(s) = (1 + k1 s)(1 + k2 s), each factor floored at a_min past a focal point;
+path_volume gives A and V(s) = ∫ A ds at the streamline's points, and
+volume_at reads V at any depth (baillarger.columns uses it for
+r = V(d) / V(T_p)). The first version integrated div u, the divergence of the
+streamlines' direction field (from D): right at the scale of a column, but
+on V1V2 it corrected about twice too much for the curvature (see the plan).
 
 Relative depth r = d / T_c (relative_depth) uses the column thickness T_c,
 which the outer loop updates (column_thickness gives it from a tissue mask).
@@ -106,9 +109,11 @@ class Frame:
     path_cut: Bool
     #: columns with at least one cut streamline
     column_cut: Bool
-    #: div u (per mm) at each streamline point: the divergence of the unit
-    #: direction field u of the streamlines (for the equivolume depth)
-    path_div: F32
+    #: principal curvatures (per mm, k1 >= k2, > 0 where the white surface is
+    #: convex) of the white mesh at each vertex, smoothed (for the equivolume
+    #: depth)
+    vertex_k1: F64
+    vertex_k2: F64
     #: column (-1 none), streamline (-1 none) and depth d (mm, NaN none) of
     #: each voxel
     voxel_column: I32
@@ -528,7 +533,7 @@ def build_frame(
     sample_mm: float | None = None,
     column_mm: float = 0.7,
     reach_mm: float = 1.5,
-    div_max: float = 10.0,
+    curv_mm: float = 1.0,
 ) -> Frame:
     """The frame of one patch from its rim labels (only the WM and the domain
     matter, see the module notes) and its missing tissue.
@@ -536,7 +541,8 @@ def build_frame(
     gmin: the smoothed |grad D| (per mm, about 1 away from ridges) below which
     a streamline counts as at a ridge. sample_mm: the spacing of the kept
     streamline points (default: the smallest voxel size). Streamlines are at
-    most 2 x d_max long. div_max: the clip of div u (per mm).
+    most 2 x d_max long. curv_mm: the smoothing of the white mesh's
+    curvatures (mm).
     """
     vox = np.asarray(voxel_mm, np.float64)
     vt = (float(vox[0]), float(vox[1]), float(vox[2]))
@@ -588,10 +594,7 @@ def build_frame(
     path_points = pts[keep]
     path_arc = arc[keep]
     del pts, arc
-    divu = _flow_divergence(G, D, vt, sigma, gmin, div_max)
-    path_div = ndi.map_coordinates(
-        divu, path_points.T.astype(np.float64), order=1, mode="nearest"
-    ).astype(np.float32)
+    vertex_k1, vertex_k2 = mesh_curvatures(verts * vox, faces, normals, curv_mm)
     voxel_column, voxel_path, depth = _assign(
         path_start,
         path_points,
@@ -618,7 +621,8 @@ def build_frame(
         path_end=end,
         path_cut=path_cut,
         column_cut=column_cut,
-        path_div=path_div,
+        vertex_k1=vertex_k1,
+        vertex_k2=vertex_k2,
         voxel_column=voxel_column,
         voxel_path=voxel_path,
         depth=depth,
@@ -675,43 +679,84 @@ def path_exit(frame: Frame, tissue: Bool, fluid: Bool) -> F32:
     return out
 
 
-def _flow_divergence(
-    G: F32,
-    D: F32,
-    voxel_mm: tuple[float, float, float],
-    sigma: float,
-    gmin: float,
-    div_max: float,
-) -> F32:
-    """div u (per mm) of the unit direction field u = G / |G| of the
-    streamlines, clipped to ± div_max, and 0 where it is not reliable: one
-    voxel inside the region where D is defined (smoothed by sigma, above 0.3)
-    and |G| is at least gmin (not at ridges)."""
-    gmag = np.linalg.norm(G, axis=-1)
-    U = G / np.maximum(gmag, 1e-9)[..., None]
-    vox = np.asarray(voxel_mm, float)
-    div = sum(np.gradient(U[..., k], axis=k) / vox[k] for k in range(3))
-    ok = ndi.gaussian_filter(np.isfinite(D).astype(np.float64), sigma) > 0.3
-    usable = ndi.binary_erosion(ok & (gmag >= gmin))
-    out: F32 = np.where(usable, np.clip(div, -div_max, div_max), 0.0).astype(np.float32)
-    return out
+def mesh_curvatures(
+    verts_mm: F64, faces: I64, normals: F64, sigma_mm: float
+) -> tuple[F64, F64]:
+    """Principal curvatures k1 >= k2 (per mm) at each vertex of a mesh with
+    outward normals (> 0 where it is convex), from the mean curvature
+    (cotangent Laplacian) and the Gaussian curvature (angle defect), both
+    smoothed along the mesh over about sigma_mm.
+
+    The smoothing spreads each vertex's integrated curvature and area equally
+    to itself and its neighbours (a column-stochastic step, so totals are
+    kept), about 2.3 (sigma_mm / edge)² times, then divides. A step that
+    weights each vertex by its valence biases the Gaussian curvature on
+    marching-tetrahedra meshes, where the angle defect goes with the valence
+    (on a ball of radius 3.6 mm: 0.017 instead of 0.077 per mm²). Boundary
+    vertices (the crop) take no Gaussian curvature.
+    """
+    nv = len(verts_mm)
+    if not len(faces):
+        return np.zeros(nv), np.zeros(nv)
+    v = verts_mm
+    lap = np.zeros_like(v)
+    area = np.zeros(nv)
+    angle = np.zeros(nv)
+    for k in range(3):
+        i, j, o = faces[:, k], faces[:, (k + 1) % 3], faces[:, (k + 2) % 3]
+        a, b = v[i] - v[o], v[j] - v[o]
+        cross = np.maximum(np.linalg.norm(np.cross(a, b), axis=1), 1e-12)
+        cot = np.einsum("ij,ij->i", a, b) / cross
+        for s, t in ((i, j), (j, i)):
+            np.add.at(lap, s, cot[:, None] * (v[t] - v[s]) / 2)
+        e1, e2 = v[j] - v[i], v[o] - v[i]
+        norms = np.linalg.norm(e1, axis=1) * np.linalg.norm(e2, axis=1)
+        c = np.einsum("ij,ij->i", e1, e2) / np.maximum(norms, 1e-12)
+        np.add.at(angle, i, np.arccos(np.clip(c, -1, 1)))
+        np.add.at(area, faces[:, k], 0.5 * cross / 3)
+    area = np.maximum(area, 1e-12)
+    h_int = -np.einsum("ij,ij->i", lap, normals)  # (k1 + k2) x area
+    k_int = 2 * np.pi - angle  # k1 k2 x area
+    E = np.sort(
+        np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), 1
+    )
+    key, count = np.unique(E[:, 0] * nv + E[:, 1], return_counts=True)
+    border = np.zeros(nv, bool)
+    once = key[count == 1]
+    border[once // nv] = True
+    border[once % nv] = True
+    k_int[border] = 0.0
+    u = _edges(faces)
+    adj = sparse.coo_matrix((np.ones(len(u)), (u[:, 0], u[:, 1])), shape=(nv, nv))
+    loops = (adj + adj.T).tocsr() + sparse.identity(nv, format="csr")
+    W = (loops @ sparse.diags(1 / np.asarray(loops.sum(0)).ravel())).tocsr()
+    edge = float(np.median(np.linalg.norm(v[u[:, 0]] - v[u[:, 1]], axis=1)))
+    n = int(round(2.3 * (sigma_mm / max(edge, 1e-9)) ** 2))
+    x = np.stack([h_int, k_int, area], 1)
+    for _ in range(n):
+        x = np.asarray(W @ x)
+    H, K = x[:, 0] / x[:, 2], x[:, 1] / x[:, 2]
+    disc = np.sqrt(np.maximum(H * H / 4 - K, 0.0))
+    k1: F64 = H / 2 + disc
+    k2: F64 = H / 2 - disc
+    return k1, k2
 
 
-def path_volume(frame: Frame) -> tuple[F64, F64]:
-    """Along each streamline, the relative cross-section A(s) / A(0) of its flow
-    tube and the volume V(s) = ∫ A ds from the white surface (mm, for a unit
-    cross-section at the start), at each streamline point: d ln A / ds = div u
+def path_volume(frame: Frame, a_min: float = 0.1) -> tuple[F64, F64]:
+    """Along each streamline, the relative cross-section A(s) of its flow tube
+    and the volume V(s) = ∫ A ds from the white surface (mm, for a unit
+    cross-section at the start), at each streamline point: the offset
+    surfaces of its vertex, A = max(1 + k1 s, a_min) max(1 + k2 s, a_min)
     (trapezoids between the points)."""
     s = frame.path_arc.astype(np.float64)
-    dv = frame.path_div.astype(np.float64)
     start = frame.path_start
+    pid = np.repeat(np.arange(len(start) - 1), np.diff(start))
+    k1, k2 = frame.vertex_k1[pid], frame.vertex_k2[pid]
+    A: F64 = np.maximum(1 + k1 * s, a_min) * np.maximum(1 + k2 * s, a_min)
     # the index of each point's path's first point
-    first = np.repeat(start[:-1], np.diff(start))
+    first = start[pid]
     is_first = np.arange(len(s)) == first
     ds = np.where(is_first, 0.0, s - np.roll(s, 1))
-    dln = np.where(is_first, 0.0, 0.5 * (dv + np.roll(dv, 1)) * ds)
-    c = np.cumsum(dln)
-    A = np.exp(c - c[first])
     dV = np.where(is_first, 0.0, 0.5 * (A + np.roll(A, 1)) * ds)
     c = np.cumsum(dV)
     V: F64 = c - c[first]
