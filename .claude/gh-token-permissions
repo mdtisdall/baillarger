@@ -1,0 +1,9 @@
+# GitHub fine-grained token permissions that this project needs.
+# Format: one `permission=level` per line (level: read | write). A `#` starts
+# a comment. The dev-workflow plugin uses this file to pre-fill the token form
+# (token-url.sh) and to validate the token (check-gh-token.sh).
+# git fetch and git push use SSH and need none of these.
+metadata=read        # required for every token
+contents=write       # gh pr merge
+pull_requests=write  # gh pr create, gh pr view, gh pr merge
+actions=read         # CI status through the Actions API (gh run list)

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# All the checks that CI runs, in one command. Run it in the devShell:
+#
+#   nix develop --command scripts/check                            # all tests
+#   nix develop --command scripts/check --changed-since origin/main
+#
+# With --changed-since, the lint, format, and type checks still run on the
+# whole project, and only the tests that the change can affect run
+# (scripts/affected-tests). Pull requests use it; main runs all the tests
+# after each merge.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+base=""
+case "${1:-}" in
+  --changed-since)
+    [ $# -eq 2 ] || { echo "usage: scripts/check [--changed-since <ref>]" >&2; exit 64; }
+    base="$2"
+    ;;
+  '') ;;
+  *) echo "usage: scripts/check [--changed-since <ref>]" >&2; exit 64 ;;
+esac
+[ -z "$base" ] || echo "scripts/check: only the tests that the changes since $base can affect"
+
+uv sync --frozen
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src tests
+if [ -n "$base" ]; then
+  python3 scripts/affected-tests --base "$base" --run -- uv run pytest -q
+else
+  uv run pytest -q
+fi

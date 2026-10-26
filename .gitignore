@@ -1,0 +1,16 @@
+# direnv, and this project's GitHub token (dev-workflow)
+.direnv/
+.envrc.local
+.envrc.local.*
+# One git worktree for each task (dev-workflow start-task)
+.worktrees/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
