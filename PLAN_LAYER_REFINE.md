@@ -356,8 +356,13 @@ With fixed layers this is large (V1V2 with 24 surfaces at full resolution:
 about 4,500 × 250 × 24 = 27 million); with bands it has only K_R − 1
 surfaces per region, which is much smaller. The coarse level is the
 region's DP split Z_R on the depth grid (step 3b); the fine level is the
-min-cut in a band of ± `w_band` (default half of the narrowest band of the
-region) around Z_R, with a depth step of 1/200 of the thickness. The
+min-cut in a band of ± `w_band` around Z_R, with a depth step of 1/200 of the
+thickness. `w_band` is half the narrower of the two bands next to each
+surface (to confirm: first planned as half the region's narrowest band for
+every surface, which on V1V2 is the thin band at the pial edge, r 0.94 to 1;
+every surface could then move only ± 0.02 to 0.03 and 30 % of them stopped
+at the window's edge, against 17 % and a 6 % lower data term with the
+window of each surface). The
 fixed-K baseline uses the same two levels, with the 13-layer bins as the
 coarse level.
 
@@ -498,8 +503,12 @@ In `src/baillarger/` (names are working names), with the tests in `tests/`:
 - the evaluation sweep.
 
 Dependencies (through uv): numpy, scipy, nibabel, scikit-image,
-scikit-learn, numba. Min cuts use `scipy.sparse.csgraph.maximum_flow`;
-PyMaxflow (from PyPI) only if that is too slow for the optimal surfaces.
+scikit-learn, numba. Min cuts use `scipy.sparse.csgraph.maximum_flow`; it
+takes 32-bit integer capacities, so the optimal surfaces scale their real
+costs to integers (optimal to within the rounding; on random regions the
+same depths as the prototype's real-valued PyMaxflow cut). PyMaxflow is
+GPL-licensed, so it is not a dependency unless the project's licence allows
+it; a 3,906-column region of V1V2 takes about 2 s with scipy.
 
 ## Model implementation
 
