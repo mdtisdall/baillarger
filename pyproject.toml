@@ -4,13 +4,19 @@ version = "0.1.0"
 description = ""
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "numba>=0.68.0",
+    "numpy>=2.5.4",
+    "scipy>=1.18.1",
+]
 
 [dependency-groups]
 dev = [
   "mypy",
   "pytest",
   "ruff",
+  "scikit-image>=0.26.0",
+  "scipy-stubs>=1.18.1.1",
 ]
 
 [build-system]
@@ -27,6 +33,13 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.mypy]
 strict = true
 exclude = ["^\\.worktrees/"]
+# scikit-image ships py.typed but leaves most functions unannotated.
+untyped_calls_exclude = ["skimage"]
+
+# numba has no type stubs. baillarger._jit gives njit a typed signature.
+[[tool.mypy.overrides]]
+module = ["numba", "numba.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
