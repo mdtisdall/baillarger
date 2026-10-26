@@ -423,6 +423,27 @@ cortex (convergence in fundi, ridges), that the 1 mm white-surface
 curvature leaves out. Proposed default for step 7: equivolume r from the
 white mesh's smoothed curvature (mesh offset); to decide after review.
 
+**Again with the edge zones out and λ_z = 5** (#24; scratch runs of the
+same candidates, pial-based ones left out):
+
+| frame | data term ×1e6, level 256 / 32 / 5 | raw profiles: trend / RMS / R² | stria columns 256 / 64 / 32 / 16 | Spearman(stria centre r, mesh k) 256 / 128 / 64 | step across regions, 32 |
+|---|---|---|---|---|---|
+| equidistant | 3.144 / 3.406 / 3.672 | +0.017 / 0.177 / 0.486 | 2,868 / 1,565 / 1,113 / 0 | +0.30 / +0.34 / +0.19 | 0.105 |
+| div u | 3.101 / 3.249 / 3.351 | −0.031 / 0.131 / 0.482 | 1,130 / 839 / 513 / 148 | −0.19 / +0.00 / +0.01 | 0.105 |
+| half div u | 3.132 / 3.331 / 3.477 | −0.006 / 0.129 / 0.529 | 2,116 / 1,249 / 330 / 0 | −0.01 / +0.04 / +0.12 | 0.095 |
+| mesh offset | 3.181 / 3.370 / 3.539 | −0.006 / 0.109 / 0.525 | 2,546 / 2,310 / 1,232 / 721 | −0.07 / −0.08 / −0.02 | 0.085 |
+| two-surface, white | 3.164 / 3.385 / 3.573 | −0.006 / 0.120 / 0.525 | 2,724 / 2,030 / 1,302 / 121 | −0.01 / −0.01 / −0.02 | 0.085 |
+
+(raw profiles now on 2,935 V1-like columns.) With the edges out, the
+picture is the same and sharper: the white-surface curvature at 1 mm (mesh
+offset, or the two-surface form with R_in) has no stria trend in the raw
+profiles or in the model's bands, the tightest profiles between curvature
+groups, the least step between regions, and keeps the stria at coarse
+levels (721 columns at level 16, against none with equidistant r). Its
+data term is 1 % above equidistant at level 256 and 3.6 % below at level 5.
+div u fits the data term best but turns the trend over. Proposed: the mesh
+offset as the equivolume method.
+
 So the overcorrection is real and not noise: the flow tubes of the distance
 from the WM widen (or narrow) about twice as fast as the layers do. A likely
 reason: they follow the white surface's curvature only, while Waehnert et
