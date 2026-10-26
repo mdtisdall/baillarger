@@ -1,6 +1,7 @@
 """Tests for baillarger.output on the two-area patch of test_refine."""
 
 import csv
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,19 @@ def test_write_level(tmp_path: Path) -> None:
     data, truth = two_areas()
     _, levels = Refiner(data).run([2])
     lv = levels[2]
+    # two edge voxels outside the table: white side of column 0, pial side of
+    # the last column
+    # (the patch has no free voxel: add two rows along the first axis, which
+    # keeps the flat indices)
+    s0, s1, s2 = data.shape
+    free = s0 * s1 * s2 + np.arange(2)
+    data = replace(
+        data,
+        shape=(s0 + 2, s1, s2),
+        edge_index=free,
+        edge_col=np.array([0, data.n - 1]),
+        edge_side=np.array([-1, 1]),
+    )
     out.write_level(tmp_path, data, lv, np.eye(4))
     reg = load(tmp_path / "regions.nii.gz").ravel()
     # every voxel of the table is in region 1 or 2, as its column
@@ -34,6 +48,10 @@ def test_write_level(tmp_path: Path) -> None:
     assert band[data.index[cx]].max() == max(lv.K.values())
     # the WM extension is -1 down to each region's bottom (here all of it)
     assert (band[data.index[~cx]] == -1).all()
+    # the edge voxels: band 1 at the white surface, K_R at the pial surface
+    assert band[free[0]] == 1
+    assert band[free[1]] == lv.K[lv.reg[data.n - 1]]
+    assert np.array_equal(reg[free], lv.reg[[0, data.n - 1]] + 1)
     filt = load(tmp_path / "filtered.nii.gz")
     assert filt.shape[-1] == 3
     with open(tmp_path / "regions.csv") as fh:

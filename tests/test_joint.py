@@ -66,6 +66,7 @@ def test_seams_bring_fused_columns_into_the_model() -> None:
         D, _ = cl.column_data(F, rim_x, flash)
         inm = np.zeros(rim.size, bool)
         inm[D.index[D.ctx]] = True
+        inm[D.edge_index] = True  # in the model's columns, out of its fit
         return inm.reshape(rim.shape)
 
     before = covered(rim.astype(np.int16))

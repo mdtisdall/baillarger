@@ -14,8 +14,9 @@ In OUTDIR:
   energy terms after each inner round, K of each region and the seconds;
 - level_<N>/ for each re-fit level (N regions):
   - regions.nii.gz: region (1..N) of each voxel of the table (cortex and the
-    WM extension), 0 elsewhere;
-  - bands.nii.gz: band (1..K_R) of each cortex voxel after the nudge; −1 for
+    WM extension) and of the edge voxels (baillarger.columns), 0 elsewhere;
+  - bands.nii.gz: band (1..K_R) of each cortex voxel after the nudge (the
+    edge voxels: 1 at the white surface, K_R at the pial surface); −1 for
     the WM extension down to the region's bottom; 0 elsewhere;
   - filtered.nii.gz: per echo (4D), the normalized intensity (x − a) / s of
     each cortex voxel shifted by the TV change of its cell (u − x̂);
@@ -59,11 +60,9 @@ def write_level(outdir: Path, D: ColumnData, lv: Level, affine: F64) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     reg, K = lv.reg, lv.K
     nR = len(K)
-    _save(
-        outdir / "regions.nii.gz",
-        D.image(reg[D.col] + 1, fill=0, dtype=np.int16),
-        affine,
-    )
+    regimg = D.image(reg[D.col] + 1, fill=0, dtype=np.int16)
+    regimg.flat[D.edge_index] = reg[D.edge_col] + 1
+    _save(outdir / "regions.nii.gz", regimg, affine)
     cx = D.ctx
     c = D.col[cx]
     bandv = bd.band_of(D.m[cx], lv.z[c])
@@ -72,7 +71,12 @@ def write_level(outdir: Path, D: ColumnData, lv: Level, affine: F64) -> None:
     wm = ~cx
     bottom = np.array([lv.bottoms[R][0] for R in range(nR)])
     band[wm & (D.m >= bottom[reg[D.col]])] = -1
-    _save(outdir / "bands.nii.gz", D.image(band, fill=0, dtype=np.int16), affine)
+    bandimg = D.image(band, fill=0, dtype=np.int16)
+    # the edge voxels take the band next to them: the first at the white
+    # surface, the column's last at the pial surface
+    Kc = np.array([K[R] for R in range(nR)], np.int64)[reg[D.edge_col]]
+    bandimg.flat[D.edge_index] = np.where(D.edge_side < 0, 1, Kc)
+    _save(outdir / "bands.nii.gz", bandimg, affine)
     if lv.u.size:
         a, s = lv.a, lv.s
         xh = (D.f[cx] - a[c]) / np.where(s[c] != 0, s[c], 1.0)

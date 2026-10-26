@@ -127,6 +127,32 @@ def test_column_data_on_the_slab(slab: tuple[ph.Rim, F64, fr.Frame]) -> None:
     assert (img.ravel()[np.setdiff1d(np.arange(img.size), D.index)] == -1).all()
 
 
+def test_edge_zones_on_the_slab(slab: tuple[ph.Rim, F64, fr.Frame]) -> None:
+    """With the slab's white surface at z = 9.5 and pial surface at 24.5, the
+    voxel layers z = 10 and z = 24 are within one voxel (0.16 mm) of them."""
+    rim, echoes, F = slab
+    D, why = cl.column_data(F, rim, echoes)
+    D0, _ = cl.column_data(F, rim, echoes, edge_vox=0)
+    assert len(D0.edge_index) == 0
+    assert why["edge_voxels"] == len(D.edge_index) > 0
+    # the edge voxels and the cortex of the table are the cortex without zones
+    both = np.sort(np.r_[D.index[D.ctx], D.edge_index])
+    assert np.array_equal(both, np.sort(D0.index[D0.ctx]))
+    z = np.unravel_index(D.edge_index, rim.shape)[2]
+    ijk = np.stack(np.unravel_index(D.edge_index, rim.shape), 1)
+    inner = np.all((ijk[:, :2] >= 3) & (ijk[:, :2] < 45), 1)
+    assert set(z[inner & (D.edge_side < 0)].tolist()) == {10}
+    assert set(z[inner & (D.edge_side > 0)].tolist()) == {24}
+    zc = np.unravel_index(D.index[D.ctx], rim.shape)[2]
+    inner_c = np.all(
+        np.stack(np.unravel_index(D.index[D.ctx], rim.shape), 1)[:, :2] >= 3, 1
+    )
+    assert set(np.unique(zc[inner_c]).tolist()) <= set(range(11, 24))
+    # each edge voxel keeps its column
+    vc = F.voxel_column.ravel()[D.edge_index]
+    assert np.array_equal(D.labels[D.edge_col], vc)
+
+
 def test_grid_sums_by_brute_force(slab: tuple[ph.Rim, F64, fr.Frame]) -> None:
     rim, echoes, F = slab
     D, _ = cl.column_data(F, rim, echoes)
@@ -187,7 +213,22 @@ def test_drop_small_pieces() -> None:
     keep_e = ~np.isin(data.edges, [0, 1, 7]).any(1)
     e = np.vstack([data.edges[keep_e], [[1, 7]]])
     w = np.r_[data.w[keep_e], 1.0]
-    cut = cl.ColumnData(**{**data.__dict__, "edges": e, "w": w})
+    # one edge voxel in column 0 (dropped) and one in column 2 (kept)
+    # (the patch has no free voxel: add two rows along the first axis, which
+    # keeps the flat indices)
+    s0, s1, s2 = data.shape
+    free = s0 * s1 * s2 + np.arange(2)
+    cut = cl.ColumnData(
+        **{
+            **data.__dict__,
+            "edges": e,
+            "w": w,
+            "shape": (s0 + 2, s1, s2),
+            "edge_index": free,
+            "edge_col": np.array([0, 2]),
+            "edge_side": np.array([-1, 1]),
+        }
+    )
     out, dropped = cl.drop_small_pieces(cut, 5)
     assert dropped == 3 and out.n == data.n - 3
     assert set(out.labels.tolist()) == set(range(data.n)) - {0, 1, 7}
@@ -195,6 +236,8 @@ def test_drop_small_pieces() -> None:
     assert out.edges.max() < out.n and len(out.edges) == len(e) - 1
     # each voxel keeps its values and its column
     assert np.array_equal(out.labels[out.col], cut.col[np.isin(cut.col, out.labels)])
+    assert np.array_equal(out.edge_index, free[1:]) and out.edge_side.tolist() == [1]
+    assert out.labels[out.edge_col].tolist() == [2]
     same, none = cl.drop_small_pieces(data, 5)
     assert same is data and none == 0
 

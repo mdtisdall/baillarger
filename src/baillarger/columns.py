@@ -44,9 +44,23 @@ over the column's streamlines. The noise of each column is the
 pooled variance, per echo, inside the cells of n_layers equal bins of r in
 the cortex (the fixed-K baseline's geometric layers): the model's noise is
 diagonal over the echoes.
+
+Edge zones. The cortex voxels within edge_vox voxels (default 1, 0.16 mm on
+V1V2) of the white or the pial surface along their streamline (d < edge or
+T_p − d < edge) are partial volumes of cortex with WM or fluid. They change
+most along r (on V1V2 the outer 0.1 of r carried 9 times the mean intensity
+step of the inner 0.1s, the inner 0.1 twice), so the band fit gave them
+bands of their own: 30 % of the region boundaries sat below r = 0.1 or above
+0.9, and the edge voxels made about half of the data term. They are left out
+of the model (and of the noise) and kept in edge_index for the outputs, which
+give them the band next to them. With them out (and λ_z = 5), on V1V2: no
+region boundary below r = 0.1 or above 0.9 (levels 256, 32, 16), mean K_R
+4.3 instead of 5.0, and the stria (a dark middle band in echo 2) found in
+2,908 columns instead of 1,642 at level 256, 1,113 instead of 107 at level
+32; at level 16 still in none with equidistant r.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import numpy as np
@@ -184,6 +198,13 @@ class ColumnData:
     w: F64
     #: noise variance of each column and echo (n, E)
     sigma2: F64
+    #: the edge voxels: cortex voxels of the model columns within edge_mm of
+    #: the white or the pial surface along their streamline, left out of the
+    #: model (partial volume); their flat index, column, and side (-1 white,
+    #: +1 pial), for the outputs
+    edge_index: I64 = field(default_factory=lambda: np.zeros(0, np.int64))
+    edge_col: I64 = field(default_factory=lambda: np.zeros(0, np.int64))
+    edge_side: I64 = field(default_factory=lambda: np.zeros(0, np.int64))
 
     @property
     def n(self) -> int:
@@ -234,11 +255,14 @@ def column_data(
     links: Literal["base", "faces"] = "base",
     wm_mm: float = 0.5,
     n_layers: int = 13,
+    edge_vox: float = 1.0,
     depth: Literal["equidistant", "equivolume"] = "equidistant",
 ) -> tuple[ColumnData, dict[str, int]]:
     """The voxel table of the model (see the module notes). echoes: the
-    patch's echoes, shape (*shape, E). Returns the table and the counts of
-    model_columns."""
+    patch's echoes, shape (*shape, E). edge_vox: the width of the edge zones
+    left out at the white and the pial surface, in voxels (0: none). depth:
+    the relative depth r of the voxels (see the module notes). Returns the
+    table and the counts of model_columns, with the number of edge voxels."""
     x = np.asarray(echoes, np.float64)
     if x.ndim == 3:
         x = x[..., None]
@@ -268,12 +292,20 @@ def column_data(
     col_c = new[vc.ravel()[idx_c]]
     p_c = vp.ravel()[idx_c].astype(np.int64)
     d_c = frame.depth.ravel()[idx_c].astype(np.float64)
+    T_c = Tp[p_c].astype(np.float64)
     if depth == "equivolume":
         A, V = path_volume(frame)
         VT = volume_at(frame, A, V, np.arange(len(Tp)), np.nan_to_num(Tp))
         m_c = volume_at(frame, A, V, p_c, d_c) / VT[p_c]
     else:
-        m_c = d_c / Tp[p_c].astype(np.float64)
+        m_c = d_c / T_c
+    # the edge zones: partial volume with the WM or the fluid
+    edge_mm = edge_vox * float(np.mean(frame.voxel_mm))
+    side = np.where(d_c < edge_mm, -1, np.where(T_c - d_c < edge_mm, 1, 0))
+    is_edge = side != 0
+    edge_index, edge_col, edge_side = idx_c[is_edge], col_c[is_edge], side[is_edge]
+    idx_c, col_c, m_c = idx_c[~is_edge], col_c[~is_edge], m_c[~is_edge]
+    why["edge_voxels"] = int(is_edge.sum())
     # the WM extension: within wm_mm of the white surface, with the column and
     # the streamline of the nearest white vertex
     wm = rim == 2
@@ -320,6 +352,9 @@ def column_data(
         edges=edges,
         w=w,
         sigma2=sigma2,
+        edge_index=edge_index.astype(np.int64),
+        edge_col=edge_col.astype(np.int64),
+        edge_side=edge_side.astype(np.int64),
     )
     return data, why
 
@@ -376,5 +411,8 @@ def drop_small_pieces(data: ColumnData, min_cols: int = 5) -> tuple[ColumnData, 
         edges=new[data.edges[e]],
         w=data.w[e],
         sigma2=data.sigma2[keep],
+        edge_index=data.edge_index[keep[data.edge_col]],
+        edge_col=new[data.edge_col[keep[data.edge_col]]],
+        edge_side=data.edge_side[keep[data.edge_col]],
     )
     return out, int((~keep).sum())
