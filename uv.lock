@@ -78,6 +78,7 @@ dependencies = [
     { name = "nibabel" },
     { name = "numba" },
     { name = "numpy" },
+    { name = "scikit-fmm" },
     { name = "scipy" },
 ]
 
@@ -95,6 +96,7 @@ requires-dist = [
     { name = "nibabel", specifier = ">=5.4.2" },
     { name = "numba", specifier = ">=0.68.0" },
     { name = "numpy", specifier = ">=2.5.4" },
+    { name = "scikit-fmm", specifier = ">=2025.6.23" },
     { name = "scipy", specifier = ">=1.18.1" },
 ]
 
@@ -661,6 +663,16 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2c/d4/c3b74e1b4808438ea7f14bb914478025e2d51261f60774a54a0fa222ec46/ruff-0.17.2-py3-none-win32.whl", hash = "sha256:6bce7d1f5165701ae18f5df85c65afe78cddfa6c5fb4b9bdb0014d60388f3edd", size = 9870537, upload-time = "2026-10-22T18:37:52.486Z" },
     { url = "https://files.pythonhosted.org/packages/1c/9a/c7da96c2c96d20704cf9027f7a5121da272a8c05f1d1531ba949e3b3df04/ruff-0.17.2-py3-none-win_amd64.whl", hash = "sha256:1b59d447f197bef9ef48a22ba1a6016137753c6099e9bac9c36eb566e422424c", size = 10282826, upload-time = "2026-10-22T18:37:55.2Z" },
     { url = "https://files.pythonhosted.org/packages/81/60/a3604c79cb02777b6cb84da894104021986f06c4bc41375102cc95049a32/ruff-0.17.2-py3-none-win_arm64.whl", hash = "sha256:195ad918027f817c119310ca89a42d347887dfc28934aaa869325e9c5dc9d962", size = 9827036, upload-time = "2026-10-22T18:37:58.031Z" },
+]
+
+[[package]]
+name = "scikit-fmm"
+version = "2025.6.23"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/90/94/3b2969fc1f64a5faafad03c421ed200e717fc99c556985da0a17822f868d/scikit_fmm-2025.6.23.tar.gz", hash = "sha256:a3208f5f3881e40b7878d1121ba39b8d57f1bc38fb4e5f0d9d1c66a9b007e44f", size = 467753, upload-time = "2025-06-23T19:04:13.366Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/10/093e76640c8c6efae5e42203e92e86cb3e5dceaa3dcb8ac0733a1f817c64/scikit_fmm-2025.6.23-cp312-cp312-win_amd64.whl", hash = "sha256:859e5076d09f5d9b87d3d6fdc08652b714b43c5ad31523e5d58b28abdc9ced5b", size = 69261, upload-time = "2025-06-23T19:04:11.187Z" },
+    { url = "https://files.pythonhosted.org/packages/52/2c/7aac8f88a20df085aeaa5802de8c8958a02d33715652b69d5ef90bc41b8b/scikit_fmm-2025.6.23-cp313-cp313-win_amd64.whl", hash = "sha256:a5f291db66949f15a68cc3e472c73e50ceb70d5ecb49eb364f55befdcbdcbc6e", size = 68454, upload-time = "2025-06-23T19:04:12.222Z" },
 ]
 
 [[package]]
