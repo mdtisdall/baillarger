@@ -55,10 +55,12 @@ type F64 = npt.NDArray[np.float64]
 type I64 = npt.NDArray[np.int64]
 
 
-def fused_fraction(frame: Frame, cortex: Bool) -> F64:
+def fused_fraction(frame: Frame, cortex: Bool, exit_depth: F32 | None = None) -> F64:
     """For each column, the fraction of its streamlines (those with at least
-    one step) that end at a ridge inside the cortex; NaN for a column with
-    none."""
+    one step) that end at a ridge inside the cortex without having exited
+    into fluid first (exit_depth NaN, when given; with seams, a streamline can
+    exit at a seam and go on to a ridge in the facing bank's cortex); NaN for
+    a column with none."""
     n = np.diff(frame.path_start)
     moved = n >= 2
     last = frame.path_points[frame.path_start[1:][moved] - 1]
@@ -66,6 +68,8 @@ def fused_fraction(frame: Frame, cortex: Bool) -> F64:
     in_cortex = np.zeros(len(n), bool)
     in_cortex[moved] = cortex[vi[:, 0], vi[:, 1], vi[:, 2]]
     fused = moved & (frame.path_end == END_RIDGE) & in_cortex
+    if exit_depth is not None:
+        fused &= ~np.isfinite(exit_depth)
     col = frame.vertex_column
     total = np.bincount(col[moved], minlength=frame.n_columns).astype(np.float64)
     hit = np.bincount(col[fused], minlength=frame.n_columns)
@@ -91,7 +95,7 @@ def model_columns(
     good = cortex & (vp >= 0)
     good[good] = np.isfinite(exit_depth[vp[good]])
     exits = np.bincount(frame.voxel_column[good], minlength=frame.n_columns) > 0
-    fused = fused_fraction(frame, cortex) > fused_frac
+    fused = fused_fraction(frame, cortex, exit_depth) > fused_frac
     keep = has & exits & ~frame.column_cut & ~fused
     why = dict(
         columns=frame.n_columns,

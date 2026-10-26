@@ -4,6 +4,7 @@
 
 In OUTDIR:
 
+- seams.nii.gz: the step-0 seams (baillarger.joint), unless --no-seams;
 - merge_tree.csv: one row per merge (step, the two region ids, the new id,
   cost, columns of the new region; ids 0..n-1 are the model's columns);
 - run.json: parameters, the frame and model-column counts, the number of
@@ -42,6 +43,7 @@ from baillarger import bands as bd
 from baillarger import data as dt
 from baillarger import frame as fr
 from baillarger.columns import ColumnData, column_data, drop_small_pieces
+from baillarger.joint import initial_seams, with_seams
 from baillarger.refine import DEFAULT_LEVELS, Level, Params, Refiner
 
 type F64 = npt.NDArray[np.float64]
@@ -125,16 +127,24 @@ def run_patch(
     params: Params | None = None,
     directory: Path | None = None,
     min_piece: int = 5,
+    seams: bool = True,
 ) -> dict[str, Any]:
-    """Load one patch, build the frame and the voxel table (without the graph
-    pieces of fewer than min_piece columns), run the model and write the
-    outputs. Returns the run summary (also in run.json)."""
+    """Load one patch, build the frame, place the step-0 seams (with seams:
+    baillarger.joint), build the voxel table with the seams as fluid (without
+    the graph pieces of fewer than min_piece columns), run the model and write
+    the outputs. Returns the run summary (also in run.json)."""
     t0 = time.perf_counter()
     outdir.mkdir(parents=True, exist_ok=True)
     p = dt.load_patch(name, directory)
     miss = fr.missing_tissue(p.rim, p.flash, p.voxel_mm)
     F = fr.build_frame(p.rim, p.voxel_mm, miss)
-    D, why = column_data(F, p.rim, p.echoes, miss)
+    rim = p.rim
+    seam_report: dict[str, int] = {}
+    if seams:
+        seam_mask, seam_report = initial_seams(p.rim, p.flash, p.voxel_mm, miss)
+        rim = with_seams(p.rim, seam_mask)
+        _save(outdir / "seams.nii.gz", seam_mask.astype(np.uint8), p.affine)
+    D, why = column_data(F, rim, p.echoes, miss)
     D, why["small_pieces"] = drop_small_pieces(D, min_piece)
     t_inputs = time.perf_counter() - t0
     R = Refiner(D, params)
@@ -161,6 +171,7 @@ def run_patch(
         patch=name,
         params=asdict(R.p),
         columns=why,
+        seams=seam_report,
         graph_pieces=n_pieces,
         levels_not_reached=[L for L in asked if L < D.n and L not in out],
         missing_voxels=int(miss.sum()),
@@ -184,8 +195,13 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--patch", required=True, choices=sorted(dt.PATCHES))
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--levels", type=int, nargs="+", default=DEFAULT_LEVELS)
+    ap.add_argument(
+        "--no-seams",
+        action="store_true",
+        help="leave fused cortex out (no step-0 seams)",
+    )
     a = ap.parse_args(argv)
-    s = run_patch(a.patch, a.out, a.levels)
+    s = run_patch(a.patch, a.out, a.levels, seams=not a.no_seams)
     print(f"{a.patch}: {s['seconds']} s, levels {list(s['levels'])}")
 
 
