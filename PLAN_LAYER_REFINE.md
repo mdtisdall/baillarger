@@ -48,24 +48,34 @@ rule counts only streamlines that never exit. What it leaves: a bank whose
 streamlines meet the facing bank's at the ridge before they reach its seam
 still has no exit (see the finding under **Columns and depth frame**).
 
-**Next**, in this order:
+**Next**, in this order (decided after the literature review, see
+**Literature and ideas to try**):
 
-1. Seams as barriers in the frame: D recomputed with the seams as
+1. Equivolume r, as an option of the frame (equidistant or equivolume), from
+   the divergence of the streamlines' flow (the prototype's
+   `surface_geometry.equivolume`); compare both on V1V2 (band sharpness, K_R,
+   the stria's width) before step 7 builds on r.
+2. A Hotelling T² test between the column profiles of two neighbouring
+   regions: reported for each merge (which merges join distinct areas), and
+   used in test A for each WM bin on its own (step 5).
+3. Seams as barriers in the frame: D recomputed with the seams as
    obstacles, and a streamline that reaches a seam ends there with its own end
    class, which counts as an exit. A scratch version (without the end class)
-   was inconclusive.
-2. Step 7: the fluid template μ_F and Σ_F, the costs Λ, the fluid against
+   was inconclusive. Once Λ exists (step 7), compare it with D's path cost
+   weighted by Λ, on P1, P8 and V1V2.
+4. Step 7: the fluid template μ_F and Σ_F, the costs Λ, the fluid against
    tissue growth with Λ, the cut placement with Λ, the repair, the thickness.
-3. The outer loop, and tests 7, 9 and 10.
-4. The evaluation sweep (with the measures of the earlier column-filter
-   evaluation, to port), then the other two patches (PCC_SPL, M1S1).
+5. The outer loop, and tests 7, 9 and 10.
+6. The evaluation sweep (with the measures of the earlier column-filter
+   evaluation, to port), then the other two patches (PCC_SPL, M1S1). The
+   sweep must compare our K rule with an absolute-error held-out loss and
+   with mBIC (see **Literature and ideas to try**).
 
 Waiting for a decision:
 
 - How the merging reaches the levels below the number of graph pieces
-  (3 and 2 regions on V1V2 with the step-0 seams; see step 1).
-- The bottom tests (step 5): test each WM bin on its own, or keep the
-  relative drop of the totals.
+  (3 and 2 regions on V1V2 with the step-0 seams; see step 1); the T² test
+  (next step 2) may make those levels matter less.
 - The changes marked "changed" below that depart from the first plan (the K
   rule, the window of each surface, scipy's min-cut, the fused rule).
 - Whether PyMaxflow (GPL) may be a dependency.
@@ -831,30 +841,42 @@ Each with its status: confirmed (the evidence supports it as built), changed
 ## Literature and ideas to try
 
 From a literature search on search results and abstracts, not on the full
-papers: each source is to read before acting on it.
+papers: each source is to read before acting on it. Reviewed against the
+plan: the decisions taken (equivolume r first, the T² test, both seam
+methods compared, the K-rule comparison in the evaluation) are in **Status**.
 
 - **K choice (step 3b).** Our cross-validation over-selected K, and the 5 %
   floor we added because of it, match what Pein & Shah (arXiv:2112.03220)
-  found with squared-error cross-validation for change-point models. To
-  try: an absolute-error held-out loss, and mBIC as in cghseg (Picard et al.,
-  Biostatistics 2011). The group fused lasso (Bleakley & Vert 2011) is the
+  found with squared-error cross-validation for change-point models: it can
+  under- or over-estimate the number of changes; they propose an
+  absolute-error loss or modified hold-out sets (R package
+  `crossvalidationCP`; checked on the abstract). To compare in the
+  evaluation sweep (required, Next 6): an absolute-error held-out loss, and
+  mBIC as in cghseg (Picard et al., Biostatistics 2011). The group fused lasso (Bleakley & Vert 2011) is the
   convex analogue of the shared-band split. Arlot & Celisse (2010) survey
   cross-validation when the noise varies (as σ_c does here).
 - **Test A (step 5) and a level of the merge tree.** The Mahalanobis distance
   with a Hotelling T² test between neighbouring blocks of profiles
-  (Schleicher, Amunts, Zilles et al. 1998–99; on MRI, Waehnert et al. 2016).
-  To try: test each WM bin on its own with it (the late-reaction finding), and
-  stop merging where the T² between two regions is no longer significant.
-- **Depth frame.** Waehnert et al. 2014 found that equivolume layers fit the
-  myelinated bands of ex vivo cortex much better than Laplace or
-  equidistant ones. To consider: move the equivolume r ahead of "a later
-  option". Implementations: nighres, highres-cortex (Leprince 2015), LayNii
-  `-equivol`.
-- **Seams.** Osechinskiy & Kruggel 2012 (Int J Biomed Imaging) put the
-  collision ridge near the true sulcal centreline by weighting the field by
-  the GM probability. To try: weight D's path cost by Λ, as an alternative to
-  recomputing D with the seams as barriers. Compare step 7 with CRUISE/ACE
-  (Han et al. 2004).
+  (Schleicher, Amunts, Zilles et al. 1998–99: the Mahalanobis distance was
+  the most sensitive measure, and significant maxima mark borders; checked on
+  abstracts and later papers that use the method). Waehnert et al. 2016
+  (NeuroImage 125) is an MRI framework of equivolume layers and quantitative
+  T1 profiles; that it uses T² is not confirmed by its abstract. Decided
+  (Next 2): test each WM bin on its own with it, and report for each merge
+  whether the T² between the two regions is significant.
+- **Depth frame.** Waehnert et al. 2014 (NeuroImage 93) found that
+  equivolume layers (Bok's principle) fit the myelinated bands of ex vivo
+  cortex better than Laplace or equidistant ones (checked on the abstract).
+  Decided (Next 1): equivolume r before step 7. Implementations: nighres,
+  highres-cortex (Leprince 2015), LayNii `-equivol`; ours will follow the
+  streamlines (the prototype's flow-divergence method).
+- **Seams.** Osechinskiy & Kruggel 2012 (Int J Biomed Imaging 2012:870196)
+  compute the field of an inhomogeneous dielectric layer of grey matter round
+  conductive white matter, on ex vivo images of 0.25 to 0.35 mm; that the
+  weighting is by the GM probability, and that it puts the collision ridge
+  on the true sulcal centreline, is not confirmed from the abstract.
+  Decided (Next 3): weight D's path cost by Λ, compared with the seams as
+  barriers. Compare step 7 with CRUISE/ACE (Han et al. 2004).
 - **Regions.** To try: polish a Ward level with α-expansion and template
   re-fits, with label costs (Delong et al., IJCV 2012; PEARL, Isack & Boykov
   2012), so that the columns at region borders can move.
