@@ -387,6 +387,17 @@ b_R is the deepest b for which every depth from 0 to b passes both tests.
 Only columns that have WM voxels down to b vote; columns without WM voxels
 take their region's b_R.
 
+**Finding (to confirm): both tests react late.** Each compares a total over
+all the bins from b up with its value at b = 0, so a WM bin with no contrast
+only dilutes it. On a synthetic patch of two areas (6 × 4 columns, 12 WM
+bins) whose contrast stops at the WM, test A stopped 3 bins (0.075 of the
+thickness) too deep; with a contrast fading over about 5 bins, neither test
+stopped before the deepest bin; test B, which noise-only WM bins barely move,
+never stopped unless the WM voxels were much noisier than the cortex. To
+try: test each new bin on its own (the between-group separation of bin b,
+and the variance the template explains in bin b, against the cortex bins'),
+so that a bin with no contrast fails at once.
+
 ### 6. Intensity TV (for each output level)
 
 Chambolle–Pock with diagonal preconditioning and adaptive steps, as in
