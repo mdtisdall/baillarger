@@ -8,6 +8,7 @@ dependencies = [
     "nibabel>=5.4.2",
     "numba>=0.68.0",
     "numpy>=2.5.4",
+    "scikit-fmm>=2025.6.23",
     "scipy>=1.18.1",
 ]
 
@@ -39,10 +40,10 @@ exclude = ["^\\.worktrees/"]
 # unannotated too.
 untyped_calls_exclude = ["skimage", "nibabel", "numba"]
 
-# numba and llvmlite have no type stubs. baillarger._jit gives njit a typed
-# signature.
+# numba, llvmlite and scikit-fmm have no type stubs. baillarger._jit gives
+# njit a typed signature.
 [[tool.mypy.overrides]]
-module = ["numba", "numba.*", "llvmlite", "llvmlite.*"]
+module = ["numba", "numba.*", "llvmlite", "llvmlite.*", "skfmm", "skfmm.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
