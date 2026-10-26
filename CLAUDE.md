@@ -42,5 +42,6 @@ this project:
   Code by `.claude/hooks/block-main-writes.sh`. To run the git command
   yourself in a terminal is a break-glass action for a stuck state, not a
   shortcut for routine edits.
-- Show the commit message and wait for approval before `git commit`. Merge
-  only when told to.
+- Commit, push and open the PR without waiting for approval. Show the
+  commit message and the PR body in the reply. To merge a PR to `main`
+  needs an explicit instruction from the user that names the PR.
