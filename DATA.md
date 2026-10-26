@@ -17,8 +17,8 @@ One ex vivo hemisphere: subject INDD121850, session 7THemix20250516.
 | `…_echo-{1,2,3}_part-mag_FLASH.json` | 2 kB each | BIDS sidecars |
 | `sub-INDD121850_ses-7THemix20250516_aseg.nii.gz` | 11 MB | PURPLE segmentation |
 
-All images share one grid: 700 × 384 × 1148 voxels of 0.160 × 0.160 ×
-0.160 mm (int16). The three echoes are in register.
+All images share one grid: 700 × 384 × 1148 voxels of 0.16028 × 0.16 ×
+0.16028 mm (int16, RAS). The three echoes are in register.
 
 Check the files (at the top of the checkout):
 
@@ -29,7 +29,7 @@ shasum -a 256 -c data.sha256
 ## Acquisition
 
 7 T Siemens, 3D gradient echo (`a_gre_exvivo_160um_TR80`): TR 80 ms, flip
-angle 25°, echo times 9.37, 20.71 and 32.05 ms, 0.16 mm isotropic. The
+angle 25°, echo times 9.37, 20.71 and 32.05 ms, 0.16 mm nominal. The
 specimen is in Fomblin, which gives no signal.
 
 ## Labels
@@ -42,6 +42,10 @@ Some blocks of tissue were cut out before the scan. The segmentation imputes
 labels there, but the FLASH is black.
 
 ## Patches
+
+`baillarger.data.load_patch(name)` reads one box from the three echoes and
+the aseg (only the box is kept in memory) and makes the rim labels. The data
+directory is `data/` here, or `$BAILLARGER_DATA`.
 
 Voxel boxes (lo inclusive, hi exclusive, in (i, j, k) of the grid above).
 Each box spans the boundary points (Dan's areal boundary points) plus a

@@ -5,6 +5,7 @@ description = ""
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "nibabel>=5.4.2",
     "numba>=0.68.0",
     "numpy>=2.5.4",
     "scipy>=1.18.1",
@@ -33,9 +34,10 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.mypy]
 strict = true
 exclude = ["^\\.worktrees/"]
-# scikit-image ships py.typed but leaves most functions unannotated; numba
-# internals (numba.core.cgutils) are unannotated too.
-untyped_calls_exclude = ["skimage", "numba"]
+# scikit-image and nibabel ship py.typed but leave some functions unannotated
+# (nibabel: Nifti1Header.get_zooms); numba internals (numba.core.cgutils) are
+# unannotated too.
+untyped_calls_exclude = ["skimage", "nibabel", "numba"]
 
 # numba and llvmlite have no type stubs. baillarger._jit gives njit a typed
 # signature.
