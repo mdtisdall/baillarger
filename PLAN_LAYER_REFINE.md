@@ -37,6 +37,7 @@ surfaces**; "tests" those of **Correctness tests**.
 | #19 | `output` | the outputs of a run; `python -m baillarger.output` |
 | #20 | `bands`, `columns`, `output` | one-column regions in `choose_k`; small graph pieces dropped |
 | #21 | `joint`, `columns`, `output` | outer loop step 0 (geometric seams as fluid); the fused rule |
+| #24 | `columns`, `refine`, `output` | edge zones out of the model; λ_z = 5 |
 
 (#6 changed `CLAUDE.md` only.) Tests 1–6 and 8 pass; test 9's phantom (P8)
 is an expected failure of the seam growth, the open problem that step 7 is
@@ -295,6 +296,23 @@ in the facing bank's cortex; counted as fused, it kept even the bank that
 crossed the seam out). Then `drop_small_pieces` (#20) removes the columns in
 connected pieces of the column graph with fewer than 5 columns: they can
 never merge, and one column cannot cross-validate its bands.
+
+**Edge zones.** The cortex voxels within one voxel (0.16 mm) of the white
+or the pial surface along their streamline are left out of the model
+(`column_data(edge_vox=1)`) and take the band next to them in the outputs
+(1 at the white surface, K_R at the pial surface). On V1V2 they are
+partial volumes with the WM or fluid: the pooled normalized profile changes
+9 times as much in the outer 0.1 of r as in an average 0.1 inside, twice as
+much in the inner 0.1, and these voxels made about half of the data term.
+With them in, the band fit spent bands on them: 30 % of the region
+boundaries sat below r = 0.1 or above 0.9, and the stria (a dark middle band
+in echo 2) was found in 1,642 columns at level 256 and none at level 16.
+With them out (and λ_z = 5): no boundary at the edges (levels 256, 32 and
+16), mean K_R 4.3 instead of 5.0, the stria in 2,908 columns at level 256
+(0.37 mm wide) and 1,113 at level 32 (instead of 107); at level 16 still
+none. Estimating the noise with the edge voxels still in (a scratch run)
+gave 1,070 at level 16: the coarse levels are sensitive to the noise. A partial-volume model of the edges would
+use these voxels; the trim is the simple first step.
 
 **Finding (still open): streamlines regenerated in the loop.** With the fixed
 frame, both banks of a fused stretch stop at the ridge midway between their
@@ -595,7 +613,13 @@ u does not feed back into steps 1–5. V1V2 (9,402 columns, 5 bands): 8 s for
 | n_inner (rounds per re-fit) | rounds | 3 |
 
 The sweep weights start at the prototype's defaults (`refine.Params`): κ = 1,
-λ_z = 1, η = 10, λ_g = 0.5, λ_l = 0; none has been swept yet.
+λ_z = 1, η = 10, λ_g = 0.5, λ_l = 0; none has been swept yet, except λ_z, now
+5: on V1V2 (with the edge zones out) it halves the step of the boundaries
+between linked columns of a region (median 0.010 to 0.005 of r) and the
+share of boundaries at the edge of their window (0.15 to 0.11 at level 256),
+for 0.4 % more data term. Moving one column's boundary by 0.05 of r costs
+about 10 in the data term (only about 3 voxels per 0.05 of a column), the
+TV about 2 per unit λ_z, the pull η (0.05)² = 0.025.
 
 ## Outputs (per patch)
 
