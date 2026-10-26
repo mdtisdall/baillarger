@@ -317,9 +317,17 @@ x̂(v) = (f(v) − a_c) / s_c:
    the split for K − 1.
 3. **Choose K by cross-validation.** Split the region's columns into two
    halves A and B at random (fixed seed); the halves share no voxels. Fit
-   the split for each K on A; on B, re-fit each column's gain and offset to
-   A's template (2 parameters per column) and measure the residual; swap A
-   and B and add. K_R is the K with the least held-out residual.
+   the split for each K on A; measure its residual on B, with B's voxels
+   normalized by their own gain and offset; swap A and B and add. K_R is the
+   least K whose held-out residual is within the larger of one standard
+   error (of the paired difference over the held-out columns) and 5 % of the
+   whole held-out gain (residual at K = 1 minus the least) of the least one.
+   (Re-fitting each held-out column's gain and offset to A's template, as
+   first planned and as the prototype did, gives every K ≥ 2 a gain fitted
+   on the held-out data that a flat template cannot use: a flat profile then
+   never got K = 1. The standard error alone stops nothing in a large
+   region, where every extra band of a smooth trend is a real improvement:
+   K = K_max on V1V2's large components; with the 5 % term, K = 5 or 6.)
 4. Z_R = the best split for K_R on all columns.
 
 Each column's boundaries are then nudged around Z_R in step 4. A region
@@ -522,7 +530,11 @@ Decisions for the model:
   face counts; on P1 there is no link across the fused stretch (66 with
   plain faces). `links="faces"` keeps the plain rule for comparison.
 - **K rule.** Cross-validation only (the prototype's other rules are not
-  ported).
+  ported), with the held-out residual not re-fitted and the least K within
+  max(one standard error, 5 % of the held-out gain) of the minimum (step 3b).
+  On synthetic regions (K = 1 to 4, one or three echoes, 20 seeds each) it
+  finds the true K in 160 of 160; the prototype's rule in 87 of 160, and a
+  flat profile's K = 1 in none. To confirm.
 - **Merge cost.** Plain Ward; the prototype's border-length term is an option,
   off.
 - **Columns in steps 1–6.** Columns with cortex voxels on streamlines that
