@@ -11,6 +11,75 @@ The plan started as a LayNii plan (the ex vivo prototype used LayNii's
 labels come from the aseg, and the columns and the depth frame come from the
 white surface (see **Joint surfaces**).
 
+## Status
+
+Updated after #21. "Steps" are the numbers of **Solver** and **Joint
+surfaces**; "tests" those of **Correctness tests**.
+
+**Merged** (on `main`):
+
+| PR | Module | What |
+|---|---|---|
+| #4 | `topology`, `wellcomposed` | simple points, Euler characteristic, well-composed repair |
+| #5 | `phantoms` | P1–P9 |
+| #7 | `growth` | topological growth, fluid against tissue, `thin_seam`, `mincut_seam` |
+| #8 | `mesh`, `mesh_intersect` | marching tetrahedra, mesh topology, RAS VTK, triangle intersection |
+| #9 | `data` | patch crops of the three echoes and the aseg, rim labels |
+| #10 | `frame` | white mesh, D, streamlines, columns, depth; missing tissue |
+| #11 | `columns` | model columns, column graph, voxel table, per-streamline r |
+| #12 | `bands` | step 3b (band DP, K by cross-validation), fixed-K baseline |
+| #13 | `gain` | steps 2 and 3 |
+| #14 | `surfaces` | step 4 |
+| #15 | `regions` | step 1 (Ward merging, re-fit levels) |
+| #16 | `bottom` | step 5 |
+| #17 | `tv` | step 6 |
+| #18 | `refine` | steps 1–6 together (`Refiner`, `Params`) |
+| #19 | `output` | the outputs of a run; `python -m baillarger.output` |
+| #20 | `bands`, `columns`, `output` | one-column regions in `choose_k`; small graph pieces dropped |
+| #21 | `joint`, `columns`, `output` | outer loop step 0 (geometric seams as fluid); the fused rule |
+
+(#6 changed `CLAUDE.md` only.) Tests 1–6 and 8 pass; test 9's phantom (P8)
+is an expected failure of the seam growth, the open problem that step 7 is
+for. A run on V1V2 (all levels, step-0 seams) takes about 4.5 minutes.
+
+**In progress:** nothing. The step-0 work is merged (#21): `joint` places the
+seams with the seam growth, `run_patch` uses them as fluid, and the fused
+rule counts only streamlines that never exit. What it leaves: a bank whose
+streamlines meet the facing bank's at the ridge before they reach its seam
+still has no exit (see the finding under **Columns and depth frame**).
+
+**Next**, in this order (decided after the literature review, see
+**Literature and ideas to try**):
+
+1. Equivolume r, as an option of the frame (equidistant or equivolume), from
+   the divergence of the streamlines' flow (the prototype's
+   `surface_geometry.equivolume`); compare both on V1V2 (band sharpness, K_R,
+   the stria's width) before step 7 builds on r.
+2. A Hotelling T² test between the column profiles of two neighbouring
+   regions: reported for each merge (which merges join distinct areas), and
+   used in test A for each WM bin on its own (step 5).
+3. Seams as barriers in the frame: D recomputed with the seams as
+   obstacles, and a streamline that reaches a seam ends there with its own end
+   class, which counts as an exit. A scratch version (without the end class)
+   was inconclusive. Once Λ exists (step 7), compare it with D's path cost
+   weighted by Λ, on P1, P8 and V1V2.
+4. Step 7: the fluid template μ_F and Σ_F, the costs Λ, the fluid against
+   tissue growth with Λ, the cut placement with Λ, the repair, the thickness.
+5. The outer loop, and tests 7, 9 and 10.
+6. The evaluation sweep (with the measures of the earlier column-filter
+   evaluation, to port), then the other two patches (PCC_SPL, M1S1). The
+   sweep must compare our K rule with an absolute-error held-out loss and
+   with mBIC (see **Literature and ideas to try**).
+
+Waiting for a decision:
+
+- How the merging reaches the levels below the number of graph pieces
+  (3 and 2 regions on V1V2 with the step-0 seams; see step 1); the T² test
+  (next step 2) may make those levels matter less.
+- The changes marked "changed" below that depart from the first plan (the K
+  rule, the window of each surface, scipy's min-cut, the fused rule).
+- Whether PyMaxflow (GPL) may be a dependency.
+
 ## Goal
 
 A filter that refines geometric layers with the observed laminar contrast,
@@ -139,12 +208,17 @@ The model becomes
 
     x(v) = a_c + s_c ⊙ μ_R(k_c(v)) + noise,    noise ~ N(0, Σ_c)
 
-with a per-echo offset a_c and gain s_c (vectors of 3), vector templates
-μ_R,k, and a 3 × 3 noise covariance Σ_c from the residuals inside the cells.
-The data term is the Mahalanobis form of the scalar one. The gain/offset
-field and the templates are fitted per echo as in steps 2 and 3. The merge
-costs (step 1) and the band DP (step 3b) use the same Mahalanobis residual:
-the prefix sums hold Σ x̂ and Σ x̂ x̂ᵀ for each grid bin.
+with a per-echo offset a_c and gain s_c (vectors of 3) and vector templates
+μ_R,k. **Changed:** the noise is diagonal over the echoes, Σ_c =
+diag(σ²_c,e), a variance per column and echo pooled inside the cells of 13
+equal bins of r (`columns`); the first plan had a full 3 × 3 Σ_c. So every
+step is a sum over the echoes of its one-echo form: the gain/offset field
+and the templates per echo (steps 2 and 3), and the merge costs (step 1),
+the band DP (step 3b), the surface costs (step 4) and the bottom tests
+(step 5) sum their one-echo residuals; the prefix sums hold Σ x̂ and Σ x̂² per
+bin and echo. With E = 1 each step gives the prototype's outputs on the same
+inputs (about 2,700 comparisons, #12–#17). The fluid's Σ_F (step 7) stays a
+full 3 × 3 covariance.
 
 Measured on V1V2 (signal over the cortex median, by echo):
 
@@ -173,17 +247,31 @@ the loop:
 
 - **Domain.** Cortex, seams and the fluid inside the crop (rim labels 3 and
   1), without missing tissue.
+- **Missing tissue.** Blocks cut out of the specimen before the scan, which
+  the aseg labels as tissue (imputed) but where the FLASH is black: tissue
+  where the FLASH smoothed by 2 voxels is below 0.25 × the cortex median, in
+  blocks of at least 250 voxels, grown by 0.3 mm (`frame.missing_tissue`).
+  Not in the domain; its WM is no source of D; a streamline stops on entering
+  it and is cut: its voxels take no column and it does not count for the
+  thickness. The white mesh is made from all the WM, imputed WM too, so the
+  edge of a cut does not become a false white surface. V1V2: 416,865 voxels
+  (14.6 % of its cortex label).
 - **Distance.** D(v), the distance from the white surface (mm), along paths in
-  the domain (not through the WM).
+  the domain (not through the WM), by second-order fast marching (scikit-fmm;
+  p99 error 66 µm on a ball, against 415 µm for 26-neighbour Dijkstra).
 - **Streamlines.** From each white-mesh vertex, along the gradient of D
   (smoothed by 1 voxel), outward. A streamline stops at the ridge of D (where
   streamlines from facing banks meet: in fused cortex, the medial surface
   between the two banks), at missing tissue, at the crop faces, or at
   D = D_max (default 4 mm, about twice the thickest cortex).
-- **Columns.** Patches of white-mesh vertices about 0.7 mm across. Each voxel
-  goes to the column of the nearest streamline that reaches it, so each voxel
-  is in one column. Unlike columns built from the rim, these do not depend
-  on the pial surface.
+- **Columns.** Patches of white-mesh vertices about 0.7 mm across: geodesic
+  Voronoi cells of the white mesh, from farthest-point seeds until every
+  vertex is within 0.35 mm of a seed. Each voxel goes to the column of the
+  nearest streamline point within 1.5 mm (streamlines fan out over gyral
+  crowns; with 0.35 mm, 3.6 % of the V1V2 cortex fell between them), so each
+  voxel is in one column. Unlike columns built from the rim, these do not
+  depend on the pial surface. V1V2: 21,034 columns, of which 14,397 have
+  cortex.
 - **Depth.** d(v): the distance along the voxel's streamline (mm). Relative
   depth r(v) = d(v) / T_p, where T_p is the depth at which the voxel's own
   streamline exits the cortex into fluid (`frame.path_exit`). A streamline
@@ -196,9 +284,19 @@ the loop:
   3b), the pull to Z_R, the TV on z and t_min use r.
 
 r is equidistant in the first version. An equivolume correction of r is a
-later option.
+later option (see **Literature and ideas to try**).
 
-**Finding (to confirm): streamlines regenerated in the loop.** With the fixed
+**Columns in steps 1–6** (`columns.model_columns`): a column takes part when
+it has cortex voxels on streamlines that exit into fluid, is not cut by
+missing tissue, and at most half of its streamlines are fused. A streamline
+is fused when it ends at a ridge inside the cortex without having exited
+first (#21: with seams, a streamline can exit at a seam and go on to a ridge
+in the facing bank's cortex; counted as fused, it kept even the bank that
+crossed the seam out). Then `drop_small_pieces` (#20) removes the columns in
+connected pieces of the column graph with fewer than 5 columns: they can
+never merge, and one column cannot cross-validate its bands.
+
+**Finding (still open): streamlines regenerated in the loop.** With the fixed
 frame, both banks of a fused stretch stop at the ridge midway between their
 WM surfaces. When step 7 puts the seam at the true contact, nearer the
 thinner bank (P8: banks of 12 and 18 voxels), the thicker bank's
@@ -210,7 +308,14 @@ contact). So, at each outer iteration: the columns (patches of the white
 mesh) stay fixed; D is recomputed with the current seams as barriers, the
 streamlines are traced again from the same vertices, and a streamline that
 reaches a seam exits there. Test 8 then reads: with no seams, the frame does
-not depend on the pial surface.
+not depend on the pial surface. Evidence so far: P8 (above); P1 with the
+step-0 seams as fluid only (#21, `test_joint`): the cut lies at x = 28, the
+ridge at x = 31.5, so bank A's streamlines exit at the seam (> 80 % of its
+patch voxels join the model) and bank B's do not (< 50 %). A scratch run on
+V1V2 with the seams as barriers covered less, not more (26 % of the cortex,
+against 64 % with the seams as fluid), but its exit test looked only one
+sample past a streamline's end and missed most seams: inconclusive. Next
+step 1 of **Status**.
 
 ### 7. Geometry (fixed regions, templates, gain/offset, bands)
 
@@ -246,18 +351,24 @@ always lower E. The loop records E after each step.
 
 0. Start from the geometric surfaces: the white surface from the WM labels,
    and the pial surface and seams from the seam growth with the echo-2
-   darkness (as the ex vivo prototype), which give T_c. (`baillarger.joint`, used by
-   `output.run_patch`: the seams count as fluid. On V1V2 they raise the
-   cortex in the model from 58 % to 69 % and leave the column graph in 5
-   pieces instead of 8. A bank whose streamlines meet the facing bank's at
-   the ridge before they reach the seam still has no exit: the seams as
-   barriers, the finding under **Columns and depth frame**.)
+   darkness (as the ex vivo prototype), which give T_c. Done (#21):
+   `joint.initial_seams` runs `grow_competing`, `thin_seam` and `mincut_seam`
+   on the echo-2 FLASH, with missing tissue left out; `output.run_patch` uses
+   the seams as fluid (`--no-seams` leaves them out). On V1V2 (24 s; 44,728
+   seam voxels; 616 cuts placed by min-cut) they raise the cortex in the
+   model from 58 % to 69 %, leave the column graph in 5 pieces instead of 8,
+   and the merging reached every level down to 4 regions (a scratch run before
+   the fused-rule fix). At 256, 64 and 16 regions, Dan's point
+   (66, 62, 62) lies on a border between two regions. A bank whose
+   streamlines meet the facing bank's at the ridge before they reach its seam
+   still has no exit: the seams as barriers (finding above).
 1. Steps 1–5 of the model, in the fixed frame.
 2. Step 7, with the regions of the finest re-fit level whose regions all have
    at least N_geo columns (default 50), so that each template is pooled over
    many columns.
 3. Repeat from 1 until fewer than n_stop voxels (default 0.1 % of the cortex)
-   change label, or for it_max iterations (default 5).
+   change label, or for it_max iterations (default 5). (Not built: the
+   stopping rule is untested.)
 
 The templates are pooled over many columns, so the columns with a clear pial
 surface set them, and the fused columns are fitted to them. In a fused
@@ -286,26 +397,53 @@ The merge loop is the outer loop; it gives the full hierarchy.
    boundaries.
 3. Merge the cheapest pair; update the costs of its neighbours.
 4. **Re-fit levels.** A full re-fit (steps 2–5 below) after each merge is too
-   expensive. The re-fit runs at the levels where the number of regions
-   reaches N₀ / 2^j (and at 2, 3, 4, 5 regions), and the merge costs are then
-   recomputed. Before the first re-fit, the boundaries are geometric (the
-   fixed-K baseline) and the gain/offset is the per-column mean and RMS.
+   expensive. The re-fit runs when the number of regions reaches one of the
+   levels, and the merge costs are then recomputed. **Changed:** a fixed list,
+   256, 128, 64, 32, 16, 8, 5, 4, 3, 2 (`refine.DEFAULT_LEVELS`), not N₀ / 2^j.
+   Before the first re-fit the gain/offset is each column's cortex mean and
+   SD, per echo; the merge costs need no boundaries (they compare the
+   profiles on the depth grid). At each re-fit (`refine.Refiner.refit`): the
+   bands of each region (3b), which start the columns' boundaries at Z_R; then
+   3 rounds of templates, gain/offset, templates, boundaries (4), templates;
+   then the bottoms (5) and the TV (6). The energy terms are recorded after
+   each round; on V1V2 the total falls at every level.
    Each re-fit chooses K_R again for every region (step 3b), so a merged
    region can have more or fewer bands than its parts.
-5. Stop at one region. Nothing chooses a level: the output is the merge tree
-   plus the full results at each re-fit level.
+5. Stop at one region, or when no regions touch. Nothing chooses a level: the
+   output is the merge tree plus the full results at each re-fit level.
+
+The merge cost uses the profiles on the depth grid up to m = 0.85 (no
+pial-edge bins), each bin weighted by s²/σ², summed over the echoes (`regions`;
+with E = 1 the prototype's merge tree, 468 merges). The prototype's
+border-length (Potts) term is an option, off.
+
+**Merging stops at the number of connected pieces of the column graph**: it
+joins only touching regions. V1V2 had 19 pieces (fused and cut columns left
+out, and the crop), so no level below 19 was reached; with the small pieces
+dropped (#20) 10, and with the step-0 seams 4 (6,066, 4,796, 151 and 18
+columns), so 3 and 2 regions are still out of reach. `run.json` reports the
+pieces and the levels not reached. Open: merge across pieces by Ward cost
+once no touching pair is left (one try, without re-fits, gave 8,462 against
+940 columns, unrelated to Dan's points), link the pieces through the fused
+cortex once step 7 places its seams, or set the levels per piece.
 
 ### 2. Gain/offset field (fixed regions, templates, boundaries)
 
-Quadratic: a sparse linear system in 2 unknowns per column (data term plus
-graph Laplacian), solved with conjugate gradients. κ = 0 gives the
-independent per-column least squares.
+Quadratic: a sparse linear system in 2 unknowns per column and echo (data
+term plus graph Laplacian, scaled by the echo's median noise), one per echo,
+solved directly (`scipy.sparse.linalg.spsolve`; 0.2 s for V1V2's 9,402 columns
+× 3 echoes). A tiny ridge keeps a column with nothing to fit at its previous
+values. κ = 0 gives the independent per-column least squares; κ → ∞ one gain
+and offset per echo (test 2).
 
 ### 3. Templates (fixed gain/offset, boundaries)
 
-μ_R,k = Σ s_c (f(v) − a_c) / Σ s_c², over the voxels of region R in band k.
-Then centre and scale μ_R to zero mean and unit norm over the common bands,
-and change a_c and s_c to match, so the model is unchanged.
+μ_R,k = Σ s_c (f(v) − a_c) / Σ s_c², over the voxels of region R in band k
+(weights 1/σ²_c), per echo. Then centre and scale μ_R to zero mean and unit
+RMS over the region's voxels, per echo, and change a_c and s_c to match, so
+the model is unchanged; a flat template (K = 1) is zero and its mean goes into
+the offsets. **Changed:** over all the region's voxels, as the prototype, not
+over the common bands (p_common is not used).
 
 ### 3b. Bands of each region (fixed gain/offset)
 
@@ -335,6 +473,12 @@ x̂(v) = (f(v) − a_c) / s_c:
    K = K_max on V1V2's large components; with the 5 % term, K = 5 or 6.)
 4. Z_R = the best split for K_R on all columns.
 
+A region of fewer than 6 columns splits its voxels for the cross-validation,
+not its columns. **#20:** a region of one column then has a single held-out
+column and no standard error, so only the 5 % gain term applies (it fell
+back to the least residual, and on V1V2 one-column regions got K up to 8;
+`test_bands.test_one_column_region`).
+
 Each column's boundaries are then nudged around Z_R in step 4. A region
 with K_R = 1 has no boundaries (no laminar contrast that generalizes).
 
@@ -363,13 +507,17 @@ surfaces per region, which is much smaller. The coarse level is the
 region's DP split Z_R on the depth grid (step 3b); the fine level is the
 min-cut in a band of ± `w_band` around Z_R, with a depth step of 1/200 of the
 thickness. `w_band` is half the narrower of the two bands next to each
-surface (to confirm: first planned as half the region's narrowest band for
+surface (changed: first planned as half the region's narrowest band for
 every surface, which on V1V2 is the thin band at the pial edge, r 0.94 to 1;
 every surface could then move only ± 0.02 to 0.03 and 30 % of them stopped
 at the window's edge, against 17 % and a 6 % lower data term with the
-window of each surface). The
-fixed-K baseline uses the same two levels, with the 13-layer bins as the
-coarse level.
+window of each surface; `surfaces.candidates`, `window="region"` keeps the
+first plan). The fixed-K baseline uses the same two levels, with the
+13-layer bins as the coarse level.
+
+The min-cut is `scipy.sparse.csgraph.maximum_flow` on costs scaled to 32-bit
+integers (see **Layout and dependencies**); on 25 random regions it gives the
+prototype's depths in all 1,130 boundaries (test 1 by brute force passes).
 
 ### 5. Bottom (pressure 2), for each region at each re-fit level
 
@@ -380,19 +528,23 @@ a band can also reach below the GM/WM border. For each candidate bottom b
 (the WM depth down to b included):
 
 - **Test A, areal border.** For each neighbouring region R', over the
-  columns within `D` (default 2 column widths) of the R–R' border: the
-  separation of the two groups of profiles (between-group / within-group
-  variance). It fails when it drops by more than `δ_A` (default 0.1) from its
-  value with no WM layers.
+  columns within `D` (default 2 links of the column graph) of the R–R'
+  border: the separation of the two groups of profiles (between-group /
+  within-group variance, over the bins and the echoes). It fails when it
+  drops by more than `δ_A` (default 0.1) from its value with no WM layers.
 - **Test B, laminar transitions.** The fraction of variance of the region's
   columns that the extended template explains. It fails when it drops by
   more than `δ_B` (default 0.1) from its value with no WM layers.
 
 b_R is the deepest b for which every depth from 0 to b passes both tests.
-Only columns that have WM voxels down to b vote; columns without WM voxels
-take their region's b_R.
+Only columns that have WM voxels down to b vote; the search stops
+("voters") where fewer than max(3, 20 %) of the region's columns do.
+Columns without WM voxels take their region's b_R. As built (`bottom`, as the
+prototype): the WM part of test B is the region's mean in each WM bin, not a
+DP continuing the bands; the WM extension is the WM within 0.5 mm of the
+white surface, each voxel in the column of its nearest white vertex.
 
-**Finding (to confirm): both tests react late.** Each compares a total over
+**Finding (still open): both tests react late.** Each compares a total over
 all the bins from b up with its value at b = 0, so a WM bin with no contrast
 only dilutes it. On a synthetic patch of two areas (6 × 4 columns, 12 WM
 bins) whose contrast stops at the WM, test A stopped 3 bins (0.075 of the
@@ -401,14 +553,20 @@ stopped before the deepest bin; test B, which noise-only WM bins barely move,
 never stopped unless the WM voxels were much noisier than the cortex. To
 try: test each new bin on its own (the between-group separation of bin b,
 and the variance the template explains in bin b, against the cortex bins'),
-so that a bin with no contrast fails at once.
+so that a bin with no contrast fails at once. On V1V2 (step-0 seams) most
+regions stop on test A or on the voters, at about −0.12 to −0.26 of the
+thickness; test B stopped 2 to 6 regions per level. Waiting for a decision.
 
 ### 6. Intensity TV (for each output level)
 
-Chambolle–Pock with diagonal preconditioning and adaptive steps, as in
-LayNii's `LN2_COLUMN_SMOOTH_TV_NORM`, with the per-depth term added (its dual prox is
-a clip of each entry) and the grid maps P_c in the difference operator.
-u does not feed back into steps 1–5.
+Chambolle–Pock with the per-depth term added (its dual prox is a clip of
+each entry) and the grid maps P_c in the difference operator. **Changed:**
+fixed steps from the operator norm (power iteration), as the prototype, not
+diagonal preconditioning with adaptive steps. With three echoes the group
+term's vector holds every bin and every echo, so an areal border acts on the
+whole multi-echo profile; the per-depth term is per bin and echo (`tv`).
+u does not feed back into steps 1–5. V1V2 (9,402 columns, 5 bands): 8 s for
+λ_g = 0.5, 14 s with λ_l = 0.1.
 
 ## Weights (normalized units)
 
@@ -428,6 +586,16 @@ u does not feed back into steps 1–5.
 | D_max (streamline length) | mm | 4 |
 | N_geo (columns per region for step 7) | columns | 50 |
 | n_stop, it_max (outer loop) | voxels, iterations | 0.1 % of cortex, 5 |
+| gain_frac (K rule, step 3b) | fraction of the held-out gain | 0.05 |
+| column_mm, reach (frame) | mm | 0.7, 1.5 |
+| base_mm (column graph) | mm | 1 |
+| fused_frac, min_piece (model columns) | fraction, columns | 0.5, 5 |
+| wm_mm (WM extension) | mm | 0.5 |
+| m_max (merge profiles) | relative depth | 0.85 |
+| n_inner (rounds per re-fit) | rounds | 3 |
+
+The sweep weights start at the prototype's defaults (`refine.Params`): κ = 1,
+λ_z = 1, η = 10, λ_g = 0.5, λ_l = 0; none has been swept yet.
 
 ## Outputs (per patch)
 
@@ -445,6 +613,16 @@ u does not feed back into steps 1–5.
 - Joint surfaces, per outer iteration: the tissue/fluid labels, the seam,
   T_c per column (CSV), the pial mesh (RAS, for ITK-SNAP), Λ as an image, and
   E after each step.
+
+Written now (`output`, #19 and #21): `merge_tree.csv`; `run.json` (parameters,
+column counts and why the others are out, the seams' report, the graph
+pieces and the levels not reached, per level the energies, K and seconds);
+`seams.nii.gz`; and per level `regions.nii.gz`, `bands.nii.gz` (the WM down
+to the region's bottom as −1, which stands in for a bottom-depth image),
+`filtered.nii.gz` (4D, per echo), `regions.csv` (K, Z, template, bottom and
+why it stopped, cross-validated residuals) and `columns.csv` (frame column,
+region, T_c, a, s, σ per echo, z). Not yet: the column-level region image,
+the joint-surface outputs.
 
 ## Evaluation
 
@@ -502,24 +680,31 @@ at the level nearest to the earlier k = 2 split:
    where each bank's profile ends, within 1 voxel, not to the midpoint.
 10. On the phantoms, the outer loop stops (n_stop) within it_max iterations.
 
+Status: 1–6 pass (`test_surfaces`, `test_gain`, `test_tv`, `test_regions`,
+`test_surfaces` for 5, `test_bands`); 8 passes (`test_frame`); 7, 9 and 10
+wait for step 7 and the outer loop (P8's cut at the natural contact is an
+expected failure of the seam growth, `test_growth`).
+
 ## Layout and dependencies
 
-In `src/baillarger/` (names are working names), with the tests in `tests/`:
+In `src/baillarger/`, with the tests in `tests/`:
 
-- the topology core: simple points, Euler characteristic, well-composed
-  repair, topology-preserving growth, the fluid-against-tissue competition,
-  seam thinning and the min-cut cut placement;
-- meshes: marching tetrahedra, triangle intersection tests, streamlines;
-- the phantoms;
-- data: patch crops, rim labels, the three echoes;
-- the model: regions, gain/offset, templates, band DP, optimal surfaces,
-  bottom, intensity TV (tests 1–6); see **Model implementation** for the
-  modules and the order;
-- the joint surfaces: frame, step 7 and the outer loop (tests 7–10);
-- the evaluation sweep.
+- the topology core: `topology`, `wellcomposed`, `growth` (topology-preserving
+  growth, the fluid-against-tissue competition, seam thinning and the
+  min-cut cut placement);
+- meshes: `mesh`, `mesh_intersect`;
+- the phantoms: `phantoms`;
+- data: `data` (patch crops, rim labels, the three echoes);
+- the frame: `frame`; the model's inputs: `columns`;
+- the model: `regions`, `gain`, `bands`, `surfaces`, `bottom`, `tv`, `refine`
+  (tests 1–6); see **Model implementation**;
+- the joint surfaces: `joint` (step 0 now; step 7 and the outer loop next,
+  tests 7–10);
+- runs and outputs: `output`;
+- the evaluation sweep (not started).
 
-Dependencies (through uv): numpy, scipy, nibabel, scikit-image,
-scikit-learn, numba. Min cuts use `scipy.sparse.csgraph.maximum_flow`; it
+Dependencies (through uv): numpy, scipy, nibabel, numba, scikit-fmm (fast
+marching for D); scikit-image and scikit-learn for the tests. Min cuts use `scipy.sparse.csgraph.maximum_flow`; it
 takes 32-bit integer capacities, so the optimal surfaces scale their real
 costs to integers (optimal to within the rounding; on random regions the
 same depths as the prototype's real-valued PyMaxflow cut). PyMaxflow is
@@ -530,20 +715,24 @@ it; a 3,906-column region of V1V2 takes about 2 s with scipy.
 
 Steps 1–6 port the ex vivo prototype's `layer_refine.py` (one echo, LayNii
 columns), generalized to E echoes on the frame's columns and depth. With
-E = 1, each ported function must give the prototype's outputs on the same
+E = 1, each ported function gives the prototype's outputs on the same
 synthetic inputs; its LayNii-specific parts (column splitting, fused-zone
 files, the equivolume metric) are not ported.
 
-| PR | Module | Contents | Tests |
-|---|---|---|---|
-| A | `columns` | model columns, column graph, voxel table (column, r, echoes), noise per column and echo, depth-grid sums | slab depth and weights by brute force; no links across P1's fused banks |
-| B | `bands` | band DP for every K ≤ K_max with t_min; K by 2-fold cross-validation; fixed-K baseline | test 6 |
-| C | `gain` | gain/offset field (sparse solve, 2E unknowns per column); templates | tests 2, 5 |
-| D | `surfaces` | optimal-surface min-cut per region, coarse to fine | test 1 |
-| E | `regions` | Ward merge loop, re-fit levels, merge tree | test 4 (scikit-learn) |
-| F | `bottom` | WM extension of the bands, tests A and B | synthetic bottoms |
-| G | `tv` | intensity TV (Chambolle–Pock), group and per-depth terms | test 3 |
-| H | `refine` | one run on a patch, the outputs above | end to end on a phantom; V1V2 |
+All done:
+
+| PR | Module | Contents | Tests | Merged |
+|---|---|---|---|---|
+| A | `columns` | model columns, column graph, voxel table (column, r, echoes), noise per column and echo, depth-grid sums | slab depth and weights by brute force; no links across P1's fused banks | #11 |
+| B | `bands` | band DP for every K ≤ K_max with t_min; K by 2-fold cross-validation; fixed-K baseline | test 6 | #12 |
+| C | `gain` | gain/offset field (sparse solve, 2 unknowns per column and echo); templates | test 2 (test 5 with D) | #13 |
+| D | `surfaces` | optimal-surface min-cut per region, coarse to fine | tests 1, 5 | #14 |
+| E | `regions` | Ward merge loop, re-fit levels, merge tree | test 4 (scikit-learn) | #15 |
+| F | `bottom` | WM extension of the bands, tests A and B | synthetic bottoms | #16 |
+| G | `tv` | intensity TV (Chambolle–Pock), group and per-depth terms | test 3 | #17 |
+| H1 | `refine` | steps 1–6 together, in memory | end to end on a two-area phantom | #18 |
+| H2 | `output` | the outputs, the command line | the files of one level | #19 |
+| fix | `bands`, `columns` | one-column regions in the K rule; small graph pieces | | #20 |
 
 Decisions for the model:
 
@@ -556,20 +745,27 @@ Decisions for the model:
   plain faces). `links="faces"` keeps the plain rule for comparison.
 - **K rule.** Cross-validation only (the prototype's other rules are not
   ported), with the held-out residual not re-fitted and the least K within
-  max(one standard error, 5 % of the held-out gain) of the minimum (step 3b).
-  On synthetic regions (K = 1 to 4, one or three echoes, 20 seeds each) it
-  finds the true K in 160 of 160; the prototype's rule in 87 of 160, and a
-  flat profile's K = 1 in none. To confirm.
+  max(one standard error, 5 % of the held-out gain) of the minimum (step 3b);
+  a one-column region uses the 5 % term alone (#20). Changed from the first
+  plan: on synthetic regions (K = 1 to 4, one or three echoes, 20 seeds each)
+  it finds the true K in 160 of 160; the prototype's rule in 87 of 160, and a
+  flat profile's K = 1 in none. Waiting for your confirmation.
 - **Merge cost.** Plain Ward; the prototype's border-length term is an option,
   off.
 - **Columns in steps 1–6.** Columns with cortex voxels on streamlines that
   exit into fluid, not cut by missing tissue, and with at most half of their
-  streamlines ending at a ridge inside the cortex (fused). The others wait
-  for step 7. To revisit if this leaves too much out: on V1V2 it keeps 9,402
-  of 21,034 columns and 66 % of the cortex (the rest: fused 20 %, crop 8 %,
-  D_max 6 %; a D_max of 6 or 8 mm does not raise the share).
+  streamlines fused (see **Columns and depth frame**). Changed by #21: with
+  the step-0 seams as fluid and the fused rule fixed, V1V2 keeps 11,922 of
+  21,034 columns and 68.5 % of its cortex label (it was 9,402 and 56 %; the
+  first plan had 66 % of the cortex without missing tissue). What is still
+  out: excised 14.6 %, columns with no exit, the crop, D_max, and the banks
+  whose seam lies beyond their ridge. A D_max of 6 or 8 mm does not raise the
+  share.
 - **Column width.** 0.7 mm (from the prototype), to be swept in the
-  evaluation (`column_mm`).
+  evaluation (`column_mm`). The prototype's own sweep (0.5 to 2 mm, raw FLASH,
+  a two-group test) found no clear optimum.
+- **Min-cut solver.** scipy, not PyMaxflow (GPL); same depths on random
+  regions. Waiting for your decision on PyMaxflow.
 
 ## Decided
 
@@ -580,7 +776,7 @@ Decisions for the model:
 | Normalization | Smooth per-column gain/offset field against the region template; shape only. |
 | Nudge | Per column, with TV smoothness across columns and a pull to geometry. |
 | TV | On the intensity and on the boundary depths. Intensity TV: compare group norm against group + per-depth. |
-| Bottom tests | Relative drop. |
+| Bottom tests | Relative drop (still open: they react late, see step 5). |
 | Number of layers | Adaptive contrast bands: K_R per region, from an optimal split (DP) of the region's pooled profile, K chosen by cross-validation. Neighbouring regions can differ in K_R; the TV on u compares them on a common depth grid; K_R is chosen again at each re-fit level. |
 | Size | Coarse to fine: the region's band split, then the min-cut in a band around it. |
 | Edge layers | Merged into their neighbours (fixed-K baseline only). |
@@ -591,27 +787,99 @@ Decisions for the model:
 | White surface | Fixed. It anchors the frame. |
 | Columns and depth | From streamlines of the distance to the white surface, independent of the pial surface; r per streamline (exit depth). |
 | Data | The three echoes as one vector per voxel. |
-| Seams | Fluid against tissue (topology-preserving competing growth), with costs from the fluid and band templates in place of the darkness measure. |
+| Seams | Fluid against tissue (topology-preserving competing growth), with costs from the fluid and band templates in place of the darkness measure. Step 0 starts from the darkness seams, as fluid (#21). |
+| Noise | Diagonal over the echoes in steps 1–6; full Σ_F for the fluid. |
+| Column graph | Mesh adjacency and the base-weighted shared faces. |
 
 ## Choices made in this plan (not yet confirmed)
 
-- u does not feed back into the regions, boundaries or bottom.
+Each with its status: confirmed (the evidence supports it as built), changed
+(built otherwise; why) or still open.
+
+- u does not feed back into the regions, boundaries or bottom. Still open:
+  built so (`Refiner.refit` computes u last), not compared with feeding it
+  back.
 - Re-fit only at the levels N₀ / 2^j and 2–5 regions; Ward costs in between.
-- TV on z is cut at region borders; the gain/offset field is not.
-- The tests A and B and their defaults (D, δ_A, δ_B).
+  Changed: a fixed list, 256 to 2 (step 1). Still open whether the levels
+  below the graph's pieces can be reached (step 1).
+- TV on z is cut at region borders; the gain/offset field is not. Still open:
+  built so, not compared.
+- The tests A and B and their defaults (D, δ_A, δ_B). Still open: they react
+  late (step 5); D is 2 links of the column graph.
 - The coarse-to-fine schedule and depth steps (h, w_band, the 1/200 step).
+  h = 1/50 and the 1/200 step: confirmed as built (tests 1 and 6 pass; no
+  sweep). w_band: changed to the window of each surface (step 4).
 - The sparse-layer rule (f_sparse) and the common-band rule (p_common).
+  f_sparse: confirmed (`test_bands.test_fixed_bands_merge_sparse_edges`).
+  p_common: changed, not used (templates normalized over all the region's
+  voxels, step 3).
 - The band DP works in relative depth (each column's own m), so a band
   boundary sits at the same fraction of thickness in every column before
-  the nudge.
+  the nudge. Confirmed, with r per streamline: exact on the flat slab
+  (`test_columns`); on V1V2 r > 1.2 for 1.5 % of the cortex without seams
+  and 3.2 % with them, against 7 % with r per column.
 - Joint surfaces: the min-cut cut placement (step 7.3) is kept. On V1V2 with
   the echo-2 darkness it removed the ladder seams at (69, 65, 69) and
   (68, 60, 71), and the pial solid had 21 digital handles against 23 without
   it. (The genus of the trimmed pial mesh rose from 34.5 to 38, but from
-  boundary loops at the trim, not from handles.)
+  boundary loops at the trim, not from handles.) Confirmed for step 0: used
+  in `joint.initial_seams` (616 cuts placed on V1V2); still open for step 7,
+  with Λ as the cost.
 - Joint surfaces: the form of the growth costs (β), the thickness prior in
   the growth (γ, T̂_c), the region level for step 7 (N_geo), the stopping rule,
-  the streamline stops (ridge, D_max), and equidistant r first.
+  the streamline stops (ridge, D_max), and equidistant r first. β, γ, N_geo
+  and the stopping rule: still open (step 7 not built). D_max = 4 mm:
+  confirmed (6 or 8 mm did not raise the cortex in the model on V1V2). The
+  ridge stop: still open (with seams, the barrier finding). Equidistant r
+  first: still open (see **Literature and ideas to try**: equivolume).
 - The cross-validation split into random halves of columns, with the held-out
   columns' gain and offset re-fitted to the training template; K_max = 8;
-  t_min = 0.05.
+  t_min = 0.05. The split into halves of columns: confirmed (test 6 passes).
+  The re-fit: changed (step 3b). K_max = 8 and t_min = 0.05: still open (no
+  sweep; V1V2's regions use K = 4 to 6, so K_max does not bind).
+
+## Literature and ideas to try
+
+From a literature search on search results and abstracts, not on the full
+papers: each source is to read before acting on it. Reviewed against the
+plan: the decisions taken (equivolume r first, the T² test, both seam
+methods compared, the K-rule comparison in the evaluation) are in **Status**.
+
+- **K choice (step 3b).** Our cross-validation over-selected K, and the 5 %
+  floor we added because of it, match what Pein & Shah (arXiv:2112.03220)
+  found with squared-error cross-validation for change-point models: it can
+  under- or over-estimate the number of changes; they propose an
+  absolute-error loss or modified hold-out sets (R package
+  `crossvalidationCP`; checked on the abstract). To compare in the
+  evaluation sweep (required, Next 6): an absolute-error held-out loss, and
+  mBIC as in cghseg (Picard et al., Biostatistics 2011). The group fused lasso (Bleakley & Vert 2011) is the
+  convex analogue of the shared-band split. Arlot & Celisse (2010) survey
+  cross-validation when the noise varies (as σ_c does here).
+- **Test A (step 5) and a level of the merge tree.** The Mahalanobis distance
+  with a Hotelling T² test between neighbouring blocks of profiles
+  (Schleicher, Amunts, Zilles et al. 1998–99: the Mahalanobis distance was
+  the most sensitive measure, and significant maxima mark borders; checked on
+  abstracts and later papers that use the method). Waehnert et al. 2016
+  (NeuroImage 125) is an MRI framework of equivolume layers and quantitative
+  T1 profiles; that it uses T² is not confirmed by its abstract. Decided
+  (Next 2): test each WM bin on its own with it, and report for each merge
+  whether the T² between the two regions is significant.
+- **Depth frame.** Waehnert et al. 2014 (NeuroImage 93) found that
+  equivolume layers (Bok's principle) fit the myelinated bands of ex vivo
+  cortex better than Laplace or equidistant ones (checked on the abstract).
+  Decided (Next 1): equivolume r before step 7. Implementations: nighres,
+  highres-cortex (Leprince 2015), LayNii `-equivol`; ours will follow the
+  streamlines (the prototype's flow-divergence method).
+- **Seams.** Osechinskiy & Kruggel 2012 (Int J Biomed Imaging 2012:870196)
+  compute the field of an inhomogeneous dielectric layer of grey matter round
+  conductive white matter, on ex vivo images of 0.25 to 0.35 mm; that the
+  weighting is by the GM probability, and that it puts the collision ridge
+  on the true sulcal centreline, is not confirmed from the abstract.
+  Decided (Next 3): weight D's path cost by Λ, compared with the seams as
+  barriers. Compare step 7 with CRUISE/ACE (Han et al. 2004).
+- **Regions.** To try: polish a Ward level with α-expansion and template
+  re-fits, with label costs (Delong et al., IJCV 2012; PEARL, Isack & Boykov
+  2012), so that the columns at region borders can move.
+- **Step 4.** The cost decomposition inside a region is Haeker et al.,
+  IPMI 2007: to cite. LOGISMOS (Yin et al. 2010) could couple the two banks
+  or the region borders; check the Iowa patent (US 8,571,278) first.
