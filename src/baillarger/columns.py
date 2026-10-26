@@ -45,10 +45,11 @@ step of the inner 0.1s, the inner 0.1 twice), so the band fit gave them
 bands of their own: 30 % of the region boundaries sat below r = 0.1 or above
 0.9, and the edge voxels made about half of the data term. They are left out
 of the model (and of the noise) and kept in edge_index for the outputs, which
-give them the band next to them. With them out, on V1V2: boundaries at the
-edges 1 % (level 256) and 0 % (level 16), mean K_R 4.3 instead of 5.0, and
-the stria found in 3,153 columns instead of 1,642 at level 256, 885 instead
-of none at level 16.
+give them the band next to them. With them out (and λ_z = 5), on V1V2: no
+region boundary below r = 0.1 or above 0.9 (levels 256, 32, 16), mean K_R
+4.3 instead of 5.0, and the stria (a dark middle band in echo 2) found in
+2,908 columns instead of 1,642 at level 256, 1,113 instead of 107 at level
+32; at level 16 still in none with equidistant r.
 """
 
 from dataclasses import dataclass, field

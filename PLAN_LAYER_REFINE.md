@@ -307,9 +307,11 @@ much in the inner 0.1, and these voxels made about half of the data term.
 With them in, the band fit spent bands on them: 30 % of the region
 boundaries sat below r = 0.1 or above 0.9, and the stria (a dark middle band
 in echo 2) was found in 1,642 columns at level 256 and none at level 16.
-With them out (and λ_z = 5): 1 % and 0 % of the boundaries at the edges,
-mean K_R 4.3 instead of 5.0, the stria in 3,153 columns at level 256 and
-1,070 at level 16, 0.38 mm wide. A partial-volume model of the edges would
+With them out (and λ_z = 5): no boundary at the edges (levels 256, 32 and
+16), mean K_R 4.3 instead of 5.0, the stria in 2,908 columns at level 256
+(0.37 mm wide) and 1,113 at level 32 (instead of 107); at level 16 still
+none. Estimating the noise with the edge voxels still in (a scratch run)
+gave 1,070 at level 16: the coarse levels are sensitive to the noise. A partial-volume model of the edges would
 use these voxels; the trim is the simple first step.
 
 **Finding (still open): streamlines regenerated in the loop.** With the fixed
