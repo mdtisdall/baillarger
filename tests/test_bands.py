@@ -228,3 +228,23 @@ def test_smooth_trend_does_not_take_every_band() -> None:
     assert K < 8
     for step in (0.35, 0.7):
         assert np.min(np.abs(Z - step)) <= 1 / 50 + 1e-9
+
+
+def test_one_column_region() -> None:
+    """A region of one column splits its voxels for the cross-validation and
+    has no standard error: the gain term alone keeps K from noise."""
+    for seed in range(3):
+        col, m, f, xh, w, sigma2 = region(
+            np.zeros(0), np.zeros((1, 3)), n_cols=1, per_col=300, noise=1.0, seed=seed
+        )
+        K, _, _ = bd.bands_for_region(
+            col, m, f, xh, w, sigma2, 1, 1 / 50, 8, 0.05, np.random.default_rng(0)
+        )
+        assert K <= 2
+    col, m, f, xh, w, sigma2 = region(
+        np.array([0.5]), np.array([[0.0], [2.0]]), n_cols=1, per_col=300, noise=0.3
+    )
+    K, Z, _ = bd.bands_for_region(
+        col, m, f, xh, w, sigma2, 1, 1 / 50, 8, 0.05, np.random.default_rng(0)
+    )
+    assert K == 2 and abs(Z[0] - 0.5) <= 1 / 50 + 1e-9

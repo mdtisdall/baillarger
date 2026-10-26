@@ -253,17 +253,20 @@ def choose_k(cv: F64, percol: F64, one_se: bool = True, gain_frac: float = 0.05)
     gain_frac of the whole held-out gain cv[K=1] - min(cv) of the least one.
     The standard error alone stops nothing in a large region: real profiles
     have smooth trends, and with a million voxels every extra band is a real
-    improvement, however small. Without one_se: the least residual.
+    improvement, however small. With one held-out column (a region of one
+    column, whose voxels are split instead) there is no standard error, and
+    the gain term alone applies. Without one_se: the least residual.
     """
     kmin = int(np.argmin(cv))
-    if not one_se or percol.shape[1] < 2:
+    if not one_se:
         return kmin + 1
     tol_gain = gain_frac * (cv[0] - cv[kmin]) if np.isfinite(cv[0]) else 0.0
     for k in range(kmin + 1):
         if not np.isfinite(cv[k]):
             continue
         d = percol[k] - percol[kmin]
-        se = np.sqrt(len(d)) * d.std(ddof=1)
+        # one held-out column has no standard error: the gain term alone
+        se = np.sqrt(len(d)) * d.std(ddof=1) if len(d) >= 2 else 0.0
         if cv[k] <= cv[kmin] + max(se, tol_gain):
             return k + 1
     return kmin + 1
