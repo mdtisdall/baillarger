@@ -59,8 +59,9 @@ still has no exit (see the finding under **Columns and depth frame**).
    comparison on V1V2 (below, **Columns and depth frame**) is not conclusive: the data
    term is lower with equivolume r, but on the raw profiles the correction
    for the curvature is about twice too strong (div u checked against the
-   mesh curvature; smoothing does not help). To try next: a two-surface
-   equivolume (white and pial areas), with α-scaled div u as a baseline.
+   mesh curvature; smoothing does not help). All candidates in the full
+   model on V1V2 (below): the white mesh's curvature smoothed at 1 mm does
+   best; the pial surface's curvature is too noisy. To decide after review.
 2. A Hotelling T² test between the column profiles of two neighbouring
    regions: reported for each merge (which merges join distinct areas), and
    used in test A for each WM bin on its own (step 5).
@@ -377,6 +378,50 @@ equivolume correlation negative. The checks after it:
   areas are not better than div u here.
 - div u is never clipped at ±10 per mm on V1V2; it is 0 (weak gradient or
   the edge of the domain) at 3.7 % of the streamline points.
+- Correction to the row above: its mesh smoothing weighted each vertex by
+  its valence, which biases the Gaussian curvature on marching-tetrahedra
+  meshes (on a ball: 0.017 instead of 0.077 per mm²). With mass-keeping
+  smoothing the ball and cylinder give the exact area ratios.
+
+**Full model on V1V2, all candidates** (scratch runs, with step-0 seams; the
+candidates replace div u along the streamlines):
+
+- div u, half div u: as above.
+- mesh offset: the white mesh's k1, k2 at the streamline's vertex (smoothed
+  along the mesh at 1 mm), A(s) = (1 + k1 s)(1 + k2 s).
+- two-surface (Waehnert's closed form, A linear in depth between the two
+  ends): A_out / A_in = R from the white surface's curvature (R_in =
+  1 + H T + K T²), the pial surface's at the exit point (R_out =
+  1 / (1 − H T + K T²); pial mesh from WM + cortex), or their geometric mean.
+  On the ball and the cylinder all three are within 0.013 (median) of the
+  exact equivolume r, against 0.024–0.030 for div u.
+
+| frame | data term ×1e6, level 256 / 32 / 5 | raw profiles: stria trend / RMS / R² | stria columns (256) | Spearman(stria centre r, mesh k): 256 / 128 / 64 |
+|---|---|---|---|---|
+| equidistant | 3.494 / 3.844 / 4.168 | +0.012 / 0.130 / 0.329 | 1,613 | +0.15 / +0.12 / +0.17 |
+| div u | 3.437 / 3.696 / 3.920 | −0.024 / 0.108 / 0.311 | 649 | +0.03 / −0.31 / −0.36 |
+| half div u | 3.466 / 3.741 / 3.987 | −0.006 / 0.087 / 0.353 | 743 | −0.12 / −0.22 / −0.15 |
+| mesh offset | 3.533 / 3.834 / 4.083 | −0.002 / 0.085 / 0.346 | 1,830 | +0.07 / +0.04 / +0.20 |
+| two-surface, both | 3.553 / 3.871 / 4.144 | +0.009 / 0.085 / 0.326 | 1,989 | +0.01 / +0.04 / +0.10 |
+| two-surface, pial | 3.542 / 3.848 / 4.153 | −0.135 / 0.084 / 0.286 | 1,690 | −0.05 / +0.00 / +0.11 |
+| two-surface, white | 3.528 / 3.829 / 4.065 | +0.001 / 0.089 / 0.346 | 1,917 | +0.04 / +0.21 / +0.11 |
+
+K_R is about 5 everywhere. The stria's width is 0.29–0.36 mm in every
+frame that uses the white surface only; with the pial surface, the stria
+band found is often a thin band near the pial surface (centre r 0.77–0.94,
+width 0.05–0.13 mm), so those rows' stria numbers are not the stria.
+
+Findings: the pial surface's curvature at the exit point is too noisy to
+use (the pial mesh closes thin sulci, and the exit point is on whichever
+bank is nearest); the two-surface hypothesis is not supported here. The
+white-surface curvature smoothed at 1 mm (mesh offset, or the two-surface
+form with R_in) lines the profiles up as well as half div u, with no
+trend, finds the stria in more columns than equidistant, and lowers the
+data term by 1–2.5 %. div u corrects too much although it agrees with
+the mesh curvature per column; it is the voxel-scale div u, deeper in the
+cortex (convergence in fundi, ridges), that the 1 mm white-surface
+curvature leaves out. Proposed default for step 7: equivolume r from the
+white mesh's smoothed curvature (mesh offset); to decide after review.
 
 So the overcorrection is real and not noise: the flow tubes of the distance
 from the WM widen (or narrow) about twice as fast as the layers do. A likely
