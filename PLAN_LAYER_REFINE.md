@@ -358,6 +358,25 @@ equivolume correlation negative. The checks after it:
 
   The profiles line up best at α ≈ 0.25–0.5; full equivolume is worse than
   equidistant on this test (though better on the model's data term).
+- Area from the white mesh instead of div u: each streamline takes the
+  principal curvatures k1, k2 of its vertex (mean curvature from the
+  cotangent Laplacian, Gaussian from the angle defect, smoothed along the
+  mesh at σ), and d ln A / ds = k1 / (1 + k1 s) + k2 / (1 + k2 s) (offset
+  surfaces; 1 + k s floored at 0.1 past the focal distance). Same test:
+
+  | σ (mm) | trend | RMS | R² | ×0.5: trend | RMS | R² |
+  |---|---|---|---|---|---|---|
+  | 0.5 | −0.008 | 0.083 | 0.264 | −0.002 | 0.074 | 0.304 |
+  | 1 | −0.002 | 0.075 | 0.280 | +0.004 | 0.080 | 0.319 |
+  | 2 | +0.016 | 0.076 | 0.262 | +0.014 | 0.095 | 0.309 |
+  | 3 | +0.021 | 0.087 | 0.237 | +0.021 | 0.100 | 0.286 |
+
+  At σ 0.5–1 mm the stria's trend is flat, but one profile explains less of
+  the voxels than with equidistant r (0.33) or half div u (0.35): the
+  profiles are blurred. At σ 2–3 mm the trend comes back. So the mesh
+  areas are not better than div u here.
+- div u is never clipped at ±10 per mm on V1V2; it is 0 (weak gradient or
+  the edge of the domain) at 3.7 % of the streamline points.
 
 So the overcorrection is real and not noise: the flow tubes of the distance
 from the WM widen (or narrow) about twice as fast as the layers do. A likely
