@@ -47,11 +47,15 @@ Input, per patch (V1V2, PCC_SPL, M1S1; the boxes are in the data manifest):
 - Rim labels: 1 outside, 2 WM, 3 cortex, 0 other, from the aseg (labels 0,
   41, 42; everything else is 0).
 - Columns c, about 0.7 mm across, anchored on the white surface (see
-  **Joint surfaces**). Column graph: columns that share voxel faces;
-  w_cc' = number of shared faces.
+  **Joint surfaces**). Column graph: columns whose patches touch on the white
+  mesh and whose cortex voxels share faces; w_cc' = the shared faces, each
+  counted by its depth d as max(0, 1 − d / base_mm) (default 1 mm), so that
+  columns touching only near the top (facing banks) count little or not at
+  all (`baillarger.columns`).
 - Continuous depth m(v): the relative depth r(v) of the joint frame, in
   [0, 1] in the cortex (0 = white surface, 1 = pial surface) and negative
-  (−distance / T_c) in the WM below the white surface.
+  (−distance / T) in the WM below the white surface. T is the exit depth of
+  the voxel's own streamline (see **Columns and depth frame**).
 - Geometric layers: 25 or 13 equal bins of m. With adaptive bands they are
   only the fixed-K baseline (see Evaluation); the bands are fitted on the
   continuous depth m.
@@ -181,13 +185,32 @@ the loop:
   is in one column. Unlike columns built from the rim, these do not depend
   on the pial surface.
 - **Depth.** d(v): the distance along the voxel's streamline (mm). Relative
-  depth r(v) = d(v) / T_c (the m of the model), where T_c is the column's current thickness (the
-  depth of its pial surface). The data term and the geometry use d; the band
-  DP (step 3b), the pull to Z_R, the TV on z and t_min use r. Only T_c changes
-  in the loop.
+  depth r(v) = d(v) / T_p, where T_p is the depth at which the voxel's own
+  streamline exits the cortex into fluid (`frame.path_exit`). A streamline
+  that never exits (it ends inside the cortex: at a ridge in fused cortex,
+  the crop, an excision or D_max) gives its voxels no r, and they stay out of
+  steps 1–6. Per column, r = d / T_c put 7 % of the V1V2 cortex beyond
+  r = 1.2 (T_c was set by truncated streamlines); per streamline, 1.2 %. The
+  column thickness T_c is the median T_p of its streamlines (for the
+  thickness prior). The data term and the geometry use d; the band DP (step
+  3b), the pull to Z_R, the TV on z and t_min use r.
 
 r is equidistant in the first version. An equivolume correction of r is a
 later option.
+
+**Finding (to confirm): streamlines regenerated in the loop.** With the fixed
+frame, both banks of a fused stretch stop at the ridge midway between their
+WM surfaces. When step 7 puts the seam at the true contact, nearer the
+thinner bank (P8: banks of 12 and 18 voxels), the thicker bank's
+streamlines stop at the ridge inside its own cortex and never reach the seam,
+and its voxels between the seam and the ridge go to the thinner bank's
+streamlines. With the seam as a barrier to D and to the streamlines, the
+thicker bank's streamlines reach the seam (P8: 2.84 mm against 2.88 mm to the
+contact). So, at each outer iteration: the columns (patches of the white
+mesh) stay fixed; D is recomputed with the current seams as barriers, the
+streamlines are traced again from the same vertices, and a streamline that
+reaches a seam exits there. Test 8 then reads: with no seams, the frame does
+not depend on the pial surface.
 
 ### 7. Geometry (fixed regions, templates, gain/offset, bands)
 
@@ -213,8 +236,8 @@ pial surface and the seams), then T_c.
    voxel cost in place of the darkness.
 4. **Well-composed tissue** (`repair`), so that the meshes have
    the topology of the voxels.
-5. **Thickness.** T_c = the median, over the column's streamlines, of the
-   depth of the last tissue voxel.
+5. **Thickness.** T_p of each streamline: where it exits the tissue into
+   fluid or a seam; T_c = the median T_p over the column's streamlines.
 
 Step 2 is a growth, not the minimum of an energy, so the outer loop does not
 always lower E. The loop records E after each step.
@@ -461,13 +484,55 @@ In `src/baillarger/` (names are working names), with the tests in `tests/`:
 - the phantoms;
 - data: patch crops, rim labels, the three echoes;
 - the model: regions, gain/offset, templates, band DP, optimal surfaces,
-  bottom, intensity TV (tests 1–6);
+  bottom, intensity TV (tests 1–6); see **Model implementation** for the
+  modules and the order;
 - the joint surfaces: frame, step 7 and the outer loop (tests 7–10);
 - the evaluation sweep.
 
 Dependencies (through uv): numpy, scipy, nibabel, scikit-image,
 scikit-learn, numba. Min cuts use `scipy.sparse.csgraph.maximum_flow`;
 PyMaxflow (from PyPI) only if that is too slow for the optimal surfaces.
+
+## Model implementation
+
+Steps 1–6 port the ex vivo prototype's `layer_refine.py` (one echo, LayNii
+columns), generalized to E echoes on the frame's columns and depth. With
+E = 1, each ported function must give the prototype's outputs on the same
+synthetic inputs; its LayNii-specific parts (column splitting, fused-zone
+files, the equivolume metric) are not ported.
+
+| PR | Module | Contents | Tests |
+|---|---|---|---|
+| A | `columns` | model columns, column graph, voxel table (column, r, echoes), noise per column and echo, depth-grid sums | slab depth and weights by brute force; no links across P1's fused banks |
+| B | `bands` | band DP for every K ≤ K_max with t_min; K by 2-fold cross-validation; fixed-K baseline | test 6 |
+| C | `gain` | gain/offset field (sparse solve, 2E unknowns per column); templates | tests 2, 5 |
+| D | `surfaces` | optimal-surface min-cut per region, coarse to fine | test 1 |
+| E | `regions` | Ward merge loop, re-fit levels, merge tree | test 4 (scikit-learn) |
+| F | `bottom` | WM extension of the bands, tests A and B | synthetic bottoms |
+| G | `tv` | intensity TV (Chambolle–Pock), group and per-depth terms | test 3 |
+| H | `refine` | one run on a patch, the outputs above | end to end on a phantom; V1V2 |
+
+Decisions for the model:
+
+- **Noise.** Diagonal over the echoes: σ_c is a variance per column and echo.
+  The fluid's Σ_F in step 7 stays a full 3 × 3 covariance.
+- **Column graph.** Mesh adjacency and the base-weighted shared faces (see
+  **Data and terms**). On V1V2, links between columns more than 3 mm apart
+  along the white mesh keep 0.1 % of the weight, against 2.5 % with plain
+  face counts; on P1 there is no link across the fused stretch (66 with
+  plain faces). `links="faces"` keeps the plain rule for comparison.
+- **K rule.** Cross-validation only (the prototype's other rules are not
+  ported).
+- **Merge cost.** Plain Ward; the prototype's border-length term is an option,
+  off.
+- **Columns in steps 1–6.** Columns with cortex voxels on streamlines that
+  exit into fluid, not cut by missing tissue, and with at most half of their
+  streamlines ending at a ridge inside the cortex (fused). The others wait
+  for step 7. To revisit if this leaves too much out: on V1V2 it keeps 9,402
+  of 21,034 columns and 66 % of the cortex (the rest: fused 20 %, crop 8 %,
+  D_max 6 %; a D_max of 6 or 8 mm does not raise the share).
+- **Column width.** 0.7 mm (from the prototype), to be swept in the
+  evaluation (`column_mm`).
 
 ## Decided
 
@@ -487,7 +552,7 @@ PyMaxflow (from PyPI) only if that is too slow for the optimal surfaces.
 | Implementation | Python, in this package. No LayNii dependency. |
 | Surfaces | Estimated jointly with the layers: the fluid is a band, and an outer loop alternates between the model and the geometry. |
 | White surface | Fixed. It anchors the frame. |
-| Columns and depth | From streamlines of the distance to the white surface, independent of the pial surface. |
+| Columns and depth | From streamlines of the distance to the white surface, independent of the pial surface; r per streamline (exit depth). |
 | Data | The three echoes as one vector per voxel. |
 | Seams | Fluid against tissue (topology-preserving competing growth), with costs from the fluid and band templates in place of the darkness measure. |
 
