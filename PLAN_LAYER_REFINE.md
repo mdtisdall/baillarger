@@ -37,7 +37,7 @@ surfaces**; "tests" those of **Correctness tests**.
 | #19 | `output` | the outputs of a run; `python -m baillarger.output` |
 | #20 | `bands`, `columns`, `output` | one-column regions in `choose_k`; small graph pieces dropped |
 | #21 | `joint`, `columns`, `output` | outer loop step 0 (geometric seams as fluid); the fused rule |
-| (this PR) | `columns`, `refine`, `output` | edge zones out of the model; λ_z = 5 |
+| #24 | `columns`, `refine`, `output` | edge zones out of the model; λ_z = 5 |
 
 (#6 changed `CLAUDE.md` only.) Tests 1–6 and 8 pass; test 9's phantom (P8)
 is an expected failure of the seam growth, the open problem that step 7 is
