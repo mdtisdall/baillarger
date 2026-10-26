@@ -48,6 +48,8 @@ _CENTRE = 13
 
 type Volume = npt.NDArray[Any]
 """A 3D array, bool or integer; nonzero is the object."""
+type Index = int | np.integer[Any]
+"""A voxel coordinate: a Python or a numpy integer."""
 
 
 def _tables() -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64], int, int, int]:
@@ -98,7 +100,7 @@ def _count_components(mask: int, adj: npt.NDArray[np.int64], seeds: int) -> int:
 
 
 @njit
-def _neighbourhood(obj: Volume, x: int, y: int, z: int) -> int:
+def _neighbourhood(obj: Volume, x: Index, y: Index, z: Index) -> int:
     """The 3x3x3 neighbourhood of (x, y, z) as 27 bits; the centre bit is 0."""
     m = np.int64(0)
     i = 0
@@ -113,7 +115,7 @@ def _neighbourhood(obj: Volume, x: int, y: int, z: int) -> int:
 
 @njit
 def topological_numbers(
-    obj: Volume, x: int, y: int, z: int, conn: int
+    obj: Volume, x: Index, y: Index, z: Index, conn: int
 ) -> tuple[int, int]:
     """(T, Tb) of voxel (x, y, z) in obj, for conn = CONN_26_6 (26) or
     CONN_6_26 (6). All 26 neighbours of (x, y, z) must lie inside the array:
@@ -132,7 +134,7 @@ def topological_numbers(
 
 
 @njit
-def is_simple(obj: Volume, x: int, y: int, z: int, conn: int) -> bool:
+def is_simple(obj: Volume, x: Index, y: Index, z: Index, conn: int) -> bool:
     """True when voxel (x, y, z) is simple for the object obj.
 
     conn: CONN_26_6 (26) for the (26, 6) pair or CONN_6_26 (6) for the (6, 26)
