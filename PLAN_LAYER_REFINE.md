@@ -246,7 +246,12 @@ always lower E. The loop records E after each step.
 
 0. Start from the geometric surfaces: the white surface from the WM labels,
    and the pial surface and seams from the seam growth with the echo-2
-   darkness (as the ex vivo prototype), which give T_c.
+   darkness (as the ex vivo prototype), which give T_c. (`baillarger.joint`, used by
+   `output.run_patch`: the seams count as fluid. On V1V2 they raise the
+   cortex in the model from 58 % to 69 % and leave the column graph in 5
+   pieces instead of 8. A bank whose streamlines meet the facing bank's at
+   the ridge before they reach the seam still has no exit: the seams as
+   barriers, the finding under **Columns and depth frame**.)
 1. Steps 1–5 of the model, in the fixed frame.
 2. Step 7, with the regions of the finest re-fit level whose regions all have
    at least N_geo columns (default 50), so that each template is pooled over
