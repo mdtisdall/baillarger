@@ -43,6 +43,8 @@ from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
+from scipy import sparse
+from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
 from baillarger.frame import END_RIDGE, Frame, path_exit
@@ -321,3 +323,36 @@ def grid_sums(
         sx[..., e] = np.bincount(cell, f[:, e], minlength=n * G).reshape(n, G)
         sxx[..., e] = np.bincount(cell, f[:, e] ** 2, minlength=n * G).reshape(n, G)
     return cnt, sx, sxx
+
+
+def drop_small_pieces(data: ColumnData, min_cols: int = 5) -> tuple[ColumnData, int]:
+    """The table without the columns in connected pieces of the column graph
+    with fewer than min_cols columns (an isolated column could never merge
+    with anything, and one column cannot cross-validate its bands). Returns
+    the new table and the number of columns left out."""
+    n = data.n
+    A = sparse.coo_matrix(
+        (np.ones(len(data.edges)), (data.edges[:, 0], data.edges[:, 1])), shape=(n, n)
+    )
+    _, comp = connected_components(A, directed=False)
+    keep = np.bincount(comp)[comp] >= min_cols
+    if keep.all():
+        return data, 0
+    new = -np.ones(n, np.int64)
+    new[keep] = np.arange(int(keep.sum()))
+    v = keep[data.col]
+    e = keep[data.edges[:, 0]] & keep[data.edges[:, 1]]
+    out = ColumnData(
+        shape=data.shape,
+        index=data.index[v],
+        col=new[data.col[v]],
+        m=data.m[v],
+        f=data.f[v],
+        ctx=data.ctx[v],
+        labels=data.labels[keep],
+        thickness=data.thickness[keep],
+        edges=new[data.edges[e]],
+        w=data.w[e],
+        sigma2=data.sigma2[keep],
+    )
+    return out, int((~keep).sum())

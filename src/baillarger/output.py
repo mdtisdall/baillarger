@@ -41,7 +41,7 @@ from scipy.sparse.csgraph import connected_components
 from baillarger import bands as bd
 from baillarger import data as dt
 from baillarger import frame as fr
-from baillarger.columns import ColumnData, column_data
+from baillarger.columns import ColumnData, column_data, drop_small_pieces
 from baillarger.refine import DEFAULT_LEVELS, Level, Params, Refiner
 
 type F64 = npt.NDArray[np.float64]
@@ -124,15 +124,18 @@ def run_patch(
     levels: list[int] | None = None,
     params: Params | None = None,
     directory: Path | None = None,
+    min_piece: int = 5,
 ) -> dict[str, Any]:
-    """Load one patch, build the frame and the voxel table, run the model and
-    write the outputs. Returns the run summary (also in run.json)."""
+    """Load one patch, build the frame and the voxel table (without the graph
+    pieces of fewer than min_piece columns), run the model and write the
+    outputs. Returns the run summary (also in run.json)."""
     t0 = time.perf_counter()
     outdir.mkdir(parents=True, exist_ok=True)
     p = dt.load_patch(name, directory)
     miss = fr.missing_tissue(p.rim, p.flash, p.voxel_mm)
     F = fr.build_frame(p.rim, p.voxel_mm, miss)
     D, why = column_data(F, p.rim, p.echoes, miss)
+    D, why["small_pieces"] = drop_small_pieces(D, min_piece)
     t_inputs = time.perf_counter() - t0
     R = Refiner(D, params)
     seconds: dict[int, float] = {}

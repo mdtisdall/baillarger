@@ -4,6 +4,7 @@ the example data when data/ has it (skipped otherwise)."""
 import numpy as np
 import numpy.typing as npt
 import pytest
+from test_refine import two_areas
 
 from baillarger import columns as cl
 from baillarger import data
@@ -178,3 +179,21 @@ def test_v1v2_column_data() -> None:
     assert (deg == 0).mean() < 0.01
     # no voxel of the table is missing tissue
     assert not miss.ravel()[D.index].any()
+
+
+def test_drop_small_pieces() -> None:
+    data, _ = two_areas()
+    # cut column 0 and the pair (1, 7) off from the rest
+    keep_e = ~np.isin(data.edges, [0, 1, 7]).any(1)
+    e = np.vstack([data.edges[keep_e], [[1, 7]]])
+    w = np.r_[data.w[keep_e], 1.0]
+    cut = cl.ColumnData(**{**data.__dict__, "edges": e, "w": w})
+    out, dropped = cl.drop_small_pieces(cut, 5)
+    assert dropped == 3 and out.n == data.n - 3
+    assert set(out.labels.tolist()) == set(range(data.n)) - {0, 1, 7}
+    assert len(out.index) == np.isin(cut.col, out.labels).sum()
+    assert out.edges.max() < out.n and len(out.edges) == len(e) - 1
+    # each voxel keeps its values and its column
+    assert np.array_equal(out.labels[out.col], cut.col[np.isin(cut.col, out.labels)])
+    same, none = cl.drop_small_pieces(data, 5)
+    assert same is data and none == 0
