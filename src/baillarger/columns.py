@@ -31,8 +31,16 @@ its voxels have no pial depth to scale by and stay out of the table. The
 table holds the cortex voxels of the model columns on exiting streamlines,
 and the WM voxels within wm_mm of the white surface, each with the column and
 the streamline of its nearest white vertex, at r = D / T_p < 0 (D is the
-signed distance of the frame, negative in the WM). The column thickness T_c
-is the median of T_p over the column's streamlines. The noise of each column is the
+signed distance of the frame, negative in the WM). With
+depth="equivolume", r is the equivolume depth instead (Waehnert et al. 2014):
+the flow tube of a streamline is that of the surfaces offset from the white
+surface, with the white mesh's principal curvatures at its vertex smoothed
+over 1 mm, A(s) = (1 + k1 s)(1 + k2 s) (frame.path_volume); its volume from
+the white surface is V(s) = integral of A ds, and r = V(d) / V(T_p) in the
+cortex, r = D / V(T_p) in the WM. On flat cortex the two depths are the
+same; over a gyral crown (k1 + k2 > 0) the equivolume r of a voxel is lower,
+in a sulcal fundus higher. The column thickness T_c is the median of T_p
+over the column's streamlines. The noise of each column is the
 pooled variance, per echo, inside the cells of n_layers equal bins of r in
 the cortex (the fixed-K baseline's geometric layers): the model's noise is
 diagonal over the echoes.
@@ -61,7 +69,7 @@ from scipy import sparse
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
-from baillarger.frame import END_RIDGE, Frame, path_exit
+from baillarger.frame import END_RIDGE, Frame, path_exit, path_volume, volume_at
 
 type Bool = npt.NDArray[np.bool_]
 type F32 = npt.NDArray[np.float32]
@@ -248,12 +256,13 @@ def column_data(
     wm_mm: float = 0.5,
     n_layers: int = 13,
     edge_vox: float = 1.0,
+    depth: Literal["equidistant", "equivolume"] = "equidistant",
 ) -> tuple[ColumnData, dict[str, int]]:
     """The voxel table of the model (see the module notes). echoes: the
     patch's echoes, shape (*shape, E). edge_vox: the width of the edge zones
-    left out at the white and the pial surface, in voxels (0: none). Returns
-    the table and the counts of model_columns, with the number of edge
-    voxels."""
+    left out at the white and the pial surface, in voxels (0: none). depth:
+    the relative depth r of the voxels (see the module notes). Returns the
+    table and the counts of model_columns, with the number of edge voxels."""
     x = np.asarray(echoes, np.float64)
     if x.ndim == 3:
         x = x[..., None]
@@ -281,9 +290,15 @@ def column_data(
     sel[sel] = keep[vc[sel]] & np.isfinite(Tp[vp[sel]])
     idx_c = np.flatnonzero(sel)
     col_c = new[vc.ravel()[idx_c]]
+    p_c = vp.ravel()[idx_c].astype(np.int64)
     d_c = frame.depth.ravel()[idx_c].astype(np.float64)
-    T_c = Tp[vp.ravel()[idx_c]].astype(np.float64)
-    m_c = d_c / T_c
+    T_c = Tp[p_c].astype(np.float64)
+    if depth == "equivolume":
+        A, V = path_volume(frame)
+        VT = volume_at(frame, A, V, np.arange(len(Tp)), np.nan_to_num(Tp))
+        m_c = volume_at(frame, A, V, p_c, d_c) / VT[p_c]
+    else:
+        m_c = d_c / T_c
     # the edge zones: partial volume with the WM or the fluid
     edge_mm = edge_vox * float(np.mean(frame.voxel_mm))
     side = np.where(d_c < edge_mm, -1, np.where(T_c - d_c < edge_mm, 1, 0))
@@ -309,7 +324,9 @@ def column_data(
         ok = keep[cw] & np.isfinite(Tp[j])
         idx_w, cw, j = idx_w[ok], cw[ok], j[ok]
         col_w = new[cw]
-        m_w = D.ravel()[idx_w].astype(np.float64) / Tp[j].astype(np.float64)
+        # below the white surface A = 1, so V = d (negative)
+        scale = VT[j] if depth == "equivolume" else Tp[j].astype(np.float64)
+        m_w = D.ravel()[idx_w].astype(np.float64) / scale
     else:
         idx_w = np.zeros(0, np.int64)
         col_w = np.zeros(0, np.int64)

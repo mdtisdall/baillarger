@@ -240,3 +240,120 @@ def test_drop_small_pieces() -> None:
     assert out.labels[out.edge_col].tolist() == [2]
     same, none = cl.drop_small_pieces(data, 5)
     assert same is data and none == 0
+
+
+def shell(dim: int, R0: float = 1.6, R1: float = 3.6) -> tuple[ph.Rim, F64]:
+    """A WM ball (dim 3) or cylinder along z (dim 2) of radius R0 (mm) in a
+    cortex shell to R1, fluid outside; and each voxel's distance from the
+    centre or axis (mm)."""
+    n = 64
+    c = np.array([31.7, 32.2, 31.9])
+    X = np.stack(np.meshgrid(*[np.arange(n)] * 3, indexing="ij"), -1)
+    r = np.linalg.norm((X[..., :dim] - c[:dim]) * 0.16, axis=-1)
+    rim = np.ones((n, n, n), np.int16)
+    rim[r <= R1] = 3
+    rim[r <= R0] = 2
+    return rim, r
+
+
+@pytest.mark.parametrize("dim", [3, 2])
+def test_equivolume_depth_on_a_ball_and_a_cylinder(dim: int) -> None:
+    """Round a ball (a cylinder) of WM, the cross-section of a radial flow
+    tube grows as R² (R), so the equivolume depth of a voxel at radius R is
+    (R^dim − R0^dim) / (R1^dim − R0^dim), below the equidistant
+    (R − R0) / (R1 − R0)."""
+    R0, R1 = 1.6, 3.6
+    rim, r = shell(dim, R0, R1)
+    F = fr.build_frame(rim, VOX)
+    f = np.zeros(rim.shape + (1,))
+    out = {}
+    for mode in ("equidistant", "equivolume"):
+        D, _ = cl.column_data(F, rim, f, depth=mode)
+        rr = r.ravel()[D.index]
+        z = np.unravel_index(D.index, rim.shape)[2]
+        # away from the crop faces (the cylinder's ends)
+        sel = D.ctx & (rr > R0 + 0.1) & (rr < R1 - 0.1) & (np.abs(z - 32) < 12)
+        out[mode] = (D.m[sel], rr[sel])
+    m_ed, rr = out["equidistant"]
+    m_ev, rr2 = out["equivolume"]
+    assert np.array_equal(rr, rr2)
+    exact = (rr**dim - R0**dim) / (R1**dim - R0**dim)
+    err_ev = np.abs(m_ev - exact)
+    err_ed = np.abs(m_ed - exact)
+    assert np.median(err_ev) < 0.025 and np.percentile(err_ev, 90) < 0.06
+    assert np.median(err_ed) > 3 * np.median(err_ev)
+    assert np.mean(m_ev - m_ed) < -0.05
+
+
+def test_equivolume_is_equidistant_on_a_flat_slab(
+    slab: tuple[ph.Rim, F64, fr.Frame],
+) -> None:
+    rim, echoes, F = slab
+    D1, _ = cl.column_data(F, rim, echoes)
+    D2, _ = cl.column_data(F, rim, echoes, depth="equivolume")
+    assert np.array_equal(D1.index, D2.index)
+    ijk = np.stack(np.unravel_index(D1.index, rim.shape), 1)
+    inner = np.all((ijk[:, :2] >= 4) & (ijk[:, :2] < 44), 1)
+    assert np.abs(D2.m[inner] - D1.m[inner]).max() < 0.01
+
+
+def flat_frame(s: F64, k1: float, k2: float) -> fr.Frame:
+    """A frame with one straight streamline of arc lengths s from a vertex of
+    principal curvatures k1, k2."""
+    return fr.Frame(
+        voxel_mm=VOX, verts=np.zeros((1, 3)), faces=np.zeros((0, 3), np.int64),
+        normals=np.zeros((1, 3)), vertex_column=np.zeros(1, np.int64),
+        column_seed=np.zeros(1, np.int64), distance=np.zeros((1, 1, 1), np.float32),
+        path_start=np.array([0, len(s)]), path_points=np.zeros((len(s), 3), np.float32),
+        path_arc=s.astype(np.float32), path_end=np.zeros(1, np.int8),
+        path_cut=np.zeros(1, bool), column_cut=np.zeros(1, bool),
+        vertex_k1=np.array([k1]), vertex_k2=np.array([k2]),
+        voxel_column=np.zeros((1, 1, 1), np.int32),
+        voxel_path=np.zeros((1, 1, 1), np.int32),
+        depth=np.zeros((1, 1, 1), np.float32),
+    )  # fmt: skip
+
+
+def test_path_volume() -> None:
+    # V(s) = s + (k1 + k2) s² / 2 + k1 k2 s³ / 3 for the offset surfaces
+    s = np.linspace(0, 2, 51)
+    for k1, k2 in ((0.5, 0.5), (0.5, 0.0), (0.4, -0.2)):
+        F = flat_frame(s, k1, k2)
+        A, V = fr.path_volume(F)
+        assert np.allclose(A, (1 + k1 * s) * (1 + k2 * s), rtol=1e-6)
+        exact = s + (k1 + k2) * s**2 / 2 + k1 * k2 * s**3 / 3
+        assert np.allclose(V, exact, atol=2e-4)
+        d = np.array([-0.3, 0.5, 1.37])
+        got = fr.volume_at(F, A, V, np.zeros(3, np.int64), d)
+        assert got[0] == -0.3
+        ex = d[1:] + (k1 + k2) * d[1:] ** 2 / 2 + k1 * k2 * d[1:] ** 3 / 3
+        assert np.allclose(got[1:], ex, atol=3e-3)
+    # past a focal point (k s < -0.9) the factor stays at a_min
+    F = flat_frame(s, -1.0, 0.0)
+    A, _ = fr.path_volume(F)
+    assert np.allclose(A[s >= 0.9], 0.1)
+    # past the last point A stays constant
+    F = flat_frame(s, 0.5, 0.0)
+    A, V = fr.path_volume(F)
+    got = fr.volume_at(F, A, V, np.zeros(1, np.int64), np.array([2.5]))
+    assert np.isclose(got[0], V[-1] + A[-1] * 0.5)
+
+
+def test_mesh_curvatures_on_a_ball_and_a_cylinder() -> None:
+    """The white mesh of a ball of radius 1.6 mm has k1 = k2 = 1 / 1.6; of a
+    cylinder, k1 = 1 / R, k2 = 0 (away from the crop)."""
+    n = 64
+    c = np.array([31.7, 32.2, 31.9])
+    X = np.stack(np.meshgrid(*[np.arange(n)] * 3, indexing="ij"), -1)
+    for dim in (3, 2):
+        r = np.linalg.norm((X[..., :dim] - c[:dim]) * 0.16, axis=-1)
+        F = fr.build_frame(np.where(r <= 1.6, 2, 3).astype(np.int16), VOX)
+        z = F.verts[:, 2]
+        mid = np.abs(z - 32) < 12
+        # the smoothed white mesh is a little inside the 1.6 mm of the labels
+        R = np.median(np.linalg.norm((F.verts[mid, :dim] - c[:dim]) * 0.16, axis=1))
+        k1, k2 = np.median(F.vertex_k1[mid]), np.median(F.vertex_k2[mid])
+        if dim == 3:
+            assert abs(k1 - 1 / R) < 0.04 and abs(k2 - 1 / R) < 0.04
+        else:
+            assert abs(k1 - 1 / R) < 0.04 and abs(k2) < 0.04

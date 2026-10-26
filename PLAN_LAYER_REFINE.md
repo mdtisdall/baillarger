@@ -38,6 +38,7 @@ surfaces**; "tests" those of **Correctness tests**.
 | #20 | `bands`, `columns`, `output` | one-column regions in `choose_k`; small graph pieces dropped |
 | #21 | `joint`, `columns`, `output` | outer loop step 0 (geometric seams as fluid); the fused rule |
 | #24 | `columns`, `refine`, `output` | edge zones out of the model; λ_z = 5 |
+| #23 | `frame`, `columns`, `output` | equivolume r as an option (white-mesh offset surfaces) |
 
 (#6 changed `CLAUDE.md` only.) Tests 1–6 and 8 pass; test 9's phantom (P8)
 is an expected failure of the seam growth, the open problem that step 7 is
@@ -55,7 +56,13 @@ still has no exit (see the finding under **Columns and depth frame**).
 1. Equivolume r, as an option of the frame (equidistant or equivolume), from
    the divergence of the streamlines' flow (the prototype's
    `surface_geometry.equivolume`); compare both on V1V2 (band sharpness, K_R,
-   the stria's width) before step 7 builds on r.
+   the stria's width) before step 7 builds on r. Done as an option
+   (`column_data(depth=...)`, `--depth`); the default stays equidistant
+   until the choice for step 7. div u (the first version) corrected about
+   twice too much for the curvature; of the candidates compared in the full
+   model on V1V2 (below, **Columns and depth frame**), the white mesh's
+   curvature smoothed at 1 mm (offset surfaces) did best, and is now the
+   method; the pial surface's curvature was too noisy.
 2. A Hotelling T² test between the column profiles of two neighbouring
    regions: reported for each merge (which merges join distinct areas), and
    used in test A for each WM bin on its own (step 5).
@@ -284,8 +291,181 @@ the loop:
   thickness prior). The data term and the geometry use d; the band DP (step
   3b), the pull to Z_R, the TV on z and t_min use r.
 
-r is equidistant in the first version. An equivolume correction of r is a
-later option (see **Literature and ideas to try**).
+r is equidistant by default. `column_data(depth="equivolume")` gives the
+equivolume r of Waehnert et al. 2014 instead. The method (chosen from the
+comparison below): the flow tube of each streamline is that of the surfaces
+offset from the white surface, A(s) = (1 + k1 s)(1 + k2 s), with k1, k2 the
+principal curvatures of the white mesh at its vertex (`frame.mesh_curvatures`:
+mean curvature from the cotangent Laplacian, Gaussian from the angle defect,
+both smoothed along the mesh over 1 mm, `build_frame(curv_mm=1.0)`), each
+factor floored at 0.1 past a focal point; V(s) = ∫ A ds, and
+r = V(d) / V(T_p) (r = D / V(T_p) in the WM). Tests: on a flat slab the two
+depths agree (< 0.01); round a WM ball and a WM cylinder (R0 1.6 mm, cortex
+to 3.6 mm, 0.16 mm voxels) the equivolume r is within 0.010 (median) and
+0.065 / 0.051 (p99) of the exact (R^n − R0^n) / (R1^n − R0^n), against
+0.149 / 0.076 (median) for the equidistant r; the smoothed curvatures are
+within 0.04 per mm of 1 / R (and 0 along the cylinder).
+
+The first version integrated d ln A / ds = div u along the streamline (u:
+the unit direction of the streamlines, div u from central differences of the
+normalized gradient of D, clipped to ±10 per mm); its ball errors were
+0.026 (median) and 0.117 (p99). The comparisons that led to the change:
+
+Comparison on V1V2 (with step-0 seams; same voxels, same 11,922 columns;
+levels 256 to 5):
+
+| level | data term, equidistant | data term, equivolume | change |
+|---|---|---|---|
+| 256 | 3.494e6 | 3.437e6 | −1.6 % |
+| 64 | 3.696e6 | 3.604e6 | −2.5 % |
+| 16 | 4.020e6 | 3.778e6 | −6.0 % |
+| 5 | 4.168e6 | 3.920e6 | −6.0 % |
+
+The column-weighted mean K_R is the same (4.86–5.03 in both). The stria (in
+each region with K_R ≥ 3, the middle band that is a local minimum of echo 2;
+on the columns where both runs find it; width in mm from each column's own
+voxels, d against r):
+
+| level | columns | width (mm), ED / EV | centre r, ED / EV | Spearman(centre r, curvature), ED / EV |
+|---|---|---|---|---|
+| 256 | 386 | 0.34 / 0.34 | 0.32 / 0.45 | +0.26 / −0.34 |
+| 128 | 362 | 0.36 / 0.36 | 0.24 / 0.43 | +0.14 / −0.57 |
+| 64 | 213 | 0.35 / 0.33 | 0.28 / 0.44 | +0.32 / −0.73 |
+
+(curvature: the column's median of ln(V(T_p) / T_p), > 0 where the flow
+tubes widen, over crowns.) That test is circular: the curvature and the
+equivolume r both come from div u, so noise in div u alone can make the
+equivolume correlation negative. The checks after it:
+
+- div u against the white mesh. Per column, the mean div u over the first
+  0.3 mm of the streamlines against the area-weighted k1 + k2 of the white
+  mesh (cotangent Laplacian; the mesh vertices are in voxel units, so per mm
+  divide by 0.16): correlation 0.45, about the same spread (5–95 %: div u
+  −0.97 to +0.94 per mm, mesh −1.3 to +1.5). Over the whole column, the
+  curvature proxy above against the mesh curvature: Spearman 0.79, same
+  range. On the ball div u is unbiased (median error −0.04 per mm, 5–95 %
+  −0.42 to +0.32, against 2/R of 0.56 to 1.21). So div u is noisy point by
+  point but right at the scale of a column.
+- Smoothing does not help. Smoothing D's gradient more (σ 1.5, 2, 3 voxels)
+  or div u itself (normalized convolution, σ 1, 2, 3) lowers the point
+  noise (SD 1.9 to 0.6 per mm) but also the agreement with the mesh (r 0.45
+  to 0.35, slope 1.06 to 0.57). The code keeps σ = 1 and no smoothing of
+  div u.
+- The stria against the mesh curvature (independent of div u), same columns
+  as above: Spearman of the centre r: equidistant +0.11, +0.03, +0.15;
+  equivolume −0.19, −0.34, −0.41 (levels 256, 128, 64). Weaker than with
+  the proxy, but still reversed.
+- Without the model. On the 1,876 columns where either run finds the stria
+  at level 256, the mean echo-2 profile (z-scored per column, 25 bins of r)
+  in each quintile of mesh curvature, with div u scaled by α (α = 0 is
+  equidistant, α = 1 equivolume):
+
+  | α | stria minimum trend (r per quintile) | profile RMS between quintiles | R² of one profile for all |
+  |---|---|---|---|
+  | 0 | +0.011 | 0.130 | 0.329 |
+  | 0.25 | +0.006 | 0.098 | 0.351 |
+  | 0.5 | −0.006 | 0.087 | 0.353 |
+  | 0.75 | −0.020 | 0.091 | 0.337 |
+  | 1 | −0.024 | 0.108 | 0.311 |
+
+  The profiles line up best at α ≈ 0.25–0.5; full equivolume is worse than
+  equidistant on this test (though better on the model's data term).
+- Area from the white mesh instead of div u: each streamline takes the
+  principal curvatures k1, k2 of its vertex (mean curvature from the
+  cotangent Laplacian, Gaussian from the angle defect, smoothed along the
+  mesh at σ), and d ln A / ds = k1 / (1 + k1 s) + k2 / (1 + k2 s) (offset
+  surfaces; 1 + k s floored at 0.1 past the focal distance). Same test:
+
+  | σ (mm) | trend | RMS | R² | ×0.5: trend | RMS | R² |
+  |---|---|---|---|---|---|---|
+  | 0.5 | −0.008 | 0.083 | 0.264 | −0.002 | 0.074 | 0.304 |
+  | 1 | −0.002 | 0.075 | 0.280 | +0.004 | 0.080 | 0.319 |
+  | 2 | +0.016 | 0.076 | 0.262 | +0.014 | 0.095 | 0.309 |
+  | 3 | +0.021 | 0.087 | 0.237 | +0.021 | 0.100 | 0.286 |
+
+  At σ 0.5–1 mm the stria's trend is flat, but one profile explains less of
+  the voxels than with equidistant r (0.33) or half div u (0.35): the
+  profiles are blurred. At σ 2–3 mm the trend comes back. So the mesh
+  areas are not better than div u here.
+- div u is never clipped at ±10 per mm on V1V2; it is 0 (weak gradient or
+  the edge of the domain) at 3.7 % of the streamline points.
+- Correction to the row above: its mesh smoothing weighted each vertex by
+  its valence, which biases the Gaussian curvature on marching-tetrahedra
+  meshes (on a ball: 0.017 instead of 0.077 per mm²). With mass-keeping
+  smoothing the ball and cylinder give the exact area ratios.
+
+**Full model on V1V2, all candidates** (scratch runs, with step-0 seams; the
+candidates replace div u along the streamlines):
+
+- div u, half div u: as above.
+- mesh offset: the white mesh's k1, k2 at the streamline's vertex (smoothed
+  along the mesh at 1 mm), A(s) = (1 + k1 s)(1 + k2 s).
+- two-surface (Waehnert's closed form, A linear in depth between the two
+  ends): A_out / A_in = R from the white surface's curvature (R_in =
+  1 + H T + K T²), the pial surface's at the exit point (R_out =
+  1 / (1 − H T + K T²); pial mesh from WM + cortex), or their geometric mean.
+  On the ball and the cylinder all three are within 0.013 (median) of the
+  exact equivolume r, against 0.024–0.030 for div u.
+
+| frame | data term ×1e6, level 256 / 32 / 5 | raw profiles: stria trend / RMS / R² | stria columns (256) | Spearman(stria centre r, mesh k): 256 / 128 / 64 |
+|---|---|---|---|---|
+| equidistant | 3.494 / 3.844 / 4.168 | +0.012 / 0.130 / 0.329 | 1,613 | +0.15 / +0.12 / +0.17 |
+| div u | 3.437 / 3.696 / 3.920 | −0.024 / 0.108 / 0.311 | 649 | +0.03 / −0.31 / −0.36 |
+| half div u | 3.466 / 3.741 / 3.987 | −0.006 / 0.087 / 0.353 | 743 | −0.12 / −0.22 / −0.15 |
+| mesh offset | 3.533 / 3.834 / 4.083 | −0.002 / 0.085 / 0.346 | 1,830 | +0.07 / +0.04 / +0.20 |
+| two-surface, both | 3.553 / 3.871 / 4.144 | +0.009 / 0.085 / 0.326 | 1,989 | +0.01 / +0.04 / +0.10 |
+| two-surface, pial | 3.542 / 3.848 / 4.153 | −0.135 / 0.084 / 0.286 | 1,690 | −0.05 / +0.00 / +0.11 |
+| two-surface, white | 3.528 / 3.829 / 4.065 | +0.001 / 0.089 / 0.346 | 1,917 | +0.04 / +0.21 / +0.11 |
+
+K_R is about 5 everywhere. The stria's width is 0.29–0.36 mm in every
+frame that uses the white surface only; with the pial surface, the stria
+band found is often a thin band near the pial surface (centre r 0.77–0.94,
+width 0.05–0.13 mm), so those rows' stria numbers are not the stria.
+
+Findings: the pial surface's curvature at the exit point is too noisy to
+use (the pial mesh closes thin sulci, and the exit point is on whichever
+bank is nearest); the two-surface hypothesis is not supported here. The
+white-surface curvature smoothed at 1 mm (mesh offset, or the two-surface
+form with R_in) lines the profiles up as well as half div u, with no
+trend, finds the stria in more columns than equidistant, and lowers the
+data term by 1–2.5 %. div u corrects too much although it agrees with
+the mesh curvature per column; it is the voxel-scale div u, deeper in the
+cortex (convergence in fundi, ridges), that the 1 mm white-surface
+curvature leaves out. Proposed default for step 7: equivolume r from the
+white mesh's smoothed curvature (mesh offset); to decide after review.
+
+**Again with the edge zones out and λ_z = 5** (#24; scratch runs of the
+same candidates, pial-based ones left out):
+
+| frame | data term ×1e6, level 256 / 32 / 5 | raw profiles: trend / RMS / R² | stria columns 256 / 64 / 32 / 16 | Spearman(stria centre r, mesh k) 256 / 128 / 64 | step across regions, 32 |
+|---|---|---|---|---|---|
+| equidistant | 3.144 / 3.406 / 3.672 | +0.017 / 0.177 / 0.486 | 2,868 / 1,565 / 1,113 / 0 | +0.30 / +0.34 / +0.19 | 0.105 |
+| div u | 3.101 / 3.249 / 3.351 | −0.031 / 0.131 / 0.482 | 1,130 / 839 / 513 / 148 | −0.19 / +0.00 / +0.01 | 0.105 |
+| half div u | 3.132 / 3.331 / 3.477 | −0.006 / 0.129 / 0.529 | 2,116 / 1,249 / 330 / 0 | −0.01 / +0.04 / +0.12 | 0.095 |
+| mesh offset | 3.181 / 3.370 / 3.539 | −0.006 / 0.109 / 0.525 | 2,546 / 2,310 / 1,232 / 721 | −0.07 / −0.08 / −0.02 | 0.085 |
+| two-surface, white | 3.164 / 3.385 / 3.573 | −0.006 / 0.120 / 0.525 | 2,724 / 2,030 / 1,302 / 121 | −0.01 / −0.01 / −0.02 | 0.085 |
+
+(raw profiles now on 2,935 V1-like columns.) With the edges out, the
+picture is the same and sharper: the white-surface curvature at 1 mm (mesh
+offset, or the two-surface form with R_in) has no stria trend in the raw
+profiles or in the model's bands, the tightest profiles between curvature
+groups, the least step between regions, and keeps the stria at coarse
+levels (721 columns at level 16, against none with equidistant r). Its
+data term is 1 % above equidistant at level 256 and 3.6 % below at level 5.
+div u fits the data term best but turns the trend over. Proposed: the mesh
+offset as the equivolume method (done: `frame.mesh_curvatures`,
+`path_volume`).
+
+So the overcorrection is real and not noise: the flow tubes of the distance
+from the WM widen (or narrow) about twice as fast as the layers do. A likely
+reason: they follow the white surface's curvature only, while Waehnert et
+al.'s equivolume model uses the areas of both the white and the pial surface,
+and the pial surface is flatter than the WM over crowns and in fundi. To try
+before step 7 uses r: a two-surface equivolume (the tube's area at the pial
+end from the pial surface, or a Laplace field between the two surfaces), and
+a scaled div u (α = 0.5) only as an empirical baseline. The stria is found in
+fewer columns with equivolume r at levels 256–64 (649 vs 1,613 at 256) and
+in more at 32 (168 vs 104).
 
 **Columns in steps 1–6** (`columns.model_columns`): a column takes part when
 it has cortex voxels on streamlines that exit into fluid, is not cut by
@@ -855,7 +1035,8 @@ Each with its status: confirmed (the evidence supports it as built), changed
   and the stopping rule: still open (step 7 not built). D_max = 4 mm:
   confirmed (6 or 8 mm did not raise the cortex in the model on V1V2). The
   ridge stop: still open (with seams, the barrier finding). Equidistant r
-  first: still open (see **Literature and ideas to try**: equivolume).
+  first: equivolume r is an option now; the default stays equidistant until
+  the overcorrection (**Columns and depth frame**) is understood.
 - The cross-validation split into random halves of columns, with the held-out
   columns' gain and offset re-fitted to the training template; K_max = 8;
   t_min = 0.05. The split into halves of columns: confirmed (test 6 passes).
@@ -892,8 +1073,9 @@ methods compared, the K-rule comparison in the evaluation) are in **Status**.
   equivolume layers (Bok's principle) fit the myelinated bands of ex vivo
   cortex better than Laplace or equidistant ones (checked on the abstract).
   Decided (Next 1): equivolume r before step 7. Implementations: nighres,
-  highres-cortex (Leprince 2015), LayNii `-equivol`; ours will follow the
-  streamlines (the prototype's flow-divergence method).
+  highres-cortex (Leprince 2015), LayNii `-equivol`; ours follows the
+  streamlines (the prototype's flow-divergence method). Done as an option;
+  the first comparison on V1V2 is not conclusive (see **Columns and depth frame**).
 - **Seams.** Osechinskiy & Kruggel 2012 (Int J Biomed Imaging 2012:870196)
   compute the field of an inhomogeneous dielectric layer of grey matter round
   conductive white matter, on ex vivo images of 0.25 to 0.35 mm; that the

@@ -1,13 +1,14 @@
 """The outputs of a run (plan: Outputs), and the command line.
 
     python -m baillarger.output --patch V1V2 --out OUTDIR [--levels 64 8 2]
+        [--no-seams] [--depth equivolume]
 
 In OUTDIR:
 
 - seams.nii.gz: the step-0 seams (baillarger.joint), unless --no-seams;
 - merge_tree.csv: one row per merge (step, the two region ids, the new id,
   cost, columns of the new region; ids 0..n-1 are the model's columns);
-- run.json: parameters, the frame and model-column counts, the number of
+- run.json: the depth, parameters, the frame and model-column counts, the number of
   connected pieces of the column graph and the levels not reached (merging
   joins only touching regions, so it stops at that number), and per level the
   energy terms after each inner round, K of each region and the seconds;
@@ -32,7 +33,7 @@ import json
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import nibabel as nib
 import numpy as np
@@ -132,11 +133,13 @@ def run_patch(
     directory: Path | None = None,
     min_piece: int = 5,
     seams: bool = True,
+    depth: Literal["equidistant", "equivolume"] = "equidistant",
 ) -> dict[str, Any]:
     """Load one patch, build the frame, place the step-0 seams (with seams:
-    baillarger.joint), build the voxel table with the seams as fluid (without
-    the graph pieces of fewer than min_piece columns), run the model and write
-    the outputs. Returns the run summary (also in run.json)."""
+        baillarger.joint), build the voxel table with the seams as fluid (without
+        the graph pieces of fewer than min_piece columns; relative depth by
+    depth, see baillarger.columns), run the model and write
+        the outputs. Returns the run summary (also in run.json)."""
     t0 = time.perf_counter()
     outdir.mkdir(parents=True, exist_ok=True)
     p = dt.load_patch(name, directory)
@@ -148,7 +151,7 @@ def run_patch(
         seam_mask, seam_report = initial_seams(p.rim, p.flash, p.voxel_mm, miss)
         rim = with_seams(p.rim, seam_mask)
         _save(outdir / "seams.nii.gz", seam_mask.astype(np.uint8), p.affine)
-    D, why = column_data(F, rim, p.echoes, miss)
+    D, why = column_data(F, rim, p.echoes, miss, depth=depth)
     D, why["small_pieces"] = drop_small_pieces(D, min_piece)
     t_inputs = time.perf_counter() - t0
     R = Refiner(D, params)
@@ -173,6 +176,7 @@ def run_patch(
     asked = DEFAULT_LEVELS if levels is None else levels
     summary = dict(
         patch=name,
+        depth=depth,
         params=asdict(R.p),
         columns=why,
         seams=seam_report,
@@ -204,8 +208,14 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="leave fused cortex out (no step-0 seams)",
     )
+    ap.add_argument(
+        "--depth",
+        choices=["equidistant", "equivolume"],
+        default="equidistant",
+        help="relative depth r of the voxels (see baillarger.columns)",
+    )
     a = ap.parse_args(argv)
-    s = run_patch(a.patch, a.out, a.levels, seams=not a.no_seams)
+    s = run_patch(a.patch, a.out, a.levels, seams=not a.no_seams, depth=a.depth)
     print(f"{a.patch}: {s['seconds']} s, levels {list(s['levels'])}")
 
 
