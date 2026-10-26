@@ -197,3 +197,80 @@ def test_drop_small_pieces() -> None:
     assert np.array_equal(out.labels[out.col], cut.col[np.isin(cut.col, out.labels)])
     same, none = cl.drop_small_pieces(data, 5)
     assert same is data and none == 0
+
+
+def ball(R0: float = 1.6, R1: float = 3.6) -> tuple[ph.Rim, F64]:
+    """A WM ball of radius R0 (mm) in a cortex shell to R1, fluid outside;
+    and each voxel's distance from the centre (mm)."""
+    n = 64
+    c = np.array([31.7, 32.2, 31.9])
+    X = np.stack(np.meshgrid(*[np.arange(n)] * 3, indexing="ij"), -1)
+    r = np.linalg.norm((X - c) * 0.16, axis=-1)
+    rim = np.ones((n, n, n), np.int16)
+    rim[r <= R1] = 3
+    rim[r <= R0] = 2
+    return rim, r
+
+
+def test_equivolume_depth_on_a_ball() -> None:
+    """Round a ball of WM, the cross-section of a radial flow tube grows as the
+    square of the radius, so the equivolume depth of a voxel at radius R is
+    (R³ − R0³) / (R1³ − R0³), below the equidistant (R − R0) / (R1 − R0)."""
+    R0, R1 = 1.6, 3.6
+    rim, r = ball(R0, R1)
+    F = fr.build_frame(rim, VOX)
+    f = np.zeros(rim.shape + (1,))
+    out = {}
+    for mode in ("equidistant", "equivolume"):
+        D, _ = cl.column_data(F, rim, f, depth=mode)
+        rr = r.ravel()[D.index]
+        sel = D.ctx & (rr > R0 + 0.1) & (rr < R1 - 0.1)
+        out[mode] = (D.m[sel], rr[sel])
+    m_ed, rr = out["equidistant"]
+    m_ev, rr2 = out["equivolume"]
+    assert np.array_equal(rr, rr2)
+    exact = (rr**3 - R0**3) / (R1**3 - R0**3)
+    err_ev = np.abs(m_ev - exact)
+    err_ed = np.abs(m_ed - exact)
+    assert np.median(err_ev) < 0.04 and np.percentile(err_ev, 90) < 0.08
+    assert np.median(err_ed) > 4 * np.median(err_ev)
+    assert np.mean(m_ev - m_ed) < -0.1
+
+
+def test_equivolume_is_equidistant_on_a_flat_slab(
+    slab: tuple[ph.Rim, F64, fr.Frame],
+) -> None:
+    rim, echoes, F = slab
+    D1, _ = cl.column_data(F, rim, echoes)
+    D2, _ = cl.column_data(F, rim, echoes, depth="equivolume")
+    assert np.array_equal(D1.index, D2.index)
+    ijk = np.stack(np.unravel_index(D1.index, rim.shape), 1)
+    inner = np.all((ijk[:, :2] >= 4) & (ijk[:, :2] < 44), 1)
+    assert np.abs(D2.m[inner] - D1.m[inner]).max() < 0.01
+
+
+def test_path_volume() -> None:
+    # one straight streamline through a field whose div u is constant: A grows
+    # as exp(k s), and V(s) = (exp(k s) - 1) / k
+    k = 0.8
+    s = np.linspace(0, 2, 41).astype(np.float32)
+    F = fr.Frame(
+        voxel_mm=VOX, verts=np.zeros((1, 3)), faces=np.zeros((0, 3), np.int64),
+        normals=np.zeros((1, 3)), vertex_column=np.zeros(1, np.int64),
+        column_seed=np.zeros(1, np.int64), distance=np.zeros((1, 1, 1), np.float32),
+        path_start=np.array([0, len(s)]), path_points=np.zeros((len(s), 3), np.float32),
+        path_arc=s, path_end=np.zeros(1, np.int8), path_cut=np.zeros(1, bool),
+        column_cut=np.zeros(1, bool), path_div=np.full(len(s), k, np.float32),
+        voxel_column=np.zeros((1, 1, 1), np.int32),
+        voxel_path=np.zeros((1, 1, 1), np.int32),
+        depth=np.zeros((1, 1, 1), np.float32),
+    )  # fmt: skip
+    A, V = fr.path_volume(F)
+    assert np.allclose(A, np.exp(k * s), rtol=1e-6)
+    assert np.allclose(V, (np.exp(k * s) - 1) / k, rtol=1e-3)
+    d = np.array([-0.3, 0.5, 1.37, 2.5])
+    got = fr.volume_at(F, A, V, np.zeros(4, np.int64), d)
+    assert got[0] == -0.3
+    assert np.allclose(got[1:3], (np.exp(k * d[1:3]) - 1) / k, rtol=2e-3)
+    # past the last point A stays constant
+    assert np.isclose(got[3], V[-1] + A[-1] * 0.5)

@@ -40,6 +40,14 @@ surface, so it does not change in the outer loop (PLAN_LAYER_REFINE.md,
   (default 1.5 mm) bridges that. Voxels that no streamline comes within
   reach_mm of have column -1 and depth NaN.
 
+Equivolume depth: path_div holds div u, the divergence of the unit direction
+field of the streamlines, at each streamline point (central differences of
+the normalized gradient of D, set to 0 where the gradient is weak or near the
+edge of the domain, clipped to +-div_max per mm). path_volume integrates it
+along each streamline to the relative cross-section A and volume V of the
+flow tube, and volume_at reads V at any depth (baillarger.columns uses it for
+r = V(d) / V(T_p)).
+
 Relative depth r = d / T_c (relative_depth) uses the column thickness T_c,
 which the outer loop updates (column_thickness gives it from a tissue mask).
 """
@@ -98,6 +106,9 @@ class Frame:
     path_cut: Bool
     #: columns with at least one cut streamline
     column_cut: Bool
+    #: div u (per mm) at each streamline point: the divergence of the unit
+    #: direction field u of the streamlines (for the equivolume depth)
+    path_div: F32
     #: column (-1 none), streamline (-1 none) and depth d (mm, NaN none) of
     #: each voxel
     voxel_column: I32
@@ -517,6 +528,7 @@ def build_frame(
     sample_mm: float | None = None,
     column_mm: float = 0.7,
     reach_mm: float = 1.5,
+    div_max: float = 10.0,
 ) -> Frame:
     """The frame of one patch from its rim labels (only the WM and the domain
     matter, see the module notes) and its missing tissue.
@@ -524,7 +536,7 @@ def build_frame(
     gmin: the smoothed |grad D| (per mm, about 1 away from ridges) below which
     a streamline counts as at a ridge. sample_mm: the spacing of the kept
     streamline points (default: the smallest voxel size). Streamlines are at
-    most 2 x d_max long.
+    most 2 x d_max long. div_max: the clip of div u (per mm).
     """
     vox = np.asarray(voxel_mm, np.float64)
     vt = (float(vox[0]), float(vox[1]), float(vox[2]))
@@ -576,6 +588,10 @@ def build_frame(
     path_points = pts[keep]
     path_arc = arc[keep]
     del pts, arc
+    divu = _flow_divergence(G, D, vt, sigma, gmin, div_max)
+    path_div = ndi.map_coordinates(
+        divu, path_points.T.astype(np.float64), order=1, mode="nearest"
+    ).astype(np.float32)
     voxel_column, voxel_path, depth = _assign(
         path_start,
         path_points,
@@ -602,6 +618,7 @@ def build_frame(
         path_end=end,
         path_cut=path_cut,
         column_cut=column_cut,
+        path_div=path_div,
         voxel_column=voxel_column,
         voxel_path=voxel_path,
         depth=depth,
@@ -656,6 +673,64 @@ def path_exit(frame: Frame, tissue: Bool, fluid: Bool) -> F32:
     a0, a1 = frame.path_arc[q1 - 1], frame.path_arc[q1]
     out[k] = (a0 + frac * (a1 - a0)).astype(np.float32)
     return out
+
+
+def _flow_divergence(
+    G: F32,
+    D: F32,
+    voxel_mm: tuple[float, float, float],
+    sigma: float,
+    gmin: float,
+    div_max: float,
+) -> F32:
+    """div u (per mm) of the unit direction field u = G / |G| of the
+    streamlines, clipped to ± div_max, and 0 where it is not reliable: one
+    voxel inside the region where D is defined (smoothed by sigma, above 0.3)
+    and |G| is at least gmin (not at ridges)."""
+    gmag = np.linalg.norm(G, axis=-1)
+    U = G / np.maximum(gmag, 1e-9)[..., None]
+    vox = np.asarray(voxel_mm, float)
+    div = sum(np.gradient(U[..., k], axis=k) / vox[k] for k in range(3))
+    ok = ndi.gaussian_filter(np.isfinite(D).astype(np.float64), sigma) > 0.3
+    usable = ndi.binary_erosion(ok & (gmag >= gmin))
+    out: F32 = np.where(usable, np.clip(div, -div_max, div_max), 0.0).astype(np.float32)
+    return out
+
+
+def path_volume(frame: Frame) -> tuple[F64, F64]:
+    """Along each streamline, the relative cross-section A(s) / A(0) of its flow
+    tube and the volume V(s) = ∫ A ds from the white surface (mm, for a unit
+    cross-section at the start), at each streamline point: d ln A / ds = div u
+    (trapezoids between the points)."""
+    s = frame.path_arc.astype(np.float64)
+    dv = frame.path_div.astype(np.float64)
+    start = frame.path_start
+    # the index of each point's path's first point
+    first = np.repeat(start[:-1], np.diff(start))
+    is_first = np.arange(len(s)) == first
+    ds = np.where(is_first, 0.0, s - np.roll(s, 1))
+    dln = np.where(is_first, 0.0, 0.5 * (dv + np.roll(dv, 1)) * ds)
+    c = np.cumsum(dln)
+    A = np.exp(c - c[first])
+    dV = np.where(is_first, 0.0, 0.5 * (A + np.roll(A, 1)) * ds)
+    c = np.cumsum(dV)
+    V: F64 = c - c[first]
+    return A, V
+
+
+def volume_at(frame: Frame, A: F64, V: F64, path: I64, d: F64) -> F64:
+    """V at depth d along each given streamline (one value per pair): linear
+    in A between the streamline's points, A constant past its last point, and
+    V = d (A = 1) below the white surface (d < 0)."""
+    s = frame.path_arc.astype(np.float64)
+    start, end = frame.path_start[path], frame.path_start[path + 1] - 1
+    # the last point of the path at or before d
+    key = np.repeat(np.arange(len(frame.path_start) - 1), np.diff(frame.path_start))
+    flat = key * 1e4 + s
+    j = np.searchsorted(flat, path * 1e4 + d, side="right") - 1
+    j = np.clip(j, start, end)
+    out: F64 = V[j] + A[j] * (d - s[j])
+    return np.where(d < 0, d, out)
 
 
 def column_thickness(frame: Frame, tissue: Bool) -> F64:

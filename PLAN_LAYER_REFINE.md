@@ -54,7 +54,12 @@ still has no exit (see the finding under **Columns and depth frame**).
 1. Equivolume r, as an option of the frame (equidistant or equivolume), from
    the divergence of the streamlines' flow (the prototype's
    `surface_geometry.equivolume`); compare both on V1V2 (band sharpness, K_R,
-   the stria's width) before step 7 builds on r.
+   the stria's width) before step 7 builds on r. Done as an option
+   (`column_data(depth=...)`, `--depth`); the default stays equidistant. The
+   comparison on V1V2 (below, **Columns and depth frame**) is not conclusive: the data
+   term is lower with equivolume r, but the stria's position overcorrects for
+   the curvature. To do before the default changes: check div u (smoothing,
+   the size of the curvature proxy) against the mesh curvature.
 2. A Hotelling T² test between the column profiles of two neighbouring
    regions: reported for each merge (which merges join distinct areas), and
    used in test A for each WM bin on its own (step 5).
@@ -283,8 +288,45 @@ the loop:
   thickness prior). The data term and the geometry use d; the band DP (step
   3b), the pull to Z_R, the TV on z and t_min use r.
 
-r is equidistant in the first version. An equivolume correction of r is a
-later option (see **Literature and ideas to try**).
+r is equidistant by default. `column_data(depth="equivolume")` gives the
+equivolume r of Waehnert et al. 2014 instead: along each streamline the
+cross-section A of a flow tube changes as d ln A / ds = div u (u: the unit
+direction of the streamlines, div u from central differences of the
+normalized gradient of D, clipped to ±10 per mm), V(s) = ∫ A ds, and
+r = V(d) / V(T_p) (r = D / V(T_p) in the WM). Tests: on a flat slab the two
+depths agree (< 0.01); round a WM ball (R0 1.6 mm, cortex to 3.6 mm, 0.16 mm
+voxels) the equivolume r is within 0.026 (median) and 0.117 (p99) of the
+exact (R³ − R0³) / (R1³ − R0³), against 0.15 / 0.21 for the equidistant r.
+
+Comparison on V1V2 (with step-0 seams; same voxels, same 11,922 columns;
+levels 256 to 5):
+
+| level | data term, equidistant | data term, equivolume | change |
+|---|---|---|---|
+| 256 | 3.494e6 | 3.437e6 | −1.6 % |
+| 64 | 3.696e6 | 3.604e6 | −2.5 % |
+| 16 | 4.020e6 | 3.778e6 | −6.0 % |
+| 5 | 4.168e6 | 3.920e6 | −6.0 % |
+
+The column-weighted mean K_R is the same (4.86–5.03 in both). The stria (in
+each region with K_R ≥ 3, the middle band that is a local minimum of echo 2;
+on the columns where both runs find it; width in mm from each column's own
+voxels, d against r):
+
+| level | columns | width (mm), ED / EV | centre r, ED / EV | Spearman(centre r, curvature), ED / EV |
+|---|---|---|---|---|
+| 256 | 386 | 0.34 / 0.34 | 0.32 / 0.45 | +0.26 / −0.34 |
+| 128 | 362 | 0.36 / 0.36 | 0.24 / 0.43 | +0.14 / −0.57 |
+| 64 | 213 | 0.35 / 0.33 | 0.28 / 0.44 | +0.32 / −0.73 |
+
+(curvature: the column's median of ln(V(T_p) / T_p), > 0 where the flow
+tubes widen, over crowns). The equidistant centre rises with the curvature,
+as Bok's principle predicts; the equivolume centre falls with it about as
+much or more, so the correction looks too strong. The curvature proxy is
+large (5–95 %: −1.09 to +1.02; a ball of WM radius 1.6 mm with 2 mm of
+cortex gives +1.02), so div u is probably too noisy at the voxel scale. The
+stria is found in fewer columns with equivolume r at levels 256–64 (649 vs
+1,613 at 256) and in more at 32 (168 vs 104).
 
 **Columns in steps 1–6** (`columns.model_columns`): a column takes part when
 it has cortex voxels on streamlines that exit into fluid, is not cut by
@@ -831,7 +873,8 @@ Each with its status: confirmed (the evidence supports it as built), changed
   and the stopping rule: still open (step 7 not built). D_max = 4 mm:
   confirmed (6 or 8 mm did not raise the cortex in the model on V1V2). The
   ridge stop: still open (with seams, the barrier finding). Equidistant r
-  first: still open (see **Literature and ideas to try**: equivolume).
+  first: equivolume r is an option now; the default stays equidistant until
+  the overcorrection (**Columns and depth frame**) is understood.
 - The cross-validation split into random halves of columns, with the held-out
   columns' gain and offset re-fitted to the training template; K_max = 8;
   t_min = 0.05. The split into halves of columns: confirmed (test 6 passes).
@@ -868,8 +911,9 @@ methods compared, the K-rule comparison in the evaluation) are in **Status**.
   equivolume layers (Bok's principle) fit the myelinated bands of ex vivo
   cortex better than Laplace or equidistant ones (checked on the abstract).
   Decided (Next 1): equivolume r before step 7. Implementations: nighres,
-  highres-cortex (Leprince 2015), LayNii `-equivol`; ours will follow the
-  streamlines (the prototype's flow-divergence method).
+  highres-cortex (Leprince 2015), LayNii `-equivol`; ours follows the
+  streamlines (the prototype's flow-divergence method). Done as an option;
+  the first comparison on V1V2 is not conclusive (see **Columns and depth frame**).
 - **Seams.** Osechinskiy & Kruggel 2012 (Int J Biomed Imaging 2012:870196)
   compute the field of an inhomogeneous dielectric layer of grey matter round
   conductive white matter, on ex vivo images of 0.25 to 0.35 mm; that the
