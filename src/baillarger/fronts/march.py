@@ -31,11 +31,17 @@ source, whose singularity dominates the error, the arrival is within about 4-8
 metrics with anisotropy 3-10 but about 5-6 degrees for near-isotropic ones
 (whose Selling stencil is just the six axis neighbours). Both errors fall when
 the grid is refined. A plane source with a metric of unit cost along its
-normal is exact.
+normal is exact. The arc length is exact from flat sources, oblique metrics
+included, but on curved fronts under strong anisotropy it is first order with
+a large constant: from a ball of radius 6 voxels at anisotropy 10, about 35 %
+off (median) at 3-12 voxels, 23 % and 16 % with the grid refined 2 and 3
+times. Errors made near the source are carried along the path.
 
-Arc length: along the characteristic, x' = D grad u, and the Euclidean length
-grows at the rate |H D grad u| per unit of arrival (H the voxel size). It is
-carried with the same upwind weights as the arrival.
+Arc length S: along the characteristic x' = D grad u, the Euclidean length
+grows by |H x'| (H the voxel size), so V . grad S = |H V| with V = D grad u.
+It is discretized on the same stencil as the arrival: with the discrete flow
+V = sum_j rho_j a_j o_j (a_j = u - u_j and o_j the voxel step from upwind
+neighbour j), sum_j rho_j a_j (S - S_j) = |H V|.
 """
 
 from dataclasses import dataclass
@@ -96,10 +102,36 @@ def riemann_from_direction(
 
 
 @njit
+def _clear(mask: Bool, x0: int, y0: int, z0: int, ex: int, ey: int, ez: int) -> bool:
+    """Whether the segment from voxel (x0, y0, z0) to its offset (ex, ey, ez)
+    stays in the domain, taken as a tube of radius 1/4 voxel: at points every
+    half voxel along it, every voxel within 1/4 of the point (in each axis) must
+    be in the domain. A step between two outside voxels that touch only at an
+    edge or a corner is therefore blocked."""
+    nx, ny, nz = mask.shape
+    steps = 2 * max(abs(ex), abs(ey), abs(ez))
+    for t in range(1, steps):
+        xa = x0 + ex * t / steps
+        ya = y0 + ey * t / steps
+        za = z0 + ez * t / steps
+        for dx in (-0.25, 0.25):
+            for dy in (-0.25, 0.25):
+                for dz in (-0.25, 0.25):
+                    xi = int(np.floor(xa + dx + 0.5))
+                    yi = int(np.floor(ya + dy + 0.5))
+                    zi = int(np.floor(za + dz + 0.5))
+                    if xi < 0 or yi < 0 or zi < 0 or xi >= nx or yi >= ny or zi >= nz:
+                        return False
+                    if not mask[xi, yi, zi]:
+                        return False
+    return True
+
+
+@njit
 def _stencils(mask: Bool, offsets: Int8, ids: Int, cells: Int) -> Int32:
     """For each domain voxel and each of its 12 signed offsets (2i: +e_i,
     2i + 1: -e_i), the compact id of the neighbour, or -1 when it is outside
-    the domain or the segment to it leaves the domain."""
+    the domain or the segment to it leaves the domain (_clear)."""
     nx, ny, nz = mask.shape
     m = cells.shape[0]
     nbr = np.full((m, 12), -1, dtype=np.int32)
@@ -109,9 +141,9 @@ def _stencils(mask: Bool, offsets: Int8, ids: Int, cells: Int) -> Int32:
         y0 = (c // nz) % ny
         z0 = c % nz
         for i in range(6):
-            ex = np.int64(offsets[p, i, 0])
-            ey = np.int64(offsets[p, i, 1])
-            ez = np.int64(offsets[p, i, 2])
+            ex = int(offsets[p, i, 0])
+            ey = int(offsets[p, i, 1])
+            ez = int(offsets[p, i, 2])
             if ex == 0 and ey == 0 and ez == 0:
                 continue
             for s in range(2):
@@ -123,16 +155,7 @@ def _stencils(mask: Bool, offsets: Int8, ids: Int, cells: Int) -> Int32:
                     continue
                 if not mask[x1, y1, z1]:
                     continue
-                steps = max(abs(ex), abs(ey), abs(ez))
-                ok = True
-                for t in range(1, steps):
-                    xa = x0 + sg * ex * t / steps
-                    ya = y0 + sg * ey * t / steps
-                    za = z0 + sg * ez * t / steps
-                    if not mask[round(xa), round(ya), round(za)]:
-                        ok = False
-                        break
-                if ok:
+                if _clear(mask, x0, y0, z0, sg * ex, sg * ey, sg * ez):
                     nbr[p, 2 * i + s] = ids[x1 * ny * nz + y1 * nz + z1]
     return nbr
 
@@ -273,29 +296,26 @@ def _update(
         used = j + 1
         if j + 1 == k or u <= wv[j + 1]:
             break
-    # flow D grad u (voxel units) and its Euclidean speed per unit of arrival
+    # discrete flow V = sum rho_j a_j o_j (D grad u, in voxels), and the arc
+    # length from the transport equation V . grad S = |H V| on the same stencil:
+    # sum rho_j a_j (S - S_j) = |H V|
     fx = 0.0
     fy = 0.0
     fz = 0.0
+    tot = 0.0
+    s = 0.0
     for j in range(used):
         g = wr[j] * (u - wv[j])
         fx += g * wo[j, 0]
         fy += g * wo[j, 1]
         fz += g * wo[j, 2]
-    rate = (
-        np.sqrt(
-            (fx * spacing[0]) ** 2 + (fy * spacing[1]) ** 2 + (fz * spacing[2]) ** 2
-        )
-        / rhs
+        tot += g
+        s += g * ws[j]
+    speed = np.sqrt(
+        (fx * spacing[0]) ** 2 + (fy * spacing[1]) ** 2 + (fz * spacing[2]) ** 2
     )
-    s = 0.0
-    tot = 0.0
-    for j in range(used):
-        w = wr[j] * (u - wv[j]) ** 2
-        s += w * (ws[j] + (u - wv[j]) * rate)
-        tot += w
     if tot > 0.0:
-        s /= tot
+        s = (s + speed) / tot
     else:
         s = ws[0]
     return u, s
@@ -433,17 +453,24 @@ def march(
     if h.shape != (3,) or np.any(h <= 0):
         raise ValueError("spacing must be three positive numbers")
     met = np.asarray(metric, np.float64)
-    if met.shape == (3, 3):
-        met = np.broadcast_to(met, (*shape, 3, 3))
-    if met.shape != (*shape, 3, 3):
-        raise ValueError(f"metric has shape {met.shape}, expected {(*shape, 3, 3)}")
+    if met.shape != (3, 3) and met.shape != (*shape, 3, 3):
+        raise ValueError(
+            f"metric has shape {met.shape}, expected (3, 3) or {(*shape, 3, 3)}"
+        )
     cells = np.flatnonzero(dom.ravel()).astype(np.int64)
     ids = np.full(dom.size, -1, dtype=np.int64)
     ids[cells] = np.arange(cells.size)
-    # dual metric in voxel units: H^-1 M^-1 H^-1
-    md = met.reshape(-1, 3, 3)[cells]
-    dual = np.linalg.inv(md) / (h[:, None] * h[None, :])
-    off, w = selling(dual)
+    # dual metric in voxel units: H^-1 M^-1 H^-1 (selling checks it is finite and SPD)
+    scale = h[:, None] * h[None, :]
+    if met.shape == (3, 3):
+        off1, w1 = selling(np.linalg.inv(met) / scale)
+        off = np.ascontiguousarray(np.broadcast_to(off1, (cells.size, 6, 3)))
+        w = np.ascontiguousarray(np.broadcast_to(w1, (cells.size, 6)))
+    else:
+        md = met.reshape(-1, 3, 3)[cells]
+        if not np.all(np.isfinite(md)):
+            raise ValueError("the metric is not finite in the domain")
+        off, w = selling(np.linalg.inv(md) / scale)
     nbr = _stencils(dom, off, ids, cells)
     count, rev = _reverse(nbr)
     seed_cells = np.flatnonzero(lab.ravel() >= 0)

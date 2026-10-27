@@ -97,13 +97,16 @@ def selling(d: npt.ArrayLike) -> tuple[Int8, Float]:
 
     Returns offsets (..., 6, 3), integer vectors, and weights (..., 6) >= 0,
     with d = sum_i weights[i] * outer(offsets[i], offsets[i]). Raises
-    ValueError if a matrix is not symmetric positive definite, or if an offset
-    does not fit in an int8 (a matrix far too anisotropic for local stencils).
+    ValueError if a matrix is not finite and symmetric positive definite, or if
+    an offset does not fit in an int8 (a matrix far too anisotropic for local
+    stencils).
     """
     a = np.asarray(d, np.float64)
     if a.shape[-2:] != (3, 3):
         raise ValueError(f"expected (..., 3, 3) matrices, got shape {a.shape}")
     flat = np.ascontiguousarray(a.reshape(-1, 3, 3))
+    if not np.all(np.isfinite(flat)):
+        raise ValueError("matrices are not finite")
     scale = np.abs(flat).max(axis=(1, 2), initial=0.0)[:, None, None]
     if np.any(np.abs(flat - flat.transpose(0, 2, 1)) > 1e-10 * scale):
         raise ValueError("matrices are not symmetric")

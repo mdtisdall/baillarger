@@ -5,6 +5,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 from scipy import ndimage as ndi
+from scipy.spatial import cKDTree
 
 from baillarger.fronts import march, riemann_from_direction, selling
 
@@ -64,6 +65,8 @@ def test_selling_reconstructs(ratio: float) -> None:
 def test_selling_rejects_bad_matrices() -> None:
     with pytest.raises(ValueError):
         selling(np.diag([1.0, -1.0, 1.0]))
+    with pytest.raises(ValueError):
+        selling(np.diag([1.0, np.nan, 1.0]))
     with pytest.raises(ValueError):
         selling(np.array([[1.0, 0.5, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]))
 
@@ -125,6 +128,69 @@ def test_constant_anisotropic_metric(ratio: float) -> None:
     ang = gradient_angles(f.arrival, ex, far)
     assert np.median(ang) < 2.0
     assert np.percentile(ang, 95) < 6.0
+
+
+def oblique_plane_length_error(ratio: float) -> tuple[float, float]:
+    """Arc length from the plane source x = 0 under a constant metric oblique
+    to it: the characteristics are straight, along V = M^-1 e_x, so the exact
+    length is x |V| / V_x. Returns the median and 95th percentile of the
+    relative error where the characteristic from the plane stays in the box."""
+    n = 41
+    m = rotated_metric(ratio)
+    lab = -np.ones((n, n, n), np.int64)
+    lab[0] = 0
+    f = march(m, lab)
+    v = np.linalg.inv(m) @ np.array([1.0, 0.0, 0.0])
+    x, y, z = np.meshgrid(*[np.arange(n, dtype=float)] * 3, indexing="ij")
+    exact = x * np.linalg.norm(v) / v[0]
+    y0 = y - v[1] / v[0] * x
+    z0 = z - v[2] / v[0] * x
+    keep = (x >= 5) & (y0 >= 0) & (y0 <= n - 1) & (z0 >= 0) & (z0 <= n - 1)
+    rel = np.abs(f.length[keep] - exact[keep]) / exact[keep]
+    return float(np.median(rel)), float(np.percentile(rel, 95))
+
+
+@pytest.mark.parametrize("ratio", [3.0, 10.0])
+def test_length_from_an_oblique_plane_source(ratio: float) -> None:
+    """The arc length is carried by the transport equation V . grad S = |H V|
+    on the arrival's stencil. With a metric oblique to the source the
+    characteristics are not along grad u; the length must still be exact, as
+    it is for any flat front."""
+    med, p95 = oblique_plane_length_error(ratio)
+    assert med < 0.01
+    assert p95 < 0.05
+
+
+def ball_length_error(n: int, ratio: float) -> tuple[float, float]:
+    """Arc length from a ball of source voxels (radius 6, in a box of side 40
+    with n points per axis) under a constant metric. Geodesics are straight,
+    so the exact length at x is the Euclidean distance to the source voxel
+    nearest x in the metric. Returns the median and 95th percentile of the
+    relative error at 3-12 from the ball's surface."""
+    m = rotated_metric(ratio)
+    h = 40.0 / (n - 1)
+    g = grid(n, (0, 0, 0)) * h
+    r = np.linalg.norm(g - 20.0, axis=-1)
+    ball = r <= 6.0
+    f = march(m, np.where(ball, 0, -1).astype(np.int64), spacing=(h, h, h))
+    chol = np.linalg.cholesky(m)  # metric distance = |chol^T (x - y)|
+    _, idx = cKDTree(g[ball] @ chol).query(g.reshape(-1, 3) @ chol)
+    exact = np.linalg.norm(g.reshape(-1, 3) - g[ball][idx], axis=-1).reshape(r.shape)
+    keep = (r > 9.0) & (r < 18.0)
+    rel = np.abs(f.length[keep] - exact[keep]) / exact[keep]
+    return float(np.median(rel)), float(np.percentile(rel, 95))
+
+
+def test_length_from_a_curved_source_converges() -> None:
+    """On curved fronts under a strongly anisotropic metric the arc length is
+    only first order (about 35 % off at 41^3), but it must converge: both the
+    median and the worst errors fall when the grid is refined. An earlier,
+    inconsistent discretization of the transport left the 95th percentile at
+    about 95 % whatever the resolution."""
+    coarse = ball_length_error(41, 10.0)
+    fine = ball_length_error(81, 10.0)
+    assert fine[0] < 0.75 * coarse[0]
+    assert fine[1] < 0.8 * coarse[1]
 
 
 def test_anisotropic_spacing() -> None:
@@ -251,6 +317,25 @@ def test_wall_is_not_jumped() -> None:
     assert f.arrival[behind] > direct + 5.0
 
 
+def test_oblique_thin_wall_is_not_jumped() -> None:
+    """A wall one voxel thick on the diagonal plane x = y is connected only
+    through voxel edges; diagonal stencil steps must not pass between them."""
+    n = 31
+    i = np.arange(n)
+    mask = np.ones((n, n, n), bool)
+    mask[i, i, :] = False
+    lab = -np.ones((n, n, n), np.int64)
+    lab[20, 10, 15] = 0  # on the x > y side
+    m = riemann_from_direction(np.array([1.0, -1.0, 0.2]), 5.0)
+    f = march(m, lab, mask=mask)
+    x, y = np.meshgrid(i, i, indexing="ij")
+    other = np.broadcast_to((x < y)[:, :, None], (n, n, n))
+    assert np.all(np.isinf(f.arrival[other]))
+    assert np.all(
+        np.isfinite(f.arrival[np.broadcast_to((x > y)[:, :, None], (n, n, n))])
+    )
+
+
 def test_input_checks() -> None:
     lab = point_seed(5)
     with pytest.raises(ValueError):
@@ -261,3 +346,7 @@ def test_input_checks() -> None:
         march(np.eye(2), lab)
     with pytest.raises(ValueError):
         march(np.eye(3), lab, spacing=(1.0, 0.0, 1.0))
+    bad = np.broadcast_to(np.eye(3), (5, 5, 5, 3, 3)).copy()
+    bad[2, 2, 3] = np.nan
+    with pytest.raises(ValueError):
+        march(bad, lab)
