@@ -6,6 +6,8 @@ can become a package of its own.
 - march: arrival from labelled sources under a Riemannian metric, with each
   voxel's source label, the Euclidean length of its path, and the best
   arrival of any other label (for the meeting surface between fronts).
+  Each label can have its own start time and speed; the fronts compete by
+  crystal growth (no front enters territory another has claimed).
 - riemann_from_direction: a metric with unit cost along a direction field.
 - selling: Selling's decomposition of 3 x 3 symmetric positive definite
   matrices, which gives the adaptive stencils.

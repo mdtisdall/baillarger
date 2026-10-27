@@ -6,6 +6,17 @@ metric M, so a path costs the integral of sqrt(x'^T M x'). Every reached
 voxel also gets the label of the source its arrival comes from, and the
 Euclidean length of the path from that source.
 
+Weighted sources: each label l can start at its own time t_l and move at its
+own speed c_l, so that its arrival is t_l + d_l / c_l, with d_l the metric
+distance along the label's own fronts. Its update solves the scheme below with
+right-hand side 1 / c_l^2. The fronts compete by "crystal growth": a voxel goes
+to the label that reaches it first, and no front enters territory that another
+label has already claimed, so every label's region is connected and contains
+its sources (or is empty, when another front reaches a source before its start
+time). This is not the pure weighted Voronoi partition, whose regions can be
+disconnected: a slow source's region is its pure (Apollonius) region plus a
+tail in its shadow, where the faster front would have to go round it.
+
 The scheme (Mirebeau 2014, "Anisotropic fast-marching on cartesian grids
 using lattice basis reduction"; here with Selling's decomposition,
 baillarger.fronts.selling) writes D, in voxel units, as sum_i rho_i e_i e_i^T
@@ -19,7 +30,8 @@ grid favours no direction. An offset is used only when the straight segment to
 it stays inside the domain, so a front never jumps a thin gap.
 
 Labels: the update of a voxel is computed separately for each label, from that
-label's accepted neighbours only, and the voxel takes the earliest. Labels
+label's accepted neighbours only (with that label's right-hand side), and the
+voxel takes the earliest. Labels
 never mix inside one update, so every voxel's arrival comes from one source,
 and fronts stop where they meet. The best arrival of another label at the time
 a voxel is accepted is kept as well, for locating the meeting surface between
@@ -41,7 +53,9 @@ Arc length S: along the characteristic x' = D grad u, the Euclidean length
 grows by |H x'| (H the voxel size), so V . grad S = |H V| with V = D grad u.
 It is discretized on the same stencil as the arrival: with the discrete flow
 V = sum_j rho_j a_j o_j (a_j = u - u_j and o_j the voxel step from upwind
-neighbour j), sum_j rho_j a_j (S - S_j) = |H V|.
+neighbour j), sum_j rho_j a_j (S - S_j) = |H V|. A label's speed and start time
+leave S unchanged: a start time does not change the differences a_j, and a
+speed c scales every a_j, and so both sides, by 1 / c.
 """
 
 from dataclasses import dataclass
@@ -65,11 +79,13 @@ _INF = np.inf
 class Fronts:
     """The result of march. Unreached voxels: arrival inf, label -1, length nan."""
 
-    #: arrival time (the metric's distance from the nearest source)
+    #: arrival time: the label's start time plus its metric distance over its
+    #: speed, for the label that reaches the voxel first
     arrival: Float
     #: label of the source the arrival comes from
     label: Int
-    #: Euclidean length of the path from that source (in the units of spacing)
+    #: Euclidean length of the path from that source (in the units of spacing;
+    #: independent of the label's start time and speed)
     length: Float
     #: best arrival of any other label when the voxel was accepted (inf: none)
     second_arrival: Float
@@ -331,6 +347,8 @@ def _march(
     seeds: Int,
     seed_labels: Int,
     spacing: Float,
+    start: Float,
+    rhs: Float,
 ) -> tuple[Float, Int, Float, Float, Int, Int]:
     m = nbr.shape[0]
     arrival = np.full(m, _INF)
@@ -357,11 +375,12 @@ def _march(
     ws = np.empty(6)
     for n in range(seeds.shape[0]):
         p = seeds[n]
-        if 0.0 < t1[p]:
-            t1[p] = 0.0
+        t0 = start[seed_labels[n]]
+        if t0 < t1[p]:
+            t1[p] = t0
             l1[p] = seed_labels[n]
             s1[p] = 0.0
-            size = _heap_push(hv, hp, hl, size, 0.0, p, seed_labels[n])
+            size = _heap_push(hv, hp, hl, size, t0, p, seed_labels[n])
     rank = 0
     while size > 0:
         v = hv[0]
@@ -385,7 +404,7 @@ def _march(
             u, s = _update(
                 q,
                 lab,
-                1.0,
+                rhs[lab],
                 nbr,
                 offsets,
                 weights,
@@ -423,11 +442,26 @@ def _march(
     return arrival, label, length, second, second_label, order
 
 
+def _per_label(x: npt.ArrayLike | None, fill: float, n: int, name: str) -> Float:
+    """A per-label array of floats: fill for every label when x is None, else
+    x checked to be 1D and to cover labels 0..n-1."""
+    if x is None:
+        return np.full(max(n, 1), fill)
+    a = np.asarray(x, np.float64)
+    if a.ndim != 1:
+        raise ValueError(f"{name} must be a 1D array indexed by label")
+    if a.size < n:
+        raise ValueError(f"{name} has {a.size} entries, but the labels run to {n - 1}")
+    return np.ascontiguousarray(a)
+
+
 def march(
     metric: npt.ArrayLike,
     seed_labels: npt.ArrayLike,
     mask: npt.ArrayLike | None = None,
     spacing: npt.ArrayLike = (1.0, 1.0, 1.0),
+    start_time: npt.ArrayLike | None = None,
+    speed: npt.ArrayLike | None = None,
 ) -> Fronts:
     """Fast marching from labelled sources in a 3D domain.
 
@@ -435,10 +469,14 @@ def march(
         for a constant one, in the units of spacing (a path of Euclidean
         length L along a unit vector v costs L sqrt(v^T M v)).
     seed_labels: integer array (nx, ny, nz), the source label (>= 0) at each
-        source voxel and -1 elsewhere. Sources start at arrival 0.
+        source voxel and -1 elsewhere.
     mask: the domain (default: the whole array). Fronts move only inside it,
         and never along a stencil segment that leaves it.
     spacing: voxel size along each axis.
+    start_time: per label (indexed by label), the arrival at its sources;
+        finite, may be negative. Default 0 for every label.
+    speed: per label, the speed of its front (its arrival grows by the metric
+        distance over the speed); positive and finite. Default 1.
     """
     lab = np.asarray(seed_labels)
     if lab.ndim != 3 or not np.issubdtype(lab.dtype, np.integer):
@@ -457,6 +495,13 @@ def march(
         raise ValueError(
             f"metric has shape {met.shape}, expected (3, 3) or {(*shape, 3, 3)}"
         )
+    nlab = int(lab.max()) + 1 if lab.size else 0
+    t0 = _per_label(start_time, 0.0, nlab, "start_time")
+    if not np.all(np.isfinite(t0)):
+        raise ValueError("start_time must be finite")
+    c = _per_label(speed, 1.0, nlab, "speed")
+    if not np.all(np.isfinite(c) & (c > 0)):
+        raise ValueError("speed must be positive and finite")
     cells = np.flatnonzero(dom.ravel()).astype(np.int64)
     ids = np.full(dom.size, -1, dtype=np.int64)
     ids[cells] = np.arange(cells.size)
@@ -483,6 +528,8 @@ def march(
         ids[seed_cells],
         lab.ravel()[seed_cells].astype(np.int64),
         h,
+        t0,
+        1.0 / c**2,
     )
 
     def full(x: npt.NDArray[np.generic], fill: float) -> npt.NDArray[np.generic]:
