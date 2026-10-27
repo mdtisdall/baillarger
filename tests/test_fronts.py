@@ -543,7 +543,13 @@ def test_weight_input_checks() -> None:
     lab = point_seed(5)
     lab[0, 0, 0] = 2
     good = np.ones(3)
-    for bad in ([1.0, 1.0, 0.0], [1.0, -1.0, 1.0], [1.0, np.inf, 1.0], [np.nan, 1, 1]):
+    for bad in (
+        [1.0, 1.0, 0.0],
+        [1.0, -1.0, 1.0],
+        [1.0, np.inf, 1.0],
+        [np.nan, 1, 1],
+        [1.0, 1e-160, 1.0],  # 1 / speed^2 overflows
+    ):
         with pytest.raises(ValueError, match="speed"):
             march(np.eye(3), lab, speed=bad)
     for bad in ([0.0, np.nan, 0.0], [0.0, 0.0, np.inf]):
@@ -555,3 +561,31 @@ def test_weight_input_checks() -> None:
         march(np.eye(3), lab, start_time=np.zeros((3, 1)))
     f = march(np.eye(3), lab, start_time=np.zeros(5), speed=good)  # longer is fine
     assert np.all(f.label >= 0)
+
+
+def test_weights_with_spacing_and_a_wall() -> None:
+    """Speeds act in physical units (anisotropic voxels), and a fast front
+    does not jump a wall: behind a one-voxel wall with a hole, a slow source
+    owns the cortex near it until the fast front has gone round."""
+    n = 21
+    h = np.array([0.2, 0.16, 0.16])
+    lab = -np.ones((n, n, n), np.int64)
+    lab[0] = 0
+    f = march(np.eye(3), lab, spacing=h, start_time=[1.0], speed=[2.5])
+    x = np.arange(n)[:, None, None] * h[0] * np.ones((n, n, n))
+    assert np.allclose(f.arrival, 1.0 + x / 2.5, atol=1e-12)
+    assert np.allclose(f.length, x, atol=1e-12)
+    n = 31
+    mask = np.ones((n, n, n), bool)
+    mask[:, 15, :] = False
+    mask[2:4, 15, 2:4] = True  # a hole far from both sources
+    lab = -np.ones((n, n, n), np.int64)
+    lab[15, 5, 15] = 0  # fast, in front of the wall
+    lab[15, 25, 15] = 1  # slow, behind it
+    m = riemann_from_direction(np.array([0.3, 1.0, 0.2]), 5.0)
+    f = march(m, lab, mask=mask, speed=[10.0, 1.0])
+    assert np.all(f.label[:, :15, :][mask[:, :15, :]] == 0)
+    # straight through the wall, the fast front would win at (15, 20, 15)
+    assert f.label[15, 20, 15] == 1
+    comp, ncomp = ndi.label(f.label == 1, structure=np.ones((3, 3, 3)))
+    assert ncomp == 1

@@ -11,11 +11,12 @@ own speed c_l, so that its arrival is t_l + d_l / c_l, with d_l the metric
 distance along the label's own fronts. Its update solves the scheme below with
 right-hand side 1 / c_l^2. The fronts compete by "crystal growth": a voxel goes
 to the label that reaches it first, and no front enters territory that another
-label has already claimed, so every label's region is connected and contains
-its sources (or is empty, when another front reaches a source before its start
-time). This is not the pure weighted Voronoi partition, whose regions can be
-disconnected: a slow source's region is its pure (Apollonius) region plus a
-tail in its shadow, where the faster front would have to go round it.
+label has already claimed. So the region of a label with one source voxel (or
+a connected set of them) is connected and contains it, or is empty when
+another front reaches the source before its start time. This is not the pure
+weighted Voronoi partition, whose regions can be disconnected: a slow source's
+region is its pure (Apollonius) region plus a tail in its shadow, where the
+faster front would have to go round it.
 
 The scheme (Mirebeau 2014, "Anisotropic fast-marching on cartesian grids
 using lattice basis reduction"; here with Selling's decomposition,
@@ -31,11 +32,10 @@ it stays inside the domain, so a front never jumps a thin gap.
 
 Labels: the update of a voxel is computed separately for each label, from that
 label's accepted neighbours only (with that label's right-hand side), and the
-voxel takes the earliest. Labels
-never mix inside one update, so every voxel's arrival comes from one source,
-and fronts stop where they meet. The best arrival of another label at the time
-a voxel is accepted is kept as well, for locating the meeting surface between
-voxels.
+voxel takes the earliest. Labels never mix inside one update, so every voxel's
+arrival comes from one source, and fronts stop where they meet. The best
+arrival of another label at the time a voxel is accepted is kept as well, for
+locating the meeting surface between voxels.
 
 Accuracy (measured in the tests): the scheme is first order. From a point
 source, whose singularity dominates the error, the arrival is within about 4-8
@@ -500,8 +500,11 @@ def march(
     if not np.all(np.isfinite(t0)):
         raise ValueError("start_time must be finite")
     c = _per_label(speed, 1.0, nlab, "speed")
-    if not np.all(np.isfinite(c) & (c > 0)):
-        raise ValueError("speed must be positive and finite")
+    with np.errstate(divide="ignore", over="ignore"):
+        rhs = 1.0 / c**2
+    # 1 / c^2 must be finite too, or the label's updates are all inf
+    if not np.all(np.isfinite(c) & (c > 0) & np.isfinite(rhs)):
+        raise ValueError("speed must be positive and finite, and 1 / speed^2 finite")
     cells = np.flatnonzero(dom.ravel()).astype(np.int64)
     ids = np.full(dom.size, -1, dtype=np.int64)
     ids[cells] = np.arange(cells.size)
@@ -529,7 +532,7 @@ def march(
         lab.ravel()[seed_cells].astype(np.int64),
         h,
         t0,
-        1.0 / c**2,
+        rhs,
     )
 
     def full(x: npt.NDArray[np.generic], fill: float) -> npt.NDArray[np.generic]:
