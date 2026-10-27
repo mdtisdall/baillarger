@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Run a command and kill its whole process tree if the tree's resident memory
+# exceeds a limit, so that a heavy run cannot take all the machine's memory.
+#
+#   scripts/memguard <limit_GB> <command> [args...]
+#   nix develop --command scripts/memguard 12 uv run python big_run.py
+#
+# The resident memory of the command and all its descendants is read every
+# 0.5 s. When the command ends, the peak goes to stderr. The exit code is the
+# command's, or 137 if memguard killed it.
+#
+# The command runs in the background, so it does not get memguard's stdin:
+# pass a script as a file, not as a heredoc.
+set -u
+
+if [ $# -lt 2 ] || ! [[ $1 =~ ^[0-9]+$ ]] || [ "$1" -eq 0 ]; then
+  echo "usage: scripts/memguard <limit_GB> <command> [args...]" >&2
+  exit 64
+fi
+limit_kb=$(($1 * 1024 * 1024))
+shift
+
+"$@" &
+root=$!
+peak=0
+
+tree() { # the pid and all its descendants, parents first
+  local p=$1
+  echo "$p"
+  for c in $(pgrep -P "$p"); do tree "$c"; done
+}
+
+while kill -0 "$root" 2>/dev/null; do
+  pids=$(tree "$root" | paste -sd, -)
+  rss=$(ps -o rss= -p "$pids" 2>/dev/null | awk '{s += $1} END {print s + 0}')
+  ((rss > peak)) && peak=$rss
+  if ((rss > limit_kb)); then
+    echo "memguard: resident memory $((rss / 1024)) MB exceeds $((limit_kb / 1024)) MB; killing" >&2
+    # children first, so that a parent cannot start a new one
+    for p in $(tree "$root" | awk '{a[NR] = $0} END {for (i = NR; i > 0; i--) print a[i]}'); do
+      kill -9 "$p" 2>/dev/null
+    done
+    wait "$root" 2>/dev/null
+    echo "memguard: peak $((peak / 1024)) MB" >&2
+    exit 137
+  fi
+  sleep 0.5
+done
+wait "$root"
+code=$?
+echo "memguard: peak $((peak / 1024)) MB" >&2
+exit $code
