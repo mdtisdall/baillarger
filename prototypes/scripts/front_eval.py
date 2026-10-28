@@ -186,18 +186,20 @@ def sites(A):
             d["meeting a crest, by class"] = {CT.CLASS[c]: int(np.sum(keep & (cls == c) & (ca >= 0)))
                                               for c in range(5)}
             r[m] = d
-        zf, zc = Z["front"], Z["crest"]
+        zf = Z["front"]
         keep = ~zf["near_face"]
-        assert np.array_equal(zf["tv"], zc["tv"])
-        r["front vs crest: path distance (mm) p50/p90/p99, same outcome"] = agreement(
-            (zc["pos"], zc["ns"], zc["outc"], keep), (zf["pos"], zf["ns"], zf["outc"], keep), vox)
-        ch = {}
-        for a in range(5):
-            for b in range(5):
-                n = int(np.sum(keep & (zc["cls"] == a) & (zf["cls"] == b)))
-                if n and a != b:
-                    ch[f"{CT.CLASS[a]} -> {CT.CLASS[b]}"] = n
-        r["front vs crest: class changes"] = ch
+        for other in ("crest", "traverse"):
+            zc = Z[other]
+            assert np.array_equal(zf["tv"], zc["tv"])
+            r[f"front vs {other}: path distance (mm) p50/p90/p99, same outcome"] = agreement(
+                (zc["pos"], zc["ns"], zc["outc"], keep), (zf["pos"], zf["ns"], zf["outc"], keep), vox)
+            ch = {}
+            for a in range(5):
+                for b in range(5):
+                    n = int(np.sum(keep & (zc["cls"] == a) & (zf["cls"] == b)))
+                    if n and a != b:
+                        ch[f"{CT.CLASS[a]} -> {CT.CLASS[b]}"] = n
+            r[f"front vs {other}: class changes"] = ch
         ta = zf["turn_at"]
         r["front: descending, by class"] = {CT.CLASS[c]: int(np.sum(keep & (zf["cls"] == c) & (ta >= 0)))
                                             for c in range(5)}
