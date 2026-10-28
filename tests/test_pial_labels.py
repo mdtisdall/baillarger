@@ -125,6 +125,23 @@ def test_fluid_fraction_of_a_mixture() -> None:
     assert dk.fluid[0] == pytest.approx(45.0, rel=0.02)
 
 
+def test_darkness_reads_echo_1() -> None:
+    """Voxels at the fluid level in echo 1 only (cortex level in echoes 2 and
+    3): their contrast is negative only through echo 1, by its noise weight,
+    and their fluid fraction is echo 1's share of the weights."""
+    rim = slab_rim()
+    m = np.zeros(rim.shape, bool)
+    m[15, 10:13, 10:13] = True
+    t = synthetic(rim, {}, noise=0.01)
+    t.patch.echoes[m, 0] = FLUID[0]
+    dk = PL.darkness(t)
+    assert PL.ECHOES == (0, 1, 2) and dk.d.shape[0] == 3
+    assert np.all(dk.d[0][m] < -2.5) and np.all(np.abs(dk.d[1:][:, m]) < 0.1)
+    assert np.all(dk.z[m] < -dk.k)
+    w = [((1 - FLUID[i] / CORTEX[i]) / dk.sigma[i]) ** 2 for i in range(3)]
+    assert np.allclose(dk.frac[m], w[0] / sum(w), atol=0.05)
+
+
 # ------------------------------------------------- shape, cells, topology
 
 
