@@ -1012,6 +1012,81 @@ V1V2's three cuts, in ITK-SNAP voxels (1-based, box):
 - The 2,047-voxel cut.
 - Whether a cut should be the smallest cross-section rather than the meeting wall, as in V1V2's third cut.
 
+### The white surface on the image's edge
+
+The column roots are vertices of the white mesh, and the voxel steps read the WM label: the fitted field's T = 0 boundary, the traces' "reached WM" stop, and the cortex mask. To make the root really the GM/WM boundary, the plan has four steps in the WM stage, before anything reaches `column_volume.py`:
+1. measure the image's edge against the mesh;
+2. correct the label where that edge is more than half a voxel from the label's boundary;
+3. remove handles on the corrected label (`wm_changes`);
+4. mesh it, and move each vertex along its normal to the edge, by at most half a voxel, smoothed along the mesh.
+
+That keeps the surface and the label in agreement, and leaves the topology unchanged. **Only step 1 is done.**
+
+**The measure** (`baillarger.wm_edge`):
+- *Normalization.* `tissue_contrast` divides the echo by its normalized convolution over the WM (8 voxels), minus 1. This removes a slow bias field without moving the edge.
+- *Where the edge is.* `edge_offsets` samples the gradient (Gaussian at 0.1 mm, cubic spline) along each vertex's outward normal over ±0.3 mm. The offset is where the WM-to-GM derivative peaks; positive means the edge is outside the mesh, in the cortex. The data sets the sign: in echoes 2 and 3 the WM is darker.
+
+Three choices move the edge, and the tests pin each down:
+- **Interpolation.** With linear interpolation the derivative is piecewise constant, and its peak falls on a voxel face: up to a voxel off. Finding 28's measure used linear interpolation. The cubic spline leaves under 0.1 voxel on a step one voxel wide.
+- **The log.** The log of a blurred step is steepest nearer its dark side: 0.03 mm for a 40 % step 0.24 mm wide.
+- **The divisor.** A trend over WM and cortex together contains the step itself, which moves the edge by 0.012 mm. A trend over the WM alone does not contain it.
+
+Two biases are left and not corrected:
+- On a curved edge, the derivative scale moves the edge toward the concave side by scale² H: 0.01 mm at H = 1/mm.
+- On a thin WM blade, the blurred profile's steepest point lies outside the blade (see the last list below).
+
+**Tests** (`tests/test_wm_edge.py`, 10, all exact or with a stated error):
+- an oblique plane, within 0.002 mm;
+- a step one voxel wide at 21 sub-voxel positions, under 0.1 voxel;
+- bright WM in place of dark (sign −1, same offsets);
+- an edge outside the window (flagged);
+- anisotropic voxels;
+- the white mesh of two balls under a sphere 0.6 voxel larger, at two derivative scales: the ray's distance to the sphere less scale² H, within 0.005 mm;
+- a bias field that also varies across the edge: the same edge as the bare step, within 0.001 mm.
+
+**The two sites** (`prototypes/scripts/wm_edge_maps.py`; the handle-free label, its `white_mesh` and the same boxes as the turn diagnostic; vertices ≥ 2 mm from the box faces; 0.16 mm voxels, so half a voxel is 0.08 mm; echo 2 unless stated):
+
+| | V1V2 banks | M1S1 |
+|---|---|---|
+| vertices, roots | 308,365, 99,953 | 339,215, 109,869 |
+| no edge within ±0.3 mm | 11.7 % | 3.5 % |
+| offset p5 / 25 / 50 / 75 / 95, mm | −0.21 / −0.06 / +0.02 / +0.10 / +0.23 | −0.10 / 0.00 / +0.06 / +0.12 / +0.22 |
+| beyond half a voxel: outside / inside | 30.8 % / 20.6 % | 41.8 % / 7.4 % |
+| echo 3 − echo 2, p25 / 50 / 75 mm; correlation | −0.02 / 0.00 / +0.03; 0.81 | −0.03 / 0.00 / +0.03; 0.66 |
+
+- **Half the vertices are more than half a voxel from the image's edge.** That is far more than finding 28's medians suggested. The two echoes agree vertex by vertex, so the spread is in the image and the label, not in the measure's noise. Roots and all vertices give the same numbers.
+- **The label lies inside the image's edge at convex white surface.** The median offset by mean curvature H (1/mm, at 0.48 mm, > 0 convex):
+
+  | H (1/mm) | −0.75 to −0.25 | −0.25 to 0.25 | 0.25 to 0.75 | 0.75 to 1.5 |
+  |---|---|---|---|---|
+  | V1V2, mm | −0.05 | +0.02 | +0.10 | +0.12 |
+  | M1S1, mm | −0.01 | +0.06 | +0.12 | +0.16 |
+
+  At the crowns the WM label is thinner than the image's WM. In the fundi it is about right, and at V1V2 slightly too thick.
+- **Where the cortex is most coherent (> 0.8), the edge lies further out:** median +0.07 mm (V1V2) and +0.11 mm (M1S1), against about 0 to +0.03 elsewhere. The edge is also steeper there. Where coherence is low, the edge is weaker and more often outside the window: 49 % below coherence 0.2 at V1V2, mostly next to missing or other tissue.
+- **By the root's trace outcome**, the median offset is:
+  - +0.06 / +0.07 mm (V1V2 / M1S1) for traces crossing to the far WM (fused or kissing cortex);
+  - +0.03 / +0.08 mm for traces ending in fluid;
+  - −0.03 / +0.01 mm for traces that turned.
+
+  The turning roots are where the label is nearest the edge or inside it.
+- **What the thin-blade bias can explain.** For a WM blade of width w under a Gaussian blur s, the steepest point lies beyond the blade's edge by:
+  - w = 0.16 mm: 0.05 mm (s = 0.12) or 0.09 mm (s = 0.16);
+  - w = 0.32 mm: 0.03 mm (s = 0.16);
+  - w ≥ 0.48 mm: 0.01 mm or less.
+
+  M1S1's WM is thick, and its offset is +0.06 mm almost everywhere, so this bias explains little of what is measured. Still, step 2 must not grow thin blades to the steepest point without allowing for it.
+
+**Views** (in `scratch/wm-edge`, not kept):
+- `figures/wm_edge_<site>_maps.png`: the histogram; the offset by curvature, by coherence and by outcome; the fraction with no edge; the slope.
+- `figures/wm_edge_<site>_planes.png`: three planes of echo 2, with the label and the vertices coloured by offset.
+- `wm_edge_<site>.vtk`: the mesh with the offsets, curvature and coherence, in ITK-SNAP world coordinates.
+- `wm_edge_<site>_overlay.nii.gz`: at each vertex's voxel, 1 means the edge is outside by more than half a voxel, 2 inside by more than half a voxel, 3 no edge in the window. The code-3 clusters (for example M1S1, plane i = 70, top right) are where the label may be off by more than 0.3 mm.
+
+**Open, before step 2:**
+- Whether the convex-crown offset is the label (the aseg's WM too thin at crowns) or anatomy: deep-layer myelin moving the intensity edge into the cortex where the layers are strongest. The coherence pattern fits both.
+- What "the GM/WM boundary" should mean for the roots, if not the steepest point of echo 2.
+
 ### Across both faces
 
 - **The principle survives at V1V2 and fails as estimated at M1S1** (principle, roles, estimators): the same estimators with the same settings place a V1 contact within about half a voxel and miss an M1/S1 contact by 3–5 voxels, while placing open-cortex joins at both within a third of a voxel.
