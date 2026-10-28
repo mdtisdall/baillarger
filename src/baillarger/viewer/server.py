@@ -22,12 +22,9 @@ Requests:
   /streamlines?i=&radius= (the traces from and to trace i, by kind and class);
   /tracts/<i>/<radius>/<kind>_<class>.tck (the traces of one group, as .tck);
   /overview/<class>/<every>.tck (every k-th shown trace of a class);
-  /echo2.nii.gz, /white.gii, /gm.gii (world mm, for the volume pane);
-  with --labels (baillarger.viewer.labels): /labels/list, /labels.nii.gz.
+  /echo2.nii.gz, /white.gii, /gm.gii (world mm, for the volume pane).
 - POST /state {from, patch}: merge patch into the state; every page gets
   {from, seq, patch}.
-- POST /labels/decide {from, id, status}, /labels/brush {from, mm, radius, label}:
-  change the pial-label review and save it; every page gets the new labels_seq.
 """
 
 import argparse
@@ -43,7 +40,6 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 from baillarger.viewer.data import Site
-from baillarger.viewer.labels import LabelReview
 
 STATIC = Path(__file__).parent / "static"
 TYPES = {
@@ -97,7 +93,6 @@ def round3(a: Any) -> list[float | None]:
 class Handler(BaseHTTPRequestHandler):
     site: Site
     shared: Shared
-    labels: LabelReview | None = None
     lock = threading.Lock()  # one site computation at a time
     groups: dict[tuple[int, float], dict[str, list[int]]] = {}
 
@@ -230,61 +225,23 @@ class Handler(BaseHTTPRequestHandler):
             self.binary(s.white_bytes)
         elif u.path == "/gm.gii":
             self.binary(s.gm_bytes)
-        elif u.path == "/labels/list":
-            self.json(lambda: self.review().rows())
-        elif u.path == "/labels.nii.gz":
-            self.binary(lambda: self.review().overlay_bytes())
         else:
             self.send_error(404)
-
-    def review(self) -> LabelReview:
-        if self.labels is None:
-            raise ValueError("no label changes: start the viewer with --labels")
-        return self.labels
-
-    def label_change(self, fn: Any, sender: str) -> dict[str, Any]:
-        out: dict[str, Any] = fn()
-        self.shared.update(sender, dict(labels_seq=out["seq"]))
-        return out
 
     def do_POST(self) -> None:
         n = int(self.headers.get("Content-Length") or 0)
         req = json.loads(self.rfile.read(n)) if n else {}
-        sender = str(req.get("from", ""))
-        if self.path == "/labels/decide":
-            self.json(
-                lambda: self.label_change(
-                    lambda: self.review().decide(int(req["id"]), str(req["status"])),
-                    sender,
-                )
-            )
-            return
-        if self.path == "/labels/brush":
-            self.json(
-                lambda: self.label_change(
-                    lambda: self.review().brush(
-                        [float(x) for x in req["mm"]],
-                        int(req.get("radius", 1)),
-                        str(req["label"]),
-                    ),
-                    sender,
-                )
-            )
-            return
         if self.path != "/state":
             self.send_error(404)
             return
-        seq = self.shared.update(sender, dict(req.get("patch", {})))
+        seq = self.shared.update(str(req.get("from", "")), dict(req.get("patch", {})))
         self.send(json.dumps(dict(seq=seq)).encode(), "application/json")
 
 
-def serve(
-    site: Site, port: int, labels: LabelReview | None = None
-) -> ThreadingHTTPServer:
+def serve(site: Site, port: int) -> ThreadingHTTPServer:
     Handler.site = site
     Handler.shared = Shared()
     Handler.groups = {}
-    Handler.labels = labels
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     srv.daemon_threads = True
     return srv
@@ -301,19 +258,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--pia", type=Path, help="pia_<name>.npz: single-surface horizon")
     ap.add_argument("--priority", type=Path, help="edit_priority_<tag>.npz")
     ap.add_argument("--echo", type=Path, help="echo 2 of the full grid (default: data)")
-    ap.add_argument(
-        "--labels",
-        type=Path,
-        help="pial_labels_<name>.npz (baillarger.pial_labels), saved in place",
-    )
     ap.add_argument("--port", type=int, default=8790)
     a = ap.parse_args(argv)
     t0 = time.time()
     site = Site(a.column_volume, a.cache, a.joint, a.pia, a.priority, a.echo, log=print)
-    review = None
-    if a.labels:
-        review = LabelReview(a.labels, site.lo, site.shape, site.affine)
-    srv = serve(site, a.port, review)
+    srv = serve(site, a.port)
     print(
         f"serving on http://127.0.0.1:{a.port}/ ({time.time() - t0:.0f} s)", flush=True
     )

@@ -35,13 +35,6 @@
   #log { font-size: 11px; color: var(--mute); white-space: pre-wrap; padding: 2px 8px 4px; max-height: 4.5em; overflow-y: auto; flex: none; }
   .key span { display: inline-block; margin-right: 10px; font-size: 11px; }
   .sw { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 3px; }
-  #ltable { overflow-y: auto; flex: 1; min-height: 0; font-size: 12px; }
-  #ltable table { border-collapse: collapse; width: 100%; }
-  #ltable td, #ltable th { padding: 1px 5px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
-  #ltable th { position: sticky; top: 0; background: var(--panel); color: var(--mute); font-weight: 600; }
-  #ltable tr { cursor: pointer; }
-  #ltable tr.cur { background: #3a2f48; }
-  .st-proposed { color: #ff6b6b; } .st-accepted { color: #7cff6b; } .st-rejected { color: #ffd23f; }
   #vstat { position: absolute; left: 6px; top: 4px; font-size: 11px; background: #000a; padding: 1px 6px; border-radius: 4px;
            pointer-events: none; white-space: pre-wrap; }
 </style>
@@ -57,8 +50,7 @@
     <option value="volume,surface,map,sections">all</option>
     <option value="volume">volume</option><option value="surface,map">surface + map</option>
     <option value="sections">sections</option><option value="volume,sections">volume + sections</option>
-    <option value="surface,map,sections">surface, map, sections</option>
-    <option value="volume,labels">volume + labels</option><option value="labels">labels</option></select></label>
+    <option value="surface,map,sections">surface, map, sections</option></select></label>
   <button id="newwin" title="open another window with these panes">new window</button>
   <span id="sync">connecting…</span>
 </div>
@@ -73,9 +65,6 @@
       <label><input type="checkbox" id="vfrom" checked> from</label><label><input type="checkbox" id="vto" checked> to</label>
       <label><input type="checkbox" id="vover"> all traces (every 4th)</label>
       <label><input type="checkbox" id="vpts" checked> points</label>
-      <span id="vlab" style="display:none"><label>labels <input type="range" id="vlabop" min="0" max="1" step="0.05" value="0.6" style="width:60px"></label>
-        <label>brush <select id="brush"><option value="">off</option><option value="fluid">to fluid</option><option value="cortex">to cortex</option></select></label>
-        <label>radius <select id="bradius"><option>0</option><option selected>1</option><option>2</option><option>3</option></select></label></span>
     </div>
     <div class="key pbar" id="vkey"></div>
     <div class="fill"><canvas id="nv"></canvas><div id="vstat"></div>
@@ -91,22 +80,6 @@
     <div class="fill"><canvas id="map"></canvas>
       <div id="legend"><div id="lname"></div><canvas id="lbar" width="160" height="10"></canvas>
         <div style="display:flex;justify-content:space-between"><span id="lmin"></span><span id="lmax"></span></div></div></div>
-  </div>
-  <div class="pane" id="p-labels">
-    <h2><span>Pial labels: proposed relabels (cortex to fluid)</span><span id="lcount"></span></h2>
-    <div class="pbar">
-      <label>show <select id="lfilter"><option value="proposed">proposed</option><option value="open">proposed + accepted</option>
-        <option value="all" selected>all</option><option value="rejected">rejected</option></select></label>
-      <button id="lacc" title="a">accept</button><button id="lrej" title="r">reject</button><button id="lund" title="u">back to proposed</button>
-      <button id="lprev" title="k">prev</button><button id="lnext" title="j">next</button>
-    </div>
-    <div class="key pbar">
-      <span><i class="sw" style="background:#ff4040;height:8px"></i>proposed</span><span><i class="sw" style="background:#40ff40;height:8px"></i>accepted</span>
-      <span><i class="sw" style="background:#ffd000;height:8px"></i>rejected</span><span><i class="sw" style="background:#40c0ff;height:8px"></i>brush: fluid</span>
-      <span><i class="sw" style="background:#ff40ff;height:8px"></i>brush: cortex</span>
-    </div>
-    <div id="ltable"></div>
-    <div class="help" style="position:static;padding:2px 8px">row: crosshair to the cell · keys: j / k next / previous, a accept, r reject, u back to proposed · brush (volume pane): click a slice</div>
   </div>
   <div class="pane" id="p-sections">
     <h2><span>Sections along the traces</span></h2>
@@ -152,7 +125,7 @@ const has = p => PANES.includes(p);
 
 // ---------------------------------------------------------------- layout
 function layout() {
-  for (const p of ["volume", "surface", "map", "sections", "labels"]) $("p-" + p).style.display = has(p) ? "" : "none";
+  for (const p of ["volume", "surface", "map", "sections"]) $("p-" + p).style.display = has(p) ? "" : "none";
   const n = PANES.length, m = $("main");
   m.style.setProperty("--cols", n >= 3 ? 2 : n);
   m.style.gridTemplateRows = n >= 3 ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(0, 1fr)";
@@ -172,7 +145,6 @@ async function apply(st) {
     if ("layer" in st && st.layer && st.layer !== $("layer").value) { $("layer").value = st.layer; await loadLayer(); }
     if ("crosshair" in st && st.crosshair) { CROSS = st.crosshair; moveVolumeCrosshair(st.crosshair); }
     if ("selection" in st) await setSelection(st.selection, st.frame || null);
-    if ("labels_seq" in st && LAB.on && st.labels_seq !== LAB.seq) await loadLabels();
   } finally { applying = false; }
 }
 function connect() {
@@ -400,13 +372,11 @@ async function initVolume() {
   nv.onLocationChange = d => {
     const mm = Array.from(d.mm).slice(0, 3);
     if (NV.shift) { const back = NV.shift.back; NV.shift = null; volumeShiftClick(mm, back); return; }
-    if (NV.paint) { NV.paint = false; brushAt(mm); }
     $("vstat").textContent = `crosshair ${mm.map(x => x.toFixed(2)).join(", ")} mm  voxel ${d.vox.join(", ")}`;
     if (!applying && !NV.moving) { CROSS = mm; share({ crosshair: mm }); }
   };
   // a shift-click: note it before NiiVue moves its crosshair, then treat that move as a WM click
-  $("nv").addEventListener("pointerdown", e => { NV.shift = e.shiftKey && e.button === 0 ? { back: CROSS } : null;
-                                                  NV.paint = !e.shiftKey && e.button === 0 && LAB.on && $("brush").value !== ""; }, true);
+  $("nv").addEventListener("pointerdown", e => { NV.shift = e.shiftKey && e.button === 0 ? { back: CROSS } : null; }, true);
   await loadPoints();
   log(`volume pane ready (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
 }
@@ -546,79 +516,6 @@ function drawSection(c, S, title, h) {
 $("half").onchange = () => CUR !== null && showTrace(CUR);
 $("dmax").onchange = () => SEC && drawSections();
 
-// ---------------------------------------------------------------- pial labels (baillarger.viewer.labels)
-const LAB = { on: false, rows: [], seq: -1, cur: -1, vol: null };
-const LABCOL = { R: [0, 255, 64, 255, 64, 255, 150], G: [0, 64, 255, 208, 192, 64, 80], B: [0, 64, 64, 0, 255, 255, 255],
-                 A: [0, 255, 255, 255, 255, 255, 255], I: [0, 1, 2, 3, 4, 5, 6],
-                 labels: ["", "proposed", "accepted", "rejected", "brush: fluid", "brush: cortex", "dark, no cell"] };
-function shownRows() {
-  const f = $("lfilter").value;
-  return LAB.rows.filter(r => f === "all" || r.status === f || (f === "open" && r.status !== "rejected"));
-}
-function drawLabels() {
-  const rows = shownRows(), c = LAB.counts;
-  $("lcount").textContent = `${c.proposed} proposed · ${c.accepted} accepted · ${c.rejected} rejected · ${LAB.brush} brush voxels`;
-  const h = ["rank", "status", "auto", "kind", "voxels", "columns", "crest", "fluid frac", "touches fluid", "Betti local", "ITK-SNAP"];
-  let t = "<table><tr>" + h.map(x => `<th>${x}</th>`).join("") + "</tr>";
-  for (const r of rows) {
-    t += `<tr data-id="${r.id}" class="${r.id === LAB.cur ? "cur" : ""}"><td>${r.rank + 1}</td><td class="st-${r.status}">${r.status}</td><td>${r.auto}</td>`
-       + `<td>${r.kind}</td><td>${r.voxels}</td><td>${r.columns}</td><td>${r.crest}</td><td>${r.frac.toFixed(2)}</td><td>${r.touches ? "yes" : ""}</td>`
-       + `<td>${r.betti[0].join(",")} → ${r.betti[1].join(",")}</td><td>${r.itksnap.join(", ")}</td></tr>`;
-  }
-  $("ltable").innerHTML = t + "</table>";
-  for (const tr of $("ltable").querySelectorAll("tr[data-id]")) tr.onclick = () => goCell(+tr.dataset.id);
-}
-async function loadLabels() {
-  const L = await get("/labels/list");
-  Object.assign(LAB, { rows: L.rows, counts: L.counts, brush: L.brush, seq: L.seq });
-  if (has("labels")) drawLabels();
-  await loadLabelOverlay();
-}
-async function loadLabelOverlay() {
-  const nv = NV.nv; if (!nv) return;
-  if (LAB.vol) { nv.removeVolume(LAB.vol); LAB.vol = null; }
-  await nv.addVolumeFromUrl({ url: `/labels.nii.gz?seq=${LAB.seq}`, name: `labels${LAB.seq}.nii.gz`, opacity: +$("vlabop").value });
-  LAB.vol = nv.volumes[nv.volumes.length - 1];
-  LAB.vol.setColormapLabel(LABCOL); nv.updateGLVolume();
-}
-function goCell(id) {
-  const r = LAB.rows.find(x => x.id === id); if (!r) return;
-  LAB.cur = id; if (has("labels")) drawLabels();
-  const el = $("ltable").querySelector("tr.cur"); if (el) el.scrollIntoView({ block: "nearest" });
-  crossHere(r.world_mm);
-  $("info").textContent = `review cell ${r.id} (rank ${r.rank + 1}): ${r.status}, auto ${r.auto}; ${r.kind}, ${r.voxels} voxels; `
-    + `${r.columns} columns and ${r.crest} crest voxels; median fluid fraction ${r.frac}; local Betti of the tissue ${r.betti[0]} → ${r.betti[1]}; `
-    + `ITK-SNAP (full grid) ${r.itksnap.join(", ")}`;
-}
-function step(d) {
-  const rows = shownRows(); if (!rows.length) return;
-  const k = rows.findIndex(r => r.id === LAB.cur);
-  goCell(rows[Math.min(rows.length - 1, Math.max(0, k < 0 ? 0 : k + d))].id);
-}
-async function decide(status) {
-  if (LAB.cur < 0) return;
-  const r = await fetch("/labels/decide", { method: "POST", headers: { "Content-Type": "application/json" },
-                                             body: JSON.stringify({ from: ME, id: LAB.cur, status }) });
-  const j = await r.json(); if (j.error) { log("error: " + j.error); return; }
-  await loadLabels(); if (status !== "proposed") step(1);
-}
-async function brushAt(mm) {
-  const r = await fetch("/labels/brush", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ from: ME, mm, radius: +$("bradius").value, label: $("brush").value }) });
-  const j = await r.json(); if (j.error) { log("error: " + j.error); return; }
-  log(`brush: ${j.voxels} voxels to ${$("brush").value} at box voxel ${j.centre_box0.join(", ")}`);
-  await loadLabels();
-}
-$("lacc").onclick = () => decide("accepted"); $("lrej").onclick = () => decide("rejected"); $("lund").onclick = () => decide("proposed");
-$("lnext").onclick = () => step(1); $("lprev").onclick = () => step(-1);
-$("lfilter").onchange = drawLabels;
-$("vlabop").oninput = () => { if (LAB.vol) { LAB.vol.opacity = +$("vlabop").value; NV.nv.updateGLVolume(); } };
-document.addEventListener("keydown", e => {
-  if (!LAB.on || e.target.tagName === "SELECT" || e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey) return;
-  const k = { j: () => step(1), k: () => step(-1), a: () => decide("accepted"), r: () => decide("rejected"), u: () => decide("proposed") }[e.key];
-  if (k) { e.preventDefault(); k(); }
-});
-
 // ---------------------------------------------------------------- start
 window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections")) drawSections(); });
 (async () => {
@@ -632,9 +529,6 @@ window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections
   if (has("map")) fitMap();
   await loadLayer();
   if (has("volume")) await initVolume();
-  try { await get("/labels/list"); LAB.on = true; } catch (e) { LAB.on = false; }
-  if (LAB.on) { $("vlab").style.display = ""; await loadLabels(); }
-  else if (has("labels")) $("ltable").textContent = "no label changes: start the viewer with --labels pial_labels_<name>.npz";
   connect();
   log(`loaded ${META.n} traces; tracer ${META.tracer}; WM label ${META.wm_label}`);
 })();

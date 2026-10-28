@@ -1022,7 +1022,7 @@ On an off-centre 2-voxel slot, T now rises in each bank up to the fluid, with no
 
 ### Pial-side label refinement
 
-A GM refinement step at the front of the pipeline, like the WM one: `baillarger.pial_labels` finds voxels that the aseg labels cortex but the image shows are fluid, writes a change file (`LabelChanges`, the counterpart of `baillarger.white.WMChanges`), and `column_traces.load_tissue(..., pial_changes=...)` applies it after the handle-free WM. Everything downstream (T, the crest, the columns, the viewer) reads the refined labels. Clear cases are accepted automatically; the rest wait in a ranked review queue in the viewer.
+A GM refinement step at the front of the pipeline, like the WM one: `baillarger.pial_labels` finds voxels that the aseg labels cortex but the image shows are fluid, writes a change file (`LabelChanges`, the counterpart of `baillarger.white.WMChanges`), and `column_traces.load_tissue(..., pial_changes=...)` applies it after the handle-free WM. Everything downstream (T, the crest, the columns, the viewer) reads the refined labels. Clear cases are accepted automatically; the rest wait in a ranked review queue (statuses in the change file; the review pane in `baillarger.viewer` is a separate step).
 
 **What the image shows.** At V1V2 the fluid is fomblin at the noise floor (45 in every echo, against 514 for cortex in echo 2). The aseg's cortex runs one to three voxels into it around most sulci, and fills the thin channels of sulci it fused, such as the user's marked "contact" at (270, 133, 139). The vessel the user identified at (324, 146, 139) is a one-voxel-wide dotted dark line, partial-volumed.
 
@@ -1047,12 +1047,7 @@ A GM refinement step at the front of the pipeline, like the WM one: `baillarger.
    - The rest are proposed, the review queue: hidden channels, and cells that would open a cavity, a tunnel or a split (as a channel between two banks does).
 6. **Ranking.** By the columns of a column volume that pass through the cell, then the crest voxels within one voxel of it, then size. Descriptors per cell: shape (Westin: tube, sheet or blob), fluid fraction, contrast, and local Betti numbers before and after.
 
-**Review in the viewer:** `python -m baillarger.viewer <column volume> --cache DIR --labels pial_labels_<site>.npz`, panes "volume + labels".
-- The labels pane lists the cells ranked, with status, kind, columns, crest hits, fluid fraction and topology. A row moves the crosshair to the cell, in every window.
-- Keys: j / k for next / previous; a, r, u for accept, reject, back to proposed.
-- The volume pane shows the overlay (proposed red, accepted green, rejected yellow, brush blue / magenta). A brush (to fluid or back to cortex, radius 0–3 voxels) paints a voxel ball at a clicked point.
-- Every change is saved at once to the change file; the first change keeps `.orig.npz`.
-- Checked in the browser at both sites: accept, reject, brush, the saved file and the overlay.
+**The step on its own:** `python -m baillarger.pial_labels propose --out DIR --name NAME --lo I J K --hi I J K --wm-changes FILE [--columns column_volume_<name>.npz]`, as the WM step runs with `python -m baillarger.white changes`. It writes `pial_labels_<NAME>.npz` (the change file), a `.json` summary with the cells in rank order, and an ITK-SNAP overlay on the box grid. A status can be changed and brush edits added with `LabelChanges.with_status` and `with_brush`.
 
 `column_volume.py --label-changes FILE [--proposed]` applies the file: the accepted cells and brush edits, and with `--proposed` the unreviewed queue too.
 
@@ -1064,7 +1059,7 @@ A GM refinement step at the front of the pipeline, like the WM one: `baillarger.
 - the fluid fraction of a known mixture;
 - shapes, cells, the Betti change of a slot, a cavity and a tunnel, and traces counted per cell;
 - the change file's round trip, application order, WM protection and overlay;
-- `tissue` with changes, and the review backend.
+- `tissue` with changes.
 
 **Proposals:**
 - **The stria trap on fused banks.** A hidden fluid channel at the WM midline is proposed (queue: it reaches no fluid). Two dark bands, one per bank, 90 % of whose voxels are dark, are not proposed.
