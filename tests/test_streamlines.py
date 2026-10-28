@@ -226,3 +226,19 @@ def test_ascend_prefers_a_label_to_a_flat_field_to_a_face() -> None:
     assert S.ascend(flat, labels, near, x0, VOX, 10, never)[2][0] == S.RIDGE
     labels[:] = 1
     assert S.ascend(flat, labels, near, x0, VOX, 10, never)[2][0] == S.FLUID
+
+
+def test_descend_reaches_the_wm_down_a_linear_field() -> None:
+    """T = distance from the WM plane x = 4.5: from x = 20, unit steps of
+    STEP_MM straight down, ending on the first sample in the WM."""
+    shape = (30, 12, 12)
+    labels = np.zeros(shape, np.int16)
+    labels[:5] = 2
+    T = (np.indices(shape)[0] - 4.5) * 0.16
+    pos, ns, out = S.descend(
+        T, labels, np.full(shape, 99.0), np.array([[20.1, 6.0, 6.0]]), VOX, 300
+    )
+    h = S.STEP_MM / 0.16
+    assert out[0] == S.WM
+    assert np.round(pos[0, ns[0] - 1, 0]) == 4
+    assert np.allclose(np.diff(pos[0, : ns[0], 0]), -h, atol=1e-4)

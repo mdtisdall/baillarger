@@ -59,8 +59,8 @@ import numpy.typing as npt
 from scipy import ndimage as ndi
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.csgraph import dijkstra
-from scipy.spatial import cKDTree
 
+from baillarger import mesh_graph as G
 from baillarger import streamlines as S
 from baillarger.data import Patch, load_box
 from baillarger.frame import missing_tissue
@@ -85,9 +85,11 @@ TREND = 4.0
 MESH_SIGMA = 2.0
 #: The blended start's length at coherence 1 (mm).
 BLEND_MM = 0.3
-#: Root patch spacing (voxels), cost ratio across the normal, the distance
-#: along the white surface that separates two banks (mm), and the box-face
-#: margin (mm).
+#: Root patch spacing on the white mesh (mm), the reach of the patch
+#: distances (mm), the one pass's seed patch spacing (voxels) and its cost
+#: ratio across the normal, the distance along the white surface that
+#: separates two banks (mm), and the box-face margin (mm).
+PATCH_MM, LIMIT_MM = 0.96, 8.0
 PATCH, RATIO, SAME_MM, FACE_MM = 6, 3.0, 5.0, 2.0
 #: Samples per trace: 8 mm at STEP_MM.
 NMAX = 201
@@ -365,41 +367,53 @@ def run(
 
 @dataclass
 class OnePass:
-    """The equal-arrival one pass, its root patches and their distances."""
+    """The equal-arrival one pass, for the fallback."""
 
     setup: Setup
     fronts: Fronts
-    #: patch centre to patch centre along the white surface (mm), inf beyond
-    #: the limit
-    D: F32
     #: the arrival, 0 in the WM and its maximum where no front arrived
     u: F64
-    tree: cKDTree
-    seed_patch: I64
-
-    def patch_at(self, x: npt.ArrayLike) -> I64:
-        """The root patch of the nearest seed voxel to each position."""
-        out: I64 = self.seed_patch[self.tree.query(np.asarray(x, np.float64))[1]]
-        return out
+    #: the mesh patch of each of the pass's seed patches (by its centre seed)
+    to_mesh_patch: I64
 
 
 def one_pass(
-    t: Tissue, direction: F64, limit_mm: float = 8.0, chunk: int = 200
+    t: Tissue, direction: F64, v: F64, nrm: F64, patches: "Patches"
 ) -> OnePass:
     """Step 4's one pass along direction (oriented_normal of the data)."""
     wm = t.wm
-    h = float(np.mean(t.vox))
     s = setup(wm, t.ctx, direction=direction)
     f_eq = run(s)
-    seed_pos = np.stack(np.unravel_index(s.sflat, wm.shape), -1).astype(float)
-    D = np.full((s.npatch, s.npatch), np.inf, np.float32)
-    for a in range(0, s.npatch, chunk):
-        d = dijkstra(s.graph, indices=s.rep[a : a + chunk], limit=limit_mm / h)
-        D[a : a + chunk] = d[:, s.rep] * h
     arr = f_eq.arrival
     fin = np.isfinite(arr)
     u = np.where(wm, 0.0, np.where(fin, arr, np.nanmax(arr[fin])))
-    return OnePass(s, f_eq, D, u, cKDTree(seed_pos), s.patch.ravel()[s.sflat])
+    centre = np.stack(np.unravel_index(s.sflat[s.rep], wm.shape), -1).astype(float)
+    inward = -s.direction.reshape(-1, 3)[s.sflat[s.rep]]
+    j = G.crossing_vertex(v, nrm, centre, inward, t.vox)
+    return OnePass(s, f_eq, u, patches.of_vertex[j])
+
+
+# ---------------------------------------------------------------- patches
+
+
+@dataclass
+class Patches:
+    """Geodesic Voronoi patches on the white mesh, for step 5's bank rule."""
+
+    graph: csr_matrix
+    #: the centre vertex of each patch
+    rep: I64
+    #: the patch of each vertex
+    of_vertex: I64
+    #: patch centre to patch centre along the mesh (mm), inf beyond LIMIT_MM
+    D: F32
+
+
+def mesh_patches(v: F64, f: I64, vox: F64) -> Patches:
+    """Patches PATCH_MM apart on the white mesh and their distances."""
+    g = G.edge_graph(v, f, vox)
+    rep, of_vertex = G.geodesic_patches(g, PATCH_MM)
+    return Patches(g, rep, of_vertex, G.patch_distances(g, rep, LIMIT_MM))
 
 
 # ---------------------------------------------------------------- traces
@@ -429,11 +443,14 @@ class ColumnTraces:
     #: 0 primary, 1 fallback
     fallback: I8
     cls: I8
+    #: the patches of the root vertex and of the end's vertex (where the
+    #: trace crossed the white mesh, by mesh_graph.crossing_vertex)
     root_patch: I64
     end_patch: I64
     near_face: Bool
     #: the data's coherence (zero outside the cortex)
     coh: F64
+    patches: Patches
     one_pass: OnePass
     #: the fitted field's solver info, if any
     notes: dict[str, Any]
@@ -462,6 +479,50 @@ def classify(
     return cls
 
 
+def finish(
+    t: Tissue,
+    v: F64,
+    nrm: F64,
+    tv: I64,
+    P: Patches,
+    op: OnePass,
+    pos: F32,
+    ns1: I64,
+    out1: I64,
+) -> tuple[F32, I64, I64, I8, I64, I8]:
+    """Steps 4 and 5 after the primary trace: the fallback where it turned or
+    reached the cap, and the classes. pos is updated in place. Returns pos,
+    the sample counts, the final outcomes, the fallback flags, the end
+    patches and the classes."""
+    root_patch = P.of_vertex[tv]
+    x0 = v[tv]
+    fb = np.flatnonzero((out1 == S.TURN) | (out1 == S.LENGTH))
+    lab_eq = op.fronts.label
+
+    def far(i_paths: I64, q: I64) -> Bool:
+        lab = lab_eq[tuple(q.T)]
+        rp = root_patch[fb[i_paths]]
+        mp = op.to_mesh_patch[np.maximum(lab, 0)]
+        out: Bool = (lab >= 0) & (P.D[rp, mp] > SAME_MM)
+        return out
+
+    ns, outc = ns1.copy(), out1.copy()
+    if fb.size:
+        pos2, ns2, out2 = S.ascend(op.u, t.labels, t.dface, x0[fb], t.vox, NMAX, far)
+        pos[fb] = pos2
+        ns[fb] = ns2
+        outc[fb] = out2
+    fallback = np.zeros(len(tv), np.int8)
+    fallback[fb] = 1
+    k = np.arange(len(tv))
+    endp = pos[k, ns - 1].astype(float)
+    last = endp - pos[k, np.maximum(ns - 2, 0)]
+    last = np.where((ns > 1)[:, None], last, -nrm[tv])  # one sample: inward
+    end_patch = P.of_vertex[G.crossing_vertex(v, nrm, endp, last, t.vox)]
+    cls = classify(outc, P.D[root_patch, end_patch])
+    return pos, ns, outc, fallback, end_patch, cls
+
+
 def trace_columns(t: Tissue, tracer: str = "fitted_blend") -> ColumnTraces:
     """Steps 2-5 on a box."""
     if tracer not in TRACERS:
@@ -472,36 +533,20 @@ def trace_columns(t: Tissue, tracer: str = "fitted_blend") -> ColumnTraces:
     del nh
     v, f, nrm = white_mesh(t.wm)
     tv = root_vertices(v, nrm)
-    op = one_pass(t, direction)
+    P = mesh_patches(v, f, t.vox)
+    op = one_pass(t, direction, v, nrm, P)
     del direction
-    root_patch = op.patch_at(v[tv])
+    root_patch = P.of_vertex[tv]
     x0 = v[tv]
     field, notes = primary_tensor(tracer, base, t)
     del base
     blend = BLEND_MM if tracer == "fitted_blend" else None
     pos, ns1, out1 = S.trace(field, t.labels, t.dface, x0, nrm[tv], t.vox, NMAX, blend)
     del field
-    fb = np.flatnonzero((out1 == S.TURN) | (out1 == S.LENGTH))
-    lab_eq = op.fronts.label
-
-    def far(i_paths: I64, q: I64) -> Bool:
-        lab = lab_eq[tuple(q.T)]
-        rp = root_patch[fb[i_paths]]
-        out: Bool = (lab >= 0) & (op.D[rp, np.maximum(lab, 0)] > SAME_MM)
-        return out
-
     end1 = pos[np.arange(len(tv)), ns1 - 1].copy()
-    ns, outc = ns1.copy(), out1.copy()
-    if fb.size:
-        pos2, ns2, out2 = S.ascend(op.u, t.labels, t.dface, x0[fb], t.vox, NMAX, far)
-        pos[fb] = pos2
-        ns[fb] = ns2
-        outc[fb] = out2
-    fallback = np.zeros(len(tv), np.int8)
-    fallback[fb] = 1
-    endp = pos[np.arange(len(tv)), ns - 1].astype(float)
-    end_patch = op.patch_at(endp)
-    cls = classify(outc, op.D[root_patch, end_patch])
+    pos, ns, outc, fallback, end_patch, cls = finish(
+        t, v, nrm, tv, P, op, pos, ns1, out1
+    )
     q = np.clip(np.round(x0).astype(int), 0, np.array(t.wm.shape) - 1)
     near_face = t.dface[tuple(q.T)] < FACE_MM
     return ColumnTraces(
@@ -522,6 +567,7 @@ def trace_columns(t: Tissue, tracer: str = "fitted_blend") -> ColumnTraces:
         end_patch=end_patch,
         near_face=near_face,
         coh=coh,
+        patches=P,
         one_pass=op,
         notes=notes,
     )

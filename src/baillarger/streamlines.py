@@ -42,8 +42,9 @@ outcome code)
   the data's direction after blend_mm / c. This keeps the start off the
   partial-volume edge of the white surface, where the data tensor is
   unreliable.
-- ascend: steps up the gradient of a scalar field (an arrival time), the
-  fallback where the primary trace turns.
+- ascend: steps up the gradient of a scalar field, the fallback where the
+  primary trace turns; descend: steps down it, from a point in the cortex to
+  the WM.
 
 Stops (outcome codes): WM (after wm_after mm), FLUID, MISSING (missing
 tissue), OTHER labels, FACE (within face_mm of a box face, or outside),
@@ -392,15 +393,16 @@ def ascend(
     x0: npt.ArrayLike,
     vox: npt.ArrayLike,
     nmax: int,
-    far: Callable[[I64, I64], Bool],
+    far: Callable[[I64, I64], Bool] | None = None,
     step_mm: float = STEP_MM,
     face_mm: float = 2.0,
     wm_after: float = 0.3,
 ) -> Traces:
     """Paths up grad u from x0 (n, 3), unit steps of step_mm in mm.
-    far(i_paths, q) -> bool per path: the voxel q (rounded positions) belongs
-    to a root far from that path's own (CONTACT). RIDGE where grad u vanishes
-    or u decreases (after wm_after mm). Arrays as trace."""
+    far(i_paths, q) -> bool per path, if given: the voxel q (rounded
+    positions) belongs to a root far from that path's own (CONTACT). RIDGE
+    where grad u vanishes or u decreases (after wm_after mm). Arrays as
+    trace."""
     g = np.stack(gradient(u), 0)
     x = np.asarray(x0, np.float64).copy()
     n = x.shape[0]
@@ -431,7 +433,8 @@ def ascend(
         # a label stop wins over a vanished gradient, which wins over a face
         flat = (nv[:, 0] < 1e-9) & ((code == RUNNING) | (code == FACE))
         code[flat] = RIDGE
-        code[(code == RUNNING) & far(act, q)] = CONTACT
+        if far is not None:
+            code[(code == RUNNING) & far(act, q)] = CONTACT
         fell = (ui < prev[act] - 1e-6) & (i * step_mm > wm_after)
         code[(code == RUNNING) & fell] = RIDGE
         prev[act] = ui
@@ -440,3 +443,20 @@ def ascend(
         out[act] = code
         act = act[code == RUNNING]
     return pos, nsamp, out
+
+
+def descend(
+    u: F64,
+    labels: npt.NDArray[np.integer[Any]],
+    dface: F64,
+    x0: npt.ArrayLike,
+    vox: npt.ArrayLike,
+    nmax: int,
+    step_mm: float = STEP_MM,
+    face_mm: float = 2.0,
+) -> Traces:
+    """Paths down grad u from x0 (n, 3): ascend on -u, stopping on the first
+    sample in the WM (no wm_after). For the fitted field T (0 on the WM),
+    the path from a point in the cortex to its root. RIDGE where u stops
+    decreasing (a minimum away from the WM). Arrays as trace."""
+    return ascend(-u, labels, dface, x0, vox, nmax, None, step_mm, face_mm, 0.0)

@@ -132,7 +132,11 @@ def main():
     v, f, nrm, tv = R.v, R.f, R.nrm, R.tv
     pos, ns, out1, outc, tracer, cls = R.pos, R.ns, R.out1, R.outc, R.fallback, R.cls
     root_patch, end_patch, near_face, coh = R.root_patch, R.end_patch, R.near_face, R.coh
-    s, f_eq, D = R.one_pass.setup, R.one_pass.fronts, R.one_pass.D
+    s, f_eq, D = R.one_pass.setup, R.one_pass.fronts, R.patches.D
+    # the pass's seed patches (its labels, Thickness's weights) and the mesh patches
+    seed_to_mesh = R.one_pass.to_mesh_patch
+    seed_pos = np.stack(np.unravel_index(s.sflat, wm.shape), -1).astype(float)
+    mesh_to_seed = s.patch.ravel()[s.sflat][cKDTree(seed_pos).query(v[R.patches.rep])[1]]
     say(f"traces at {len(tv):,} roots; {s.npatch:,} patches; {R.notes}")
     oc = np.bincount(out1, minlength=10)
     say("primary: " + ", ".join(f"{X.OUTCOME[k]} {oc[k]:,}" for k in range(10) if oc[k]))
@@ -169,13 +173,14 @@ def main():
             ok = np.isfinite(p[..., 0])
             q = np.clip(np.round(np.nan_to_num(p)).astype(int), 0, np.array(wm.shape) - 1)
             lab = ff.label[q[..., 0], q[..., 1], q[..., 2]]
-            lab0 = np.maximum(lab, 0)
+            lab0 = seed_to_mesh[np.maximum(lab, 0)]
             near_a = D[pa[a:a + 5000, None], lab0] < SAME_MM
             near_b = D[pb[a:a + 5000, None], lab0] < SAME_MM
             sw = ok & (lab >= 0) & near_b & ~near_a
             first = np.argmax(sw, 1)
             H[name][j] = np.where(sw.any(1), first * X.STEP_MM - X.STEP_MM / 2, np.nan)
-    x_pr, _ = X.pairwise_posterior(L[ic], mu_f[pa] * h, sd_f[pa] * h, mu_f[pb] * h, sd_f[pb] * h)
+    sa, sb = mesh_to_seed[pa], mesh_to_seed[pb]
+    x_pr, _ = X.pairwise_posterior(L[ic], mu_f[sa] * h, sd_f[sa] * h, mu_f[sb] * h, sd_f[sb] * h)
     H["field prior"][ic] = x_pr
     # profile split on a subsample, templates from open traces near each end root
     rng = np.random.default_rng(0)
