@@ -1,6 +1,7 @@
 """Tests for baillarger.white: the handle-free WM label of a small synthetic
 aseg, its changes on the full grid, and boxes cropped from it."""
 
+import json
 from pathlib import Path
 
 import nibabel as nib
@@ -9,6 +10,7 @@ import numpy.typing as npt
 import pytest
 
 from baillarger import data, white
+from baillarger import mesh_smoothing as S
 from baillarger.handles import kuhn_betti
 from baillarger.mesh import marching_tetrahedra, topology
 
@@ -84,3 +86,110 @@ def test_box_outside_the_grid_raises(tmp_path: Path) -> None:
     ch = white.wm_changes(tmp_path)
     with pytest.raises(ValueError):
         white.white_matter_box((30, 0, 0), (41, 10, 10), ch, tmp_path)
+
+
+# ---------------------------------------------------------------- the mesh
+
+
+def test_white_mesh_of_a_ball() -> None:
+    n, c, r = 30, np.array([14.3, 14.6, 15.1]), 9.0
+    g = np.indices((n, n, n)).astype(float)
+    wm = ((g - c[:, None, None, None]) ** 2).sum(0) <= r * r
+    v, f = white.white_mesh(wm)
+    v0, f0 = marching_tetrahedra(wm.astype(np.float64), 0.5)
+    np.testing.assert_array_equal(f, f0[:, [0, 2, 1]])
+    np.testing.assert_array_equal(v, S.twice(S.relax(v0, f), f, 2.0))
+    assert topology(f, len(v))["genus"] == 0
+    assert np.all(np.sum(S.vertex_normals(v, f) * (v - c), 1) > 0)  # out of the WM
+
+
+def test_mesh_pieces_on_the_phantom(tmp_path: Path) -> None:
+    a = write_aseg(tmp_path)
+    vox = (0.2, 0.16, 0.2)
+    v, f = white.white_mesh(a == data.ASEG_WM)
+    ps = white.mesh_pieces(v, f, vox)
+    assert [p["genus"] for p in ps] == [1, 1] and [p["boundary_loops"] for p in ps] == [
+        0,
+        0,
+    ]
+    assert ps[0]["V"] >= ps[1]["V"] and sum(p["F"] for p in ps) == len(f)
+    e1, e2 = (v[f[:, 1]] - v[f[:, 0]]) * vox, (v[f[:, 2]] - v[f[:, 0]]) * vox
+    area = 0.5 * np.linalg.norm(np.cross(e1, e2), axis=1).sum()
+    assert abs(sum(p["area_mm2"] for p in ps) - area) < 1e-2
+
+
+# ---------------------------------------------------------------- the reports
+
+
+def test_changes_summary(tmp_path: Path) -> None:
+    write_aseg(tmp_path)
+    ch = white.wm_changes(tmp_path)
+    s = white.changes_summary(ch, (0.2, 0.16, 0.2))
+    assert s["betti_before"] == [2, 2, 0] and s["betti_after"] == [2, 0, 0]
+    assert (s["voxels_removed"], s["voxels_added"], s["stranded"]) == (1, 4, 0)
+    assert s["by_kind"]["fill"] == dict(moves=1, voxels=4)
+    fill = next(m for m in s["moves"] if m["kind"] == "fill")
+    assert fill["extent_vox"][:2] == [2, 2] and fill["extent_vox"][2] == 1
+    assert fill["centre_itksnap"] == [c + 1 for c in fill["centre_full0"]]
+    assert fill["volume_mm3"] == pytest.approx(4 * 0.2 * 0.16 * 0.2, abs=1e-4)
+
+
+def test_box_report(tmp_path: Path) -> None:
+    write_aseg(tmp_path)
+    ch = white.wm_changes(tmp_path)
+    r = white.box_report((0, 0, 0), SHAPE, ch, tmp_path)
+    assert (r["voxels_removed"], r["voxels_added"]) == (1, 4)
+    assert [p["genus"] for p in r["pieces_before"]] == [1, 1]
+    assert [p["genus"] for p in r["pieces_after"]] == [0, 0]
+    assert sorted(m["kind"] for m in r["moves"]) == ["cut", "fill"]
+    # a box round the block only: its plug, and a face distance in mm
+    lo, hi = (5, 3, 2), (25, 25, 22)
+    r = white.box_report(lo, hi, ch, tmp_path)
+    assert [m["kind"] for m in r["moves"]] == ["fill"] and r["voxels_added"] == 4
+    m = r["moves"][0]
+    assert m["centre_full0"] == [
+        p + q for p, q in zip(m["centre_box0"], lo, strict=True)
+    ]
+    assert m["face_distance_mm"] > 0
+    ov = white.overlay(ch, lo, hi)
+    assert ov.shape == (20, 22, 20) and (ov == white.FILL).sum() == 4 and ov.max() == 2
+
+
+def test_command_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_aseg(tmp_path)
+    monkeypatch.setenv("BAILLARGER_DATA", str(tmp_path))
+    out = tmp_path / "out"
+    white.main(["changes", "--out", str(out)])
+    for name in ("wm_changes.npz", "wm_changes.json", "wm_changes_overlay.nii.gz"):
+        assert (out / name).is_file()
+    white.main(
+        [
+            "box",
+            "--changes",
+            str(out / "wm_changes.npz"),
+            "--out",
+            str(out),
+            "--name",
+            "blk",
+            "--lo",
+            "5",
+            "3",
+            "2",
+            "--hi",
+            "25",
+            "25",
+            "22",
+        ]
+    )
+    rep = json.loads((out / "wm_box_blk.json").read_text())
+    assert rep["voxels_added"] == 4
+    img = nib.load(out / "wm_box_blk_wm_fixed.nii.gz")
+    assert isinstance(img, nib.nifti1.Nifti1Image)
+    fixed = np.asarray(img.dataobj)
+    assert fixed.shape == (20, 22, 20)
+    assert np.array_equal(
+        fixed.astype(bool),
+        white.white_matter_box(
+            (5, 3, 2), (25, 25, 22), white.WMChanges.load(out / "wm_changes.npz")
+        ),
+    )

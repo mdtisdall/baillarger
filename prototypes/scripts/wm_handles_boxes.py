@@ -1,14 +1,17 @@
-"""The white mesh of each box before and after the handle removal of wm_handles.py: topology per
-piece (flat_map.topology), area, the changes inside the box, an ITK-SNAP overlay on the box grid and
-labelled slices through each change.
+"""The white mesh of each box before and after the handle removal of wm_handles.py: the report and
+the box-grid images are baillarger.white.write_box (as `python -m baillarger.white box`); this
+driver takes each site's box from column_volume_<site>.npz, checks that its WM label is the aseg's,
+and draws labelled slices through each change.
 
 Usage: wm_handles_boxes.py <figures> <data> <site>...
-       (writes <data>/wm_handles_<site>.json, <data>/wm_handles_<site>_overlay.nii.gz and
+       (run from prototypes/scripts; reads <data>/wm_handles.npz; writes <data>/wm_handles_<site>.json,
+       <data>/wm_handles_<site>_overlay.nii.gz, <data>/wm_handles_<site>_wm_fixed.nii.gz and
        <figures>/wm_handles_<site>.png)
 """
 
 import json
 import sys
+from pathlib import Path
 
 import matplotlib
 
@@ -17,70 +20,21 @@ import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 
-import flat_map as FM
-import mesh_smoothing as MS
-from baillarger.data import aseg_path
-from wm_handles import KIND, fixed_wm
-
-NAMES = {v: k for k, v in KIND.items()}
-
-
-def white_mesh(wm):
-    """As column_volume.white_mesh."""
-    v0, f = MS.contour(wm, 0.0)
-    return MS.twice(MS.relax(v0, f), f, 2.0), f
-
-
-def per_piece(v, f, vox):
-    lab, flab = FM.pieces(f, len(v))
-    out = []
-    for p in range(flab.max() + 1):
-        fp = f[flab == p]
-        t = FM.topology(fp)
-        e1, e2 = (v[fp[:, 1]] - v[fp[:, 0]]) * vox, (v[fp[:, 2]] - v[fp[:, 0]]) * vox
-        t["area_mm2"] = round(float(0.5 * np.linalg.norm(np.cross(e1, e2), axis=1).sum()), 3)
-        out.append(t)
-    return sorted(out, key=lambda t: -t["V"])
+from baillarger.data import ASEG_WM, aseg_path
+from baillarger.white import WMChanges, white_matter_box, write_box
 
 
 def main(fig, data, site):
     z = np.load(f"column_volume_{site}.npz")
-    lo, wm0 = z["lo"], z["wm"]
-    hi = lo + np.array(wm0.shape)
+    lo, wm0 = tuple(int(t) for t in z["lo"]), z["wm"]
+    hi = tuple(a + s for a, s in zip(lo, wm0.shape))
     img = nib.load(aseg_path())
-    vox = np.array(img.header.get_zooms()[:3], float)
-    wm1 = fixed_wm(lo, hi, data)
-    assert np.array_equal(np.asarray(img.dataobj[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]) == 41, wm0)
-    before = per_piece(*white_mesh(wm0), vox)
-    after = per_piece(*white_mesh(wm1), vox)
-
-    H = np.load(f"{data}/wm_handles.npz")
-    p, k, m = H["voxels"] - lo, H["kind"], H["move"]
-    inside = np.all((p >= 0) & (p < hi - lo), 1)
-    p, k, m = p[inside], k[inside], m[inside]
-    moves = []
-    for i in np.unique(m):
-        q = p[m == i]
-        c = np.round(q.mean(0)).astype(int)
-        moves.append(dict(move=int(i), kind=NAMES[int(k[m == i][0])], voxels_in_box=len(q),
-                          centre_box0=c.tolist(), centre_itksnap_box=(c + 1).tolist(),
-                          centre_full0=(c + lo).tolist(), face_distance_mm=round(float(
-                              np.min(np.r_[c, np.array(wm0.shape) - 1 - c] * np.r_[vox, vox])), 2)))
-    ov = np.zeros(wm0.shape, np.int16)
-    ov[tuple(p.T)] = k
-    aff = img.affine @ np.r_[np.c_[np.eye(3), lo], [[0, 0, 0, 1]]]
-    nib.save(nib.Nifti1Image(ov, aff), f"{data}/wm_handles_{site}_overlay.nii.gz")
-    nib.save(nib.Nifti1Image(wm1.astype(np.int16), aff), f"{data}/wm_handles_{site}_wm_fixed.nii.gz")
-
-    summ = dict(site=site, lo=lo.tolist(), voxels_removed=int((wm0 & ~wm1).sum()),
-                voxels_added=int((wm1 & ~wm0).sum()),
-                area_mm2_before=round(sum(t["area_mm2"] for t in before), 3),
-                area_mm2_after=round(sum(t["area_mm2"] for t in after), 3),
-                pieces_before=before, pieces_after=after, moves=moves)
-    json.dump(summ, open(f"{data}/wm_handles_{site}.json", "w"), indent=1)
-    print(json.dumps({k_: v_ for k_, v_ in summ.items() if k_ not in ("moves",)}, indent=None))
-    print(f"{len(moves)} moves in the box")
-    view(fig, site, wm0, wm1, moves)
+    assert np.array_equal(np.asarray(img.dataobj[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]) == ASEG_WM, wm0)
+    ch = WMChanges.load(Path(data) / "wm_handles.npz")
+    rep = write_box(lo, hi, ch, Path(data), f"wm_handles_{site}")
+    print(json.dumps({k: v for k, v in rep.items() if k != "moves"}))
+    print(f"{len(rep['moves'])} moves in the box")
+    view(fig, site, wm0, white_matter_box(lo, hi, ch), rep["moves"])
 
 
 def view(fig, site, wm0, wm1, moves):
