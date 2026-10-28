@@ -19,7 +19,10 @@ Requests:
 - GET  / (the page); /meta (JSON: map positions of the traces, layers, worklist, steps, marks);
   /layer?name=... (JSON values per trace); /section?i=<trace>&half=<mm> (JSON: the two sections
   at trace i along the flat map's axes and, at a contact, the facing trace's two sections);
-  /mesh?level=k[&faces=1] (binary: the white mesh, true or inflated, see mesh_payload).
+  /mesh?level=k[&faces=1] (binary: the white mesh, true or inflated, see mesh_payload);
+  /streamlines?i=<trace>&radius=<mm>&half=<mm> (JSON: the streamline panel at trace i's root, see
+  Editor.streamlines and streamline_view.py: the traces from and to it, whatever tracer made the
+  column volume, the true white mesh and the GM boundary in a box around it, the pia on them).
 - POST /section3d {trace, right, up, level, half}: as /section, along the screen's axes on the
   inflated surface carried to the true mesh (inflate.transfer).
 - POST /edit {trace, depth}; /unpend {k}; /resolve {R}; /undo (drop the last step);
@@ -55,6 +58,7 @@ import edit_data as ED  # noqa: E402
 import edit_resolve as ER  # noqa: E402
 import inflate as IN  # noqa: E402
 import pia_sections as PS  # noqa: E402
+import streamline_view as SV  # noqa: E402
 from volume_views import mesh_graph  # noqa: E402
 
 STATIC = Path(__file__).parent / "pia_editor_static"
@@ -91,7 +95,14 @@ class Editor:
         self.nrm = Z["nrm"][self.rv].astype(float)
         self.roots_of = -np.ones(len(self.vmm), int)
         self.roots_of[self.rv] = np.arange(self.n)
-        self.pos, self.ns = Z["pos"][self.sub], Z["ns"][self.sub]
+        # every trace of the column volume, for the streamline panel (streamline_view.py)
+        self.pos_all, self.ns_all, self.tv_all = Z["pos"], Z["ns"], Z["tv"]
+        self.cls_all, self.fallback_all, self.ctx = Z["cls"], Z["tracer"], Z["ctx"]
+        self.tracer_name = str(Z["tracer_name"]) if "tracer_name" in Z.files else "not saved (made before tracer_name)"
+        self.wm_label = str(Z["wm_label"]) if "wm_label" in Z.files else "not saved (aseg)"
+        self.sub_of = -np.ones(len(self.tv_all), np.int64)
+        self.sub_of[self.sub] = np.arange(self.sub.size)
+        self.pos, self.ns = self.pos_all[self.sub], self.ns_all[self.sub]
         self.echo = Z["fv"][0][self.sub]
         self.vmax = float(np.nanpercentile(np.abs(self.echo), 97))
         self.top = Z["H_top"][self.sub].astype(float)
@@ -103,6 +114,7 @@ class Editor:
         self.log2_area = -0.5 * np.log2(np.linalg.det(g))  # map area / surface area at the root
         self.f = Z["f"].astype(np.int64)
         self.vf = IN.vertex_faces(self.f, len(self.vmm))
+        self.vnrm = IN.vertex_normals(self.vmm, self.f)
         Ip = np.load(f"{work}/inflate_{self.site}.npz")
         self.infl = [self.vmm] + [x.astype(float) for x in Ip["x"]]
         self.infl_names = ["true surface"] + [f"inflated, lam {lv:g}" for lv in Ip["levels"]]
@@ -382,6 +394,39 @@ class Editor:
                     pending=self.pending, edits=self.all_edits(), ok=self.ok, worklist_done=done,
                     priority=self.prio_status)
 
+    def streamlines(self, i, radius=1.0, half=5.0, sigma=1.0):
+        """The streamline panel at trace i's root (streamline_view): the traces from and to it, the
+        white mesh and the GM boundary in the box of half width `half` mm around it, and the current
+        and saved pia on the subsampled traces among them. Positions in mm."""
+        root = int(self.rv[i])
+        x0 = self.vmm[root]
+        fr, to = SV.select(self.G, root, x0, self.tv_all, self.pos_all, self.ns_all, self.vox, radius)
+        r3 = lambda a: np.round(np.asarray(a, float), 3).ravel().tolist()  # noqa: E731
+        wv, wf, keep = SV.crop_mesh(self.vmm, self.f, x0 - half, x0 + half)
+        wn = self.vnrm[keep]
+        lo = np.floor((x0 - half) / self.vox).astype(int)
+        hi = np.ceil((x0 + half) / self.vox).astype(int) + 1
+        gv, gf = SV.gm_surface(self.ctx, self.vox, lo, hi, sigma)
+        z = self.states[-1]
+        lines = []
+        for kind, ts in (("from", fr), ("to", to)):
+            for t in ts:
+                n = int(self.ns_all[t])
+                k = int(self.sub_of[t])
+                lines.append(dict(trace=int(t), kind=kind, cls=int(self.cls_all[t]), fallback=int(self.fallback_all[t]),
+                                  sub=k, xyz=r3(self.pos_all[t, :n].astype(float) * self.vox)))
+        ts = np.r_[fr, to]
+        ks = self.sub_of[ts]
+        sel = ts[ks >= 0]
+        ks = ks[ks >= 0]
+        pia = SV.at_depth(self.pos_all[sel], self.ns_all[sel], z[-1, ks], self.vox)
+        saved = SV.at_depth(self.pos_all[sel], self.ns_all[sel], self.z0[-1, ks], self.vox)
+        fin = lambda p: p[np.isfinite(p).all(1)]  # noqa: E731
+        return dict(trace=int(i), root=root, x0=r3(x0), radius=radius, half=half, tracer=self.tracer_name,
+                    wm_label=self.wm_label, n_from=int(fr.size), n_to=int(to.size), n_sub=int(sel.size),
+                    lines=lines, pia=r3(fin(pia)), pia_saved=r3(fin(saved)),
+                    wm=dict(v=r3(wv), n=r3(wn), f=wf.ravel().tolist()), gm=dict(v=r3(gv), f=gf.ravel().tolist()))
+
     def mesh_payload(self, level, faces):
         """uint32 header length, JSON header padded to 4 bytes, then float32 positions, normals,
         sulcal depth (inflated level `level`), and with faces: int32 nearest trace per vertex and
@@ -446,6 +491,8 @@ class Handler(BaseHTTPRequestHandler):
                                                             for x in ed.layer(q["name"])]))
         elif u.path == "/section":
             self._json(lambda: ed.section_at(int(q["i"]), float(q.get("half", 8.0))))
+        elif u.path == "/streamlines":
+            self._json(lambda: ed.streamlines(int(q["i"]), float(q.get("radius", 1.0)), float(q.get("half", 5.0))))
         elif u.path == "/mesh":
             with self.lock:
                 body = ed.mesh_payload(int(q.get("level", 0)), q.get("faces") == "1")
