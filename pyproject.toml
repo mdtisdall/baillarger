@@ -14,6 +14,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "matplotlib>=3.11.2",
   "mypy",
   "pytest",
   "ruff",
@@ -28,7 +29,8 @@ build-backend = "hatchling.build"
 
 [tool.ruff]
 target-version = "py312"
-extend-exclude = [".worktrees"]
+# prototypes/: research scripts, kept as written and not linted (their own tests run in CI)
+extend-exclude = [".worktrees", "prototypes"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
@@ -49,8 +51,10 @@ module = ["numba", "numba.*", "llvmlite", "llvmlite.*", "skfmm", "skfmm.*",
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "prototypes/scripts/test_crossing_lib.py"]
 
 [tool.affected-tests]
 # Claude Code hooks: no Python test depends on them.
 ignore = [".claude/hooks/**"]
+# the prototype tests import their modules from prototypes/scripts
+source-roots = ["src", "prototypes/scripts"]
