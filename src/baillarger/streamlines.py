@@ -183,6 +183,21 @@ def signed_wm_direction(wm: Bool, vox: npt.ArrayLike, sigma: float = 1.0) -> F64
     return out
 
 
+def tissue_wm_distance(wm: Bool, ctx: Bool, vox: npt.ArrayLike) -> F64:
+    """The signed WM distance (mm, negative in the WM) measured through
+    tissue: second-order fast marching (skfmm) over the WM and the cortex,
+    with fluid, other labels and missing tissue as obstacles. NaN where it
+    does not reach (obstacles, and tissue with no path to the WM)."""
+    v = np.asarray(vox, np.float64)
+    free = wm | ctx
+    if not wm.any() or not ctx.any():
+        return np.full(wm.shape, np.nan)
+    phi = np.ma.MaskedArray(np.where(wm, -1.0, 1.0), mask=~free)
+    D = skfmm.distance(phi, dx=v, order=2)
+    d: F64 = np.ma.filled(np.ma.MaskedArray(D).astype(np.float64), np.nan)
+    return np.where(free, d, np.nan)
+
+
 def tissue_wm_direction(
     wm: Bool, ctx: Bool, vox: npt.ArrayLike, sigma: float = 1.0
 ) -> F64:
@@ -199,13 +214,10 @@ def tissue_wm_direction(
     banks are reached through tissue, and it flips where they meet, as the
     straight-line distance (signed_wm_direction) does everywhere."""
     v = np.asarray(vox, np.float64)
-    free = wm | ctx
     if not wm.any() or not ctx.any():
         return signed_wm_direction(wm, v, sigma)
-    phi = np.ma.MaskedArray(np.where(wm, -1.0, 1.0), mask=~free)
-    D = skfmm.distance(phi, dx=v, order=2)
-    d = np.ma.filled(np.ma.MaskedArray(D).astype(np.float64), np.nan)
-    reached = free & np.isfinite(d)
+    d = tissue_wm_distance(wm, ctx, v)
+    reached = np.isfinite(d)
     # smoothed over tissue only (normalized convolution), then each obstacle
     # voxel takes its nearest tissue voxel's value, so that a narrow sulcus's
     # far bank cannot leak back across the fluid into this bank
@@ -747,4 +759,64 @@ def sample(img: npt.ArrayLike, pos: F32, chunk: int = 20000) -> F32:
             im, p[ok].T.astype(float), order=1, mode="nearest"
         )
         out[a : a + chunk] = val.reshape(-1, m)
+    return out
+
+
+def ray(
+    labels: npt.NDArray[np.integer[Any]],
+    dface: F64,
+    x0: npt.ArrayLike,
+    d0: npt.ArrayLike,
+    vox: npt.ArrayLike,
+    nmax: int,
+    step_mm: float = STEP_MM,
+    face_mm: float = 2.0,
+    wm_after: float = 0.3,
+) -> Traces:
+    """Straight paths from x0 (n, 3) along d0 (n, 3; a direction in voxel
+    coordinates, such as a mesh normal), in steps of step_mm in mm: the path
+    of each point of a surface moving along its normal at constant speed.
+    Stops as trace (WM after wm_after, fluid, missing, other, face, LENGTH).
+    Arrays as trace."""
+    v = np.asarray(vox, np.float64)
+    x = np.asarray(x0, np.float64).copy()
+    n = x.shape[0]
+    d = np.asarray(d0, np.float64) / v  # to a direction in mm
+    d /= np.linalg.norm(d, axis=1, keepdims=True)
+    h = d * step_mm / v  # one step, in voxels
+    pos = np.full((n, nmax, 3), np.nan, np.float32)
+    pos[:, 0] = x
+    nsamp = np.ones(n, np.int64)
+    out = np.full(n, RUNNING, np.int64)
+    act = np.arange(n)
+    for i in range(1, nmax):
+        if not act.size:
+            break
+        xa = x[act] + h[act]
+        x[act] = xa
+        pos[act, i] = xa
+        nsamp[act] = i + 1
+        code = _stop_codes(xa, labels, dface, i * step_mm, face_mm, wm_after)
+        if i == nmax - 1:
+            code[code == RUNNING] = LENGTH
+        out[act] = code
+        act = act[code == RUNNING]
+    return pos, nsamp, out
+
+
+def first_fall(u: F64, pos: F32, ns: I64, chunk: int = 20000) -> I64:
+    """Per path, the index of the sample before u first decreases along it
+    (u sampled trilinearly; NaN samples are skipped), -1 if it never does.
+    For the WM distance through tissue, that is where the path passes the
+    surface where its own bank's front meets another's."""
+    n = len(ns)
+    out = np.full(n, -1, np.int64)
+    for a in range(0, n, chunk):
+        ua = sample(u, pos[a : a + chunk]).astype(np.float64)
+        du = np.diff(ua, axis=1)
+        fell = du < 0
+        k = np.arange(ua.shape[1] - 1)[None, :] < (ns[a : a + chunk, None] - 1)
+        fell &= k & np.isfinite(du)
+        hit = fell.any(1)
+        out[a : a + chunk][hit] = np.argmax(fell[hit], 1)
     return out

@@ -1020,6 +1020,57 @@ On an off-centre 2-voxel slot, T now rises in each bank up to the fluid, with no
 - Columns moved as a surface: the surface-growing session (`column_front`), with a coupled mesh and equivolume area.
 - Step 2's use of `crest_at`, for example an edit-priority layer of crests without a fused contact, as likely label errors.
 
+### Normal rays: columns without a field
+
+**Code.**
+- `baillarger.column_traces`: `--columns normal`; `equivolume`; `ColumnTraces.vol`.
+- `baillarger.streamlines`: `ray` (straight paths in mm steps), `first_fall`, `tissue_wm_distance`.
+- Tests (exact answers):
+  - rays from a ball are radial, and `vol` matches s + s²/R + s³/(3R²) (median relative error < 0.1);
+  - rays cross parallel fused banks and meet at the midline;
+  - rays meet on the bisector of a narrow fused V;
+  - rays see no meeting beside an open slot;
+  - `ray` is a straight line in 0.04 mm steps; `first_fall` finds where a field stops rising.
+
+**The method.** Each column leaves its root along the smoothed white-surface normal and goes straight at a constant speed. It stops only at fluid or WM labels (or missing or other tissue, the box face, the 8 mm length cap). It does not use T or the image.
+- `crest_at`: the first sample where the WM distance through tissue stops rising along the ray. There the ray has passed the midline between its own bank and another bank, so it records the geometric meeting, not T's crest.
+- `vol`: the equivolume coordinate per sample, the swept volume per unit root area, with area (1 + k1 s)(1 + k2 s) from the root's principal curvatures. vol / vol at the end is an equivolume relative depth. The speed stays constant; a speed set by curvature is the equivolume-front session's option.
+
+**At the sites** (same field, labels and roots as the traverse table; `scratch/normal-columns/`):
+
+| | V1V2: crest | V1V2: traverse | V1V2: normal | M1S1: crest | M1S1: traverse | M1S1: normal |
+|---|---|---|---|---|---|---|
+| Open | 34,668 | 15,336 | 38,625 | 27,755 | 14,746 | 31,863 |
+| Crossing | 6,001 | 4,967 | 4,946 | 14,418 | 9,916 | 13,658 |
+| Own bank | 2,394 | 32,320 | 386 | 2,353 | 30,568 | 26 |
+| To the contact | 7,325 | 194 | 0 | 6,796 | 8 | 0 |
+| Failed | 13,727 | 11,298 | 20,158 | 21,028 | 17,112 | 26,803 |
+| …box face / length | 9,447 / 1,365 | 6,607 / 17 | 14,507 / 2,673 | 20,757 / 271 | 16,765 / 123 | 23,039 / 3,764 |
+| Open columns meeting another bank | 62 % | 14 % | 12 % | 56 % | 18 % | 6 % |
+| Profile split at the marked points (median, p90 mm; points) | 0.065, 0.415 (17) | 0.066, 0.165 (25) | 0.075, 0.183 (24) | 0.236, 0.827 (21) | 0.41, 0.63 (21) | 0.169, 0.597 (20) |
+
+**On the phantoms** (right class, at V1V2's features; M1S1's within 0.02):
+
+| | Crowns | Fundus, 0.16 mm slot | Fundus, 0.48 mm slot | Kissing pair | Kissing pair, no dark band |
+|---|---|---|---|---|---|
+| crest | 0.94–0.95 | 0.95 | 0.96 | 0.90 | 0.90 |
+| traverse | 0.94 | 0.55 | 0.79 | 0.82 | 0.78 |
+| normal | 0.95 | 0.94 | 0.96 | 0.90 | 0.90 |
+| one-pass | 0.94–0.95 | 0.93–0.94 | 0.95 | 0.90 | 0.90 |
+
+The paths of normal are straight, so they are further from the phantoms' curved columns: path error p90 0.18–0.41 mm at the crowns, against 0.11–0.33 for crest; 0.25 at the kissing pairs, against 0.11–0.18.
+
+**What this says.**
+- Straight rays keep the right class as well as the field-based methods do, on every phantom, and they do not misroute through the fundus focus as traverse does: there is no field to focus.
+- At the sites they almost never return to their own bank (386 and 26 columns), and they cross fused banks about as often as crest does. Their open columns rarely meet another bank (12 % and 6 %), so most of crest's and traverse's crests on open columns come from T, not from the geometry, which agrees with the label errors found under traverse.
+- The profile split at the marked points is as good as the best method at V1V2 and the best at M1S1 (median 0.17 mm, against 0.24–0.41).
+- The cost: more failures. Straight rays leave the box more often (about 5,000 and 2,300 more at the faces) and reach the 8 mm cap more often (2,673 and 3,764). Why the long rays run 8 mm without meeting fluid or WM is not yet looked at; a ray that grazes a bank or runs along a sheet is the likely cause.
+
+**Not done:**
+- Look at the length-capped rays (where they start, what they run through).
+- The comparison with the equivolume-front method (its session), which reads these builds.
+- The crossing rays' cut: like traverse, normal's crossings depend on a cortex label without fluid channels and vessels; it is measured again after the pial-side label refinement.
+
 ### A pia editor on an inflated surface
 
 A prototype for correcting the joint warp's pia (the first pial level) trace by trace. The sections are always cut from the true 3D mesh. The inflated surface and the flat map only say where to click and which way is which.
