@@ -95,9 +95,7 @@ from baillarger import streamlines as S
 from baillarger.data import Patch, load_box
 from baillarger.frame import mesh_curvatures, missing_tissue
 from baillarger.fronts import Fronts, march, riemann_from_direction
-from baillarger.mesh_smoothing import smooth_normals
-from baillarger.white import WMChanges, white_matter_box
-from baillarger.white import white_mesh as white_surface
+from baillarger.white import WhiteMesh, WMChanges, white_matter_box, white_mesh_normals
 
 type Bool = npt.NDArray[np.bool_]
 type F32 = npt.NDArray[np.float32]
@@ -240,8 +238,7 @@ def white_mesh(wm: Bool, sigma: float = MESH_SIGMA) -> tuple[F64, I64, F64]:
     """Vertices (voxel coordinates), faces (oriented out of the WM) and unit
     normals (out of the WM) of the binary WM label's surface: step 2
     (baillarger.white.white_mesh, and baillarger.mesh_smoothing's normals)."""
-    v, f = white_surface(wm, sigma)
-    return v, f, smooth_normals(v, f)
+    return white_mesh_normals(wm, sigma)
 
 
 def root_vertices(v: F64, n: F64) -> I64:
@@ -726,15 +723,22 @@ def trace_columns(
     tracer: str = "fitted_blend",
     method: str = "crest",
     bend_deg: float | None = None,
+    mesh: WhiteMesh | None = None,
 ) -> ColumnTraces:
-    """Steps 2-6 on a box."""
+    """Steps 2-6 on a box. mesh: a saved white mesh of this box and WM label
+    (baillarger.white.WhiteMesh; ValueError if it is not) instead of making
+    it (white_mesh)."""
     if tracer not in TRACERS:
         raise ValueError(f"tracer {tracer!r}: not one of {TRACERS}")
     if method not in METHODS:
         raise ValueError(f"method {method!r}: not one of {METHODS}")
     base = base_tensor(t)
     nh, coh = data_normal(base, t.ctx)
-    v, f, nrm = white_mesh(t.wm)
+    if mesh is None:
+        v, f, nrm = white_mesh(t.wm)
+    else:
+        mesh.check(t.patch.lo, t.patch.hi, t.wm)
+        v, f, nrm = mesh.v, mesh.f, mesh.normals
     tv = root_vertices(v, nrm)
     P = mesh_patches(v, f, t.vox)
     root_patch = P.of_vertex[tv]
