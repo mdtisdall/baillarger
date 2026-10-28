@@ -1,11 +1,14 @@
 """Tests for baillarger.column_traces: roots, root patches, classes, and the
 traces of a synthetic box with known columns."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from baillarger import column_traces as CT
 from baillarger import streamlines as S
+from baillarger import white
 from baillarger.data import Patch
 
 VOX = 0.16
@@ -415,3 +418,21 @@ def test_normal_rays_see_no_meeting_beside_an_open_slot() -> None:
     i = np.flatnonzero(left)
     assert i.size > 5
     assert np.all(R.cls[i] == CT.OPEN) and np.all(R.crest_at[i] < 0)
+
+
+def test_a_saved_white_mesh_gives_the_same_traces(tmp_path: Path) -> None:
+    """trace_columns with the box's saved WhiteMesh gives the traces it gives
+    when it makes the mesh itself, and refuses a mesh of another WM label."""
+    t = slab_tissue()
+    m = white.box_mesh(t.wm, t.patch.lo, t.patch.hi, t.patch.affine)
+    m.save(tmp_path / "m.npz")
+    m = white.WhiteMesh.load(tmp_path / "m.npz")
+    R0 = CT.trace_columns(t, "fitted_blend", "crest")
+    R1 = CT.trace_columns(t, "fitted_blend", "crest", mesh=m)
+    for k in ("v", "f", "nrm", "tv", "pos", "ns", "cls", "crest_at"):
+        assert np.array_equal(getattr(R1, k), getattr(R0, k), equal_nan=True), k
+    other = t.wm.copy()
+    other[6, 3, 3] = True
+    m2 = white.box_mesh(other, t.patch.lo, t.patch.hi, t.patch.affine)
+    with pytest.raises(ValueError, match="WM label"):
+        CT.trace_columns(t, "fitted_blend", "crest", mesh=m2)

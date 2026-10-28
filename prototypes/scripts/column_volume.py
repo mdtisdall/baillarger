@@ -31,10 +31,13 @@ with "points_full0": [[i, j, k], ...] in 0-based full-grid voxels.
 Writes <work>/column_volume_<name>.npz and .json, <figures>/column_volume_<name>_*.png.
 Usage: column_volume.py <figures dir> <work dir> --name NAME (--patch P | --box I J K [--size N ...])
                         [--points FILE] [--tracer {current,fitted,fitted_blend}]
-                        [--columns {crest,traverse,normal,one-pass}] [--wm-changes FILE] [--figs-only]
+                        [--columns {crest,traverse,normal,one-pass}] [--wm-changes FILE] [--mesh FILE]
+                        [--figs-only]
 --wm-changes: the handle-free WM label (baillarger.white.wm_changes, saved with WMChanges.save)
 replaces the aseg's everywhere (mesh, field, stops, classes); without it, the aseg's.
-The npz also holds tracer_name, column_method, wm_label and crest_at (crest and traverse: per
+--mesh: a saved white mesh of the same box and WM label (python -m baillarger.white mesh, WhiteMesh)
+instead of making it; the run stops if its box or WM label differ.
+The npz also holds tracer_name, column_method, wm_label, white_mesh (the --mesh file or "made here") and crest_at (crest and traverse: per
 column, the first sample where it meets another bank's field, T's crest; -1 if none; normal: where
 it passes another bank's front) and, with --columns normal, vol (the equivolume coordinate).
 The two marked faces of the plan: --name M1S1 --box 378 224 448; --name V1V2_banks --box 198 58 65.
@@ -61,7 +64,7 @@ import crossing_lib as X
 from baillarger import column_traces as CT
 from baillarger.data import PATCHES
 from baillarger.mesh_smoothing import edges as mesh_edges
-from baillarger.white import WMChanges
+from baillarger.white import WhiteMesh, WMChanges
 
 ap = argparse.ArgumentParser()
 ap.add_argument("fig")
@@ -75,6 +78,8 @@ ap.add_argument("--tracer", choices=CT.TRACERS, default="fitted_blend")
 ap.add_argument("--columns", choices=CT.METHODS, default="crest")
 ap.add_argument("--wm-changes", help="the handle-free WM label's changes (baillarger.white, WMChanges.save); "
                 "default: the aseg's WM label")
+ap.add_argument("--mesh", help="a saved white mesh of this box and WM label (baillarger.white, WhiteMesh); "
+                "default: made here")
 ap.add_argument("--figs-only", action="store_true")
 A = ap.parse_args()
 FIG, WORK, SITE, FIGS_ONLY = A.fig, A.work, A.name, A.figs_only
@@ -133,7 +138,7 @@ def main():
     say(f"{SITE}: box {tuple(int(a) for a in hi - lo)}; {len(P)} points; tracer {A.tracer}; columns {A.columns}; WM {WM_LABEL}")
 
     # ---- steps 1-3 (baillarger.column_traces): mesh, roots, T, primary, fallback, classes
-    R = CT.trace_columns(t, A.tracer, A.columns)
+    R = CT.trace_columns(t, A.tracer, A.columns, mesh=WhiteMesh.load(Path(A.mesh)) if A.mesh else None)
     v, f, nrm, tv = R.v, R.f, R.nrm, R.tv
     pos, ns, out1, outc, tracer, cls = R.pos, R.ns, R.out1, R.outc, R.fallback, R.cls
     root_patch, end_patch, near_face, coh = R.root_patch, R.end_patch, R.near_face, R.coh
@@ -195,7 +200,7 @@ def main():
         end_patch=end_patch, near_face=near_face, P=P, vox=vox, lo=lo,
         disp=disp.astype(np.float32), ctx=ctx, coh=coh.astype(np.float32), wm=wm,
         labels=labels.astype(np.int8),  # 0 cortex, 1 fluid, 2 WM, 3 missing, 4 other
-        tracer_name=A.tracer, column_method=A.columns, wm_label=WM_LABEL, crest_at=R.crest_at,
+        tracer_name=A.tracer, column_method=A.columns, wm_label=WM_LABEL, white_mesh=A.mesh or "made here", crest_at=R.crest_at,
         **({} if R.vol is None else dict(vol=R.vol)),
         **{"H_" + k: H[k] for k in HOR})
     json.dump(dict(turn=turn), open(f"{WORK}/column_volume_{SITE}_turn.json", "w"))
