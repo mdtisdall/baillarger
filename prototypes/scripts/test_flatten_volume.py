@@ -140,3 +140,141 @@ def test_tau_of_inverts():
     z = truth(x, y, tau, prm)
     t = FL.tau_of(z[:, 20], z, tau)
     assert np.max(np.abs(t - tau[20])) < 1e-9
+
+
+# Dynamic warping (flatten_lib.dp_lags, flatten_lib.dynamic_shifts): shifts beyond the gradient
+# estimator's reach.
+
+
+def brute_lags(E, m):
+    """The minimum of sum_i E[i, l_i] over every path with |l_{i+1} - l_i| <= m, by enumeration."""
+    import itertools
+
+    n, nl = E.shape
+    best, arg = np.inf, None
+    for p in itertools.product(range(nl), repeat=n):
+        if all(abs(p[i + 1] - p[i]) <= m for i in range(n - 1)):
+            c = sum(E[i, p[i]] for i in range(n))
+            if c < best:
+                best, arg = c, p
+    return best, np.array(arg)
+
+
+def test_dp_lags_exact():
+    """The accumulation and backtrack give a minimum-cost path, against enumeration."""
+    rng = np.random.default_rng(1)
+    for m in (0, 1, 2):
+        for _ in range(20):
+            E = rng.random((3, 6, 5))  # 3 pairs, 6 samples, 5 lags
+            lags = FL.dp_lags(E, m)
+            for k in range(3):
+                best, _ = brute_lags(E[k], m)
+                path = lags[k]
+                assert np.all(np.abs(np.diff(path)) <= m)
+                assert abs(E[k][np.arange(6), path].sum() - best) < 1e-12
+
+
+def test_large_constant_shift():
+    """A shift of 0.6 mm, past half the spacing of same-sign bands (about 1.1 mm): the gradient
+    estimator, even with its bound opened to 0.8 mm, slides to the wrong band (on this pattern it holds
+    to about 0.5 mm); dynamic warping recovers it."""
+    z = np.arange(N_S) * STEP
+    s0 = 0.6
+    Fv = two_feature(pattern(z))[:, None]
+    Fw = two_feature(pattern(z - s0))[:, None]
+    M = np.ones((1, N_S), bool)
+    good = (z > 0.6) & (z < 4.2)
+    s_lk, *_ = FL.shifts(Fv, Fw, M, M, STEP, smax=0.8)
+    assert np.median(np.abs(s_lk[0, good] - s0)) > 0.05
+    s, ncc, en, valid = FL.dynamic_shifts(Fv, Fw, M, M, STEP, smax=0.8)
+    w = FL.pair_weights(ncc, en, valid, np.median(en[valid]))
+    ok = good & (w[0] > 0.3)
+    assert ok.sum() > 50
+    assert np.max(np.abs(s[0, ok] - s0)) < 0.005
+
+
+def test_large_depth_varying_shift():
+    """w is v stretched by 10 % and moved 0.2 mm: s(z) = 0.1 z + 0.2, up to 0.6 mm."""
+    z = np.arange(N_S) * STEP
+    Fv = two_feature(pattern(z))[:, None]
+    Fw = two_feature(pattern((z - 0.2) / 1.1))[:, None]
+    M = np.ones((1, N_S), bool)
+    s, ncc, en, valid = FL.dynamic_shifts(Fv, Fw, M, M, STEP, smax=0.8)
+    w = FL.pair_weights(ncc, en, valid, np.median(en[valid]))
+    true = 0.1 * z + 0.2
+    ok = (z > 0.4) & (z < 3.6) & (w[0] > 0.3)
+    assert ok.sum() > 50
+    assert np.median(np.abs(s[0, ok] - true[ok])) < 0.005
+    assert np.max(np.abs(s[0, ok] - true[ok])) < 0.015
+
+
+def test_dynamic_strain_bound():
+    """Without the gradient polish the shift's slope never exceeds the strain bound."""
+    z = np.arange(N_S) * STEP
+    rng = np.random.default_rng(2)
+    Fv = rng.standard_normal((2, 4, N_S))
+    Fw = rng.standard_normal((2, 4, N_S))
+    M = np.ones((4, N_S), bool)
+    s, *_ = FL.dynamic_shifts(Fv, Fw, M, M, STEP, smax=0.5, strain=0.15, polish=0)
+    assert np.max(np.abs(np.diff(s, axis=1))) / STEP <= 0.15 + 1e-9
+    assert np.max(np.abs(s)) <= 0.5 + 1e-9
+    del z
+
+
+def test_dynamic_small_shifts_agree():
+    """Where the gradient estimator works (0.10 mm), dynamic warping agrees with it."""
+    z = np.arange(N_S) * STEP
+    Fv = two_feature(pattern(z))[:, None]
+    Fw = two_feature(pattern(z - 0.10))[:, None]
+    M = np.ones((1, N_S), bool)
+    s_lk, *_ = FL.shifts(Fv, Fw, M, M, STEP)
+    s, ncc, en, valid = FL.dynamic_shifts(Fv, Fw, M, M, STEP)
+    good = (z > 0.4) & (z < 4.5)
+    assert np.max(np.abs(s[0, good] - s_lk[0, good])) < 0.003
+
+
+def test_dynamic_short_trace():
+    """w ends early (nan past 2.5 mm): the shift on v's samples with a partner is still right, and
+    samples whose partner is past w's end are not valid. Near the partner's end (z = 2.2) the gradient
+    iterations' window (`shifts`, also the polish here) biases both estimators: measured 0.007 mm at
+    0.7 mm from it, 0.01 mm at 0.5 mm, 0.06 mm at 0.2 mm. Checked as two bounds, not hidden."""
+    z = np.arange(N_S) * STEP
+    s0 = 0.3
+    Fv = two_feature(pattern(z))[:, None]
+    Fw = two_feature(pattern(z - s0))[:, None]
+    Mv = np.ones((1, N_S), bool)
+    Mw = (z < 2.5)[None]
+    s, ncc, en, valid = FL.dynamic_shifts(Fv, np.where(Mw[None], Fw, 0.0), Mv, Mw, STEP, smax=0.6)
+    w = FL.pair_weights(ncc, en, valid, np.median(en[valid]))
+    ok = (z > 0.6) & (z < 1.7) & (w[0] > 0.3)
+    assert ok.sum() > 20
+    far = ok & (z < 1.2)
+    assert np.max(np.abs(s[0, far] - s0)) < 0.005
+    assert np.max(np.abs(s[0, ok] - s0)) < 0.015
+    assert not valid[0, z > 2.5 - s0 + 0.05].any()
+
+
+def grid_shifted():
+    """grid_volume with fewer, wider-spaced columns in x and a strong sideways thickness change:
+    neighbours in x differ by 0.35 * 2 / 7 * tau, 0.36 mm at the top (tau 3.6), strain up to 0.15."""
+    return grid_volume(nx=8, alpha=0.35, beta=0.12, top=3.6)
+
+
+def run_fit_dyn(F, ns, pairs, smax=0.6):
+    M = np.isfinite(F[0])
+    Fz = np.nan_to_num(F)
+    v, w = pairs[:, 0], pairs[:, 1]
+    s, ncc, en, valid = FL.dynamic_shifts(Fz[:, v], Fz[:, w], M[v], M[w], STEP, smax=smax)
+    W = FL.pair_weights(ncc, en, valid, np.median(en[valid]))
+    return FL.fit_warp(pairs, s, W, F.shape[1], STEP, tau_max=3.6, eps=0.2, n_outer=4)
+
+
+def test_fit_recovers_large_warp():
+    """The fit from dynamic shifts recovers a warp whose neighbour shifts reach 0.36 mm."""
+    F, ns, pairs, x, y, prm, _ = grid_shifted()
+    tau, r, _ = run_fit_dyn(F, ns, pairs)
+    zt = truth(x, y, tau, prm)
+    inner = (tau > 0.3) & (tau < 3.4)
+    err = np.abs(tau[None] + r - zt)[:, inner]
+    assert np.median(err) < 0.01
+    assert np.percentile(err, 95) < 0.03

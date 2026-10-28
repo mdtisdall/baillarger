@@ -249,6 +249,7 @@ A local 3D chart of the volume around a point, written as NIfTI cubes for ITK-SN
 **Data term: shifts between neighbouring traces.**
 - Neighbours: traces whose roots are within 0.3 mm of each other and whose white-mesh normals agree (dot product over 0.7), so the two sides of a thin WM blade are not joined. Roots within 2 mm of a box face are left out, as everywhere.
 - For each pair (v, w) and each depth z on v, the shift s_vw(z) that best maps w onto v near z: f_w(z + s) ≈ f_v(z). It is estimated by iterated gradient matching (Lucas–Kanade along the trace), for echoes 2 and 3 together, with derivative scale 0.16 mm and a Gaussian window of 0.32 mm, the scales of the structure tensor.
+- *Alternative estimator: dynamic warping* (`flatten_lib.dynamic_shifts`, `--shifts dyn`; Hale 2013). Squared alignment errors over lags in ±smax at 0.01 mm, smoothed along the trace at 0.32 mm; the exact minimum-cost lag path on depths every 0.16 mm with |ds/dz| ≤ 0.2; then the gradient iterations as a polish. Global along the trace, so not limited by the gradient estimator's capture range. Results: *Flattening by dynamic warping* below.
 - Weight: the window's gradient energy (normalized) times the local correlation after the shift (0 if negative). Samples past a trace's end have no weight.
 
 **Fit.** Weighted least squares, all levels and traces at once:
@@ -528,6 +529,43 @@ The darkest-point measure first counted minima on the window's edge (a pile-up a
 - echo weights: both echoes are scaled to unit SD; echo 3 carries more stria contrast;
 - per-bank or per-area gauges in place of one τ for the box;
 - the τ coordinate as the chart's depth axis (`chart.py`), and a re-trace along the flattened layer normal.
+
+### Flattening by dynamic warping: V1V2 banks
+
+**Code.** `flatten_lib.dp_lags` (the accumulation and backtrack) and `flatten_lib.dynamic_shifts`; `flatten_volume.py --shifts lk|dyn --smax MM` (outputs tagged `_dyn`, `_s<smax>`; the npz now also holds the shifts S and weights W); `flatten_compare.py <work> <site> <tags…>`.
+
+**Tests** (`test_flatten_volume.py`, 14 pass, 7 new):
+- `dp_lags` against enumeration of every path, strain 0–2 lags;
+- a constant shift of 0.6 mm: the gradient estimator, its bound opened to 0.8 mm, slides to the wrong band; dynamic warping is within 0.005 mm;
+- s(z) = 0.1 z + 0.2 (up to 0.6 mm): median 0.005, max 0.015 mm;
+- the strain and lag bounds hold exactly without the polish; at 0.10 mm the two estimators agree within 0.003 mm;
+- a partner trace that ends early: right shift and no valid samples past its end. Near the partner's end both estimators are biased by the gradient window (0.007 mm at 0.7 mm from it, 0.01 at 0.5 mm, 0.06 at 0.2 mm);
+- the fit recovers a warp whose neighbour shifts reach 0.36 mm (median under 0.01 mm).
+- **The gradient estimator's capture range on this pattern is about 0.5 mm**, not the 0.3 mm of its bound: it holds to 0.45 mm (all samples), starts failing at 0.5 mm (8 % off), and fails everywhere at 0.6 mm. In the real runs its ±0.3 mm bound is what limits it.
+
+**Runs** (same traces and pairs as the first run; ε = 0.2):
+
+| V1V2 banks | Gradient (rerun) | Dynamic, ±0.3 mm | Dynamic, ±0.6 mm |
+|---|---|---|---|
+| Time, peak memory | 6.3 min, 5.8 GB | 11.5 min, 5.8 GB | 15.3 min, 5.8 GB |
+| Weighted RMS misfit, first → last outer | 0.037 → 0.033 mm | 0.038 → 0.034 mm | 0.051 → 0.046 mm |
+| Residual p50 / p90 / p99 | 0.022 / 0.108 / 0.300 mm | 0.022 / 0.109 / 0.300 mm | 0.024 / 0.154 / 0.543 mm |
+| Folds | 2.3 % | 2.3 % | 3.4 % |
+| Darkest point in 0.5–1.5 mm, IQR raw → τ | 0.24 → 0.18 mm | 0.24 → 0.20 mm | 0.24 → 0.24 mm |
+| Shift against the gradient fit, p50 / p90 / p99 (weighted samples) | — | 0.002 / 0.011 / 0.062 mm | 0.003 / 0.017 / 0.300 mm |
+| … samples differing by more than one sample (0.04 mm) | — | 1.6 % | 5.5 % |
+| Horizons against the gradient fit, p50 / p90 / p99 | — | 0.016 / 0.069 / 0.193 mm | 0.050 / 0.217 / 0.535 mm |
+| Weighted samples (W > 0.3) at the ±0.3 mm bound | 3.0 % | 3.4 % | (1.0 % at ±0.6; 3.0 % between 0.3 and 0.6) |
+
+**What it shows** [readings by Claude]:
+- **Between neighbours, dynamic warping adds nothing at ±0.3 mm.** It reproduces the gradient shifts on 98.4 % of weighted samples within one sample, at 1.8× the time, with a slightly wider darkest band in τ. Neighbours are at most 0.25 mm apart, so their shifts are within the gradient estimator's reach.
+- **About 3 % of weighted samples sit at the ±0.3 mm bound in the gradient fit** (not known before). The clipped value goes into the fit with its weight. Opened to ±0.6 mm, these become shifts of 0.3–0.6 mm with fair correlation (mean weight 0.51, against 0.61 for shifts under 0.2 mm), and the fit gets worse on every measure. Over 0.25 mm between roots, a 0.3–0.6 mm shift is a layer slope of 50° or more against the trace.
+- **They gather on traces that end at a contact, stay in their own bank, or fail** (in the ±0.6 mm run, 45 % of the shifts at 0.3 mm or more, against 27 % of weighted samples; 42 % of the samples at the bound in the gradient fit), less on crossing traces (6 % against 15 %), and somewhat near a trace's end (27 % within 0.5 mm, against 20 %). By the no-faults rule they point at traces that diverge from their neighbours, an upstream error, rather than at tissue. A trace error, not a reason for a wider bound.
+- **Where dynamic warping should matter:** long-range pairs, where shifts are large and a local estimator can't get there: profiles matched to templates, across an evidence-free gap, or between areas (simultaneous correlation of many profiles).
+
+**Open (for the user):**
+- whether samples at the bound should get zero weight (a pair with no match there) instead of entering the fit at the bound's value;
+- whether to use `dynamic_shifts` for long-range matching (templates, simultaneous correlation) rather than for neighbours.
 
 ### The joint warp: the level solver
 

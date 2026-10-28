@@ -4,6 +4,11 @@
 - shifts: for pairs of neighbouring traces (v, w), the shift s(z) with f_w(z + s) ~ f_v(z), by iterated
   gradient matching along the trace (Lucas-Kanade in 1D), all features together, with a local
   correlation and gradient energy for the weight.
+- dynamic_shifts: the same output by dynamic warping (Hale 2013, smooth dynamic image warping): squared
+  alignment errors over a lag grid, smoothed along the trace, a minimum-cost lag path under a strain
+  bound on a coarse depth grid (dp_lags, exact), interpolated, then optionally polished by the gradient
+  iterations. Global along the trace, so it reaches shifts past the gradient estimator's capture range
+  (about half a band spacing).
 - fit_warp: the horizon volume z_v(tau) = tau + r_v(tau), from r_w - r_v = s_vw(tau + r_v) over all
   pairs and levels, eps (r_v(tau + dtau) - r_v(tau)) = 0, r_v(0) = 0; weighted least squares by
   conjugate gradients, with Gauss-Newton outer iterations (the shift is read where v's horizon is).
@@ -43,7 +48,7 @@ def interp_last(a, q):
     return v, inside
 
 
-def shifts(Fv, Fw, Mv, Mw, step, sig_d=0.16, sig_w=0.32, n_iter=10, smax=0.3):
+def shifts(Fv, Fw, Mv, Mw, step, sig_d=0.16, sig_w=0.32, n_iter=10, smax=0.3, s0=None):
     """Shift s (mm) with f_w(z + s) ~ f_v(z) at every sample z of v.
 
     Fv, Fw: (nf, k, n) features of k pairs' traces (any value where invalid); Mv, Mw: (k, n) valid.
@@ -55,7 +60,7 @@ def shifts(Fv, Fw, Mv, Mw, step, sig_d=0.16, sig_w=0.32, n_iter=10, smax=0.3):
     b = masked_smooth(Fw, Mw[None], sd)
     gb = np.gradient(b, axis=-1)
     z = np.arange(Fv.shape[-1], dtype=float)
-    s = np.zeros(Mv.shape)
+    s = np.zeros(Mv.shape) if s0 is None else s0 / step
     win = lambda x: ndi.gaussian_filter1d(x, sw, axis=-1, mode="constant")  # noqa: E731
     mwf = Mw.astype(float)
     for _ in range(n_iter):
@@ -82,6 +87,79 @@ def shifts(Fv, Fw, Mv, Mw, step, sig_d=0.16, sig_w=0.32, n_iter=10, smax=0.3):
     b0 = (bw - mb) * valid
     ncc = win((a0 * b0).sum(0)) / np.sqrt(win((a0 * a0).sum(0)) * win((b0 * b0).sum(0)) + 1e-12)
     return s * step, ncc, energy, valid
+
+
+def dp_lags(E, m):
+    """Lag indices l (k, n) minimizing sum_i E[:, i, l_i] subject to |l_{i+1} - l_i| <= m, per pair.
+
+    E (k, n, nl) costs. Accumulation forward, backtrack from the cheapest last lag; ties go to the
+    unchanged lag."""
+    k, n, nl = E.shape
+    offs = np.r_[0, np.ravel(np.c_[-np.arange(1, m + 1), np.arange(1, m + 1)])]
+    D = E[:, 0].astype(np.float64)
+    back = np.zeros((k, n, nl), np.int8)
+    for i in range(1, n):
+        P = np.full((offs.size, k, nl), np.inf)
+        for j, o in enumerate(offs):  # predecessor of lag l is l + o
+            if o >= 0:
+                P[j, :, : nl - o] = D[:, o:]
+            else:
+                P[j, :, -o:] = D[:, :o]
+        a = np.argmin(P, axis=0)
+        D = E[:, i] + np.take_along_axis(P, a[None], 0)[0]
+        back[:, i] = a
+    lags = np.zeros((k, n), np.int64)
+    lags[:, -1] = np.argmin(D, axis=1)
+    rows = np.arange(k)
+    for i in range(n - 1, 0, -1):
+        lags[:, i - 1] = lags[:, i] + offs[back[rows, i, lags[:, i]]]
+    return lags
+
+
+def dynamic_shifts(Fv, Fw, Mv, Mw, step, sig_d=0.16, sig_w=0.32, smax=0.3, dl=None, coarse=0.16,
+                   strain=0.2, polish=10, chunk=2048):
+    """Shift s (mm) with f_w(z + s) ~ f_v(z), by dynamic warping; the arguments and output as `shifts`.
+
+    Errors e(z, s) = sum over features (a(z) - b(z + s))^2 of the smoothed features, on lags s in
+    [-smax, smax] at spacing dl (default step / 4, b interpolated). Where a or b(z + s) is invalid the
+    error is the mean of the row's valid lags (no preference); a row with none is 0. Errors are
+    smoothed along z (Gaussian sig_w), the lag path is found on depths every `coarse` mm with lag
+    changes of at most strain * coarse, and interpolated linearly to every sample (|ds/dz| <= strain).
+    Then `polish` gradient iterations (`shifts`) from that start refine it below dl; 0 keeps it as is.
+    Pairs in chunks of `chunk`."""
+    dl = step / 4 if dl is None else dl
+    sd = sig_d / step
+    nl_half = int(np.floor(smax / dl + 1e-9))
+    lagv = np.arange(-nl_half, nl_half + 1) * dl
+    b_ = max(1, int(round(coarse / step)))
+    m = int(np.floor(strain * b_ * step / dl + 1e-9))
+    k, n = Mv.shape
+    z = np.arange(n, dtype=float)
+    ic = np.arange(0, n, b_)
+    s = np.zeros((k, n))
+    mwf = Mw.astype(float)
+    for c0 in range(0, k, chunk):
+        sl = slice(c0, min(k, c0 + chunk))
+        a = masked_smooth(Fv[:, sl], Mv[sl][None], sd)
+        bb = masked_smooth(Fw[:, sl], Mw[sl][None], sd)
+        kc = a.shape[1]
+        E = np.zeros((kc, n, lagv.size))
+        V = np.zeros((kc, n, lagv.size), bool)
+        for j, lg in enumerate(lagv):
+            q = np.broadcast_to(z + lg / step, (kc, n))
+            bw, ok = interp_last(bb, q)
+            mw, _ = interp_last(mwf[sl], q)
+            ok = ok & (mw > 0.999) & Mv[sl]
+            E[:, :, j] = ((bw - a) ** 2).sum(0)
+            V[:, :, j] = ok
+        cnt = V.sum(2)
+        rowmean = np.where(cnt > 0, (E * V).sum(2) / np.maximum(cnt, 1), 0.0)
+        E = np.where(V, E, rowmean[..., None])
+        E = ndi.gaussian_filter1d(E, sig_w / step, axis=1, mode="nearest")
+        lags = dp_lags(E[:, ic], m)
+        sc = lagv[lags]  # (kc, len(ic)) mm
+        s[sl] = np.array([np.interp(z, ic, row) for row in sc]) if kc else s[sl]
+    return shifts(Fv, Fw, Mv, Mw, step, sig_d=sig_d, sig_w=sig_w, n_iter=polish, smax=smax, s0=s)
 
 
 def pair_weights(ncc, energy, valid, energy_ref):
