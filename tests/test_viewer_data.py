@@ -175,6 +175,35 @@ def test_sections_and_streamlines_without_a_joint_result(site: VD.Site) -> None:
     assert hits[10][0][1] == pytest.approx(0.48)
 
 
+def test_rotated_sections_swap_u_and_v_and_follow_their_curves(
+    site: VD.Site,
+) -> None:
+    i = 4 * 9 + 4  # the plane's centre vertex
+    S0, S90 = site.section_at(i, half=3.0), site.section_at(i, half=3.0, rot=90.0)
+    assert S90["u"]["traces"] == S0["v"]["traces"]
+    assert S90["u"]["dist"] == S0["v"]["dist"]
+    assert S90["v"]["traces"] == S0["u"]["traces"][::-1]
+    assert S90["v"]["dist"] == [-d for d in S0["u"]["dist"][::-1]]
+    # the curves lie on the plane (world z of box z = 4 voxels) and pass by every
+    # trace of their section, within the section's 1.5 band
+    band = 1.5 * 0.75 * float(site.vox.min())
+    zw = site.world([0, 0, 4.0])[0, 2]
+    for S in (S0, S90):
+        for a in ("u", "v"):
+            c = np.array(S["curves"][a])
+            roots = site.world(site.v_vox[site.rv[S[a]["traces"]]])
+            assert np.allclose(c[:, 2], zw, atol=1e-4)
+            assert np.max(cKDTree(c).query(roots)[0]) <= band + 1e-9
+    # the plane's normal is box z: the axial plane is the tangent plane (no snap);
+    # the coronal plane holds the axis along box x
+    assert S0["snap"]["axial"] is None
+    tu = np.array(S0["curves"]["u"][-1]) - np.array(S0["curves"]["u"][0])
+    along_x = abs(tu[0]) > abs(tu[1])
+    co, sa = S0["snap"]["coronal"], S0["snap"]["sagittal"]
+    assert co["tilt_deg"] == 0 and sa["tilt_deg"] == 0
+    assert (co["axis"] == "u") == along_x and (sa["axis"] == "u") != along_x
+
+
 def get(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=5) as r:
         out: bytes = r.read()
@@ -209,6 +238,12 @@ def test_server_shares_state_between_pages(site: VD.Site) -> None:
         assert snap["vertex"] == 21 and snap["trace"] == 21
         assert json.loads(get(base + "/vertex?v=21")) == snap
         es.close()
+        S = json.loads(get(base + "/section?i=40&half=3&rot=90"))
+        assert S["rot"] == 90 and "curves" not in S
+        k, npts = S["axes"]["id"], S["axes"]["points"]
+        for a in ("u", "v"):
+            c = SV.read_tck(get(base + f"/axes/{k}/{a}.tck"))
+            assert len(c) == 1 and len(c[0]) == npts[a] > 2
         lines = SV.read_tck(get(base + "/overview/0/1.tck"))
         assert len(lines) == int((site.cls_all[site.sub] == 0).sum())
         with pytest.raises(urllib.error.HTTPError):
