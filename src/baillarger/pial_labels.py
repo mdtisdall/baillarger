@@ -65,10 +65,19 @@ the voxel size (mm). Everything is 3D.
    visible channel.
 6. Topology (topology_change): the Betti numbers (Kuhn adjacency,
    baillarger.handles) of the tissue (every label but fluid) in a box round
-   the component, before and after it is relabelled: a cavity (a channel
-   with no mouth in the box), a tunnel (a vessel under a bridge of
-   mislabelled cortex) or a split. Reported for review; the change file
+   each review cell, before and after its whole component is relabelled:
+   a cavity (a channel with no mouth in the box), a tunnel (a
+   vessel under a bridge of mislabelled cortex) or a split. The change file
    records the box's Betti numbers before and after the changes it applies.
+7. Status, per review cell (auto_accept): a cell of a component inside a
+   bank is rejected. A cell of a component that touches fluid is accepted
+   at once when its relabel, on top of the cells accepted so far, keeps the
+   tissue's Betti numbers in a box round it; the cells are taken in passes
+   until no more can be, so the rim where the aseg's cortex runs one to
+   three voxels into the fluid opens from the fluid inward. The rest (cells
+   of hidden channels that reach no fluid, and cells whose relabel would
+   open a cavity, a tunnel or a split, as a channel between two banks does)
+   are proposed: the review queue. The review can overturn any of them.
 
 The change file (LabelChanges): full-grid voxels, their new rim label
 (baillarger.data: 1 outside for fluid, 3 cortex for a brush that gives
@@ -82,8 +91,8 @@ Command line:
     python -m baillarger.pial_labels propose --out DIR --name NAME --lo X Y Z
         --hi X Y Z [--wm-changes FILE] [--columns column_volume_<name>.npz]
 
-writes pial_labels_<NAME>.npz (the change file, every component proposed or
-auto-rejected), .json (summary and the ranked components) and
+writes pial_labels_<NAME>.npz (the change file, every review cell
+accepted, proposed or rejected by step 7), .json (summary and the ranked components) and
 _overlay.nii.gz (box grid; overlay's codes).
 """
 
@@ -375,14 +384,20 @@ def review_cells(pts: I64, vox: npt.ArrayLike, spacing: float) -> I64:
     return cell
 
 
-def topology_change(tissue: Bool, pts: I64, margin: int = 2) -> tuple[Betti, Betti]:
+def topology_change(
+    tissue: Bool, pts: I64, margin: int = 2, also: Bool | None = None
+) -> tuple[Betti, Betti]:
     """The Betti numbers (Kuhn adjacency) of the tissue in the bounding box
-    of pts with a margin, before and after pts leave it."""
+    of pts with a margin, before and after pts (and the voxels of also in
+    that box: the rest of their component) leave it."""
     lo = np.maximum(pts.min(0) - margin, 0)
     hi = np.minimum(pts.max(0) + margin + 1, tissue.shape)
-    sub = tissue[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]].copy()
+    box = tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))
+    sub = tissue[box].copy()
     before = kuhn_betti(sub)
     sub[tuple((pts - lo).T)] = False
+    if also is not None:
+        sub &= ~also[box]
     return before, kuhn_betti(sub)
 
 
@@ -557,11 +572,12 @@ class Proposal:
 
 def _describe(
     uid: int,
-    group: int,
+    gid: int,
     pts: I64,
     thr: Bool,
     near: Bool,
     tissue: Bool,
+    group: Bool,
     dk: Darkness,
     t: CT.Tissue,
     lo: I64,
@@ -571,11 +587,11 @@ def _describe(
     touches = bool(near[tuple(pts.T)].any())
     share = float(thr.mean())
     kind, west = shape_kind(pts, t.vox)
-    b0, b1 = topology_change(tissue, pts)
+    b0, b1 = topology_change(tissue, pts, also=group)
     at = pts[np.argmin(np.sum((pts - pts.mean(0)) ** 2, 1))]  # nearest its centre
     return dict(
         id=uid,
-        group=group,
+        group=gid,
         voxels=len(pts),
         kind=kind,
         westin=[round(float(x), 3) for x in west],
@@ -590,6 +606,34 @@ def _describe(
         at_full0=(at + lo).tolist(),
         at_itksnap=(at + lo + 1).tolist(),
     )
+
+
+def auto_accept(rows: list[dict[str, Any]], cells: list[I64], tissue: Bool) -> int:
+    """Step 7: accept, in passes until none is left, the proposed cells of
+    components that touch fluid whose relabel, on top of the cells accepted
+    so far, keeps the tissue's Betti numbers in a box round the cell
+    (topology_change). Returns the number accepted."""
+    state = tissue.copy()
+    todo = [
+        i
+        for i, r in enumerate(rows)
+        if r["auto_status"] == STATUS[PROPOSED] and r["group_touches_fluid"]
+    ]
+    n = 0
+    while todo:
+        left = []
+        for i in todo:
+            b0, b1 = topology_change(state, cells[i])
+            if b0 == b1:
+                state[tuple(cells[i].T)] = False
+                rows[i]["auto_status"] = STATUS[ACCEPTED]
+                n += 1
+            else:
+                left.append(i)
+        if len(left) == len(todo):
+            break
+        todo = left
+    return n
 
 
 def propose(
@@ -618,13 +662,13 @@ def propose(
     rows: list[dict[str, Any]] = []
     vox_list, comp_list = [], []
     cell_of = np.zeros(comp.shape, np.int64)  # review cell id + 1
+    cell_pts: list[I64] = []
     for c, s in enumerate(ndi.find_objects(comp), start=1):
         assert s is not None
         allp = np.argwhere(comp[s] == c) + np.array([a.start for a in s])
         cm = np.zeros(comp.shape, bool)
         cm[tuple(allp.T)] = True
         thr_all = pass_through(cm, allp, C.T, C.noise, t.labels, t.vox, dk.k)
-        del cm
         touches = bool(near[tuple(allp.T)].any())
         share = float(thr_all.mean())
         auto = "outer" if touches or share <= 0.5 else "inside"
@@ -634,12 +678,16 @@ def propose(
             pts, thr = allp[sel], thr_all[sel]
             uid = len(rows)
             cell_of[tuple(pts.T)] = uid + 1
-            row = _describe(uid, c - 1, pts, thr, near, tissue_mask, dk, t, lo)
+            row = _describe(uid, c - 1, pts, thr, near, tissue_mask, cm, dk, t, lo)
             row.update(group_touches_fluid=touches, group_pass_through=round(share, 3))
             row["auto"] = auto
+            row["auto_status"] = STATUS[REJECTED if auto == "inside" else PROPOSED]
             rows.append(row)
+            cell_pts.append(pts)
             vox_list.append(pts + lo)
             comp_list.append(np.full(len(pts), uid, np.int32))
+        del cm
+    auto_accept(rows, cell_pts, tissue_mask)
     m = len(rows)
     around = ndi.maximum_filter(cell_of, footprint=_C26)
     crest_hits = np.bincount(around[C.crest], minlength=m + 1)
@@ -655,9 +703,7 @@ def propose(
     )
     for r_, i in enumerate(order):
         rows[i]["rank"] = r_
-    status = np.array(
-        [PROPOSED if r["auto"] == "outer" else REJECTED for r in rows], np.int8
-    )
+    status = np.array([STATUS.index(r["auto_status"]) for r in rows], np.int8)
     voxels = np.concatenate(vox_list) if vox_list else np.zeros((0, 3), np.int64)
     comps = np.concatenate(comp_list) if comp_list else np.zeros(0, np.int32)
     info = dict(

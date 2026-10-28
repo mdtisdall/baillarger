@@ -46,10 +46,10 @@ def synthetic(
 
 
 def proposed_mask(p: PL.Proposal) -> np.ndarray:
-    """Box voxels of proposed review cells."""
+    """Box voxels of review cells that would apply: accepted or proposed."""
     ch = p.changes
     out = np.zeros(p.comp.shape, bool)
-    sel = ch.status[ch.component] == PL.PROPOSED
+    sel = ch.status[ch.component] != PL.REJECTED
     out[tuple((ch.voxels[sel] - np.array(ch.lo)).T)] = True
     return out
 
@@ -268,6 +268,9 @@ def test_stria_trap_on_fused_banks() -> None:
     assert prop[inner].mean() > 0.95
     rows = [r for r in p.changes.components if r["auto"] == "inside"]
     assert rows and all(r["group_pass_through"] > 0.5 for r in rows)
+    # the channel reaches no fluid: it waits for review
+    st = p.changes.status[p.cell[inner] - 1]
+    assert (st == PL.PROPOSED).mean() > 0.95
 
 
 def test_stria_trap_on_a_slab_with_a_surface_vessel() -> None:
@@ -285,6 +288,8 @@ def test_stria_trap_on_a_slab_with_a_surface_vessel() -> None:
     assert p.dark.dark[stria].mean() > 0.9
     assert not prop[stria].any()
     assert prop[vessel].mean() > 0.95
+    # it touches the fluid and keeps the topology: accepted without review
+    assert (p.changes.status[p.cell[vessel] - 1] == PL.ACCEPTED).mean() > 0.95
     g = {r["group"] for r in p.changes.components if prop[tuple(r["at_box0"])]}
     assert len(g) == 1
     pts = np.argwhere(p.comp == g.pop() + 1)
