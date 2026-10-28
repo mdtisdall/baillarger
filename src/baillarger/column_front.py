@@ -107,6 +107,16 @@ def dual_areas(x: F64, f: npt.NDArray[np.integer[Any]], vox: F64) -> tuple[F64, 
     return A, N
 
 
+def past_crest(g: F64, d: F64, ascending: Bool, coast: Bool) -> tuple[Bool, Bool]:
+    """The rule past T's crest (module docstring, 3), per moving vertex: g the
+    unit gradient of T at its place, d its previous step (unit, mm),
+    ascending whether it still climbs T, coast whether it lies within the
+    kink's stencil. Returns which vertices begin to descend now, and which
+    keep their heading for this step."""
+    switch: Bool = ascending & ~coast & ((g * d).sum(1) < 0)
+    return switch, coast
+
+
 class _Coupling:
     """The masked, twiced Gaussian along the mesh (module docstring, 4)."""
 
@@ -213,14 +223,14 @@ def grow(
             break
         xa = x[a]
         s = (i - 1) * step_mm
-        coast = in_kink(xa) if i > 1 else np.zeros(len(a), bool)
+        keep = np.zeros(len(a), bool)
         if i > 1:  # ascend, then descend (module docstring, 3)
-            back = (sgn[a] > 0) & ~coast & ((unit_grad(xa) * d[a]).sum(1) < 0)
+            back, keep = past_crest(unit_grad(xa), d[a], sgn[a] > 0, in_kink(xa))
             sgn[a[back]] = -1.0
             turned[a[back]] = i - 1
         u1 = direction(xa, sgn[a], s, nm[a])
         u2 = direction(xa + 0.5 * u1 * h, sgn[a], s + 0.5 * step_mm, nm[a])
-        u2[coast] = d[a[coast]]
+        u2[keep] = d[a[keep]]
         if couple is not None:
             full = np.zeros((nv, 3))
             full[a] = u2
