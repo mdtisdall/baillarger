@@ -1,15 +1,12 @@
 """The column volume of a box (plan: reports/Crossing paths and contacts from laminar profiles.md,
 *The column volume*). All 3D: samples keep their 3D positions; the volume only re-indexes them.
 
-1. White mesh as finding 28 (contour of the WM label, relaxed, twicing at 2 voxels, smoothed
-   outward normals). Traces at one vertex per voxel cell and normal side (the vertex nearest the
-   cell's centre), so that they are about a voxel apart.
-2. Primary tracer: the streamline of the unsigned layer normal from the vertex along its normal
-   (crossing_lib.trace_array), up to 8 mm. Where it turns or reaches the cap, the fallback: ascent
-   of the equal-arrival pass's arrival (crossing_lib.ascend), stopped at fluid, WM, or the pass's
-   contact (a label whose root is > SAME_MM from the trace's own along the white surface).
-3. Classes: open (fluid), crossing (WM whose root is >= SAME_MM away), own bank (WM within it),
-   to contact (fallback stopped at the pass's contact), failed. Roots within 2 mm of a face: flagged.
+1-3. The traces (baillarger.column_traces, --tracer): the white mesh and one root per voxel cell
+   and normal side; the primary streamline from each root (default fitted_blend: the fitted
+   field, started along the mesh normal); where it turns or reaches the cap, the fallback (ascent
+   of the equal-arrival one pass, stopped at fluid, WM, or the pass's contact); the classes (open,
+   crossing, own bank, to contact, failed; roots within 2 mm of a face flagged). --tracer current
+   gives the volumes built before the fitted field (the structure-tensor streamline).
 4. Features: echo 2 and echo 3 (trend removed) at each sample, centre line, no disc.
 5. Horizons (mm from the root): top; far WM; the fallback's contact; on crossing traces the one
    pass's boundary (equal and field weights), the field prior's pairwise posterior on L, and the
@@ -24,7 +21,11 @@ corner, 0-based) with --size N (or N1 N2 N3; default 141). Points: --points FILE
 with "points_full0": [[i, j, k], ...] in 0-based full-grid voxels.
 Writes <work>/column_volume_<name>.npz and .json, <figures>/column_volume_<name>_*.png.
 Usage: column_volume.py <figures dir> <work dir> --name NAME (--patch P | --box I J K [--size N ...])
-                        [--points FILE] [--figs-only]
+                        [--points FILE] [--tracer {current,fitted,fitted_blend}]
+                        [--wm-changes FILE] [--figs-only]
+--wm-changes: the handle-free WM label (baillarger.white.wm_changes, saved with WMChanges.save)
+replaces the aseg's everywhere (mesh, field, stops, one pass, classes); without it, the aseg's.
+The npz also holds tracer_name and wm_label.
 The two marked faces of the plan: --name M1S1 --box 378 224 448; --name V1V2_banks --box 198 58 65.
 """
 
@@ -32,6 +33,7 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 
 sys.path.insert(0, sys.argv[2])
 import matplotlib
@@ -45,12 +47,12 @@ from scipy.sparse.csgraph import connected_components, dijkstra
 from scipy.spatial import cKDTree
 
 import crossing_lib as X
-import curv_lib as C
-import flatten_fused2 as F
-import mesh_smoothing as MS
-from click_evidence import Thickness, orientation
+from click_evidence import Thickness
+from baillarger import column_traces as CT
+from baillarger.column_traces import run
 from baillarger.data import PATCHES
-from onepass_lib import run, setup
+from baillarger.mesh_smoothing import edges as mesh_edges
+from baillarger.white import WMChanges
 
 ap = argparse.ArgumentParser()
 ap.add_argument("fig")
@@ -60,11 +62,14 @@ ap.add_argument("--patch", choices=sorted(PATCHES))
 ap.add_argument("--box", type=int, nargs=3, metavar=("I", "J", "K"))
 ap.add_argument("--size", type=int, nargs="+", default=[141])
 ap.add_argument("--points")
+ap.add_argument("--tracer", choices=CT.TRACERS, default="fitted_blend")
+ap.add_argument("--wm-changes", help="the handle-free WM label's changes (baillarger.white, WMChanges.save); "
+                "default: the aseg's WM label")
 ap.add_argument("--figs-only", action="store_true")
 A = ap.parse_args()
 FIG, WORK, SITE, FIGS_ONLY = A.fig, A.work, A.name, A.figs_only
-RATIO, PATCH, FACE_MM, SAME_MM, TPL_MM = 3.0, 6, 2.0, 5.0, 6.0
-NMAX = 201  # samples: 8 mm at 0.04 mm
+WM_LABEL = f"handle-free: {A.wm_changes}" if A.wm_changes else "aseg"
+SAME_MM, TPL_MM = CT.SAME_MM, 6.0
 N_PROFILE, TPL_MAX = 3000, 400
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
 CLASS = {OPEN: "open", CROSS: "crossing", OWN: "own bank", TOCONTACT: "to the pass's contact", FAILED: "failed"}
@@ -79,28 +84,8 @@ def say(msg):
     print(f"[{time.time() - T0:6.0f}s] {msg}", flush=True)
 
 
-def white_mesh(wm):
-    v0, f = MS.contour(wm, 0.0)
-    v = MS.twice(MS.relax(v0, f), f, 2.0)
-    return v, f, MS.smooth_normals(v, f)
-
-
-def pick_vertices(v, n):
-    """One vertex per voxel cell and normal side (dominant axis and sign): the one nearest the
-    cell's centre."""
-    ax = np.argmax(np.abs(n), 1)
-    side = ax * 2 + (n[np.arange(len(n)), ax] > 0)
-    cell = np.floor(v).astype(np.int64)
-    key = np.c_[cell, side]
-    dist = np.linalg.norm(v - (cell + 0.5), axis=1)
-    o = np.lexsort((dist, *key.T[::-1]))
-    k = key[o]
-    first = np.r_[True, np.any(k[1:] != k[:-1], 1)]
-    return np.sort(o[first])
-
-
 def mesh_graph(v, f, vox):
-    E = MS.edges(f)
+    E = mesh_edges(f)
     w = np.linalg.norm((v[E[:, 0]] - v[E[:, 1]]) * vox, axis=1)
     G = coo_matrix((w, (E[:, 0], E[:, 1])), shape=(len(v),) * 2).tocsr()
     return G.maximum(G.T).tocsr()
@@ -128,91 +113,40 @@ def box_and_points():
 
 def main():
     lo, hi, P = box_and_points()
-    B = C.load(lo, hi, f"column_volume_{SITE}")
-    vox = B["vox"]
+    changes = WMChanges.load(Path(A.wm_changes)) if A.wm_changes else None
+    t = CT.load_tissue(tuple(int(a) for a in lo), tuple(int(a) for a in hi), f"column_volume_{SITE}",
+                       changes=changes)
+    # click_evidence.Thickness reads the box as curv_lib.load's dict
+    B = dict(p=t.patch, lo=lo, rim=t.rim, vox=t.vox, miss=t.miss, ctx=t.ctx, wm=t.wm,
+             shell=t.wm & ~ndi.binary_erosion(t.wm, border_value=1), det=t.det, disp=t.det[1],
+             dface=t.dface)
+    vox = t.vox
     h = float(np.mean(vox))
-    wm, ctx, rim = B["wm"], B["ctx"], B["rim"]
-    labels = np.full(rim.shape, 4, np.int16)
-    labels[ctx] = 0
-    labels[rim == 1] = 1
-    labels[wm] = 2
-    labels[B["miss"]] = 3
-    feats = [B["det"][1], B["det"][2]]
-    Tc = F.tensor(feats[0], ctx.astype(float)) + F.tensor(feats[1], ctx.astype(float))
-    _, coh = C.tensor_normal(B)
+    wm, ctx, labels = t.wm, t.ctx, t.labels
+    feats = [t.det[1], t.det[2]]
     d_wm = ndi.distance_transform_edt(~wm, sampling=vox)
-    say(f"{SITE}: box {tuple(int(a) for a in hi - lo)}; {len(P)} points")
+    say(f"{SITE}: box {tuple(int(a) for a in hi - lo)}; {len(P)} points; tracer {A.tracer}; WM {WM_LABEL}")
 
-    # ---- mesh and trace vertices
-    v, f, nrm = white_mesh(wm)
-    tv = pick_vertices(v, nrm)
-    say(f"white mesh: {len(v):,} vertices; traces at {len(tv):,}")
-
-    # ---- one pass, thickness field, root patches and their distances
-    s = setup(wm, ctx, patch=PATCH, direction=orientation(B))
-    Thk = Thickness(B, s, h)
-    mu_f, sd_f, nobel = Thk.weights(Thk.y_tops)
-    f_eq = run(s, ratio=RATIO)
-    f_fd = run(s, mu_f, sd_f, ratio=RATIO)
-    seed_pos = np.stack(np.unravel_index(s.sflat, wm.shape), -1).astype(float)
-    seed_tree = cKDTree(seed_pos)
-    seed_patch = s.patch.ravel()[s.sflat]
-    D = np.full((s.npatch, s.npatch), np.inf, np.float32)  # patch centre to centre along the white surface (mm)
-    for a in range(0, s.npatch, 200):
-        d = dijkstra(s.graph, indices=s.rep[a:a + 200], limit=8.0 / h)
-        D[a:a + 200] = d[:, s.rep] * h
-    say(f"passes, field and patch distances done ({s.npatch:,} patches)")
-
-    def patch_at(x):
-        return seed_patch[seed_tree.query(x)[1]]
-
-    root_patch = patch_at(v[tv])
-
-    # ---- primary tracer
-    x0 = v[tv]
-    pos1, ns1, out1 = X.trace_array(Tc, labels, B["dface"], x0, nrm[tv], vox, NMAX)
+    # ---- steps 1-3 (baillarger.column_traces): mesh, roots, one pass, primary, fallback, classes
+    R = CT.trace_columns(t, A.tracer)
+    v, f, nrm, tv = R.v, R.f, R.nrm, R.tv
+    pos, ns, out1, outc, tracer, cls = R.pos, R.ns, R.out1, R.outc, R.fallback, R.cls
+    root_patch, end_patch, near_face, coh = R.root_patch, R.end_patch, R.near_face, R.coh
+    s, f_eq, D = R.one_pass.setup, R.one_pass.fronts, R.one_pass.D
+    say(f"traces at {len(tv):,} roots; {s.npatch:,} patches; {R.notes}")
     oc = np.bincount(out1, minlength=10)
     say("primary: " + ", ".join(f"{X.OUTCOME[k]} {oc[k]:,}" for k in range(10) if oc[k]))
-    # where it turns
+    oc2 = np.bincount(outc[tracer == 1], minlength=10)
+    say("fallback: " + ", ".join(f"{X.OUTCOME[k]} {oc2[k]:,}" for k in range(10) if oc2[k]))
+    # where the primary turns
     it = np.flatnonzero(out1 == X.TURN)
-    tpos = pos1[it, ns1[it] - 1].astype(float)
-    turn = dict(s_mm=((ns1[it] - 1) * X.STEP_MM).tolist(),
+    tpos = R.end1[it].astype(float)
+    turn = dict(s_mm=((R.ns1[it] - 1) * X.STEP_MM).tolist(),
                 coh=ndi.map_coordinates(coh, tpos.T, order=1).tolist(),
                 d_wm=ndi.map_coordinates(d_wm, tpos.T, order=1).tolist())
-
-    # ---- fallback where the primary turned or ran to the cap
-    fb = np.flatnonzero((out1 == X.TURN) | (out1 == X.LENGTH))
-    u = np.where(wm, 0.0, np.where(np.isfinite(f_eq.arrival), f_eq.arrival,
-                                   np.nanmax(f_eq.arrival[np.isfinite(f_eq.arrival)])))
-    lab_eq = f_eq.label
-
-    def far(i_paths, q):
-        lab = lab_eq[tuple(q.T)]
-        rp = root_patch[fb[i_paths]]
-        return (lab >= 0) & (D[rp, np.maximum(lab, 0)] > SAME_MM)
-
-    pos2, ns2, out2 = X.ascend(u, labels, B["dface"], x0[fb], vox, NMAX, far)
-    oc2 = np.bincount(out2, minlength=10)
-    say("fallback: " + ", ".join(f"{X.OUTCOME[k]} {oc2[k]:,}" for k in range(10) if oc2[k]))
-    pos, ns = pos1, ns1.copy()
-    pos[fb] = pos2
-    ns[fb] = ns2
-    tracer = np.zeros(len(tv), np.int8)  # 0 primary, 1 fallback
-    tracer[fb] = 1
-    outc = out1.copy()
-    outc[fb] = out2
-    del pos2
-
-    # ---- classes
-    endp = pos[np.arange(len(tv)), ns - 1].astype(float)
-    end_patch = patch_at(endp)
-    sep = D[root_patch, end_patch]
-    cls = np.full(len(tv), FAILED, np.int8)
-    cls[outc == X.FLUID] = OPEN
-    cls[(outc == X.WM) & (sep >= SAME_MM)] = CROSS
-    cls[(outc == X.WM) & (sep < SAME_MM)] = OWN
-    cls[outc == X.CONTACT] = TOCONTACT
-    near_face = B["dface"][tuple(np.clip(np.round(x0).astype(int), 0, np.array(wm.shape) - 1).T)] < FACE_MM
+    Thk = Thickness(B, s, h)
+    mu_f, sd_f, nobel = Thk.weights(Thk.y_tops)
+    f_fd = run(s, mu_f, sd_f, ratio=CT.RATIO)
     L = (ns - 1) * X.STEP_MM
     say("classes: " + ", ".join(f"{CLASS[c]} {np.sum((cls == c) & ~near_face):,}" for c in CLASS)
         + f"; roots near a face {near_face.sum():,}")
@@ -275,6 +209,7 @@ def main():
         end_patch=end_patch, near_face=near_face, P=P, vox=vox, lo=lo,
         disp=B["disp"].astype(np.float32), ctx=ctx, coh=coh.astype(np.float32), wm=wm,
         labels=labels.astype(np.int8),  # 0 cortex, 1 fluid, 2 WM, 3 missing, 4 other
+        tracer_name=A.tracer, wm_label=WM_LABEL,
         **{"H_" + k: H[k] for k in HOR})
     json.dump(dict(turn=turn), open(f"{WORK}/column_volume_{SITE}_turn.json", "w"))
     say("saved")
