@@ -3,3 +3,15 @@
 *.pkl
 *.nii.gz
 *.png
+*.vtk
+*.json
+data/*.txt
+data/*.md
+# inputs made by hand: marked points, crop sites, pial editor edits
+!data/*points*.json
+!data/*_sites.json
+!data/pial_editor_M1S1.edits.json
+# not part of the project
+.DS_Store
+/next_session_prompt.md
+/scripts/memguard.sh

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pial editor spike</title>
+<style>
+  :root { --bg: #111; --fg: #ddd; --muted: #888; --accent: #1baf7a; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 13px/1.4 system-ui, sans-serif; }
+  #wrap { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
+  header { display: flex; gap: 12px; align-items: center; padding: 6px 12px; flex-wrap: wrap; }
+  header label { color: var(--muted); }
+  button { background: #222; color: var(--fg); border: 1px solid #444; border-radius: 4px; padding: 3px 10px; cursor: pointer; }
+  #gl { width: 100%; height: 100%; display: block; }
+  #canvasbox { min-height: 0; position: relative; }
+  #over { position: absolute; left: 0; top: 0; pointer-events: none; }
+  pre { margin: 0; padding: 6px 12px; max-height: 9em; overflow: auto; color: var(--muted); border-top: 1px solid #333; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <strong>Pial editor spike</strong>
+    <button id="bump">Bump at crosshair (b)</button>
+    <button id="reset">Reset mesh</button>
+    <label>amp mm <input id="amp" type="number" value="0.3" step="0.1" style="width:4em"></label>
+    <label>radius mm <input id="rho" type="number" value="1.0" step="0.25" style="width:4em"></label>
+    <label>2D thickness mm <input id="thick" type="number" value="0.16" step="0.04" style="width:4em"></label>
+    <span id="loc"></span>
+  </header>
+  <div id="canvasbox"><canvas id="gl"></canvas><canvas id="over"></canvas></div>
+  <pre id="log"></pre>
+</div>
+<script type="module">
+import { Niivue, NVMesh } from "https://cdn.jsdelivr.net/npm/@niivue/niivue@0.69.0/+esm";
+
+const logEl = document.getElementById("log");
+window.spikeLog = [];
+function log(msg, rec) {
+  logEl.textContent = msg + "\n" + logEl.textContent;
+  if (rec) window.spikeLog.push(rec);
+}
+
+const nv = new Niivue({ backColor: [0, 0, 0, 1], isColorbar: false, show3Dcrosshair: true,
+  meshThicknessOn2D: 0.16, crosshairColor: [1, 0.3, 0.3, 1] });
+window.nv = nv;
+await nv.attachTo("gl");
+let t = performance.now();
+await nv.loadVolumes([{ url: "/volume.nii.gz", name: "echo2_detrended.nii.gz" }]);
+log(`volume loaded in ${(performance.now() - t).toFixed(0)} ms`, { stage: "volume", ms: performance.now() - t });
+
+const names = await (await fetch("/meshes")).json();
+const colours = [[27, 175, 122, 255], [235, 104, 52, 255], [42, 120, 214, 255]];
+const meshes = [];
+for (let i = 0; i < names.length; i++) {
+  t = performance.now();
+  const buf = await (await fetch(`/mesh/${i}`)).arrayBuffer();
+  const tFetch = performance.now() - t;
+  const [nvert, ntri] = new Uint32Array(buf, 0, 2);
+  const pts = new Float32Array(buf, 8, nvert * 3).slice();
+  const tris = new Uint32Array(buf, 8 + nvert * 12, ntri * 3).slice();
+  const t2 = performance.now();
+  const m = new NVMesh(pts, tris, names[i], new Uint8Array(colours[i % 3]), 1.0, true, nv.gl);
+  nv.addMesh(m);
+  meshes.push(m);
+  log(`${names[i]}: ${nvert} vertices; fetch ${tFetch.toFixed(0)} ms, build ${(performance.now() - t2).toFixed(0)} ms`,
+      { stage: "mesh", name: names[i], nvert, ntri, fetch_ms: tFetch, build_ms: performance.now() - t2 });
+}
+nv.setSliceType(nv.sliceTypeMultiplanar);
+// Niivue's own 2D mesh display is a clipped slab of the 3D surface, depth-tested
+// against the slice: most of it is hidden. Off; the overlay draws exact sections.
+nv.setMeshThicknessOn2D(0);
+
+// ---- exact plane sections of the meshes, drawn on an overlay canvas
+const over = document.getElementById("over");
+const octx = over.getContext("2d");
+// tile axis: axCorSag 0 axial (plane z, screen x/y = mm x/y), 1 coronal (plane y; x/z),
+// 2 sagittal (plane x; y/z)
+const PLANE = [2, 1, 0], SX = [0, 0, 1], SY = [1, 2, 2];
+
+function section(m, axis, c) {
+  // segments (flat array x0,y0,z0,x1,y1,z1) where the mesh crosses coordinate axis = c
+  const p = m.pts, t = m.tris, out = [];
+  for (let f = 0; f < t.length; f += 3) {
+    const a = t[f], b = t[f + 1], d = t[f + 2];
+    const da = p[3 * a + axis] - c, db = p[3 * b + axis] - c, dd = p[3 * d + axis] - c;
+    if ((da > 0 && db > 0 && dd > 0) || (da <= 0 && db <= 0 && dd <= 0)) continue;
+    const pts = [];
+    for (const [i, j, di, dj] of [[a, b, da, db], [b, d, db, dd], [d, a, dd, da]]) {
+      if ((di > 0) !== (dj > 0)) {
+        const s = di / (di - dj);
+        pts.push(p[3 * i] + s * (p[3 * j] - p[3 * i]), p[3 * i + 1] + s * (p[3 * j + 1] - p[3 * i + 1]),
+                 p[3 * i + 2] + s * (p[3 * j + 2] - p[3 * i + 2]));
+      }
+    }
+    if (pts.length === 6) out.push(...pts);
+  }
+  return out;
+}
+
+const lineColours = ["#1baf7a", "#eb6834", "#2a78d6"];
+function drawSections() {
+  const t0 = performance.now();
+  nv.drawScene(); // refreshes screenSlices for the current canvas size
+  const gc = nv.gl.canvas;
+  over.width = gc.width; over.height = gc.height;
+  over.style.width = gc.clientWidth + "px"; over.style.height = gc.clientHeight + "px";
+  octx.clearRect(0, 0, over.width, over.height);
+  const cross = nv.frac2mm(nv.scene.crosshairPos);
+  let nseg = 0;
+  for (const s of nv.screenSlices) {
+    if (s.axCorSag > 2) continue;
+    const [L, T, W, H] = s.leftTopWidthHeight, ax = PLANE[s.axCorSag], sx = SX[s.axCorSag], sy = SY[s.axCorSag];
+    const X = (v) => L + (v - s.leftTopMM[0]) / s.fovMM[0] * W;
+    const Y = (v) => T + H - (v - s.leftTopMM[1]) / s.fovMM[1] * H;
+    octx.save(); octx.beginPath(); octx.rect(L, T, W, H); octx.clip();
+    meshes.forEach((m, k) => {
+      const seg = section(m, ax, cross[ax]);
+      nseg += seg.length / 6;
+      octx.strokeStyle = lineColours[k % 3]; octx.lineWidth = 2 * devicePixelRatio / 2; octx.beginPath();
+      for (let i = 0; i < seg.length; i += 6) {
+        octx.moveTo(X(seg[i + sx]), Y(seg[i + sy])); octx.lineTo(X(seg[i + 3 + sx]), Y(seg[i + 3 + sy]));
+      }
+      octx.stroke();
+    });
+    // check of the mapping: a ring where the crosshair should be
+    octx.strokeStyle = "#ff0"; octx.beginPath(); octx.arc(X(cross[sx]), Y(cross[sy]), 6, 0, 2 * Math.PI); octx.stroke();
+    octx.restore();
+  }
+  window.lastSection = { ms: performance.now() - t0, segments: nseg };
+  return window.lastSection;
+}
+window.drawSections = drawSections;
+nv.onLocationChange = (d) => { document.getElementById("loc").textContent = d.string ?? ""; drawSections(); };
+new ResizeObserver(() => setTimeout(drawSections, 50)).observe(nv.gl.canvas);
+drawSections();
+
+// draw cost with the mesh(es) loaded
+t = performance.now();
+for (let k = 0; k < 10; k++) nv.drawScene();
+log(`drawScene: ${((performance.now() - t) / 10).toFixed(1)} ms per frame`, { stage: "draw", ms: (performance.now() - t) / 10 });
+
+async function bump(reset, sparse = true) {
+  const mm = nv.frac2mm(nv.scene.crosshairPos);
+  const body = { mesh: 0, mm: [mm[0], mm[1], mm[2]], amp: +document.getElementById("amp").value,
+    rho: +document.getElementById("rho").value, reset: !!reset, sparse };
+  const t0 = performance.now();
+  const r = await fetch("/bump", { method: "POST", body: JSON.stringify(body) });
+  const buf = await r.arrayBuffer();
+  const t1 = performance.now();
+  const m = meshes[0];
+  if (sparse) {
+    const n = new Uint32Array(buf, 0, 1)[0];
+    const idx = new Uint32Array(buf, 4, n);
+    const p = new Float32Array(buf, 4 + 4 * n, 3 * n);
+    for (let i = 0; i < n; i++) {
+      m.pts[3 * idx[i]] = p[3 * i]; m.pts[3 * idx[i] + 1] = p[3 * i + 1]; m.pts[3 * idx[i] + 2] = p[3 * i + 2];
+    }
+  } else {
+    m.pts.set(new Float32Array(buf));
+  }
+  m.updateMesh(nv.gl);
+  nv.drawScene();
+  nv.gl.finish();
+  const sec = drawSections();
+  const t2 = performance.now();
+  const rec = { stage: reset ? "reset" : "bump", round_trip_ms: t1 - t0, solve_ms: +r.headers.get("X-Solve-Ms"),
+    update_draw_ms: t2 - t1, section_ms: sec.ms, total_ms: t2 - t0, bytes: buf.byteLength };
+  log(`${rec.stage}: total ${rec.total_ms.toFixed(0)} ms (server solve ${rec.solve_ms} ms, ` +
+      `round trip ${rec.round_trip_ms.toFixed(0)} ms, update+draw ${rec.update_draw_ms.toFixed(0)} ms, ` +
+      `${(rec.bytes / 1e6).toFixed(1)} MB)`, rec);
+  return rec;
+}
+window.bump = bump;
+document.getElementById("bump").onclick = () => bump(false);
+document.getElementById("reset").onclick = () => bump(true);
+document.addEventListener("keydown", (e) => { if (e.key === "b") bump(false); });
+document.getElementById("thick").onchange = (e) => { nv.setMeshThicknessOn2D(+e.target.value); };
+window.spikeReady = true;
+</script>
+</body>
+</html>

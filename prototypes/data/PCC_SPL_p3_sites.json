@@ -1,0 +1,55 @@
+{
+ "name": "PCC_SPL_p3",
+ "full_lo": [
+  451,
+  133,
+  390
+ ],
+ "full_hi": [
+  592,
+  274,
+  531
+ ],
+ "shape": [
+  141,
+  141,
+  141
+ ],
+ "numbering": "ITK-SNAP voxel numbering of this crop (0-based crop index + 1); full grid = crop index + full_lo",
+ "pieces": [
+  {
+   "id": 1,
+   "voxels": 722,
+   "centre_itk": [
+    71,
+    72,
+    71
+   ],
+   "extent_mm": [
+    9.9,
+    4.3,
+    1.9
+   ],
+   "conflicts": 0,
+   "facing_pairs": 191,
+   "sides": [
+    {
+     "wall_voxels": 4397,
+     "open_thickness_mm": 2.190982362918265,
+     "open_thickness_iqr": 0.22306804058125662,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.22647136097372877,
+     "mean_curvature": -0.1399240617917951
+    },
+    {
+     "wall_voxels": 3343,
+     "open_thickness_mm": 3.014859231768487,
+     "open_thickness_iqr": 0.4577271456379308,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.3864713573974501,
+     "mean_curvature": 0.03379623277415039
+    }
+   ]
+  }
+ ]
+}

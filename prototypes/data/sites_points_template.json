@@ -1,0 +1,7 @@
+{
+ "note": "One file per site. Points in ITK-SNAP voxel numbering of that site's crop (as ITK-SNAP shows them). Keep points at least 38 voxels (about 6 mm) from every face of the crop.",
+ "site": "V1V2_banks",
+ "crop": "V1V2_banks_echo2_detrended.nii.gz",
+ "contact_points": [[0, 0, 0]],
+ "notes": "free text: what you see at this face (dark line, no gap, curl, ...)"
+}

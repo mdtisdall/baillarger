@@ -1,0 +1,55 @@
+{
+ "name": "V1V2_banks",
+ "full_lo": [
+  198,
+  58,
+  65
+ ],
+ "full_hi": [
+  339,
+  199,
+  206
+ ],
+ "shape": [
+  141,
+  141,
+  141
+ ],
+ "numbering": "ITK-SNAP voxel numbering of this crop (0-based crop index + 1); full grid = crop index + full_lo",
+ "pieces": [
+  {
+   "id": 1,
+   "voxels": 8197,
+   "centre_itk": [
+    78,
+    67,
+    73
+   ],
+   "extent_mm": [
+    5.4,
+    12.3,
+    17.1
+   ],
+   "conflicts": 0,
+   "facing_pairs": 5860,
+   "sides": [
+    {
+     "wall_voxels": 9625,
+     "open_thickness_mm": 2.36642720627795,
+     "open_thickness_iqr": 0.5389379055132473,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.9329427112186215,
+     "mean_curvature": 0.031544124871041086
+    },
+    {
+     "wall_voxels": 6537,
+     "open_thickness_mm": 2.5128687693852205,
+     "open_thickness_iqr": 0.632268030976677,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.43745009252569617,
+     "mean_curvature": 0.21734778408494543
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,157 @@
+{
+ "name": "PCC_SPL",
+ "full_lo": [
+  427,
+  93,
+  335
+ ],
+ "full_hi": [
+  602,
+  268,
+  510
+ ],
+ "shape": [
+  175,
+  175,
+  175
+ ],
+ "numbering": "ITK-SNAP voxel numbering of this crop (0-based crop index + 1); full grid = crop index + full_lo",
+ "pieces": [
+  {
+   "id": 1,
+   "voxels": 4568,
+   "centre_itk": [
+    67,
+    62,
+    85
+   ],
+   "extent_mm": [
+    8.7,
+    10.6,
+    9.6
+   ],
+   "conflicts": 0,
+   "facing_pairs": 1658,
+   "sides": [
+    {
+     "wall_voxels": 8464,
+     "open_thickness_mm": 2.5419558753792266,
+     "open_thickness_iqr": 0.6485580229320109,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.598007600994324,
+     "mean_curvature": -0.05462495974395683
+    },
+    {
+     "wall_voxels": 10542,
+     "open_thickness_mm": 2.6929115097661844,
+     "open_thickness_iqr": 0.4540070836625594,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.3864713573974501,
+     "mean_curvature": 0.07811349799295784
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "voxels": 906,
+   "centre_itk": [
+    119,
+    117,
+    63
+   ],
+   "extent_mm": [
+    11.1,
+    6.7,
+    3.7
+   ],
+   "conflicts": 0,
+   "facing_pairs": 506,
+   "sides": [
+    {
+     "wall_voxels": 6215,
+     "open_thickness_mm": 2.8145407965495965,
+     "open_thickness_iqr": 0.5740934034586465,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.3199999928474426,
+     "mean_curvature": -0.11050640908808997
+    },
+    {
+     "wall_voxels": 4298,
+     "open_thickness_mm": 2.311788365565206,
+     "open_thickness_iqr": 0.5235975237503383,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.299003800497162,
+     "mean_curvature": -0.05351837918571079
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "voxels": 723,
+   "centre_itk": [
+    95,
+    111,
+    126
+   ],
+   "extent_mm": [
+    9.9,
+    4.3,
+    1.9
+   ],
+   "conflicts": 0,
+   "facing_pairs": 191,
+   "sides": [
+    {
+     "wall_voxels": 4397,
+     "open_thickness_mm": 2.190971665750352,
+     "open_thickness_iqr": 0.22297189965131903,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.22647136097372877,
+     "mean_curvature": -0.13992406179179503
+    },
+    {
+     "wall_voxels": 3343,
+     "open_thickness_mm": 3.0195941255629295,
+     "open_thickness_iqr": 0.4620329004410024,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.3864713573974501,
+     "mean_curvature": 0.033796232774150385
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "voxels": 539,
+   "centre_itk": [
+    101,
+    60,
+    54
+   ],
+   "extent_mm": [
+    6.4,
+    5.1,
+    2.2
+   ],
+   "conflicts": 0,
+   "facing_pairs": 66,
+   "sides": [
+    {
+     "wall_voxels": 4762,
+     "open_thickness_mm": 2.839661760770541,
+     "open_thickness_iqr": 0.5070371313030555,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.0,
+     "mean_curvature": -0.07475321331465146
+    },
+    {
+     "wall_voxels": 2288,
+     "open_thickness_mm": 2.6379377156755126,
+     "open_thickness_iqr": 0.32260095094511065,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.16027875244617462,
+     "mean_curvature": -0.10862480239903602
+    }
+   ]
+  }
+ ]
+}
