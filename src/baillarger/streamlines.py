@@ -169,6 +169,19 @@ def wm_direction(wm: Bool, vox: npt.ArrayLike, sigma: float = 1.0) -> F64:
     return out
 
 
+def signed_wm_direction(wm: Bool, vox: npt.ArrayLike, sigma: float = 1.0) -> F64:
+    """The unit gradient (..., 3) of the signed WM distance (mm, positive
+    outside the WM) smoothed by sigma voxels: away from the WM's edge, on
+    both sides of it."""
+    v = np.asarray(vox, np.float64)
+    sd = ndi.distance_transform_edt(~wm, sampling=v) - ndi.distance_transform_edt(
+        wm, sampling=v
+    )
+    g = np.stack(gradient(ndi.gaussian_filter(sd, sigma), v), -1)
+    out: F64 = g / (np.linalg.norm(g, axis=-1, keepdims=True) + 1e-12)
+    return out
+
+
 def oriented_normal(
     n: npt.NDArray[np.floating[Any]],
     coh: npt.NDArray[np.floating[Any]],
@@ -207,6 +220,8 @@ def fitted_field(
     vox: npt.ArrayLike,
     lam: float = 0.1,
     tol: float = 1e-8,
+    fluid: Bool | None = None,
+    wm_band_mm: float = 0.0,
 ) -> tuple[F64, dict[str, Any]]:
     """T on the full grid (mm) and the solver's info.
 
@@ -215,13 +230,28 @@ def fitted_field(
     F_a h_a (F = oriented_normal of the tensor's normal, its coherence zero
     outside the cortex, at the edge midpoint; h_a the voxel size along the
     edge). Outside the domain T is the nearest domain value.
+
+    Extended (fluid given, or wm_band_mm > 0): the domain also takes the
+    fluid voxels 6-adjacent to the cortex and the WM voxels within wm_band_mm
+    of the WM's edge, so that grad T is T's own up to the fluid and into the
+    WM (with the nearest-value fill alone, it flattens within a voxel of the
+    domain's edge). There the data has no layers (coherence 0), so F is the
+    unit gradient of the smoothed signed WM distance (positive outside the
+    WM), and T is negative in the WM band.
     """
     v = np.asarray(vox, np.float64)
     n, c = eigen(tensor)
     c = np.where(ctx, c, 0.0)
-    Fv = oriented_normal(n, c, wm_direction(wm, v), lam)
-    dom = ctx | (wm & ndi.binary_dilation(ctx))
-    fixed = dom & wm
+    near = ndi.binary_dilation(ctx)
+    extended = fluid is not None or wm_band_mm > 0
+    g = signed_wm_direction(wm, v) if extended else wm_direction(wm, v)
+    Fv = oriented_normal(n, c, g, lam)
+    dom = ctx | (wm & near)
+    if fluid is not None:
+        dom |= fluid & near
+    if wm_band_mm > 0:
+        dom |= wm & (ndi.distance_transform_edt(wm, sampling=v) <= wm_band_mm)
+    fixed = wm & near
     idx = -np.ones(dom.shape, np.int64)
     nd = int(dom.sum())
     idx[dom] = np.arange(nd)
@@ -269,6 +299,163 @@ def fitted_field(
         resid=float(res[-1] / max(res[0], 1e-30)),
     )
     return _fill(T), info
+
+
+#: The 13 lattice directions (one of each opposite pair of the 26 neighbours).
+_DIR13 = [
+    (a, b, c)
+    for a in (-1, 0, 1)
+    for b in (-1, 0, 1)
+    for c in (-1, 0, 1)
+    if (a, b, c) > (0, 0, 0)
+]
+
+
+def eigenvalues(tensor: F64, chunk: int = 2_000_000) -> F32:
+    """The eigenvalues (..., 3), ascending, of a tensor field (6, ...)."""
+    shp = tensor.shape[1:]
+    flat = tensor.reshape(6, -1)
+    out = np.zeros((flat.shape[1], 3), np.float32)
+    for a in range(0, flat.shape[1], chunk):
+        out[a : a + chunk] = np.linalg.eigvalsh(_matrices(flat[:, a : a + chunk]))
+    return out.reshape(*shp, 3)
+
+
+def n_eff(sd: float = SD, si: float = SI) -> float:
+    """The number of independent samples of gradient noise in the structure
+    tensor's integration window: 1 / sum_t (w * w)(t) rho(t), w the Gaussian
+    window of si voxels (sum 1), rho the normalized autocorrelation of one
+    component of the gradient (central differences) of white noise smoothed
+    by a Gaussian of sd voxels. Exact for the discrete filters."""
+    m = int(np.ceil(4 * (sd + si))) + 2
+    d = np.zeros((2 * m + 1,) * 3)
+    d[m, m, m] = 1.0
+    r = np.gradient(ndi.gaussian_filter(d, sd), axis=0)
+    rho = np.real(np.fft.ifftn(np.abs(np.fft.fftn(r)) ** 2))
+    rho /= rho.flat[0]
+    w = ndi.gaussian_filter(d, si)
+    w /= w.sum()
+    ww = np.real(np.fft.ifftn(np.abs(np.fft.fftn(w)) ** 2))
+    return float(1.0 / np.sum(ww * rho))
+
+
+def step_noise(
+    tensor: F64,
+    ctx: Bool,
+    g: F64,
+    vox: npt.ArrayLike,
+    lam: float = 0.1,
+    sd: float = SD,
+    si: float = SI,
+) -> tuple[F64, float]:
+    """The predicted noise (standard deviation, mm) of T's change over one
+    voxel step, per voxel, and the gradient noise power, both from the
+    structure tensor itself (no calibration).
+
+    Noise in the image adds its gradient power sigma2 to each of the
+    tensor's eigenvalues; the layers add their gradient power S to the
+    largest only; the cortex's curvature and partial volume move power into
+    the middle one. So sigma2 is the median smallest eigenvalue over the
+    cortex, and S = lam1 - sigma2. The leading eigenvector's angular error
+    (first-order perturbation) has variance sigma2 (S + sigma2) / (S^2 N),
+    N = n_eff(sd, si). F = c n sgn + lam g (normalized, g the WM direction)
+    carries that error times c / |c n sgn + lam g|. T, the least-squares
+    potential of F, keeps the curl-free part of F's error; for an isotropic
+    error, one component of it carries a ninth of the variance, so a step
+    of h (the mean voxel size) varies with h |dF| / 3. T is solved over the
+    whole domain, so the variance is spread over F's correlation length (a
+    Gaussian of si voxels)."""
+    h = float(np.mean(np.asarray(vox, np.float64)))
+    lam_ = eigenvalues(tensor).astype(np.float64)
+    sigma2 = float(np.median(lam_[..., 0][ctx]))
+    S_ = np.maximum(lam_[..., 2] - sigma2, 1e-12 * max(sigma2, 1e-30))
+    ang2 = sigma2 * (S_ + sigma2) / (S_**2 * n_eff(sd, si))
+    n, c = eigen(tensor)
+    c = np.where(ctx, c, 0.0)
+    sgn = np.sign((n * g).sum(-1))
+    sgn[sgn == 0] = 1
+    Fn = np.linalg.norm(c[..., None] * n * sgn[..., None] + lam * g, axis=-1)
+    gain = c / np.maximum(Fn, 1e-12)
+    var = np.where(ctx, (h * gain) ** 2 * ang2 / 9.0, 0.0)
+    out: F64 = np.sqrt(ndi.gaussian_filter(var, si))
+    return out, sigma2
+
+
+def crest_voxels(
+    T: F64,
+    mask: Bool,
+    noise: F64,
+    kappa: F64,
+    vox: npt.ArrayLike,
+    alpha: float = 1e-3,
+    free: Bool | None = None,
+) -> Bool:
+    """The voxels of mask where two rises of T meet in a kink: along some
+    lattice direction e (of the 26 neighbours; L its length in mm), T rises
+    significantly into the voxel, does not rise significantly beyond it, and
+    its slope changes across the voxel by more than a smooth level set's
+    curvature allows:
+      a = T(x) - T(x - e) > k s,  b = T(x + e) - T(x) < k s,
+      a - b > L^2 kappa(x) + sqrt(2) k s,
+    s = noise(x) L / h (step_noise, for a step of L), kappa the curvature of
+    T's level sets (1/mm), k the one-sided normal quantile for alpha / 26
+    (alpha: false alarms per voxel).
+
+    In one bank T rises steadily along its flow (b > k s). A straight line
+    tangent to a curved level set has a smooth maximum of T at the tangent
+    point, but there the slope changes across the voxel by at most L^2 kappa
+    (the second difference of a smooth field). At a kink, where two banks'
+    rises meet (a contact), the slope changes by L (cos a1 + cos a2), the
+    angles at which e meets the two banks' gradients, however short the
+    step. free: the voxels where T was solved for (not pinned at 0 on the
+    WM's edge, not filled outside the domain; fitted_free); x - e, x and
+    x + e must all be free, since the pinned staircase and the fill make
+    voxel-scale kinks of their own. Box-edge voxels are not tested."""
+    from statistics import NormalDist
+
+    v = np.asarray(vox, np.float64)
+    h = float(np.mean(v))
+    k = NormalDist().inv_cdf(1.0 - alpha / 26.0)
+    out = np.zeros(T.shape, bool)
+    c = (slice(1, -1),) * 3
+    t0, n0, kap = T[c], noise[c], kappa[c]
+    fr = np.ones(T.shape, bool) if free is None else free
+    f0 = fr[c]
+    for e in _DIR13:
+        L = float(np.linalg.norm(np.asarray(e, np.float64) * v))
+        ks = k * n0 * L / h
+        curv = L**2 * kap
+        fw = tuple(slice(1 + d, T.shape[i] - 1 + d) for i, d in enumerate(e))
+        bw = tuple(slice(1 - d, T.shape[i] - 1 - d) for i, d in enumerate(e))
+        tf, tb = T[fw], T[bw]
+        ok = f0 & fr[fw] & fr[bw]
+        for up, dn in ((tb, tf), (tf, tb)):
+            a_ = t0 - up
+            b_ = dn - t0
+            out[c] |= ok & (a_ > ks) & (b_ < ks) & (a_ - b_ > curv + np.sqrt(2.0) * ks)
+    crest: Bool = out & mask
+    return crest
+
+
+def fitted_free(
+    ctx: Bool,
+    wm: Bool,
+    vox: npt.ArrayLike,
+    fluid: Bool | None = None,
+    wm_band_mm: float = 0.0,
+) -> Bool:
+    """The voxels fitted_field solves T for (with the same domain options):
+    its domain without the WM voxels 6-adjacent to the cortex, where T is
+    pinned at 0."""
+    v = np.asarray(vox, np.float64)
+    near = ndi.binary_dilation(ctx)
+    dom = ctx | (wm & near)
+    if fluid is not None:
+        dom |= fluid & near
+    if wm_band_mm > 0:
+        dom |= wm & (ndi.distance_transform_edt(wm, sampling=v) <= wm_band_mm)
+    out: Bool = dom & ~(wm & near)
+    return out
 
 
 def gradient_tensor(T: F64, vox: npt.ArrayLike) -> F64:
@@ -329,13 +516,14 @@ def trace(
     step_mm: float = STEP_MM,
     face_mm: float = 2.0,
     wm_after: float = 0.3,
-    turn_deg: float = 60.0,
+    turn_deg: float | None = 60.0,
     turn_mm: float = 0.3,
 ) -> Traces:
     """Streamlines of the leading eigenvector of `tensor` from x0 (n, 3),
     started along d0 (n, 3; the mesh normal). blend_mm None: the data's
     direction from the first step; otherwise blended in from the mesh normal
-    (module docstring). Returns positions, sample counts and outcomes."""
+    (module docstring). turn_deg None: no TURN stop. Returns positions,
+    sample counts and outcomes."""
     x = np.asarray(x0, np.float64).copy()
     n = x.shape[0]
     d_in = np.asarray(d0, np.float64)
@@ -350,7 +538,7 @@ def trace(
     hist = np.zeros((lag + 1, n, 3))
     hist[:] = d
     act = np.arange(n)
-    cos_turn = np.cos(np.radians(turn_deg))
+    cos_turn = -1.0 if turn_deg is None else np.cos(np.radians(turn_deg))
 
     def direction(xa: F64, ref: F64, s: float, nma: F64) -> F64:
         w, V = np.linalg.eigh(tensor_at(tensor, xa))
@@ -393,27 +581,33 @@ def ascend(
     x0: npt.ArrayLike,
     vox: npt.ArrayLike,
     nmax: int,
-    far: Callable[[I64, I64], Bool] | None = None,
     step_mm: float = STEP_MM,
     face_mm: float = 2.0,
     wm_after: float = 0.3,
+    turn_deg: float | None = None,
+    turn_mm: float = 0.3,
+    far: Callable[[I64, I64], Bool] | None = None,
 ) -> Traces:
-    """Paths up grad u from x0 (n, 3), unit steps of step_mm in mm.
-    far(i_paths, q) -> bool per path, if given: the voxel q (rounded
-    positions) belongs to a root far from that path's own (CONTACT). RIDGE
-    where grad u vanishes or u decreases (after wm_after mm). Arrays as
-    trace."""
+    """Paths up grad u from x0 (n, 3), unit steps of step_mm in mm. RIDGE
+    where grad u vanishes or u decreases (after wm_after mm): the last
+    sample is then the first one past the maximum. With turn_deg, TURN where
+    the direction turned more than turn_deg within turn_mm, as trace: where
+    the path reaches a crest of u that rises along its length, it turns to
+    follow the crest instead of stopping. far(i_paths, q) -> bool per path,
+    if given: the voxel q (rounded positions) belongs to a root far from that
+    path's own (CONTACT). Arrays as trace."""
     g = np.stack(gradient(u), 0)
     x = np.asarray(x0, np.float64).copy()
     n = x.shape[0]
     v = np.asarray(vox, np.float64)
-    shape = np.array(labels.shape)
     pos = np.full((n, nmax, 3), np.nan, np.float32)
     pos[:, 0] = x
     nsamp = np.ones(n, np.int64)
     out = np.full(n, RUNNING, np.int64)
     prev = ndi.map_coordinates(u, x.T, order=1, mode="nearest")
     act = np.arange(n)
+    lag = max(1, int(round(turn_mm / step_mm)))
+    hist = np.zeros((lag + 1, n, 3))
     for i in range(1, nmax):
         if not act.size:
             break
@@ -427,17 +621,24 @@ def ascend(
         x[act] = xa
         pos[act, i] = xa
         nsamp[act] = i + 1
-        q = np.clip(np.round(xa).astype(int), 0, shape - 1)
         ui = ndi.map_coordinates(u, xa.T, order=1, mode="nearest")
         code = _stop_codes(xa, labels, dface, i * step_mm, face_mm, wm_after)
+        if far is not None:
+            q = np.clip(np.round(xa).astype(int), 0, np.array(labels.shape) - 1)
+            code[(code == RUNNING) & far(act, q)] = CONTACT
         # a label stop wins over a vanished gradient, which wins over a face
         flat = (nv[:, 0] < 1e-9) & ((code == RUNNING) | (code == FACE))
         code[flat] = RIDGE
-        if far is not None:
-            code[(code == RUNNING) & far(act, q)] = CONTACT
         fell = (ui < prev[act] - 1e-6) & (i * step_mm > wm_after)
         code[(code == RUNNING) & fell] = RIDGE
         prev[act] = ui
+        if turn_deg is not None:
+            dm = dirn * v  # unit direction in mm
+            old = hist[i % (lag + 1)][act]
+            hist[i % (lag + 1)][act] = dm
+            if i > lag:
+                turned = (old * dm).sum(1) < np.cos(np.radians(turn_deg))
+                code[(code == RUNNING) & turned] = TURN
         if i == nmax - 1:
             code[code == RUNNING] = LENGTH
         out[act] = code
@@ -459,4 +660,21 @@ def descend(
     sample in the WM (no wm_after). For the fitted field T (0 on the WM),
     the path from a point in the cortex to its root. RIDGE where u stops
     decreasing (a minimum away from the WM). Arrays as trace."""
-    return ascend(-u, labels, dface, x0, vox, nmax, None, step_mm, face_mm, 0.0)
+    return ascend(-u, labels, dface, x0, vox, nmax, step_mm, face_mm, 0.0)
+
+
+def sample(img: npt.ArrayLike, pos: F32, chunk: int = 20000) -> F32:
+    """img at every sample of paths (n, m, 3), trilinear (nearest value
+    outside the grid); nan where pos is nan. (n, m) float32."""
+    n, m, _ = pos.shape
+    im = np.asarray(img, np.float64)
+    out = np.full((n, m), np.nan, np.float32)
+    for a in range(0, n, chunk):
+        p = pos[a : a + chunk].reshape(-1, 3)
+        ok = np.isfinite(p[:, 0])
+        val = np.full(p.shape[0], np.nan, np.float32)
+        val[ok] = ndi.map_coordinates(
+            im, p[ok].T.astype(float), order=1, mode="nearest"
+        )
+        out[a : a + chunk] = val.reshape(-1, m)
+    return out

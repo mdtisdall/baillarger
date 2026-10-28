@@ -680,7 +680,7 @@ Levels at V1V2 τ 0.177 / 0.375 / 0.802 and at M1S1 τ 0.146 / 0.333 / 0.823 (sn
   - every edit made so far stays in the model;
   - tests: with R covering everything, the result equals a full solve; with a fixed ring, it equals the brute-force minimum, with or without an edit; edits persist; the neighbourhood is geodesic.
 
-**The priority map** (both sites, 30 s, 6–7 GB):
+**The priority map** (both sites, 30 s, 6–7 GB): computed with seven doubts, including the field prior (|joint − field prior|), which has since been removed with the column volume's one-pass horizons; the combined score is now the mean of six ranks.
 
 | | V1V2 banks | M1S1 r3 |
 |---|---|---|

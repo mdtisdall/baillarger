@@ -42,8 +42,8 @@ FIG, WORK, SITE = A.fig, A.work, A.site
 STEP, DTAU, TAU_MAX, PAIR_MM, NDOT, CHUNK = X.STEP_MM, 0.08, 6.0, 0.25, 0.7, 20000
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
 CCOL = {OPEN: "#1baf7a", CROSS: "#2a78d6", OWN: "#eb6834", TOCONTACT: "#c79a00", FAILED: "#e34948"}
-HOR = ["top", "far WM", "field prior", "profile, top"]
-HCOL = {"top": "#ffffff", "far WM": "#30d5ff", "field prior": "#e34948", "profile, top": "#2a78d6"}
+HOR = ["top", "far WM", "profile, top"]
+HCOL = {"top": "#ffffff", "far WM": "#30d5ff", "profile, top": "#2a78d6"}
 DARK_WIN = (0.5, 1.5)  # mm: where the darkest band is looked for (the stria at V1)
 T0 = time.time()
 

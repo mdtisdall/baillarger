@@ -1,16 +1,17 @@
 """The column volume of a box (plan: reports/Crossing paths and contacts from laminar profiles.md,
 *The column volume*). All 3D: samples keep their 3D positions; the volume only re-indexes them.
 
-1-3. The traces (baillarger.column_traces, --tracer): the white mesh and one root per voxel cell
-   and normal side; the primary streamline from each root (default fitted_blend: the fitted
-   field, started along the mesh normal); where it turns or reaches the cap, the fallback (ascent
-   of the equal-arrival one pass, stopped at fluid, WM, or the pass's contact); the classes (open,
-   crossing, own bank, to contact, failed; roots within 2 mm of a face flagged). --tracer current
-   gives the volumes built before the fitted field (the structure-tensor streamline).
+1-3. The traces (baillarger.column_traces, --tracer, --columns): the white mesh and one root per
+   voxel cell and normal side; the primary streamline from each root (default fitted_blend: the
+   fitted field T, started along the mesh normal); where it cannot go on, by --columns: "crest"
+   (the default: T extended into the fluid and the WM, and a column that bends sharply, where it
+   meets a contact, ends at the bend) or "one-pass" (the method before: the turn rule, and the
+   one pass's ascent as the fallback); the classes (open, crossing, own bank, to the contact,
+   failed; roots within 2 mm of a face flagged), with the bank rule on mesh patches.
 4. Features: echo 2 and echo 3 (trend removed) at each sample, centre line, no disc.
-5. Horizons (mm from the root): top; far WM; the fallback's contact; on crossing traces the one
-   pass's boundary (equal and field weights), the field prior's pairwise posterior on L, and the
-   profile's split (E1 top-anchored) on a random subsample of crossing traces.
+5. Horizons (mm from the root): top; far WM; the contact (where a to-the-contact column ends; key
+   "fallback contact"); the profile's split (E1 top-anchored) on a random subsample of crossing
+   traces.
 6. With points (optional): every trace passing within 0.3 mm of a point gives the point's depth
    along it; each horizon minus that depth is scored.
 7. Views: roots by class on three planes, where primary traces turn; with points, sections along
@@ -22,10 +23,11 @@ with "points_full0": [[i, j, k], ...] in 0-based full-grid voxels.
 Writes <work>/column_volume_<name>.npz and .json, <figures>/column_volume_<name>_*.png.
 Usage: column_volume.py <figures dir> <work dir> --name NAME (--patch P | --box I J K [--size N ...])
                         [--points FILE] [--tracer {current,fitted,fitted_blend}]
-                        [--wm-changes FILE] [--figs-only]
+                        [--columns {crest,one-pass}] [--wm-changes FILE] [--figs-only]
 --wm-changes: the handle-free WM label (baillarger.white.wm_changes, saved with WMChanges.save)
-replaces the aseg's everywhere (mesh, field, stops, one pass, classes); without it, the aseg's.
-The npz also holds tracer_name and wm_label.
+replaces the aseg's everywhere (mesh, field, stops, classes); without it, the aseg's.
+The npz also holds tracer_name, column_method, wm_label and crest_at (--columns crest: per column,
+the first sample where it meets another bank's field, T's crest; -1 if none).
 The two marked faces of the plan: --name M1S1 --box 378 224 448; --name V1V2_banks --box 198 58 65.
 """
 
@@ -47,22 +49,21 @@ from scipy.sparse.csgraph import connected_components, dijkstra
 from scipy.spatial import cKDTree
 
 import crossing_lib as X
-from click_evidence import Thickness
 from baillarger import column_traces as CT
-from baillarger.column_traces import run
 from baillarger.data import PATCHES
 from baillarger.mesh_smoothing import edges as mesh_edges
 from baillarger.white import WMChanges
 
 ap = argparse.ArgumentParser()
 ap.add_argument("fig")
-ap.add_argument("work")  # second, as collide.py and click_evidence.py read argv[2] at import
+ap.add_argument("work")
 ap.add_argument("--name", required=True)
 ap.add_argument("--patch", choices=sorted(PATCHES))
 ap.add_argument("--box", type=int, nargs=3, metavar=("I", "J", "K"))
 ap.add_argument("--size", type=int, nargs="+", default=[141])
 ap.add_argument("--points")
 ap.add_argument("--tracer", choices=CT.TRACERS, default="fitted_blend")
+ap.add_argument("--columns", choices=CT.METHODS, default="crest")
 ap.add_argument("--wm-changes", help="the handle-free WM label's changes (baillarger.white, WMChanges.save); "
                 "default: the aseg's WM label")
 ap.add_argument("--figs-only", action="store_true")
@@ -72,11 +73,10 @@ WM_LABEL = f"handle-free: {A.wm_changes}" if A.wm_changes else "aseg"
 SAME_MM, TPL_MM = CT.SAME_MM, 6.0
 N_PROFILE, TPL_MAX = 3000, 400
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
-CLASS = {OPEN: "open", CROSS: "crossing", OWN: "own bank", TOCONTACT: "to the pass's contact", FAILED: "failed"}
+CLASS = dict(enumerate(CT.CLASS))
 CCOL = {OPEN: "#1baf7a", CROSS: "#2a78d6", OWN: "#eb6834", TOCONTACT: "#c79a00", FAILED: "#e34948"}
-HOR = ["top", "far WM", "fallback contact", "one pass, equal", "one pass, field", "field prior", "profile, top"]
-HCOL = {"top": "#ffffff", "far WM": "#30d5ff", "fallback contact": "#ff2bd6", "one pass, equal": "#eb6834",
-        "one pass, field": "#ffd23f", "field prior": "#e34948", "profile, top": "#2a78d6"}
+HOR = ["top", "far WM", "fallback contact", "profile, top"]
+HCOL = {"top": "#ffffff", "far WM": "#30d5ff", "fallback contact": "#ff2bd6", "profile, top": "#2a78d6"}
 T0 = time.time()
 
 
@@ -116,28 +116,20 @@ def main():
     changes = WMChanges.load(Path(A.wm_changes)) if A.wm_changes else None
     t = CT.load_tissue(tuple(int(a) for a in lo), tuple(int(a) for a in hi), f"column_volume_{SITE}",
                        changes=changes)
-    # click_evidence.Thickness reads the box as curv_lib.load's dict
-    B = dict(p=t.patch, lo=lo, rim=t.rim, vox=t.vox, miss=t.miss, ctx=t.ctx, wm=t.wm,
-             shell=t.wm & ~ndi.binary_erosion(t.wm, border_value=1), det=t.det, disp=t.det[1],
-             dface=t.dface)
     vox = t.vox
-    h = float(np.mean(vox))
     wm, ctx, labels = t.wm, t.ctx, t.labels
     feats = [t.det[1], t.det[2]]
+    disp = t.det[1]
     d_wm = ndi.distance_transform_edt(~wm, sampling=vox)
-    say(f"{SITE}: box {tuple(int(a) for a in hi - lo)}; {len(P)} points; tracer {A.tracer}; WM {WM_LABEL}")
+    say(f"{SITE}: box {tuple(int(a) for a in hi - lo)}; {len(P)} points; tracer {A.tracer}; columns {A.columns}; WM {WM_LABEL}")
 
-    # ---- steps 1-3 (baillarger.column_traces): mesh, roots, one pass, primary, fallback, classes
-    R = CT.trace_columns(t, A.tracer)
+    # ---- steps 1-3 (baillarger.column_traces): mesh, roots, T, primary, fallback, classes
+    R = CT.trace_columns(t, A.tracer, A.columns)
     v, f, nrm, tv = R.v, R.f, R.nrm, R.tv
     pos, ns, out1, outc, tracer, cls = R.pos, R.ns, R.out1, R.outc, R.fallback, R.cls
     root_patch, end_patch, near_face, coh = R.root_patch, R.end_patch, R.near_face, R.coh
-    s, f_eq, D = R.one_pass.setup, R.one_pass.fronts, R.patches.D
-    # the pass's seed patches (its labels, Thickness's weights) and the mesh patches
-    seed_to_mesh = R.one_pass.to_mesh_patch
-    seed_pos = np.stack(np.unravel_index(s.sflat, wm.shape), -1).astype(float)
-    mesh_to_seed = s.patch.ravel()[s.sflat][cKDTree(seed_pos).query(v[R.patches.rep])[1]]
-    say(f"traces at {len(tv):,} roots; {s.npatch:,} patches; {R.notes}")
+    D = R.patches.D
+    say(f"traces at {len(tv):,} roots; {len(R.patches.rep):,} patches; {R.notes}")
     oc = np.bincount(out1, minlength=10)
     say("primary: " + ", ".join(f"{X.OUTCOME[k]} {oc[k]:,}" for k in range(10) if oc[k]))
     oc2 = np.bincount(outc[tracer == 1], minlength=10)
@@ -148,9 +140,6 @@ def main():
     turn = dict(s_mm=((R.ns1[it] - 1) * X.STEP_MM).tolist(),
                 coh=ndi.map_coordinates(coh, tpos.T, order=1).tolist(),
                 d_wm=ndi.map_coordinates(d_wm, tpos.T, order=1).tolist())
-    Thk = Thickness(B, s, h)
-    mu_f, sd_f, nobel = Thk.weights(Thk.y_tops)
-    f_fd = run(s, mu_f, sd_f, ratio=CT.RATIO)
     L = (ns - 1) * X.STEP_MM
     say("classes: " + ", ".join(f"{CLASS[c]} {np.sum((cls == c) & ~near_face):,}" for c in CLASS)
         + f"; roots near a face {near_face.sum():,}")
@@ -165,23 +154,6 @@ def main():
     H["far WM"][cls == CROSS] = L[cls == CROSS] - X.STEP_MM / 2
     H["fallback contact"][cls == TOCONTACT] = L[cls == TOCONTACT]
     ic = np.flatnonzero(cls == CROSS)
-    pa, pb = root_patch[ic], end_patch[ic]
-    for name, ff in (("one pass, equal", f_eq), ("one pass, field", f_fd)):
-        for a in range(0, ic.size, 5000):
-            j = ic[a:a + 5000]
-            p = pos[j]
-            ok = np.isfinite(p[..., 0])
-            q = np.clip(np.round(np.nan_to_num(p)).astype(int), 0, np.array(wm.shape) - 1)
-            lab = ff.label[q[..., 0], q[..., 1], q[..., 2]]
-            lab0 = seed_to_mesh[np.maximum(lab, 0)]
-            near_a = D[pa[a:a + 5000, None], lab0] < SAME_MM
-            near_b = D[pb[a:a + 5000, None], lab0] < SAME_MM
-            sw = ok & (lab >= 0) & near_b & ~near_a
-            first = np.argmax(sw, 1)
-            H[name][j] = np.where(sw.any(1), first * X.STEP_MM - X.STEP_MM / 2, np.nan)
-    sa, sb = mesh_to_seed[pa], mesh_to_seed[pb]
-    x_pr, _ = X.pairwise_posterior(L[ic], mu_f[sa] * h, sd_f[sa] * h, mu_f[sb] * h, sd_f[sb] * h)
-    H["field prior"][ic] = x_pr
     # profile split on a subsample, templates from open traces near each end root
     rng = np.random.default_rng(0)
     io = np.flatnonzero((cls == OPEN) & ~near_face)
@@ -212,9 +184,9 @@ def main():
         f"{WORK}/column_volume_{SITE}.npz", v=v.astype(np.float32), f=f, nrm=nrm.astype(np.float32), tv=tv,
         pos=pos, ns=ns, fv=fv, cls=cls, tracer=tracer, out1=out1, outc=outc, root_patch=root_patch,
         end_patch=end_patch, near_face=near_face, P=P, vox=vox, lo=lo,
-        disp=B["disp"].astype(np.float32), ctx=ctx, coh=coh.astype(np.float32), wm=wm,
+        disp=disp.astype(np.float32), ctx=ctx, coh=coh.astype(np.float32), wm=wm,
         labels=labels.astype(np.int8),  # 0 cortex, 1 fluid, 2 WM, 3 missing, 4 other
-        tracer_name=A.tracer, wm_label=WM_LABEL,
+        tracer_name=A.tracer, column_method=A.columns, wm_label=WM_LABEL, crest_at=R.crest_at,
         **{"H_" + k: H[k] for k in HOR})
     json.dump(dict(turn=turn), open(f"{WORK}/column_volume_{SITE}_turn.json", "w"))
     say("saved")
@@ -247,15 +219,20 @@ def figures():
     summary = dict(site=SITE, traces=int(len(tv)), roots_near_face=int(near_face.sum()))
     summary["classes"] = {CLASS[c]: {"primary": int(np.sum(keep & (cls == c) & (tracer == 0))),
                                      "fallback": int(np.sum(keep & (cls == c) & (tracer == 1)))} for c in CLASS}
+    if "crest_at" in Z.files:
+        ca = Z["crest_at"]
+        summary["columns meeting another bank's field (crest_at >= 0), by class"] = {
+            CLASS[c]: int(np.sum(keep & (cls == c) & (ca >= 0))) for c in CLASS}
     summary["primary outcomes"] = {X.OUTCOME[k]: int(np.sum(keep & (out1 == k))) for k in range(10) if np.sum(keep & (out1 == k))}
     summary["fallback outcomes"] = {X.OUTCOME[k]: int(np.sum(keep & (tracer == 1) & (outc == k))) for k in range(10)
                                     if np.sum(keep & (tracer == 1) & (outc == k))}
     tl = {k: np.array(turn[k]) for k in turn}
-    summary["turns"] = dict(n=int(tl["s_mm"].size),
-                            s_mm_p10_50_90=np.percentile(tl["s_mm"], [10, 50, 90]).round(2).tolist(),
-                            coh_p10_50_90=np.percentile(tl["coh"], [10, 50, 90]).round(2).tolist(),
-                            d_wm_p10_50_90=np.percentile(tl["d_wm"], [10, 50, 90]).round(2).tolist(),
-                            frac_within_0p3mm_of_wm=round(float(np.mean(tl["d_wm"] < 0.3)), 3))
+    summary["turns"] = dict(n=int(tl["s_mm"].size))  # none with --columns crest (no turn rule)
+    if tl["s_mm"].size:
+        summary["turns"].update(s_mm_p10_50_90=np.percentile(tl["s_mm"], [10, 50, 90]).round(2).tolist(),
+                                coh_p10_50_90=np.percentile(tl["coh"], [10, 50, 90]).round(2).tolist(),
+                                d_wm_p10_50_90=np.percentile(tl["d_wm"], [10, 50, 90]).round(2).tolist(),
+                                frac_within_0p3mm_of_wm=round(float(np.mean(tl["d_wm"] < 0.3)), 3))
     for c in (OPEN, CROSS):
         m = keep & (cls == c)
         hk = "top" if c == OPEN else "far WM"
@@ -273,7 +250,7 @@ def figures():
             rows.append(dict(t=int(t), k=int(k[i]) + 1, depth=i * X.STEP_MM, cls=int(cls[t]),
                              **{h_: float(H[h_][t]) for h_ in HOR}))
     sc = {}
-    for h_ in ["fallback contact", "one pass, equal", "one pass, field", "field prior", "profile, top"]:
+    for h_ in ["fallback contact", "profile, top"]:
         off = np.array([r[h_] - r["depth"] for r in rows])
         pts = np.array([r["k"] for r in rows])
         okk = np.isfinite(off)
@@ -355,7 +332,7 @@ def sections(Z, H, keep, ax, planes, vmax):
             a.set_ylabel("depth from the root (mm)")
             a.set_xlabel("position along the white surface (mm; 0 = the vertex facing the points)")
             a.set_title(f"plane {'ijk'[ax]} = {k} (0-based), bank {bi + 1}: echo 2 trend removed along each trace; "
-                        f"strip: class (green open, blue crossing, orange own bank, gold to the pass's contact, red failed; "
+                        f"strip: class (green open, blue crossing, orange own bank, gold to the contact, red failed; "
                         f"hollow: fallback tracer); ★ your points", fontsize=10)
             if pi_ == 0 and bi == 0:
                 a.legend(fontsize=7, loc="lower right", ncol=4)
@@ -388,7 +365,8 @@ def roots_view(Z, keep, ax, planes, tl, vmax):
     a2.plot(tl["s_mm"], tl["coh"], ".", ms=1.5, c="#2a78d6", alpha=0.4)
     a2.set_ylabel("coherence at the turn (blue dots)")
     a.set_xlabel("depth along the trace where the primary tracer turned (mm)")
-    a.set_title(f"primary turns: {tl['s_mm'].size:,}; within 0.3 mm of WM {np.mean(tl['d_wm'] < 0.3):.0%}", fontsize=10)
+    near = f"; within 0.3 mm of WM {np.mean(tl['d_wm'] < 0.3):.0%}" if tl["s_mm"].size else ""
+    a.set_title(f"primary turns: {tl['s_mm'].size:,}{near}", fontsize=10)
     fig.tight_layout()
     fig.savefig(f"{FIG}/column_volume_{SITE}_roots.png", dpi=72)
     plt.close(fig)
