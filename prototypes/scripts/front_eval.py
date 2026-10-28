@@ -12,6 +12,8 @@ area_truth) at 0.4, 0.8 and 1.2 mm; and the front's swept volume against the int
 Sites (--sites; the column volumes built by column_volume.py, read from --dir): per method the
 classes and failures by outcome (roots >= 2 mm from a face), the marked points that crossing and
 to-the-contact columns pass within 0.3 mm of, the columns whose class changed against crest, and
+own-bank columns split by their heading where they enter the WM (on, against the root's normal:
+a crossing to a near wall, closer than the 5 mm bank rule; back: a return to its own bank), and
 the front's path agreement with crest: per root, the largest distance between the two paths over
 their common arc length, for roots where both end in the same outcome, and the front's dual area
 and swept volume at the open columns' tops.
@@ -166,6 +168,12 @@ def sites(A):
                 d["marked points crossed (crossing columns)"] = len(hit[CT.CROSS])
                 d["marked points reached (crossing or to the contact)"] = len(hit[CT.CROSS] | hit[CT.TOCONTACT])
                 d["points"] = len(Pts)
+            k_ = np.arange(len(cls))
+            ns_ = z["ns"]
+            d_end = (z["pos"][k_, ns_ - 1] - z["pos"][k_, np.maximum(ns_ - 2, 0)]).astype(float)
+            fwd = (d_end * z["nrm"][z["tv"]]).sum(1) > 0
+            own = keep & (cls == CT.OWN)
+            d["own bank: entering the WM heading on / back"] = [int(np.sum(own & fwd)), int(np.sum(own & ~fwd))]
             ca = z["crest_at"]
             d["meeting a crest, by class"] = {CT.CLASS[c]: int(np.sum(keep & (cls == c) & (ca >= 0)))
                                               for c in range(5)}
