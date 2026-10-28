@@ -2,11 +2,14 @@
 
 Any number of pages (windows, tabs, browsers) can be open at once; each shows the panes
 named in its address (static/index.html, ?panes=...). They share one state, kept here:
-the crosshair (a shown trace, or only a world point), the frame of its sections, the
-colour layer, the streamline radius and, optionally, the camera. A page sends its
-changes (POST /state) and every page receives every change as it happens from the
-event stream (GET /events, Server-Sent Events), so a click in one window moves the
-crosshair in all of them.
+two points, the crosshair (a world point: the slices of the volume pane) and the WM
+selection (a vertex of the true white surface with the shown trace there: the
+sections, the streamlines and the markers), the frame of the sections, and the colour
+layer. A page sends its changes (POST /state) and every page receives every change as
+it happens from the event stream (GET /events, Server-Sent Events), so a click in one
+window moves the point in all of them. In each pane a click moves that pane's own
+point (the slices: the crosshair; the surface and the map: the WM selection) and a
+shift-click moves the other one.
 
 Requests:
 - GET / (the page), /static/<file>; /meta; /state; /events;
@@ -14,6 +17,8 @@ Requests:
   comma-separated: the screen's axes on inflated level `level`);
   /mesh?level=k[&faces=1] (the white surface for the 3D pane, Site.mesh_payload);
   /locate?mm=x,y,z (the shown trace rooted nearest a world point);
+  /snap?mm=x,y,z (the WM selection at the white-mesh vertex nearest a world point);
+  /vertex?v=k (the WM selection at vertex k);
   /streamlines?i=&radius= (the traces from and to trace i, by kind and class);
   /tracts/<i>/<radius>/<kind>_<class>.tck (the traces of one group, as .tck);
   /overview/<class>/<every>.tck (every k-th shown trace of a class);
@@ -49,7 +54,9 @@ class Shared:
     """The state that every page shares, and the queues of the open event streams."""
 
     def __init__(self) -> None:
-        self.state: dict[str, Any] = dict(trace=None, mm=None, frame=None, layer=None)
+        self.state: dict[str, Any] = dict(
+            crosshair=None, selection=None, frame=None, layer=None
+        )
         self.seq = 0
         self.lock = threading.Lock()
         self.listeners: list[queue.Queue[str]] = []
@@ -192,6 +199,11 @@ class Handler(BaseHTTPRequestHandler):
         elif u.path == "/locate":
             mm = floats(q["mm"])
             self.json(lambda: dict(trace=s.locate(mm or [])))
+        elif u.path == "/snap":
+            mm_ = floats(q["mm"])
+            self.json(lambda: s.snap(mm_ or []))
+        elif u.path == "/vertex":
+            self.json(lambda: s.vertex(int(q["v"])))
         elif u.path == "/streamlines":
             self.json(
                 lambda: self.streamline_summary(

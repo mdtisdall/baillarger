@@ -52,7 +52,7 @@ type Arr = npt.NDArray[Any]
 
 CLASSES = ("open", "crossing", "own bank", "to the pass's contact", "failed")
 NEAREST_MM = 0.5  # a vertex shows the nearest subsampled trace rooted within this
-LOCATE_MM = 1.0  # a click in the volume picks the nearest root within this
+LOCATE_MM = 1.0  # a WM selection takes the nearest shown root within this
 
 
 def mesh_graph(v_mm: Float, f: Arr) -> csr_matrix:
@@ -223,6 +223,7 @@ class Site:
             np.isfinite(d), self.roots_of[np.maximum(src, 0)], -1
         ).astype(np.int32)
         self.root_tree = cKDTree(self.world(self.v_vox[self.rv]))
+        self.vertex_tree = cKDTree(self.world(self.v_vox))
         self.hits = self.point_hits()
         self._bytes: dict[str, bytes] = {}
         log(
@@ -241,6 +242,36 @@ class Site:
         """The shown trace whose root is nearest world point mm, within LOCATE_MM."""
         d, k = self.root_tree.query(np.asarray(mm, float))
         return int(k) if d <= LOCATE_MM else None
+
+    # ------------------------------------------------------------ the WM selection
+    def vertex(self, k: int) -> dict[str, Any]:
+        """The WM selection at white-mesh vertex k: its world point, and the shown
+        trace that the sections and streamlines use there: the one rooted nearest
+        along the mesh within NEAREST_MM (vtrace), else the root nearest in space
+        within LOCATE_MM, else none. root_mm: the distance from the point to that
+        trace's root (mm)."""
+        k = int(k)
+        p = self.world(self.v_vox[k])[0]
+        t = int(self.vtrace[k])
+        if t < 0:
+            d, j = self.root_tree.query(p)
+            t = int(j) if d <= LOCATE_MM else -1
+        root = None
+        if t >= 0:
+            root = round(
+                float(np.linalg.norm(self.world(self.v_vox[self.rv[t]])[0] - p)), 3
+            )
+        return dict(
+            vertex=k,
+            world_mm=[round(float(x), 3) for x in p],
+            trace=t if t >= 0 else None,
+            root_mm=root,
+        )
+
+    def snap(self, mm: npt.ArrayLike) -> dict[str, Any]:
+        """The WM selection at the white-mesh vertex nearest world point mm."""
+        _, k = self.vertex_tree.query(np.asarray(mm, float))
+        return self.vertex(int(k))
 
     # ------------------------------------------------------------ layers
     def load_priority(self) -> None:

@@ -13,6 +13,7 @@ import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 import pytest
+from scipy.spatial import cKDTree
 
 from baillarger.data import crop_affine
 from baillarger.viewer import data as VD
@@ -127,6 +128,25 @@ def test_world_is_the_box_crop_of_the_echo_affine(
     assert site.locate(root + [0, 0, 5.0]) is None
 
 
+def test_snap_is_the_nearest_surface_vertex_and_its_trace(site: VD.Site) -> None:
+    # vertices are at odd box voxels (1, 3, ..., 17) in x and y, z = 4: a click above
+    # (5.2, 7.1, 9) is nearest (5, 7, 4), vertex 2 * 9 + 3, the root of trace 21
+    sel = site.snap(site.world([5.2, 7.1, 9.0])[0])
+    assert sel["vertex"] == 21 and sel["trace"] == 21
+    assert np.allclose(sel["world_mm"], site.world([5.0, 7.0, 4.0])[0], atol=1e-3)
+    assert sel["root_mm"] == pytest.approx(0.0)
+    assert site.vertex(21) == sel
+
+
+def test_a_vertex_without_a_near_trace_takes_the_nearest_root(site: VD.Site) -> None:
+    site.vtrace[:] = -1  # as if no shown trace were rooted within NEAREST_MM
+    sel = site.vertex(21)
+    assert sel["trace"] == 21 and sel["root_mm"] == pytest.approx(0.0)
+    site.root_tree = cKDTree(site.world(site.v_vox[site.rv[:1]]))  # only trace 0
+    far = site.vertex(80)  # (17, 17, 4) voxels, 8 * sqrt(2) * 2 * 0.5 mm from trace 0
+    assert far["trace"] is None and far["root_mm"] is None
+
+
 def test_volume_is_the_box_of_the_full_grid(site: VD.Site, tmp_path: Path) -> None:
     img = nib.nifti1.Nifti1Image.from_bytes(gzip.decompress(site.volume_bytes()))
     full = np.arange(40**3, dtype=np.float32).reshape(40, 40, 40)
@@ -183,6 +203,11 @@ def test_server_shares_state_between_pages(site: VD.Site) -> None:
         msg = json.loads(line.decode().removeprefix("data: "))
         assert msg["sender"] == "pageA" and msg["patch"] == {"trace": 40}
         assert json.loads(get(base + "/state"))["state"]["trace"] == 40
+        snap = json.loads(
+            get(base + "/snap?mm=" + ",".join(map(str, site.world([5.2, 7.1, 9.0])[0])))
+        )
+        assert snap["vertex"] == 21 and snap["trace"] == 21
+        assert json.loads(get(base + "/vertex?v=21")) == snap
         es.close()
         lines = SV.read_tck(get(base + "/overview/0/1.tck"))
         assert len(lines) == int((site.cls_all[site.sub] == 0).sum())
