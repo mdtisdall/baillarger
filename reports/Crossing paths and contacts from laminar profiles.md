@@ -1083,9 +1083,20 @@ Two biases are left and not corrected:
 - `wm_edge_<site>.vtk`: the mesh with the offsets, curvature and coherence, in ITK-SNAP world coordinates.
 - `wm_edge_<site>_overlay.nii.gz`: at each vertex's voxel, 1 means the edge is outside by more than half a voxel, 2 inside by more than half a voxel, 3 no edge in the window. The code-3 clusters (for example M1S1, plane i = 70, top right) are where the label may be off by more than 0.3 mm.
 
-**Open, before step 2:**
-- Whether the convex-crown offset is the label (the aseg's WM too thin at crowns) or anatomy: deep-layer myelin moving the intensity edge into the cortex where the layers are strongest. The coherence pattern fits both.
-- What "the GM/WM boundary" should mean for the roots, if not the steepest point of echo 2.
+**Decision (the user's): the roots must include the GM/WM boundary.** A root a little inside the WM is safe, because the seismic analysis can find the boundary along the profile later. A root in the cortex, past the edge, misses it. So steps 2 and 4 are one-sided:
+- step 2 removes WM voxels where the edge lies more than half a voxel inside the mesh, and never adds voxels;
+- step 4 moves vertices inward only, onto the edge where it is inside;
+- an edge outside the mesh (overlay 1, including the convex crowns) is left alone. Whether that offset is the label or deep-layer myelin no longer matters for the roots.
+
+The vertices at risk (echo 2, share of the vertices ≥ 2 mm from the faces; roots the same):
+
+| | V1V2 banks | M1S1 |
+|---|---|---|
+| edge more than half a voxel inside the mesh (overlay 2) | 18.2 % | 7.2 % |
+| no edge in the window, the search ending at its inner end | 4.0 % | 0.7 % |
+| no edge in the window, outer end (safe) | 7.7 % | 2.9 % |
+
+The inner-end cases may lie more than 0.3 mm inside the mesh, or have no edge at all (next to missing tissue). They need a look before any automatic correction.
 
 ### Across both faces
 
