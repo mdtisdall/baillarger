@@ -1064,10 +1064,10 @@ The paths of normal are straight, so they are further from the phantoms' curved 
 - Straight rays keep the right class as well as the field-based methods do, on every phantom, and they do not misroute through the fundus focus as traverse does: there is no field to focus.
 - At the sites they almost never return to their own bank (386 and 26 columns), and they cross fused banks about as often as crest does. Their open columns rarely meet another bank (12 % and 6 %), so most of crest's and traverse's crests on open columns come from T, not from the geometry, which agrees with the label errors found under traverse.
 - The profile split at the marked points is as good as the best method at V1V2 and the best at M1S1 (median 0.17 mm, against 0.24–0.41).
-- The cost: more failures. Straight rays leave the box more often (about 5,000 and 2,300 more at the faces) and reach the 8 mm cap more often (2,673 and 3,764). Why the long rays run 8 mm without meeting fluid or WM is not yet looked at; a ray that grazes a bank or runs along a sheet is the likely cause.
+- The cost: more failures. Straight rays leave the box more often (about 5,000 and 2,300 more at the faces) and reach the 8 mm cap more often (2,673 and 3,764). Apart from the face, the cap is nearly all of normal's failures. The others are V1V2's 'other' (2,253, the same for every method) and 'missing' (725) labels.
+- **The capped rays.** They start along the WM distance's gradient (cos 0.99, as crossing rays do), and 99.7 % or more pass another bank's front, at 2.4–2.7 mm. After that they run along the far bank's sheet, not into it: the median |cos| between the ray and the far WM distance's gradient is 0.3–0.4, against about 0.9 for crossing rays. They come within about 0.9 mm of WM and 0.5–0.7 mm of fluid, but reach neither in 8 mm. A straight ray crosses into a far bank that is not parallel to its own and grazes it. By the user's decision, normal rays stay straight; the capped rays are kept as rays that end in cortex (outcome "length").
 
 **Not done:**
-- Look at the length-capped rays (where they start, what they run through).
 - The comparison with the equivolume-front method (its session), which reads these builds.
 - The crossing rays' cut: like traverse, normal's crossings depend on a cortex label without fluid channels and vessels; it is measured again after the pial-side label refinement.
 
