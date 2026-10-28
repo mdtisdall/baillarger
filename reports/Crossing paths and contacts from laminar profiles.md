@@ -1098,6 +1098,19 @@ The vertices at risk (echo 2, share of the vertices ≥ 2 mm from the faces; roo
 
 The inner-end cases may lie more than 0.3 mm inside the mesh, or have no edge at all (next to missing tissue). They need a look before any automatic correction.
 
+**Decision (the user's): a refined vertex lands at the edge minus about the edge's blur width,** so that the whole GM/WM transition lies above the root.
+- *The blur width.* The edge's own blur s, from its contrast and peak slope (an erf step, with the 0.1 mm derivative scale taken out), has a median of 0.07 mm at both sites (V1V2 and M1S1; contrast over ±0.25 mm). A quarter of the vertices read 0: their edge is sharper than the derivative scale can resolve, or noise raised the peak slope. So s is about 0.1 mm or less. An erf's 10–90 % rise spans ±1.28 s, about ±0.09 mm.
+- *The margin is 0.1 mm* (0.6 voxel).
+- *What it implies* (echo 2; vertices ≥ 2 mm from the faces with an edge in the window):
+
+  | | V1V2 banks | M1S1 |
+  |---|---|---|
+  | vertices moved inward | 75 % | 67 % |
+  | moved by more than half a voxel (label change, step 2) | 49 % | 32 % |
+  | inward move, p50 / p95 | 0.11 / 0.33 mm | 0.07 / 0.23 mm |
+
+  With the margin, most of the surface moves into the WM by about a tenth of a millimetre, not only where it is now past the edge.
+
 ### Across both faces
 
 - **The principle survives at V1V2 and fails as estimated at M1S1** (principle, roles, estimators): the same estimators with the same settings place a V1 contact within about half a voxel and miss an M1/S1 contact by 3–5 voxels, while placing open-cortex joins at both within a third of a voxel.
