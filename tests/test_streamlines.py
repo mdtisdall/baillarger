@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+from scipy import ndimage as ndi
 
 from baillarger import streamlines as S
 
@@ -196,33 +197,169 @@ def test_trace_stop_codes() -> None:
     assert S.trace(T, labels, dface, x0, d0, VOX, 5)[2][0] == S.LENGTH
 
 
-def test_ascend_climbs_the_field_and_stops_at_contact_or_ridge() -> None:
+def test_ascend_climbs_the_field_and_stops_past_its_maximum() -> None:
     shape = (60, 12, 12)
     idx = np.indices(shape).astype(float)
     labels = np.zeros(shape, np.int16)
     dface = np.full(shape, 99.0)
     x0 = np.array([[5.0, 6.0, 6.0]])
-    never = lambda i, q: np.zeros(len(i), bool)  # noqa: E731
     # u rises to x = 30, then falls: a ridge
     u = np.minimum(idx[0], 60.0 - idx[0])
-    pos, ns, out = S.ascend(u, labels, dface, x0, VOX, 400, never)
+    pos, ns, out = S.ascend(u, labels, dface, x0, VOX, 400)
     h = S.STEP_MM / 0.16
     assert out[0] == S.RIDGE
     assert abs(pos[0, ns[0] - 1, 0] - 30.0) < 2 * h
     assert np.allclose(np.diff(pos[0, : ns[0] - 1, 0]), h, atol=1e-4)
-    # the caller's contact test
-    beyond = lambda i, q: q[:, 0] >= 20  # noqa: E731
-    pos, ns, out = S.ascend(idx[0], labels, dface, x0, VOX, 400, beyond)
-    assert out[0] == S.CONTACT and round(float(pos[0, ns[0] - 1, 0])) == 20
+
+
+def test_ascend_turn_rule() -> None:
+    """With turn_deg, a path that turns by 90 degrees (u's gradient turns from
+    x to y at x = 20) stops as TURN; without it, it goes on."""
+    shape = (40, 60, 12)
+    x, y = np.indices(shape)[:2].astype(float)
+    u = np.where(x < 20, x, 20 + y)
+    labels = np.zeros(shape, np.int16)
+    dface = np.full(shape, 99.0)
+    x0 = np.array([[5.0, 10.0, 6.0]])
+    out = S.ascend(u, labels, dface, x0, VOX, 400, turn_deg=60.0)[2]
+    assert out[0] == S.TURN
+    out = S.ascend(u, labels, dface, x0, VOX, 400)[2]
+    assert out[0] != S.TURN
 
 
 def test_ascend_prefers_a_label_to_a_flat_field_to_a_face() -> None:
     shape = (30, 12, 12)
     labels = np.zeros(shape, np.int16)
-    never = lambda i, q: np.zeros(len(i), bool)  # noqa: E731
     flat = np.zeros(shape)
     x0 = np.array([[10.0, 6.0, 6.0]])
     near = np.full(shape, 1.0)  # every voxel near a face
-    assert S.ascend(flat, labels, near, x0, VOX, 10, never)[2][0] == S.RIDGE
+    assert S.ascend(flat, labels, near, x0, VOX, 10)[2][0] == S.RIDGE
     labels[:] = 1
-    assert S.ascend(flat, labels, near, x0, VOX, 10, never)[2][0] == S.FLUID
+    assert S.ascend(flat, labels, near, x0, VOX, 10)[2][0] == S.FLUID
+
+
+def test_descend_reaches_the_wm_down_a_linear_field() -> None:
+    """T = distance from the WM plane x = 4.5: from x = 20, unit steps of
+    STEP_MM straight down, ending on the first sample in the WM."""
+    shape = (30, 12, 12)
+    labels = np.zeros(shape, np.int16)
+    labels[:5] = 2
+    T = (np.indices(shape)[0] - 4.5) * 0.16
+    pos, ns, out = S.descend(
+        T, labels, np.full(shape, 99.0), np.array([[20.1, 6.0, 6.0]]), VOX, 300
+    )
+    h = S.STEP_MM / 0.16
+    assert out[0] == S.WM
+    assert np.round(pos[0, ns[0] - 1, 0]) == 4
+    assert np.allclose(np.diff(pos[0, : ns[0], 0]), -h, atol=1e-4)
+
+
+def test_extended_fitted_field_is_the_signed_distance_into_fluid_and_wm() -> None:
+    """WM below x = 4.5, cortex x in [5, 20), fluid above: with a fluid layer
+    and a WM band, T is the signed distance from the WM's last voxel row
+    (negative in the band) through the pia, so |grad T| is 1 at the pia's
+    last cortex voxel; the field without them flattens there."""
+    shape = (32, 16, 16)
+    x = np.indices(shape)[0].astype(float)
+    labels = np.full(shape, 1, np.int16)
+    labels[:5] = 2
+    labels[5:20] = 0
+    ctx, wm = labels == 0, labels == 2
+    img = np.sin(x * 0.16 / 0.2) * ctx
+    tensor = S.structure_tensor(img, ctx.astype(float))
+    T, _ = S.fitted_field(tensor, ctx, wm, VOX, fluid=labels == 1, wm_band_mm=0.5)
+    want = (np.arange(shape[0]) - 4) * 0.16
+    core = (slice(None), slice(4, -4), slice(4, -4))
+    band = slice(2, 21)  # the WM band (3 voxels), the cortex and the fluid layer
+    assert np.max(np.abs(T[core][band] - want[band, None, None])) < 0.01
+    g = np.linalg.norm(np.stack(S.gradient(T, VOX), -1), axis=-1)
+    assert np.allclose(g[19, 4:-4, 4:-4], 1.0, atol=0.02)
+    T0, _ = S.fitted_field(tensor, ctx, wm, VOX)
+    g0 = np.linalg.norm(np.stack(S.gradient(T0, VOX), -1), axis=-1)
+    assert np.all(g0[19, 4:-4, 4:-4] < 0.6)  # the nearest-value fill
+
+
+def test_crest_voxels_find_a_kink_and_not_a_smooth_curved_field() -> None:
+    """Exact fields: T = R - r (cortex inside a WM tube, rising toward the
+    axis: curved level sets, no kink) has no crest voxel, with or without a
+    noise margin; two flat banks rising to x = 30 have their crest on that
+    plane only."""
+    h = 0.16
+    vox = np.full(3, h)
+    idx = np.indices((61, 61, 21)).astype(float)
+    r = np.hypot((idx[0] - 30) * h, (idx[1] - 30) * h)
+    ctx = (r > 0.5) & (r < 4.0)
+    kap = np.where(ctx, 1.0 / np.maximum(r, h), 0.0)
+    for s_ in (0.0, 0.005):
+        c = S.crest_voxels(4.0 - r, ctx, np.full(r.shape, s_), kap, vox)
+        assert not c[ctx].any()
+    T2 = np.minimum(idx[0] * h, (60 - idx[0]) * h)
+    ones = np.ones(T2.shape, bool)
+    c2 = S.crest_voxels(T2, ones, np.full(T2.shape, 0.005), np.zeros(T2.shape), vox)
+    assert np.unique(np.argwhere(c2)[:, 0]).tolist() == [30]
+
+
+def test_n_eff_is_the_variance_reduction_of_the_tensor_window() -> None:
+    """Monte Carlo: white noise, its gradient (central differences after a
+    Gaussian of SD voxels), averaged with the Gaussian window of SI voxels:
+    the variance falls by n_eff."""
+    rng = np.random.default_rng(0)
+    noise = rng.standard_normal((96, 96, 96))
+    g = np.gradient(ndi.gaussian_filter(noise, S.SD), axis=0)
+    avg = ndi.gaussian_filter(g, S.SI)
+    core = (slice(16, -16),) * 3
+    ratio = float(np.var(g[core]) / np.var(avg[core]))
+    assert abs(ratio / S.n_eff() - 1.0) < 0.1
+
+
+def test_tissue_wm_direction_does_not_flip_beside_an_open_sulcus() -> None:
+    """WM slabs x < 6 and x >= 30, cortex between, a fluid slot at x = 21-22:
+    through tissue, every left-bank cortex voxel is nearer the left WM, so
+    the direction points +x up to the fluid; the straight-line distance
+    flips at the WM midline x = 17.5. Fused (no slot): both flip there."""
+    shape = (36, 20, 20)
+    wm = np.zeros(shape, bool)
+    wm[:6] = True
+    wm[30:] = True
+    ctx = ~wm
+    ctx[21:23] = False  # the fluid slot
+    g = S.tissue_wm_direction(wm, ctx, VOX)
+    g0 = S.signed_wm_direction(wm, VOX)
+    core = (slice(None), slice(5, -5), slice(5, -5))
+    assert np.all(g[core][8:20, ..., 0] > 0.9)
+    assert np.all(g0[core][19:21, ..., 0] < -0.9)
+    fused = ~wm
+    gf = S.tissue_wm_direction(wm, fused, VOX)
+    assert np.all(gf[core][8:16, ..., 0] > 0.9) and np.all(
+        gf[core][19:28, ..., 0] < -0.9
+    )
+
+
+def test_ray_is_a_straight_line_in_mm_steps() -> None:
+    shape = (40, 20, 20)
+    labels = np.zeros(shape, np.int16)
+    labels[35:] = 1
+    pos, ns, out = S.ray(
+        labels,
+        np.full(shape, 99.0),
+        np.array([[5.0, 10.0, 10.0]]),
+        np.array([[3.0, 4.0, 0.0]]),
+        VOX,
+        300,
+    )
+    p = pos[0, : ns[0]].astype(float)
+    d = np.diff(p, axis=0) * VOX
+    assert out[0] in (S.FLUID, S.FACE)
+    assert np.allclose(np.linalg.norm(d, axis=1), S.STEP_MM, atol=1e-5)
+    assert np.allclose(
+        d / np.linalg.norm(d, axis=1, keepdims=True), [0.6, 0.8, 0.0], atol=1e-5
+    )
+
+
+def test_first_fall_finds_where_a_field_stops_rising() -> None:
+    u = np.tile((10.0 - np.abs(np.arange(30.0) - 10.0))[:, None, None], (1, 6, 6))
+    pos = np.full((2, 30, 3), np.nan, np.float32)
+    pos[0, :25] = np.c_[np.arange(2.0, 27.0), np.full(25, 3.0), np.full(25, 3.0)]
+    pos[1, :8] = np.c_[np.arange(2.0, 10.0), np.full(8, 3.0), np.full(8, 3.0)]
+    out = S.first_fall(u, pos, np.array([25, 8]))
+    assert out.tolist() == [8, -1]  # sample 8 is x = 10, the maximum

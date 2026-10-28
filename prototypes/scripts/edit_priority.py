@@ -10,9 +10,9 @@ reports/Crossing paths and contacts from laminar profiles.md, *Correction tools*
   (b) a flat margin: the smallest energy rise of the pia moved alone by +-0.1 and +-0.2 mm, every
       other variable fixed (on a 0.02 mm grid, so that both moves are whole labels);
   (c) model doubts the pipeline already writes: the joint pia against the single-surface horizon
-      (pia_<site>.npz c), the field prior and the profile split (column_volume H_field prior,
-      H_profile, top); open tops the pia left by more than the anchor's capture range (overridden);
-      bands not found (bands_<tag>.npz taus nan).
+      (pia_<site>.npz c), the profile split (column_volume H_profile, top); open tops the pia
+      left by more than the anchor's capture range (overridden); bands not found
+      (bands_<tag>.npz taus nan).
   Each doubt as a percentile rank over the traces; the combined score is their mean (no weights).
   Scores at the marked points against the points' errors, and views on the marked planes.
 Writes <work>/edit_priority_<tag>.npz and .json, <figures>/edit_priority_<tag>_sections.png.
@@ -140,7 +140,6 @@ def main(fig, work, tag):
     say(f"margins: median flat margin {np.nanmedian(flat):.3f}; negative at {np.sum(flat < -1e-9):,} traces")
     # (c) model doubts
     c_single = Q["c"][sub]
-    field = Z["H_field prior"][sub].astype(float)
     prof = Z["H_profile, top"][sub].astype(float)
     top = J["top"]
     over = np.where(np.isfinite(top), np.abs(z[-1] - top) - prm.capture, np.nan)
@@ -151,7 +150,6 @@ def main(fig, work, tag):
         "interval width": np.where(cert, 0.0, width),
         "flat margin": -flat,
         "|joint - single-surface|": np.abs(z[-1] - c_single),
-        "|joint - field prior|": np.abs(z[-1] - field),
         "|joint - profile split|": np.abs(z[-1] - prof),
         "open top overridden": np.where(over > 0, over, np.where(np.isfinite(over), 0.0, np.nan)),
         "bands not found": nob,

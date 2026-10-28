@@ -1,0 +1,578 @@
+"""A site's files, read for viewing (plan: reports/Crossing paths and contacts from
+laminar profiles.md, *A pia editor on an inflated surface*). Nothing here edits or
+re-solves anything.
+
+Inputs (only the column volume is needed):
+- column volume (column_volume_<name>.npz, prototypes/scripts/column_volume.py): the
+  white mesh (box voxels), every trace (positions, sample counts, class, primary or
+  fallback), echo 2 along the traces, the cortex label, the horizons, the user's
+  points; the tracer and WM label it was made with, if saved.
+- joint result (joint_<tag>.npz): the subsampled traces `sub`, their levels `z` (the
+  last is the pia), certification, neighbour pairs and ties. Without it every trace is
+  shown and there are no levels.
+- single-surface horizon (pia_<name>.npz, `c` per trace).
+- priority map (edit_priority_<tag>.npz, on the same `sub`): its rank, doubt and
+  combined layers, and the QPBO interval where the pia is not certified.
+- echo 2 of the full grid (baillarger.data.echo_path(2) by default): cropped to the box
+  for the volume views, and its affine for world mm.
+
+The flat map (baillarger.viewer.flatmap) and the inflation (baillarger.viewer.inflation)
+are computed on first use and cached in the cache directory, keyed by a hash of the
+mesh, so that a rebuilt column volume gets new ones. World mm: the box's crop of the
+echo-2 affine; box mm: voxel index times the voxel size (the sections and the 3D
+surface use box mm, the volume views world mm).
+"""
+
+import gzip
+import hashlib
+import json
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import nibabel as nib
+import numpy as np
+import numpy.typing as npt
+from nibabel.gifti.gifti import GiftiDataArray, GiftiImage
+from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse.csgraph import dijkstra
+from scipy.spatial import cKDTree
+
+from baillarger.data import crop_affine, echo_path
+from baillarger.mesh_smoothing import edges
+from baillarger.streamlines import STEP_MM
+from baillarger.viewer import flatmap as FM
+from baillarger.viewer import inflation as IN
+from baillarger.viewer import sections as PS
+from baillarger.viewer import streamlines as SV
+
+type Float = npt.NDArray[np.float64]
+type Arr = npt.NDArray[Any]
+
+CLASSES = ("open", "crossing", "own bank", "to the pass's contact", "failed")
+NEAREST_MM = 0.5  # a vertex shows the nearest subsampled trace rooted within this
+LOCATE_MM = 1.0  # a WM selection takes the nearest shown root within this
+
+
+def mesh_graph(v_mm: Float, f: Arr) -> csr_matrix:
+    E = edges(f)
+    w = np.linalg.norm(v_mm[E[:, 0]] - v_mm[E[:, 1]], axis=1)
+    G = coo_matrix((w, (E[:, 0], E[:, 1])), shape=(len(v_mm),) * 2).tocsr()
+    return G.maximum(G.T).tocsr()
+
+
+def mesh_key(v: Arr, f: Arr) -> str:
+    h = hashlib.sha1(np.ascontiguousarray(v, np.float32).tobytes())
+    h.update(np.ascontiguousarray(f, np.int64).tobytes())
+    return h.hexdigest()[:16]
+
+
+def cached(path: Path, key: str, make: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    """The arrays in path if its key matches, else make() saved there with the key."""
+    if path.exists():
+        with np.load(path, allow_pickle=False) as Q:
+            if str(Q["key"]) == key:
+                return {k: Q[k] for k in Q.files if k != "key"}
+    out = make()
+    arrays = {k: v for k, v in out.items() if isinstance(v, np.ndarray)}
+    result = dict(arrays)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    arrays["key"] = np.array(key)
+    np.savez_compressed(path, **arrays)  # type: ignore[arg-type]
+    summ = {k: v for k, v in out.items() if not isinstance(v, np.ndarray)}
+    path.with_suffix(".json").write_text(json.dumps(summ, indent=1, default=float))
+    return result
+
+
+def nifti(path: Path) -> nib.nifti1.Nifti1Image:
+    img = nib.load(path)
+    if not isinstance(img, nib.nifti1.Nifti1Image):
+        raise ValueError(f"{path}: not a NIfTI-1 image")
+    return img
+
+
+def gifti_bytes(v_world: Float, f: Arr) -> bytes:
+    g = GiftiImage()
+    g.add_gifti_data_array(
+        GiftiDataArray(
+            np.asarray(v_world, np.float32),
+            intent="NIFTI_INTENT_POINTSET",
+            datatype="NIFTI_TYPE_FLOAT32",
+        )
+    )
+    g.add_gifti_data_array(
+        GiftiDataArray(
+            np.asarray(f, np.int32),
+            intent="NIFTI_INTENT_TRIANGLE",
+            datatype="NIFTI_TYPE_INT32",
+        )
+    )
+    out: bytes = g.to_bytes()
+    return out
+
+
+class Site:
+    """One site's data for the viewer; see the module docstring."""
+
+    def __init__(
+        self,
+        column_volume: Path,
+        cache: Path,
+        joint: Path | None = None,
+        pia: Path | None = None,
+        priority: Path | None = None,
+        echo: Path | None = None,
+        log: Callable[[str], object] = print,
+    ) -> None:
+        t0 = time.time()
+        self.cache = Path(cache)
+        stem = Path(column_volume).name.removesuffix(".npz")
+        self.name = stem.removeprefix("column_volume_")
+        self.log = log
+        Z = np.load(column_volume)
+        self.vox: Float = Z["vox"].astype(float)
+        self.lo: Arr = Z["lo"]
+        self.v_vox: Float = Z["v"].astype(float)
+        self.vmm: Float = self.v_vox * self.vox
+        self.f: Arr = Z["f"].astype(np.int64)
+        self.vnrm: Float = Z["nrm"].astype(float)
+        self.tv_all: Arr = Z["tv"]
+        self.pos_all: Arr = Z["pos"]
+        self.ns_all: Arr = Z["ns"]
+        self.cls_all: Arr = Z["cls"]
+        self.fallback_all: Arr = Z["tracer"]
+        self.ctx: npt.NDArray[np.bool_] = Z["ctx"].astype(bool)
+        self.shape = tuple(int(x) for x in self.ctx.shape)
+        self.P: Float = Z["P"].astype(float)
+        fv0: Arr = Z["fv"][0]
+        top_all: Arr = Z["H_top"]
+        self.tracer_name = (
+            str(Z["tracer_name"]) if "tracer_name" in Z.files else "not saved"
+        )
+        self.wm_label = str(Z["wm_label"]) if "wm_label" in Z.files else "not saved"
+        self.G = mesh_graph(self.vmm, self.f)
+        # the traces shown: the joint result's subsample, or all
+        self.joint = None if joint is None else dict(np.load(joint))
+        if self.joint is not None:
+            self.sub: Arr = self.joint["sub"]
+            self.z: Arr | None = self.joint["z"]
+            self.pairs: Arr = self.joint["pairs"]
+            self.ties: Arr = self.joint["ties"]
+            self.cert_saved: Arr = self.joint["cert"][-1].astype(bool)
+        else:
+            self.sub = np.flatnonzero(self.tv_all >= 0)
+            self.z = None
+            self.pairs = np.zeros((0, 2), np.int64)
+            self.ties = np.zeros((0, 2), np.int64)
+            self.cert_saved = np.ones(self.sub.size, bool)
+        self.n = int(self.sub.size)
+        self.sub_of = -np.ones(len(self.tv_all), np.int64)
+        self.sub_of[self.sub] = np.arange(self.n)
+        self.rv: Arr = self.tv_all[self.sub]
+        self.nrm: Float = self.vnrm[self.rv]
+        self.roots_of = -np.ones(len(self.vmm), np.int64)
+        self.roots_of[self.rv] = np.arange(self.n)
+        self.pos: Arr = self.pos_all[self.sub]
+        self.ns: Arr = self.ns_all[self.sub]
+        self.echo: Arr = fv0[self.sub]
+        self.vmax = float(np.nanpercentile(np.abs(self.echo), 97))
+        self.top: Float = top_all[self.sub].astype(float)
+        self.single: Float | None = (
+            None if pia is None else np.load(pia)["c"][self.sub].astype(float)
+        )
+        self.partner: dict[int, int] = {}
+        for a, b in self.ties:
+            self.partner.setdefault(int(a), int(b))
+            self.partner.setdefault(int(b), int(a))
+        self.priority_path = priority
+        self.load_priority()
+        # world mm
+        self.echo_path = Path(echo) if echo is not None else echo_path(2)
+        self.affine: Float = crop_affine(nifti(self.echo_path).affine, self.lo)
+        # flat map and inflation, cached by mesh
+        key = mesh_key(self.v_vox, self.f)
+        F = cached(
+            self.cache / f"flat_map_{self.name}.npz",
+            key,
+            lambda: FM.site_flat_map(self.vmm, self.f, log=log),
+        )
+        self.uv: Float = F["uv_v"][self.rv]
+        self.T: Float = F["T_v"][self.rv]
+        g = np.einsum("nij,nik->njk", self.T, self.T)
+        self.log2_area: Float = -0.5 * np.log2(np.linalg.det(g))
+        Ip = cached(
+            self.cache / f"inflate_{self.name}.npz",
+            key,
+            lambda: IN.site_inflation(self.vmm, self.f, log=log),
+        )
+        self.infl: list[Float] = [self.vmm] + [x.astype(float) for x in Ip["x"]]
+        self.infl_names = ["true surface"] + [
+            f"inflated, lam {lv:g}" for lv in Ip["levels"]
+        ]
+        self.vf = IN.vertex_faces(self.f, len(self.vmm))
+        self.sulc = IN.sulcal_depth(self.vmm, self.infl[-1], self.f)
+        d, _, src = dijkstra(
+            self.G,
+            indices=self.rv,
+            min_only=True,
+            return_predecessors=True,
+            limit=NEAREST_MM,
+        )
+        self.vtrace = np.where(
+            np.isfinite(d), self.roots_of[np.maximum(src, 0)], -1
+        ).astype(np.int32)
+        self.root_tree = cKDTree(self.world(self.v_vox[self.rv]))
+        self.vertex_tree = cKDTree(self.world(self.v_vox))
+        self.hits = self.point_hits()
+        self._bytes: dict[str, bytes] = {}
+        log(
+            f"site {self.name}: {self.n:,} traces shown of {len(self.tv_all):,}, "
+            f"tracer {self.tracer_name}, WM label {self.wm_label} "
+            f"({time.time() - t0:.0f} s)"
+        )
+
+    # ------------------------------------------------------------ coordinates
+    def world(self, p_vox: npt.ArrayLike) -> Float:
+        p = np.atleast_2d(np.asarray(p_vox, float))
+        out: Float = (np.c_[p, np.ones(len(p))] @ self.affine.T)[:, :3]
+        return out
+
+    def locate(self, mm: npt.ArrayLike) -> int | None:
+        """The shown trace whose root is nearest world point mm, within LOCATE_MM."""
+        d, k = self.root_tree.query(np.asarray(mm, float))
+        return int(k) if d <= LOCATE_MM else None
+
+    # ------------------------------------------------------------ the WM selection
+    def vertex(self, k: int) -> dict[str, Any]:
+        """The WM selection at white-mesh vertex k: its world point, and the shown
+        trace that the sections and streamlines use there: the one rooted nearest
+        along the mesh within NEAREST_MM (vtrace), else the root nearest in space
+        within LOCATE_MM, else none. root_mm: the distance from the point to that
+        trace's root (mm)."""
+        k = int(k)
+        p = self.world(self.v_vox[k])[0]
+        t = int(self.vtrace[k])
+        if t < 0:
+            d, j = self.root_tree.query(p)
+            t = int(j) if d <= LOCATE_MM else -1
+        root = None
+        if t >= 0:
+            root = round(
+                float(np.linalg.norm(self.world(self.v_vox[self.rv[t]])[0] - p)), 3
+            )
+        return dict(
+            vertex=k,
+            world_mm=[round(float(x), 3) for x in p],
+            trace=t if t >= 0 else None,
+            root_mm=root,
+        )
+
+    def snap(self, mm: npt.ArrayLike) -> dict[str, Any]:
+        """The WM selection at the white-mesh vertex nearest world point mm."""
+        _, k = self.vertex_tree.query(np.asarray(mm, float))
+        return self.vertex(int(k))
+
+    # ------------------------------------------------------------ layers
+    def load_priority(self) -> None:
+        self.prio: dict[str, Float] = {}
+        self.cert = self.cert_saved
+        self.lo_mm: Float | None = None
+        self.hi_mm: Float | None = None
+        if self.priority_path is not None and Path(self.priority_path).exists():
+            with np.load(self.priority_path) as Q:
+                if not np.array_equal(Q["sub"], self.sub):
+                    raise ValueError("the priority map is on other traces than shown")
+                self.prio = {
+                    k: Q[k].astype(float)
+                    for k in Q.files
+                    if k == "combined" or k.startswith(("rank_", "doubt_"))
+                }
+                self.cert = Q["cert"].astype(bool)
+                self.lo_mm, self.hi_mm = Q["lo"].astype(float), Q["hi"].astype(float)
+
+    def layers(self) -> dict[str, Float]:
+        out = dict(self.prio)
+        if self.z is not None:
+            out["not certified"] = (~self.cert).astype(float)
+            if self.single is not None:
+                out["joint - single-surface (mm)"] = self.z[-1] - self.single
+            out["pia depth (mm)"] = self.z[-1].astype(float)
+        out["open top (H_top set)"] = np.isfinite(self.top).astype(float)
+        out["class at the root"] = self.cls_all[self.sub].astype(float)
+        out["fallback tracer"] = self.fallback_all[self.sub].astype(float)
+        out["log2 map area factor"] = self.log2_area
+        return out
+
+    # ------------------------------------------------------------ points
+    def point_hits(self, within: float = 0.3) -> dict[int, list[tuple[int, float]]]:
+        """Per shown trace: (point number from 1, depth mm) of each of the user's
+        points whose nearest sample along the trace is within `within` mm."""
+        out: dict[int, list[tuple[int, float]]] = {}
+        if not len(self.P):
+            return out
+        tree = cKDTree(self.P * self.vox)
+        for i in range(self.n):
+            d_, k_ = tree.query(self.pos[i, : self.ns[i]].astype(float) * self.vox)
+            d, k = np.atleast_1d(d_), np.atleast_1d(k_)
+            j = int(np.argmin(d))
+            if d[j] <= within:
+                out.setdefault(i, []).append((int(k[j]) + 1, j * STEP_MM))
+        return out
+
+    # ------------------------------------------------------------ sections
+    def screen_directions(
+        self, i: int, right: npt.ArrayLike, up: npt.ArrayLike, level: int
+    ) -> tuple[Float, Float, float]:
+        x, r = self.infl[int(level)], int(self.rv[i])
+        T = np.c_[
+            IN.transfer(np.asarray(right, float), r, x, self.vmm, self.f, self.vf),
+            IN.transfer(np.asarray(up, float), r, x, self.vmm, self.f, self.vf),
+        ]
+        return PS.directions(T, self.nrm[i])
+
+    def cut(self, i: int, t: Float, half: float) -> tuple[Arr, Float]:
+        r = int(self.rv[i])
+        return PS.section(
+            self.vmm,
+            self.G,
+            r,
+            self.vmm[r],
+            self.nrm[i],
+            t,
+            self.roots_of,
+            half=half,
+            band=0.75 * float(self.vox.min()),
+            f=self.f,
+        )
+
+    def section_at(
+        self,
+        i: int,
+        half: float = 8.0,
+        right: npt.ArrayLike | None = None,
+        up: npt.ArrayLike | None = None,
+        level: int = 0,
+    ) -> dict[str, Any]:
+        """The two sections at shown trace i: along the flat map's axes, or along the
+        screen's right and up on inflated level `level` carried to the true mesh; at a
+        contact, the facing trace's sections through the same planes."""
+        i = int(i)
+        if right is None or up is None:
+            tu, tv, ang = PS.directions(self.T[i], self.nrm[i])
+            frame = "flat map axes"
+        else:
+            tu, tv, ang = self.screen_directions(i, right, up, level)
+            frame = f"screen axes on the {self.infl_names[int(level)]}"
+        out: dict[str, Any] = dict(
+            trace=i, angle_error_deg=round(ang, 2), frame=frame, info=self.info(i)
+        )
+        out["u"] = self.pack(*self.cut(i, tu, half))
+        out["v"] = self.pack(*self.cut(i, tv, half))
+        j, via = self.facing(i, out)
+        if j is not None:
+            nj = self.nrm[j]
+            fc: dict[str, Any] = dict(trace=j, via=via, info=self.info(j))
+            for name, t in (("u", tu), ("v", tv)):
+                tj = t - (t @ nj) * nj
+                fc[name] = self.pack(*self.cut(j, tj / np.linalg.norm(tj), half))
+            out["facing"] = fc
+        return out
+
+    def facing(self, i: int, out: dict[str, Any]) -> tuple[int | None, str | None]:
+        if i in self.partner:
+            return self.partner[i], f"tie of trace {i}"
+        best: tuple[float, int] | None = None
+        for name in ("u", "v"):
+            for t, d in zip(out[name]["traces"], out[name]["dist"], strict=True):
+                if t in self.partner and d is not None and abs(d) <= 1.0:
+                    if best is None or abs(d) < best[0]:
+                        best = (abs(d), t)
+        if best is None:
+            return None, None
+        return (
+            self.partner[best[1]],
+            f"tie of trace {best[1]}, {best[0]:.2f} mm from the crosshair",
+        )
+
+    def pack(self, tr: Arr, dist: Float) -> dict[str, Any]:
+        tr = np.asarray(tr, int)
+
+        def r2(a: Arr) -> list[float | None]:
+            return [None if not np.isfinite(x) else round(float(x), 3) for x in a]
+
+        img = [
+            np.clip(
+                np.round(np.nan_to_num(self.echo[t, : self.ns[t]]) / self.vmax * 127),
+                -127,
+                127,
+            )
+            .astype(int)
+            .tolist()
+            for t in tr
+        ]
+        unc = ~self.cert[tr]
+        nan = np.full(tr.size, np.nan)
+        return dict(
+            traces=tr.tolist(),
+            dist=r2(dist),
+            img=img,
+            ns=self.ns[tr].tolist(),
+            levels=[] if self.z is None else [r2(lv[tr]) for lv in self.z],
+            lo=None if self.lo_mm is None else r2(np.where(unc, self.lo_mm[tr], nan)),
+            hi=None if self.hi_mm is None else r2(np.where(unc, self.hi_mm[tr], nan)),
+            uncertified=unc.astype(int).tolist(),
+            top=r2(self.top[tr]),
+            single=None if self.single is None else r2(self.single[tr]),
+            points=[
+                dict(k=k, point=p, depth=round(d, 3))
+                for k, t in enumerate(tr.tolist())
+                for p, d in self.hits.get(t, [])
+            ],
+            tied=[int(t in self.partner) for t in tr.tolist()],
+        )
+
+    def info(self, i: int) -> dict[str, Any]:
+        root = self.v_vox[self.rv[i]]
+        return dict(
+            trace=int(i),
+            map_mm=[round(float(x), 2) for x in self.uv[i]],
+            root_itksnap=[int(x) for x in np.round(root) + 1],
+            root_full_grid0=[int(x) for x in np.round(root) + self.lo],
+            world_mm=[round(float(x), 3) for x in self.world(root)[0]],
+            pia_mm=None if self.z is None else round(float(self.z[-1, i]), 3),
+            certified=bool(self.cert[i]),
+            cls=CLASSES[int(self.cls_all[self.sub[i]])],
+            fallback=bool(self.fallback_all[self.sub[i]]),
+            tie=self.partner.get(int(i)),
+        )
+
+    # ------------------------------------------------------------ 3D surface
+    def mesh_payload(self, level: int, faces: bool) -> bytes:
+        """uint32 header length, JSON header padded to 4 bytes, then float32 positions
+        (box mm), normals, sulcal depth (inflated level `level`), and with faces:
+        int32 nearest shown trace per vertex and uint32 faces."""
+        x = self.infl[int(level)]
+        parts: list[Arr] = [
+            x.astype(np.float32),
+            IN.vertex_normals(x, self.f).astype(np.float32),
+            self.sulc.astype(np.float32),
+        ]
+        if faces:
+            parts += [self.vtrace, self.f.astype(np.uint32)]
+        c = x.mean(0)
+        hdr = dict(
+            nv=len(x),
+            nf=len(self.f),
+            level=int(level),
+            faces=bool(faces),
+            centre=c.tolist(),
+            radius=float(np.linalg.norm(x - c, axis=1).max()),
+        )
+        h = json.dumps(hdr).encode()
+        h += b" " * (-len(h) % 4)
+        return (
+            np.uint32(len(h)).tobytes()
+            + h
+            + b"".join(np.ascontiguousarray(p).tobytes() for p in parts)
+        )
+
+    # ------------------------------------------------------------ volume views
+    def volume_bytes(self) -> bytes:
+        """echo 2 cropped to the box, as .nii.gz bytes (world affine)."""
+        if "echo2" not in self._bytes:
+            full = nifti(self.echo_path)
+            a, b = self.lo, self.lo + np.array(self.shape)
+            box = np.asarray(
+                full.dataobj[a[0] : b[0], a[1] : b[1], a[2] : b[2]], np.float32
+            )
+            img = nib.Nifti1Image(box, self.affine)
+            self._bytes["echo2"] = gzip.compress(img.to_bytes(), compresslevel=1)
+        return self._bytes["echo2"]
+
+    def white_bytes(self) -> bytes:
+        if "white" not in self._bytes:
+            self._bytes["white"] = gifti_bytes(self.world(self.v_vox), self.f)
+        return self._bytes["white"]
+
+    def gm_bytes(self, sigma: float = 1.0) -> bytes:
+        """The cortex label's boundary over the whole box (display only)."""
+        if "gm" not in self._bytes:
+            v, f = SV.label_surface(self.ctx, (0, 0, 0), self.shape, sigma)
+            self._bytes["gm"] = gifti_bytes(self.world(v), f)
+        return self._bytes["gm"]
+
+    def overview_tracts(self, cls: int, every: int = 4) -> bytes:
+        """Every `every`-th shown trace of class cls, as .tck (world mm)."""
+        t = self.sub[::every]
+        t = t[self.cls_all[t] == cls]
+        return SV.tck([self.world(self.pos_all[k, : self.ns_all[k]]) for k in t])
+
+    # ------------------------------------------------------------ streamlines
+    def streamlines(self, i: int, radius: float = 1.0) -> dict[str, Any]:
+        """The traces from and to shown trace i's root (streamlines.select) by kind and
+        class, with the pia (world mm) on the shown ones among them."""
+        root = int(self.rv[i])
+        fr, to = SV.select(
+            self.G,
+            root,
+            self.vmm[root],
+            self.tv_all,
+            self.pos_all,
+            self.ns_all,
+            self.vox,
+            radius,
+        )
+        groups: dict[str, list[int]] = {}
+        for kind, ts in (("from", fr), ("to", to)):
+            for c in range(len(CLASSES)):
+                groups[f"{kind}_{c}"] = ts[self.cls_all[ts] == c].tolist()
+        ts = np.r_[fr, to]
+        ks = self.sub_of[ts]
+        sel, ks = ts[ks >= 0], ks[ks >= 0]
+        pia: list[list[float]] = []
+        if self.z is not None and sel.size:
+            p = SV.at_depth(self.pos_all[sel], self.ns_all[sel], self.z[-1, ks], 1.0)
+            p = p[np.isfinite(p).all(1)]
+            pia = np.round(self.world(p), 3).tolist() if len(p) else []
+        return dict(
+            trace=int(i),
+            root_world=[round(float(x), 3) for x in self.world(self.v_vox[root])[0]],
+            radius=radius,
+            n_from=int(fr.size),
+            n_to=int(to.size),
+            n_fallback=int(self.fallback_all[ts].sum()) if ts.size else 0,
+            groups={k: len(v) for k, v in groups.items()},
+            pia_world=pia,
+            tracer=self.tracer_name,
+            wm_label=self.wm_label,
+            _groups=groups,
+        )
+
+    def tracts(self, traces: list[int]) -> bytes:
+        return SV.tck([self.world(self.pos_all[k, : self.ns_all[k]]) for k in traces])
+
+    # ------------------------------------------------------------ meta
+    def meta(self) -> dict[str, Any]:
+        return dict(
+            site=self.name,
+            n=self.n,
+            uv=[
+                [round(float(a), 3), round(float(b), 3)]
+                if np.isfinite(a) and np.isfinite(b)
+                else [None, None]
+                for a, b in self.uv
+            ],
+            rv=self.rv.tolist(),
+            levels=self.infl_names,
+            layers=list(self.layers()),
+            classes=list(CLASSES),
+            points=len(self.P),
+            points_world=np.round(self.world(self.P), 3).tolist()
+            if len(self.P)
+            else [],
+            vmax=self.vmax,
+            has_levels=self.z is not None,
+            tracer=self.tracer_name,
+            wm_label=self.wm_label,
+        )

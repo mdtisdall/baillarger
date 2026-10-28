@@ -3,6 +3,8 @@ tetrahedra mesh and a global check, and handle removal on phantoms with known
 answers (a drilled hole is filled, a thin bridge and a pinhole contact are
 cut, cavities and islands are kept)."""
 
+import hashlib
+
 import numpy as np
 import numpy.typing as npt
 from scipy import ndimage as ndi
@@ -234,3 +236,138 @@ def test_stranded_voxels_cannot_be_put_back() -> None:
                 b = r.obj.copy()
                 b[tuple(v)] = True
                 assert H.kuhn_betti(b) != H.kuhn_betti(r.obj), (seed, v)
+
+
+# ---------------------------------------------------------------- exact output
+
+
+def perforated_slab(k: int, seed: int) -> Bool3:
+    """A slab 8 voxels thick with k tunnels (radius 1.5 to 3) through it on a
+    jittered grid 12 voxels apart: b1 = k."""
+    rng = np.random.default_rng(seed)
+    m = int(np.ceil(np.sqrt(k)))
+    n = m * 12 + 8
+    a = np.zeros((n, n, 24), bool)
+    a[2:-2, 2:-2, 8:16] = True
+    i, j = np.mgrid[:n, :n]
+    for t in range(k):
+        cx = 10 + (t // m) * 12 + int(rng.integers(-2, 3))
+        cy = 10 + (t % m) * 12 + int(rng.integers(-2, 3))
+        r = rng.uniform(1.5, 3.0)
+        a[(i - cx) ** 2 + (j - cy) ** 2 <= r * r, :] = False
+    return a
+
+
+def digest(obj: Bool3, moves: list[H.Move]) -> str:
+    """A hash of an output and its moves, in order."""
+    h = hashlib.sha256(np.packbits(obj).tobytes() + str(obj.shape).encode())
+    for m in moves:
+        h.update(m.kind.encode() + np.ascontiguousarray(m.voxels, np.int64).tobytes())
+    return h.hexdigest()[:16]
+
+
+def reference_digests() -> dict[str, str]:
+    """The digests of remove_handles (and _remove_one on a padded array) on
+    the phantoms of the tests above and on perforated slabs."""
+    hole = np.zeros((20, 20, 20), bool)
+    hole[4:16, 4:16, 4:16] = True
+    hole[9:11, 9:11, :] = False
+    bridge = ring()
+    bridge[3:8, 13:17, 3:9] = False
+    bridge[5, 13:17, 6] = True
+    sheets = np.zeros((30, 30, 16), bool)
+    sheets[3:27, 3:27, 3:6] = True
+    sheets[3:27, 3:27, 9:12] = True
+    sheets[3:6, 3:27, 3:12] = True
+    sheets[18, 15, 6:9] = True
+    shell = ball(40, 9, (14, 14, 14)) & ~ball(40, 4, (14, 14, 14))
+    shell |= ball(40, 1.5, (14, 14, 14)) | ball(40, 2.5, (34, 6, 34))
+    shell[7:22, 22:37, 12:17] = True
+    shell[11:18, 26:33, :] = False
+    cases: dict[str, Bool3] = {
+        "hole": hole,
+        "bridge": bridge,
+        "ring": ring(),
+        "sheets": sheets,
+        "shell": shell,
+        "slab": perforated_slab(16, 16),
+    }
+    cases |= {f"blobs22-{s}": blobs(s, 22) for s in range(12)}
+    cases |= {f"blobs18-{s}": blobs(s, 18, 1.0) for s in range(40)}
+    out = {}
+    for name, a in cases.items():
+        r = H.remove_handles(a)
+        out[name] = digest(r.obj, r.moves)
+    # one component in a padded box, straight to _remove_one
+    out["slab-padded"] = digest(*H._remove_one(np.pad(perforated_slab(16, 16), 20)))
+    return out
+
+
+REFERENCE = {
+    "hole": "6bb2a14cf71aa076",
+    "bridge": "2d9cb6266a893ebe",
+    "ring": "b247ab13bb5a183a",
+    "sheets": "7adb4f5782cd5134",
+    "shell": "1fa6bccb5bf47802",
+    "slab": "e81c8ad7b20f11bd",
+    "blobs22-0": "5673df3065670b06",
+    "blobs22-1": "98f0e222786171d1",
+    "blobs22-2": "aff212d1ad2c8b1f",
+    "blobs22-3": "e29df872e9ec7a20",
+    "blobs22-4": "82eb5c91baec57ae",
+    "blobs22-5": "e5081443a14332a7",
+    "blobs22-6": "5d4fad58185a29d3",
+    "blobs22-7": "db1dc3f40b170420",
+    "blobs22-8": "fdf203da521885b5",
+    "blobs22-9": "2bd60250327a2725",
+    "blobs22-10": "83e9014149b0c8d5",
+    "blobs22-11": "8018dadc543e1883",
+    "blobs18-0": "bfe38d0d6f035b64",
+    "blobs18-1": "3e9bff85b0e8291a",
+    "blobs18-2": "9ff03e5bccccbc66",
+    "blobs18-3": "d0e115446705a81a",
+    "blobs18-4": "51c3ca2ab0ed2c68",
+    "blobs18-5": "482f1cdcf5419822",
+    "blobs18-6": "6893501b011d8247",
+    "blobs18-7": "dbfa1b1f8f1e953b",
+    "blobs18-8": "7b43dcfc4ca98ba5",
+    "blobs18-9": "316bd1e3744d2abb",
+    "blobs18-10": "b2665ce2d28d3a11",
+    "blobs18-11": "75b33dc19824d9d0",
+    "blobs18-12": "217d719645f17cee",
+    "blobs18-13": "e17f00eb648c0fae",
+    "blobs18-14": "67b87800b004b5fd",
+    "blobs18-15": "4468f51eeea6ba3d",
+    "blobs18-16": "c7bd6402ca992519",
+    "blobs18-17": "a57459889829062c",
+    "blobs18-18": "8fcda9bc35402642",
+    "blobs18-19": "a2875ed1f8130702",
+    "blobs18-20": "bb17183e247ab543",
+    "blobs18-21": "f0a75ae29c9b02e9",
+    "blobs18-22": "2604b72dd6bfad66",
+    "blobs18-23": "3fc2ae77e096a5f3",
+    "blobs18-24": "b74f9b70364ac30d",
+    "blobs18-25": "9df049d4f0f563f1",
+    "blobs18-26": "d931dff70d02fd93",
+    "blobs18-27": "051c06b3b97282ca",
+    "blobs18-28": "613043606be67eee",
+    "blobs18-29": "bd7eb2ab91442b4b",
+    "blobs18-30": "3bbea9134c92512b",
+    "blobs18-31": "ccc59d37f1520e8f",
+    "blobs18-32": "69fa5e680b94a894",
+    "blobs18-33": "46146bcb90ce5a43",
+    "blobs18-34": "f297f2186472d5a9",
+    "blobs18-35": "60cccedb275942c8",
+    "blobs18-36": "d8c5a29cde5ffccf",
+    "blobs18-37": "6be0ba64a51a85bc",
+    "blobs18-38": "cedc038049eb5bb5",
+    "blobs18-39": "9d9079dfdff62599",
+    "slab-padded": "25078be5e6bfb0d8",
+}
+
+
+def test_output_is_the_reference_output() -> None:
+    # exact output of the one-wall-per-pass loop, pinned before its
+    # per-pass work was cut down: any change in the order of claims shows here
+    assert H.kuhn_betti(perforated_slab(16, 16)) == (1, 16, 0)
+    assert reference_digests() == REFERENCE

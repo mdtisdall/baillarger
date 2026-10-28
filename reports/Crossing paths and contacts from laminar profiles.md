@@ -172,27 +172,37 @@ What would change the plan:
 
 ### Traces and their failures
 
-- **Primary tracer:** the streamline of the unsigned layer normal (`crossing_lib.trace`), started at the vertex along its outward normal; a WM label is ignored for the first 0.3 mm.
-- **Fallback, where the primary stops on a turn or the length cap:** ascent of the equal-arrival pass's arrival from the vertex. It stops at fluid, at WM, or where the pass's label belongs to a root more than 5 mm away along the white surface (the pass's contact).
-- **Recorded per trace:** which tracer made it; each tracer's outcome (fluid, WM, turn, length, face, missing, other); length; the root and end positions; and the end root's distance from the start root along the white surface.
+The tracing is in the package (`baillarger.column_traces`, `baillarger.streamlines`); `column_volume.py --columns` picks the method.
+
+- **Primary tracer:** the streamline of the fitted field T (`fitted_blend`), started at the vertex along its outward normal and blended into the field over 0.3 mm. A WM label is ignored for the first 0.3 mm.
+- **`--columns crest` (the default):**
+  - *The field.* T is extended one voxel into the fluid and 0.5 mm into the WM, so its gradient is T's own up to the pia.
+  - *No turn rule and no fallback.* Columns are traced through.
+  - *Crest hits are recorded, not acted on.* Where a column meets another bank's field it crosses T's crest, and `crest_at` records its first sample there. The crest is where T rises from two sides into a kink (`crest_voxels`: a noise- and curvature-bounded kink test, *Column traces without the one pass*). It is the midline between the two banks' WM, not the anatomical contact, which the reading of the columns places.
+  - *Reversals.* A column that reflects off a crest it cannot cross and goes back into its own WM is cut at T's largest value along it.
+- **`--columns one-pass` (the method before, for comparison):** T on the cortex alone, the turn rule (60° within 0.3 mm), and where the primary turned or reached the length cap, the fallback: ascent of the equal-arrival pass's arrival, stopped at fluid, at WM, or where the pass's label belongs to a root 5 mm or more away along the white surface.
+- **Recorded per trace:**
+  - which tracer made it (`one-pass` only);
+  - the outcome (fluid, WM, contact, turn, length, face, missing, other, ridge);
+  - the length and the root and end positions;
+  - the end's distance from the root along the white surface;
+  - `crest_at`.
 - **Trace classes:**
   - *open:* ends in fluid;
-  - *crossing:* ends on WM whose root is ≥ 5 mm away along the white surface (the gap of *Results*: under 1.9 or over 14 mm);
-  - *own bank:* ends on WM within 5 mm, back on its own bank;
-  - *to the contact:* the fallback stopped at the pass's contact;
-  - *failed:* face, missing, other, or both tracers failed.
-- **Faces:** traces whose root is within 2 mm of a box face are kept but flagged, and left out of every summary (the rules).
-- **The check first:** where do primary traces turn: depth along the trace, coherence there, and distance from the WM. A turn just above the WM points at the tracer's start (the normal is unreliable at WM edges); a turn mid-column at low coherence is what the fallback is for.
+  - *crossing:* ends on WM whose root is 5 mm or more away along the white surface, measured on geodesic patches of the white mesh (`baillarger.mesh_graph`);
+  - *own bank:* ends on WM within 5 mm;
+  - *to the contact:* a reversal cut at the crest (`crest`), or the fallback stopped at the pass's contact (`one-pass`);
+  - *failed:* face, missing, other, or the length cap (`one-pass`: also a ridge).
+- **Faces:** traces whose root is within 2 mm of a box face are kept but flagged, and left out of every summary. Most failures are traces from deeper roots that run into this margin (*Column traces without the one pass*).
 
 ### Horizons (per trace, in mm from the root; NaN where not defined)
 
 - **top:** the length of an open trace.
 - **far WM:** the length of a crossing trace (its L).
-- **contact estimates, on crossing traces:**
-  - the one pass's label boundary along the trace, equal and field weights (sides by root distance, as in *Results*);
-  - the field prior's pairwise posterior on L (μ, σ at the two end roots' patches);
-  - the profile's split, E1 top-anchored, with templates from open traces in the volume within 6 mm of each end root. This one is costly, so it is computed on a random subsample of crossing traces (about 3,000 per box) and marked as sparse.
-- **contact from the fallback:** the length of a trace stopped at the pass's contact.
+- **contact:** the length of a to-the-contact trace (key `fallback contact`).
+- **the profile's split, on crossing traces:** E1 top-anchored, with templates from open traces in the volume within 6 mm of each end root. This one is costly, so it is computed on a random subsample of crossing traces (about 3,000 per box) and marked as sparse.
+
+The one pass's horizons (its label boundary with equal and field weights, and the field prior's pairwise posterior) were debugging information and are no longer written.
 
 ### Views
 
@@ -680,7 +690,7 @@ Levels at V1V2 τ 0.177 / 0.375 / 0.802 and at M1S1 τ 0.146 / 0.333 / 0.823 (sn
   - every edit made so far stays in the model;
   - tests: with R covering everything, the result equals a full solve; with a fixed ring, it equals the brute-force minimum, with or without an edit; edits persist; the neighbourhood is geodesic.
 
-**The priority map** (both sites, 30 s, 6–7 GB):
+**The priority map** (both sites, 30 s, 6–7 GB): computed with seven doubts, including the field prior (|joint − field prior|), which has since been removed with the column volume's one-pass horizons; the combined score is now the mean of six ranks.
 
 | | V1V2 banks | M1S1 r3 |
 |---|---|---|
@@ -852,6 +862,215 @@ Contact error (where the trace crosses the contact, from the true crossing point
 - Phantoms with equivolume laminae (curved true columns) and with a perturbed pia, to test both.
 - The order measure at equal τ instead of equal arc length.
 
+### Column traces without the one pass
+
+**Code.**
+- In the package:
+  - `baillarger.column_traces`: `--columns crest` (the default) and `one-pass`; `crest_at`;
+  - `baillarger.streamlines`: the extended fitted field (`fitted_field(fluid=, wm_band_mm=)`), `crest_voxels`, `step_noise`, `n_eff`, `fitted_free`, `descend`;
+  - `baillarger.mesh_graph`: the white mesh's graph, geodesic patches, and the vertex where a path crossed the mesh.
+- Diagnostics in `prototypes/scripts/`:
+  - `turn_diag.py` and `turn_cases.py`: why the primaries turned;
+  - `turn_experiment.py`: the extended field, with and without the turn rule;
+  - `bend_sweep.py`: the bend threshold;
+  - `crest_noise.py`: the noise model and the crest test on the phantoms.
+- Inputs: all site results are on the handle-free WM label (`wm_handles.npz`) with `fitted_blend`, roots 2 mm or more from a box face.
+- Tests (exact answers):
+  - mesh graph: distances on a plane within the 8-neighbour bound; a blade's sides apart, and the crossing vertex on the entered side;
+  - extended field: the signed distance on a slab, with |grad T| = 1 at the pia;
+  - crest test: none in a curved single-source field (T = R − r), with or without a noise margin; exactly the kink plane between two flat banks;
+  - `n_eff`: the window's variance reduction, Monte Carlo within 10 %;
+  - crest method: columns cross parallel fused banks and meet the crest at the midline; in a narrow fused V they meet it on the bisector; on a slab they meet none;
+  - crest cut: a returning column is cut at T's maximum.
+
+**Patches on the white mesh.**
+- The bank rule's distances along the white surface now come from geodesic patches on the white mesh, not on the voxel seed graph.
+- The graph includes the edges across neighbouring triangles. Without them, Dijkstra overestimates by up to 41 % in some directions, because the triangles' own edges zigzag on a grid-aligned surface. With them, the bound on a plane is 8.2 %.
+- Against the straight line between the same patch centres at M1S1 (p10, p50 of geodesic ÷ chord):
+
+| Straight line | Seed graph | Mesh graph |
+|---|---|---|
+| 2–4 mm | 1.06, 1.11 | 1.01, 1.06 |
+| 4–6 mm | 1.07, 1.12 | 1.02, 1.07 |
+| 6–8 mm | 1.07, 1.11 | 1.02, 1.05 |
+
+- Moving the patches alone changed 944 (V1V2) and 1,471 (M1S1) classes: mostly traces near the 5 mm rule, and the fallback's contact stops.
+
+**Why the primaries turned** (`one-pass`'s tracer, on the handle-free label):
+- **Where:** about 2 mm out, not at the root: 0.5–2.4 % of turns within 0.3 mm of the WM. The blended start had removed the start spikes.
+- **Rate by root curvature at M1S1:** 59–65 % of fundus roots (H < −0.15 /mm) turn, against 8–16 % elsewhere. At V1V2 the rate is 19–35 % at every curvature.
+- **|grad T| at the turns:** 0.35 near the fluid, 0.43 in the interior, 0.51–0.58 at crests. Typically it is 0.96 (0.76–1.08) in single-bank cortex, and 0.97–0.98 along traces that end normally.
+- **Near the fluid:** an artefact. T was filled flat outside the cortex, so within a voxel of the pia its gradient shrank and tilted.
+- **Elsewhere:** at T's crests, where two or three banks' fields meet.
+- **The paths themselves were right:**
+  - their bodies bend 0.27° per 0.04 mm step;
+  - over the 0.3 mm before the turn they change heading by 15–20° (median);
+  - a one-step wiggle where the field is weak tripped the 60° rule;
+  - 14–16 % of roots then lost a good primary to the fallback.
+
+**The extended field and the turn rule** (`turn_experiment.py`; primaries only):
+
+| | Crowns and fundi, right class | Failed | Kissing pairs, right class |
+|---|---|---|---|
+| T as before, turn rule | 84–88 % | 12–16 % | 86–87 % |
+| T extended, turn rule | 95–96 % | 4–5 % | 90–91 % |
+
+- The phantoms' turns were all the pia artefact: with T extended, the turn rule changes nothing on them.
+- **At the sites:** extending T turns about 1,700–1,800 turned roots per site into open columns. Elsewhere paths move a median 0.02 mm (p99 0.12 mm).
+- **Without the turn rule:** of the remaining turned roots, 8,500 per site become "own bank", and they are bounces. They are half as long between their ends as along their path, half end on a wall facing like their root's, and only 1–3 % cross straight to an opposite wall. They reflect off a crest met at an angle.
+
+**A bend threshold cannot decide** (`bend_sweep.py`; columns ended at a bend sharper than the threshold within 0.3 mm):
+
+| Bend threshold | Classes changed from 60° | V1V2 crossing columns |
+|---|---|---|
+| 45° | 4.7–4.8 % | 4,665 |
+| 30° | 11–12.5 % | 3,128 |
+| 10° | 31–34 % | 365 |
+
+Crossings kink where they meet a contact at an angle, by about the angle between the banks' layers. So an angle slices a continuum of real crossings. On the phantoms, whose contacts are met head on, the results are stable from 30° to 60°.
+
+**The crest test** (`crest_noise.py`, on the fold phantoms at V1V2's features, noisy against noise-free):
+- **The rule:** a voxel is a crest if T rises significantly into it, does not rise significantly beyond it, and its slope changes across it by more than L²κ plus the noise margin. κ is the concave curvature of T's level sets, from the white mesh's k2 carried to depth as |k2| / (1 − |k2| d). A smooth tangential maximum changes slope by at most L²κ; a kink changes it by a finite amount. Only values T was solved for count: not pinned at the WM's edge, not filled.
+- **The noise model** (`step_noise`, no calibration):
+  - the noise power is the cortex's median smallest eigenvalue of the structure tensor;
+  - the angular error is σ²(S + σ²) / (S² N), with N = `n_eff` exact for the filters;
+  - one component of the curl-free part keeps a ninth of the variance.
+- **The noise power from λ₃** is within 1–7 % of the known value on the fundi and kissing pairs, and 25–45 % high on the crowns, where curvature leaks into λ₃.
+- **Actual ÷ predicted step noise:** 1.0–1.2, and 1.2–1.6 in the lowest quartile.
+
+| Phantom | Crest voxels (noisy) | Noisy crests within 1.5 voxels of the noise-free ones |
+|---|---|---|
+| Crowns | 0.01–0.03 % | 80–100 % |
+| Fundi (no contact) | 0.5–1.1 % | 98 % |
+| Kissing pairs | 5.3–6.2 % | 99.6–99.7 % |
+
+**The crest is not the contact.** In the kissing pair (banks 2.0 and 2.6 mm thick, contact at r = 3.6 mm), the crest lies at r = 3.9 mm (p10–p90 3.8–4.0). That is the midline between the two WM surfaces, 1.6 and 6.2 mm. It lies there in the fused sector, and also in the open sector, where a fluid gap separates the banks: T follows the WM-distance direction in the fluid, so it does not see the gap. So the crest is recorded on each column (`crest_at`) and not used to end it: the boundary there has to come from the reading of the columns.
+
+**At the sites:** see *Traverse, and T's sign through tissue*, which compares the three methods on the current field.
+
+### Traverse, and T's sign through tissue
+
+**Code.**
+- `baillarger.column_traces`: `--columns traverse` (`crest` stays the default).
+- `baillarger.streamlines`:
+  - `crest_kinks`: the crest test, which also returns the lattice direction across each kink;
+  - `tissue_wm_direction`;
+  - `fitted_field`: leaves out edges with fluid at both ends.
+- `prototypes/scripts/`:
+  - `methods_phantoms.py`: all three methods on the fold phantoms, through the package;
+  - `crest_planes.py`: crest voxels on a site's marked planes.
+- Tests (exact answers):
+  - traverse crosses parallel fused banks, opposite the root to within one lattice step, with samples 0.04 mm apart;
+  - it crosses banks at 30° (90 % or more end in the far WM);
+  - it crosses the narrow fused V (90 % or more end in the opposite wall's WM);
+  - it leaves columns open beside an off-centre fluid slot;
+  - a crossing that meets fluid ends there;
+  - the WM direction through tissue does not flip beside an open slot, and flips where banks are fused.
+
+**Traverse.**
+- Up to its first crest voxel, a column is traced as in `crest`.
+- There it crosses the kink, one lattice step along the direction the kink test found, signed to agree with its heading. The test itself puts that neighbour past the kink. The step keeps the column's own offset within the voxel, and it is sampled every 0.04 mm.
+- It then descends −∇T into the far bank.
+- A crossing that enters fluid, WM, missing or other tissue ends there.
+- Every column is then a complete ray, and the reading of the columns chooses where to cut it.
+
+**T's sign through tissue** (all crest-based methods). T's target direction was signed by the straight-line distance to the nearest WM. Beside an open sulcus, that flips inside a bank's cortex, so T had a crest short of the fluid. It is now signed by the WM distance through tissue (fast marching, with fluid, other labels and missing tissue as obstacles):
+- smoothed over tissue only;
+- obstacle voxels take their nearest tissue voxel's direction;
+- the fit leaves out edges with fluid at both ends, so two banks' fluid layers across a narrow sulcus do not couple.
+
+On an off-centre 2-voxel slot, T now rises in each bank up to the fluid, with no crest in the cortex.
+
+**At the sites** (handle-free WM, fitted_blend, roots 2 mm or more from a box face; `scratch/traverse/`):
+
+| | V1V2: crest | V1V2: traverse | V1V2: one-pass | M1S1: crest | M1S1: traverse | M1S1: one-pass |
+|---|---|---|---|---|---|---|
+| Open | 34,668 | 15,336 | 35,752 | 27,755 | 14,746 | 29,586 |
+| Crossing | 6,001 | 4,967 | 5,369 | 14,418 | 9,916 | 12,122 |
+| Own bank | 2,394 | 32,320 | 970 | 2,353 | 30,568 | 479 |
+| To the contact | 7,325 | 194 | 4,139 | 6,796 | 8 | 4,100 |
+| Failed | 13,727 | 11,298 | 17,885 | 21,028 | 17,112 | 26,063 |
+| …box face / other / missing / length / ridge | 9,447 / 2,253 / 662 / 1,365 / 0 | 6,607 / 2,253 / 297 / 17 / 2,124 | 9,513 / 2,253 / 777 / 0 / 5,342 | 20,757 / 0 / 0 / 271 / 0 | 16,765 / 0 / 0 / 123 / 224 | 19,039 / 0 / 0 / 0 / 7,024 |
+| Open columns meeting a crest | 62 % | 14 % | — | 56 % | 18 % | — |
+| Profile split at the marked points (median, p90 mm; points) | 0.065, 0.415 (17) | 0.066, 0.165 (25) | 0.067, 0.165 (16) | 0.236, 0.827 (21) | 0.41, 0.63 (21) | 0.384, 0.584 (23) |
+
+**On the phantoms** (right class, at V1V2's features; M1S1's within 0.03):
+
+| | Crowns | Fundus, 0.16 mm slot | Fundus, 0.48 mm slot | Kissing pair | Kissing pair, no dark band |
+|---|---|---|---|---|---|
+| crest | 0.94–0.95 | 0.95 | 0.96 | 0.90 | 0.90 |
+| traverse | 0.92–0.94 | 0.55 | 0.79 | 0.82 | 0.78 |
+| one-pass | 0.94–0.95 | 0.93–0.94 | 0.95 | 0.90 | 0.90 |
+
+**Where traverse goes wrong: the cortex label.**
+- **The symptom:** traverse sends more than half of the open columns at both sites into the opposite bank's WM ("own bank"), and does worse on the open-fundus phantoms.
+- **Where the crests are:** on V1V2's marked planes (`crest_planes.py`; crops in ITK-SNAP), they lie along the marked "contact", which the user identified in 3D as a thin fluid channel; the crest follows it, departing into cortex at points. They also lie around a dark structure in thick cortex, which the user identified as a small piece of superficial vessel outside the cortex.
+- **Why:** both are labelled cortex by the aseg. T treats them as cortex, so the two banks' fields meet across them, and the crest marks the meeting. Traverse then crosses what is really an open sulcus or a vessel.
+- **On the phantoms:** in the fundus phantoms, columns converge into the slot's edge, tighter than the voxel grid resolves. The crest test flags that focus and traverse crosses it.
+- **So:**
+  - traverse depends on a cortex label that excludes fluid channels and vessels;
+  - until the pial-side labels are refined, it is an option, not the default;
+  - crest voxels without a fused contact mark places where the label is wrong, which makes them a useful flag in their own right.
+
+**Not done:**
+- The pial-side label refinement: thin dark channels and superficial vessels inside the aseg's cortex, relabelled while preserving topology. Then traverse is measured again.
+- The comparison with the surface-growing ("front") method's crossing rule (its session), on the same inputs.
+- Padded boxes, so that traces can run past the crop. A 4 mm margin is about 2.5 × the volume, roughly 11 GB. Most failures are still the box face.
+- A full top boundary for T at the pia. The sign through tissue makes T respect labelled fluid; a fluid label that misses a channel still hides it.
+- Columns moved as a surface: the surface-growing session (`column_front`), with a coupled mesh and equivolume area.
+- Step 2's use of `crest_at`, for example an edit-priority layer of crests without a fused contact, as likely label errors.
+
+### Normal rays: columns without a field
+
+**Code.**
+- `baillarger.column_traces`: `--columns normal`; `equivolume`; `ColumnTraces.vol`.
+- `baillarger.streamlines`: `ray` (straight paths in mm steps), `first_fall`, `tissue_wm_distance`.
+- Tests (exact answers):
+  - rays from a ball are radial, and `vol` matches s + s²/R + s³/(3R²) (median relative error < 0.1);
+  - rays cross parallel fused banks and meet at the midline;
+  - rays meet on the bisector of a narrow fused V;
+  - rays see no meeting beside an open slot;
+  - `ray` is a straight line in 0.04 mm steps; `first_fall` finds where a field stops rising.
+
+**The method.** Each column leaves its root along the smoothed white-surface normal and goes straight at a constant speed. It stops only at fluid or WM labels (or missing or other tissue, the box face, the 8 mm length cap). It does not use T or the image.
+- `crest_at`: the first sample where the WM distance through tissue stops rising along the ray. There the ray has passed the midline between its own bank and another bank, so it records the geometric meeting, not T's crest.
+- `vol`: the equivolume coordinate per sample, the swept volume per unit root area, with area (1 + k1 s)(1 + k2 s) from the root's principal curvatures. vol / vol at the end is an equivolume relative depth. The speed stays constant; a speed set by curvature is the equivolume-front session's option.
+
+**At the sites** (same field, labels and roots as the traverse table; `scratch/normal-columns/`):
+
+| | V1V2: crest | V1V2: traverse | V1V2: normal | M1S1: crest | M1S1: traverse | M1S1: normal |
+|---|---|---|---|---|---|---|
+| Open | 34,668 | 15,336 | 38,625 | 27,755 | 14,746 | 31,863 |
+| Crossing | 6,001 | 4,967 | 4,946 | 14,418 | 9,916 | 13,658 |
+| Own bank | 2,394 | 32,320 | 386 | 2,353 | 30,568 | 26 |
+| To the contact | 7,325 | 194 | 0 | 6,796 | 8 | 0 |
+| Failed | 13,727 | 11,298 | 20,158 | 21,028 | 17,112 | 26,803 |
+| …box face / length | 9,447 / 1,365 | 6,607 / 17 | 14,507 / 2,673 | 20,757 / 271 | 16,765 / 123 | 23,039 / 3,764 |
+| Open columns meeting another bank | 62 % | 14 % | 12 % | 56 % | 18 % | 6 % |
+| Profile split at the marked points (median, p90 mm; points) | 0.065, 0.415 (17) | 0.066, 0.165 (25) | 0.075, 0.183 (24) | 0.236, 0.827 (21) | 0.41, 0.63 (21) | 0.169, 0.597 (20) |
+
+**On the phantoms** (right class, at V1V2's features; M1S1's within 0.02):
+
+| | Crowns | Fundus, 0.16 mm slot | Fundus, 0.48 mm slot | Kissing pair | Kissing pair, no dark band |
+|---|---|---|---|---|---|
+| crest | 0.94–0.95 | 0.95 | 0.96 | 0.90 | 0.90 |
+| traverse | 0.94 | 0.55 | 0.79 | 0.82 | 0.78 |
+| normal | 0.95 | 0.94 | 0.96 | 0.90 | 0.90 |
+| one-pass | 0.94–0.95 | 0.93–0.94 | 0.95 | 0.90 | 0.90 |
+
+The paths of normal are straight, so they are further from the phantoms' curved columns: path error p90 0.18–0.41 mm at the crowns, against 0.11–0.33 for crest; 0.25 at the kissing pairs, against 0.11–0.18.
+
+**What this says.**
+- Straight rays keep the right class as well as the field-based methods do, on every phantom, and they do not misroute through the fundus focus as traverse does: there is no field to focus.
+- At the sites they almost never return to their own bank (386 and 26 columns), and they cross fused banks about as often as crest does. Their open columns rarely meet another bank (12 % and 6 %), so most of crest's and traverse's crests on open columns come from T, not from the geometry, which agrees with the label errors found under traverse.
+- The profile split at the marked points is as good as the best method at V1V2 and the best at M1S1 (median 0.17 mm, against 0.24–0.41).
+- The cost: more failures. Straight rays leave the box more often (about 5,000 and 2,300 more at the faces) and reach the 8 mm cap more often (2,673 and 3,764). Apart from the face, the cap is nearly all of normal's failures. The others are V1V2's 'other' (2,253, the same for every method) and 'missing' (725) labels.
+- **The capped rays.** They start along the WM distance's gradient (cos 0.99, as crossing rays do), and 99.7 % or more pass another bank's front, at 2.4–2.7 mm. After that they run along the far bank's sheet, not into it: the median |cos| between the ray and the far WM distance's gradient is 0.3–0.4, against about 0.9 for crossing rays. They come within about 0.9 mm of WM and 0.5–0.7 mm of fluid, but reach neither in 8 mm. A straight ray crosses into a far bank that is not parallel to its own and grazes it. By the user's decision, normal rays stay straight; the capped rays are kept as rays that end in cortex (outcome "length").
+
+**Not done:**
+- The comparison with the equivolume-front method (its session), which reads these builds.
+- The crossing rays' cut: like traverse, normal's crossings depend on a cortex label without fluid channels and vessels; it is measured again after the pial-side label refinement.
+
 ### A pia editor on an inflated surface
 
 A prototype for correcting the joint warp's pia (the first pial level) trace by trace. The sections are always cut from the true 3D mesh. The inflated surface and the flat map only say where to click and which way is which.
@@ -905,8 +1124,8 @@ At a contact, the facing trace (through the crosshair trace's tie, or the neares
 
 Each step stores R and its solve: free traces, seconds, number of pia changes, largest change.
 
-**Tests** (exact answers, or a stated tolerance where only the limit is exact). 25 pass:
-- `test_flat_map.py` (9):
+**Tests** (exact answers, or a stated tolerance where only the limit is exact). The flat map, inflation, section and streamline code now lives in `baillarger.viewer` (*A viewer in the package*, below), and its tests moved with it to `tests/`:
+- `tests/test_viewer_flatmap.py` (9):
   - a plane maps isometrically up to a similarity (1e-9);
   - a polygonal cylinder strip unrolls exactly;
   - a hemisphere cap keeps angles: the area-weighted mean of s1/s2 − 1 is under 0.025 at 4000 sphere points and halves when the spacing halves;
@@ -914,10 +1133,10 @@ Each step stores R and its solve: free traces, seconds, number of pia changes, l
   - a genus-1 surface with a hole is cut to genus 0, then to a disk;
   - a long tube needs the disk cut (free-boundary LSCM folds on it);
   - packing and scale.
-- `test_inflate.py` (5): a uniform plane grid does not move; the boundary stays pinned; convergence to the discrete harmonic membrane; the tangent transfer is the face map; the sulcal depth.
-- `test_pia_sections.py` (5): a plane gives the row at Euclidean distances; a cylinder gives the ring at arc lengths; a U fold gives the U at arc lengths; the directions; the points.
-- `test_pia_editor.py` (1): replay equals the live result under other `rand()` states.
-- `test_streamline_view.py` (5):
+- `tests/test_viewer_inflation.py` (5): a uniform plane grid does not move; the boundary stays pinned; convergence to the discrete harmonic membrane; the tangent transfer is the face map; the sulcal depth.
+- `tests/test_viewer_sections.py` (5): a plane gives the row at Euclidean distances; a cylinder gives the ring at arc lengths; a U fold gives the U at arc lengths; the directions; the points.
+- `prototypes/scripts/test_pia_editor.py` (1): replay equals the live result under other `rand()` states.
+- `tests/test_viewer_streamlines.py` (6, with the TCK round trip):
   - on a plane, *from* is the geodesic disk and *to* the traces ending within r;
   - on a U fold, the facing sheet's traces are *to*, never *from*;
   - the mesh crop keeps exactly the faces in the box;
@@ -952,8 +1171,77 @@ Each step stores R and its solve: free traces, seconds, number of pia changes, l
 
 **Open.**
 - At strong inflation the carried vertical can be far from v. It was 56° at the V1V2 handle and 10–31° elsewhere in the checks. The sections stay orthogonal on the true surface, but their directions on screen are then only approximate.
-- The colour layers wait for `edit_priority_<tag>.npz`.
 - Whether the gray regions (no subsampled trace) hide cortex that should have traces.
+
+### A viewer in the package
+
+`baillarger.viewer` shows a site's column data in the browser, for looking only: nothing in it edits or re-solves the pia. Which correction steps are useful, and how to do them, waits until the data can be seen well. The prototype editor (`prototypes/scripts/pia_editor.py`, above) still runs and imports the same code from the package.
+
+**How to use it.** From the repository root, for example:
+
+    nix develop --command scripts/memguard 8 uv run python -m baillarger.viewer prototypes/scripts/column_volume_M1S1.npz --cache scratch/viewer --joint prototypes/scripts/joint_M1S1_s0.16_r3.npz --pia prototypes/scripts/pia_M1S1.npz --priority prototypes/scripts/edit_priority_M1S1_s0.16_r3.npz --port 8791
+
+Then open http://127.0.0.1:8791/ (127.0.0.1 only). Only the column volume is required:
+- without `--joint`, every trace is shown, with no levels;
+- without `--priority`, there are no priority layers;
+- `--echo` gives echo 2 of the full grid (default: the data directory).
+
+The flat map and the inflation are computed on the first start (41 s at M1S1) and cached in `--cache`, keyed by a hash of the mesh. A rebuilt column volume gets new ones.
+
+**Two points.** The viewer keeps two points:
+- the *crosshair*: a world point, which sets the three slices of the volume pane;
+- the *WM selection*: a vertex of the true white surface, with the shown trace there. It sets the sections, the streamlines and the info line. That trace is the one rooted nearest along the mesh within 0.5 mm, else the root nearest in space within 1 mm, else none.
+
+In each pane a click moves that pane's own point, and a shift-click moves the other one:
+
+| pane | click | shift-click |
+|---|---|---|
+| volume (slices) | the crosshair | the WM selection, to the white-surface vertex nearest the clicked point |
+| surface (true or inflated), map | the WM selection | the crosshair, to that point of the true white surface |
+
+The WM selection is drawn as a sphere in the volume pane and as a cyan dot on the surface.
+
+**Panes and windows.** Each window shows the panes named in its address: `?panes=volume,surface,map,sections` (the default), or any subset. *New window* opens another one. Every window gets every move of either point, and every layer change, from the server as it happens (Server-Sent Events from `/events`), so the panes can be spread over several windows, browsers or screens. A window opened later starts at the current points.
+- *volume* (NiiVue 0.69, world mm):
+  - echo 2 of the box in three orthogonal views and 3D, with the white surface and the GM boundary (translucent) where they cut each slice;
+  - the traces from and to the crosshair, coloured by class (*to* paler), with the pia on them as small spheres, and your points;
+  - optionally every 4th shown trace.
+
+- *surface*: the white surface, true or inflated, coloured by the layer. A WM selection made here gives sections along the screen's axes.
+- *map*: the flat overview. A WM selection made here gives sections along the map's axes.
+- *sections*: the depth sections along the traces, as in the editor, without the edits.
+
+The volume pane names the tracer and the WM label that made the column volume (`tracer_name`, `wm_label`). Files made before these were saved say "not saved".
+
+**Why both NiiVue and our own WebGL.** NiiVue does the volume views, meshes, tracks and spheres with little code. It reads TCK tracks and GIfTI meshes that the server writes on the fly. Clicking a mesh in its 3D tile did not move the crosshair in 0.69 (left or right click), so the surface pane stays our own WebGL view. That view already picks a vertex and gives the screen axes that the sections need.
+
+**Tests** (exact answers):
+- `tests/test_viewer_streamlines.py` (6) and the three moved test files above.
+- `tests/test_viewer_data.py` (6), on a synthetic site (a plane of roots, straight traces, a cortex slab, a full grid whose values are their own index):
+  - the site reads its tracer and WM label;
+  - the flat map and the inflation are cached by mesh, not recomputed for the same mesh, and recomputed for another;
+  - world mm is the box's crop of the echo affine, and `locate` finds a root within 1 mm and nothing beyond;
+  - a WM selection snaps to the nearest white-surface vertex and takes its trace; a vertex with no trace near it along the mesh takes the nearest root within 1 mm, or none;
+  - the volume is exactly the box of the full grid;
+  - sections and streamlines without a joint result; a point's depth along its trace;
+  - two pages share state through the server: a POST from one page arrives on another's event stream, tracks come back as TCK, and a path outside `static/` is refused.
+
+**Checked in the browser (M1S1).**
+- All four panes loaded with no console errors (volume pane 3.5 s).
+- A click on the inflated surface moved the sections, the flat map's crosshair and the NiiVue slices to trace 19920, with 130 traces from it.
+- A second window (`?panes=volume`) opened at the same voxel. A click on the first window's flat map moved the second window's crosshair to the same voxel (86, 104, 66).
+- The traces at the crosshair reload with each move (172 from; then 155 from, 2 to).
+- The two points:
+  - a click on the surface set the WM selection and left the crosshair alone;
+  - a shift-click there moved the crosshair to the same vertex (242090);
+  - a click on a slice moved only the crosshair;
+  - a shift-click on a slice moved only the WM selection (to vertex 91408).
+
+  A second window (`?panes=surface,map`) opened at the current WM selection and followed a shift-click made in the first.
+
+**Open.**
+- Placing new points from the volume pane: NiiVue has drawing tools, not yet wired to a points file.
+- The camera is not shared between windows. Each 3D view keeps its own.
 
 ### A handle-free white surface
 
