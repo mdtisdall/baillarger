@@ -273,14 +273,15 @@ def _grow(
     offs: Int,
     simple: Bool,
     dmax: int,
+    queued: Bool,
 ) -> int:
     """Each unclaimed voxel joins the front of its own phase (phase[i]: _OBJ or
     _BG), deepest first, when it is simple for that front. cand: the voxels to
-    start from (those next to their front are queued). Returns the number of
-    voxels claimed."""
+    start from (those next to their front are queued). queued: all False, the
+    size of state; all False again on return (every voxel queued is popped).
+    Returns the number of voxels claimed."""
     heap = np.empty(1024, np.int64)
     size = 0
-    queued = np.zeros(state.size, np.bool_)
     for i in cand:
         if state[i] != _U or queued[i]:
             continue
@@ -353,15 +354,14 @@ class HandleRemoval:
 
 
 def _walls(
-    state: npt.NDArray[np.uint8],
+    u: Int,
     phase: npt.NDArray[np.uint8],
     offs: Int,
     mixed: bool = False,
 ) -> list[Int]:
     """Connected pieces (Kuhn adjacency, one phase, or both phases together
-    when mixed) of the unclaimed voxels, smallest first; ties: object walls
-    first, then lowest index."""
-    u = np.flatnonzero(state == _U)
+    when mixed) of the voxels u (sorted flat indices: the unclaimed voxels),
+    smallest first; ties: object walls first, then lowest index."""
     if not u.size:
         return []
     ph = phase[u]
@@ -404,17 +404,19 @@ def _resolve_cluster(
     phase: npt.NDArray[np.uint8],
     offs: Int,
     shape: tuple[int, ...],
+    u: Int,
 ) -> Move | None | bool:
     """When no wall can be claimed voxel by voxel: claim the smallest set of
     unclaimed voxels that one front can take whole (_set_simple), by the front
     that changes fewer voxels (ties: the background, a cut). The sets tried
     are the walls, the pairs of touching walls of opposite phase and the
     clusters (Kuhn-connected pieces of both phases; a ring of walls is one
-    that no front can take whole). Ties in size: lowest index. Returns the
+    that no front can take whole). u: the unclaimed voxels (sorted flat
+    indices). Ties in size: lowest index. Returns the
     move, None if nothing changed (a set of one phase claimed by its own
     front), or False if no set can be claimed."""
     s3 = state.reshape(shape)
-    walls = _walls(state, phase, offs)
+    walls = _walls(u, phase, offs)
     lab = np.full(state.size, -1, np.int64)
     for k, w in enumerate(walls):
         lab[w] = k
@@ -425,7 +427,7 @@ def _resolve_cluster(
             if phase[walls[j][0]] != phase[w[0]]:
                 pairs.add((k, j))
     sets = walls + [np.sort(np.r_[walls[k], walls[j]]) for k, j in sorted(pairs)]
-    sets += [c for c in _walls(state, phase, offs, mixed=True) if len(c) > 1]
+    sets += [c for c in _walls(u, phase, offs, mixed=True) if len(c) > 1]
     for c in sorted(sets, key=lambda c: (c.size, int(c[0]))):
         n_obj = int((phase[c] == _OBJ).sum())
         options = sorted(
@@ -471,11 +473,16 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
         + KUHN_OFFSETS[:, 2]
     ).astype(np.int64)
     st, ph, dd = state.ravel(), phase.ravel(), d2.ravel()
-    _grow(st, ph, dd, np.flatnonzero(st == _U), offs, SIMPLE, dmax)
+    queued = np.zeros(st.size, np.bool_)
+    _grow(st, ph, dd, np.flatnonzero(st == _U), offs, SIMPLE, dmax, queued)
 
+    # u: the unclaimed voxels, sorted. Voxels are only ever claimed, so each
+    # pass refreshes u from its last value instead of from the whole array.
+    u = np.flatnonzero(st == _U)
     moves: list[Move] = []
     while True:
-        walls = _walls(st, ph, offs)
+        u = u[st[u] == _U]
+        walls = _walls(u, ph, offs)
         done = False
         for w in walls:
             own = int(ph[w[0]])
@@ -486,23 +493,25 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
             taken = got[st[got] == other]
             vox = np.stack(np.unravel_index(taken, x.shape), 1) - 2
             moves.append(Move("cut" if own == _OBJ else "fill", vox))
-            _grow(st, ph, dd, np.flatnonzero(st == _U), offs, SIMPLE, dmax)
+            u = u[st[u] == _U]
+            _grow(st, ph, dd, u, offs, SIMPLE, dmax, queued)
             done = True
             break
         if not done:
-            m = _resolve_cluster(st, ph, offs, x.shape)
+            m = _resolve_cluster(st, ph, offs, x.shape, u)
             if m is False:
                 break
             if isinstance(m, Move):
                 moves.append(m)
-            _grow(st, ph, dd, np.flatnonzero(st == _U), offs, SIMPLE, dmax)
+            u = u[st[u] == _U]
+            _grow(st, ph, dd, u, offs, SIMPLE, dmax, queued)
 
     # the rest of the background stays background; the rest of the object
     # joins the object front where it can (simple for it, alone or as a
     # cluster), and what cannot is removed
     st[(st == _U) & (ph == _BG)] = _BG
     _claim(st, np.flatnonzero(st == _U), _OBJ, offs, SIMPLE)
-    for c in _walls(st, ph, offs):
+    for c in _walls(np.flatnonzero(st == _U), ph, offs):
         if _set_simple(state, _OBJ, c):
             st[c] = _OBJ
     left = np.argwhere((state == _U) & x) - 2

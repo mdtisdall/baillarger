@@ -333,3 +333,33 @@ def test_tissue_wm_direction_does_not_flip_beside_an_open_sulcus() -> None:
     assert np.all(gf[core][8:16, ..., 0] > 0.9) and np.all(
         gf[core][19:28, ..., 0] < -0.9
     )
+
+
+def test_ray_is_a_straight_line_in_mm_steps() -> None:
+    shape = (40, 20, 20)
+    labels = np.zeros(shape, np.int16)
+    labels[35:] = 1
+    pos, ns, out = S.ray(
+        labels,
+        np.full(shape, 99.0),
+        np.array([[5.0, 10.0, 10.0]]),
+        np.array([[3.0, 4.0, 0.0]]),
+        VOX,
+        300,
+    )
+    p = pos[0, : ns[0]].astype(float)
+    d = np.diff(p, axis=0) * VOX
+    assert out[0] in (S.FLUID, S.FACE)
+    assert np.allclose(np.linalg.norm(d, axis=1), S.STEP_MM, atol=1e-5)
+    assert np.allclose(
+        d / np.linalg.norm(d, axis=1, keepdims=True), [0.6, 0.8, 0.0], atol=1e-5
+    )
+
+
+def test_first_fall_finds_where_a_field_stops_rising() -> None:
+    u = np.tile((10.0 - np.abs(np.arange(30.0) - 10.0))[:, None, None], (1, 6, 6))
+    pos = np.full((2, 30, 3), np.nan, np.float32)
+    pos[0, :25] = np.c_[np.arange(2.0, 27.0), np.full(25, 3.0), np.full(25, 3.0)]
+    pos[1, :8] = np.c_[np.arange(2.0, 10.0), np.full(8, 3.0), np.full(8, 3.0)]
+    out = S.first_fall(u, pos, np.array([25, 8]))
+    assert out.tolist() == [8, -1]  # sample 8 is x = 10, the maximum

@@ -1,6 +1,7 @@
 """Tests for baillarger.white: the handle-free WM label of a small synthetic
 aseg, its changes on the full grid, and boxes cropped from it."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from baillarger.handles import kuhn_betti
 from baillarger.mesh import marching_tetrahedra, topology
 
 SHAPE = (40, 36, 30)
+type Bool = npt.NDArray[np.bool_]
 
 
 def write_aseg(d: Path) -> npt.NDArray[np.int16]:
@@ -193,3 +195,89 @@ def test_command_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             (5, 3, 2), (25, 25, 22), white.WMChanges.load(out / "wm_changes.npz")
         ),
     )
+
+
+def ball(shape: tuple[int, int, int] = (20, 22, 24), r: float = 6.0) -> Bool:
+    c = (np.array(shape) - 1) / 2
+    idx = np.indices(shape).reshape(3, -1).T
+    out: Bool = (np.linalg.norm(idx - c, axis=1) <= r).reshape(shape)
+    return out
+
+
+def test_label_sha256_tells_labels_apart() -> None:
+    a = ball()
+    assert white.label_sha256(a) == white.label_sha256(a.copy())
+    b = a.copy()
+    b[0, 0, 0] = True
+    assert white.label_sha256(b) != white.label_sha256(a)
+    # the same voxels in C order, on another shape
+    assert white.label_sha256(a.reshape(22, 20, 24)) != white.label_sha256(a)
+
+
+def test_box_mesh_is_the_traces_mesh_and_survives_save_and_load(
+    tmp_path: Path,
+) -> None:
+    wm = ball()
+    lo, hi = (3, 4, 5), (23, 26, 29)
+    aff = np.diag([0.2, 0.16, 0.2, 1.0])
+    m = white.box_mesh(wm, lo, hi, aff, provenance={"wm_label": "test"})
+    v, f, n = white.white_mesh_normals(wm)
+    assert np.array_equal(m.v, v) and np.array_equal(m.f, f)
+    assert np.array_equal(m.normals, n)
+    m.save(tmp_path / "m.npz")
+    r = white.WhiteMesh.load(tmp_path / "m.npz")
+    for k in ("v", "f", "normals", "affine"):
+        assert np.array_equal(getattr(r, k), getattr(m, k))
+    assert (r.lo, r.hi, r.sigma) == (lo, hi, 2.0)
+    assert r.wm_sha256 == white.label_sha256(wm)
+    assert r.provenance == {"wm_label": "test"}
+    with pytest.raises(ValueError, match="not on the box"):
+        white.box_mesh(wm, lo, (23, 26, 30), aff)
+
+
+def test_check_refuses_another_box_or_label() -> None:
+    wm = ball()
+    lo, hi = (0, 0, 0), wm.shape
+    m = white.box_mesh(wm, lo, hi, np.eye(4))
+    m.check(lo, hi, wm.copy())
+    with pytest.raises(ValueError, match="not the mesh's"):
+        m.check((1, 0, 0), (21, 22, 24), wm)
+    other = wm.copy()
+    other[10, 11, 12] = False
+    with pytest.raises(ValueError, match="WM label"):
+        m.check(lo, hi, other)
+
+
+def test_mesh_command_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    a = write_aseg(tmp_path)
+    monkeypatch.setenv("BAILLARGER_DATA", str(tmp_path))
+    out = tmp_path / "out"
+    white.main(["changes", "--out", str(out)])
+    ch_path = out / "wm_changes.npz"
+    lo, hi = (5, 3, 2), (25, 25, 22)
+    box = ["--lo", "5", "3", "2", "--hi", "25", "25", "22"]
+    white.main(
+        ["mesh", "--changes", str(ch_path), "--out", str(out)] + ["--name", "blk", *box]
+    )
+    m = white.WhiteMesh.load(out / "wm_mesh_blk.npz")
+    wm = white.white_matter_box(lo, hi, white.WMChanges.load(ch_path))
+    m.check(lo, hi, wm)
+    v, f, n = white.white_mesh_normals(wm)
+    assert np.array_equal(m.v, v) and np.array_equal(m.f, f)
+    assert np.array_equal(m.normals, n)
+    assert np.allclose(m.affine, data.crop_affine(np.diag([0.2, 0.16, 0.2, 1.0]), lo))
+    p = m.provenance
+    assert p["wm_label"] == "handle-free"
+    assert p["changes"]["sha256"] == hashlib.sha256(ch_path.read_bytes()).hexdigest()
+    rep = json.loads((out / "wm_mesh_blk.json").read_text())
+    assert [t["genus"] for t in rep["pieces"]] == [0]
+    assert rep["vertices"] == len(v) and rep["provenance"] == p
+    assert (out / "wm_mesh_blk.vtk").read_text().count("POINTS") == 1
+    # without --changes: the aseg's WM label
+    white.main(["mesh", "--out", str(out), "--name", "aseg", *box])
+    m0 = white.WhiteMesh.load(out / "wm_mesh_aseg.npz")
+    sl = tuple(slice(x, y) for x, y in zip(lo, hi, strict=True))
+    m0.check(lo, hi, a[sl] == data.ASEG_WM)
+    assert m0.provenance["wm_label"] == "aseg" and m0.provenance["changes"] is None
+    with pytest.raises(SystemExit):
+        white.main(["mesh", "--out", str(out), "--name", "x", "--patch", "V1V2", *box])
