@@ -1061,13 +1061,15 @@ A GM refinement step at the front of the pipeline, like the WM one: `baillarger.
 **What the image shows.** At V1V2 the fluid is fomblin at the noise floor (45 in every echo, against 514 for cortex in echo 2). The aseg's cortex runs one to three voxels into it around most sulci, and fills the thin channels of sulci it fused, such as the user's marked "contact" at (270, 133, 139). The vessel the user identified at (324, 146, 139) is a one-voxel-wide dotted dark line, partial-volumed.
 
 **The method** (all closed-form; module docstring):
-1. **Darkness.** Echoes 2 and 3, log, minus their trend over the cortex (as in `column_traces.tissue`, re-estimated without the voxels the first pass found dark). A voxel is dark when two things hold:
+1. **Darkness.** Echoes 1, 2 and 3, log, minus their trend over the cortex (as in `column_traces.tissue`, re-estimated without the voxels the first pass found dark). A voxel is dark when two things hold:
    - it is significantly darker than its local cortex: the noise-weighted contrast is below −k, k the normal quantile for α = 10⁻³ per voxel;
    - it is more fluid than cortex: its fluid fraction, between the local cortex level and the box's labelled-fluid level, is above ½.
+
+   Echo 1 has the most signal and the largest contrast of tissue against the fomblin; echoes 2 and 3 add the T2* contrast of blood in vessels. The fitted field T of step 4 is made, as in the column traces, from echoes 2 and 3.
 2. **Noise.** Per echo, from the structure tensor: the median smallest eigenvalue over the cortex (away from its edges), divided by the derivative filter's gain and by the median smallest eigenvalue of a Wishart matrix with `n_eff` degrees of freedom (the sample tensor's smallest eigenvalue is biased low: 0.68 at n_eff = 39).
    - On white noise it is within a few per cent, high (tests).
    - The real noise is spatially correlated: neighbour correlation 0.5–0.67, even in deep WM. The estimate is then the white noise with the same gradient power.
-   - At V1V2 it gives 0.208 / 0.300 (echo 2 / 3), against a cortex MAD of 0.188 / 0.272, which includes the layers. At M1S1: 0.140 / 0.221 against 0.137 / 0.207.
+   - At V1V2 it gives 0.124 / 0.208 / 0.300 (echo 1 / 2 / 3), against a cortex MAD of 0.105 / 0.188 / 0.272, which includes the layers. At M1S1: 0.075 / 0.140 / 0.221 against 0.075 / 0.137 / 0.207.
 3. **Components.** 26-connected components of the dark voxels, at least n_min voxels. n_min is the smallest size expected less than once in noise: N p (e·25·p)^(n−1) < 1, the bound on connected sets in a graph of degree 26. That gives 3 at V1V2 and 1 at M1S1. Each component is split into review cells, geodesic Voronoi cells 0.96 mm apart (the root patches' spacing), because the rim and a fused channel are often one component.
 4. **Position** (per component). A component is "outer" when it touches fluid or other labels, or when T does not pass through it within one bank:
    - step along ∇T out of the component on both sides;
@@ -1112,28 +1114,30 @@ A status can be changed and brush edits added with `LabelChanges.with_status` an
 - **The stria trap on a slab with a vessel.** A mid-depth dark band is not proposed. A tube on the pial surface is accepted, and its shape is a tube.
 - **The channel removes the crest.** With the channel relabelled, T's crest at the midline falls below a tenth of what it was.
 
-**At the sites** (handle-free WM; `scratch/pial-labels/`, with a README):
+**At the sites** (handle-free WM; echoes 1, 2 and 3 in `scratch/pial-labels-echo1/`; echoes 2 and 3 alone, the first version, in `scratch/pial-labels/`; each with a README):
 
-| | V1V2 | M1S1 |
-|---|---|---|
-| Cortex voxels | 1,081,775 | 1,599,739 |
-| Dark voxels | 51,034 (4.7 %) | 27,581 (1.7 %) |
-| Components (n_min) | 405 (3) | 1,671 (1) |
-| Cells accepted (voxels) | 1,992 (37,172) | 2,141 (23,562) |
-| Cells in the queue (voxels; reaching no fluid) | 494 (11,076; 176) | 578 (2,422; 527) |
-| Cells rejected, inside a bank (voxels) | 191 (1,624) | 438 (1,597) |
-| Tissue Betti numbers of the box (components, tunnels, cavities), aseg | (1, 9, 6) | (1, 11, 5) |
-| … with the accepted cells | (1, 9, 6) | (1, 11, 5) |
-| … with the best guess (accepted and queue: the default) | (6, 314, 324) | (1, 63, 560) |
+| | V1V2, echoes 1–3 | V1V2, echoes 2–3 | M1S1, echoes 1–3 | M1S1, echoes 2–3 |
+|---|---|---|---|---|
+| Cortex voxels | 1,081,775 | | 1,599,739 | |
+| Dark voxels | 44,140 (4.1 %) | 51,034 (4.7 %) | 26,606 (1.7 %) | 27,581 (1.7 %) |
+| Components (n_min) | 634 (1) | 405 (3) | 864 (1) | 1,671 (1) |
+| Cells accepted (voxels) | 2,202 (34,832) | 1,992 (37,172) | 2,100 (24,850) | 2,141 (23,562) |
+| Cells in the queue (voxels) | 378 (8,522) | 494 (11,076) | 106 (1,258) | 578 (2,422) |
+| Cells rejected, inside a bank (voxels) | 157 (786) | 191 (1,624) | 140 (498) | 438 (1,597) |
+| Tissue Betti numbers of the box (components, tunnels, cavities), aseg | (1, 9, 6) | | (1, 11, 5) | |
+| … with the accepted cells | (1, 9, 6) | (1, 9, 6) | (1, 11, 5) | (1, 11, 5) |
+| … with the best guess (accepted and queue: the default) | (2, 207, 190) | (6, 314, 324) | (1, 41, 79) | (1, 63, 560) |
 
-**The user's three places at V1V2:**
-- The marked "contact" (270, 133, 139): an accepted cell one voxel away (a tube of 15 voxels, fluid fraction 0.71).
-- The dark pocket (289, 118, 139): the top of the queue (676 columns; it reaches no fluid).
-- The vessel (324, 146, 139): only fragments within 5 voxels (a 7-voxel queue cell). A vessel one voxel wide rarely reaches a majority-fluid voxel at this noise, so it is left to the brush.
+With echo 1, the combined contrast's noise per voxel falls: echo 1's noise is about 0.6 of echo 2's. n_min falls to 1 at V1V2. The queue shrinks by a quarter at V1V2 and by four fifths at M1S1, and the best guess opens far fewer cavities: most of the two-echo queue's pockets were noise that echo 1 no longer finds dark.
+
+**The user's three places at V1V2** (echoes 1–3; echoes 2–3 in brackets):
+- The marked "contact" (270, 133, 139): a queue cell one voxel away, an 11-voxel tube with fluid fraction 0.69 (an accepted 15-voxel cell). It is in the best guess either way.
+- The dark pocket (289, 118, 139): the top-ranked cell, now accepted, 35 voxels (the top of the queue).
+- The vessel (324, 146, 139): only fragments within 5 voxels, a 5-voxel queue cell (7). A vessel one voxel wide rarely reaches a majority-fluid voxel at this noise, so it is left to the brush.
 
 The best guess changes the tissue's topology a lot. The queue is, by definition, the cells whose relabel opens a cavity, a tunnel or a split: dark pockets with no mouth to the fluid in the box (hidden channels, or noise), and channels that cut the tissue at the box faces. The user chose to trust it by default and correct it in the review (2026-10-28).
 
-**The former traverse re-measured** (its lattice step along the kink direction, before the shared rule of *One crossing rule: traverse and front*; the best guess, unreviewed: accepted and queue; roots 2 mm or more from a face):
+**The former traverse re-measured** (its lattice step along the kink direction, before the shared rule of *One crossing rule: traverse and front*; the best guess of the two-echo version, unreviewed: accepted and queue; not re-measured with echo 1, so as to measure columns only on reviewed labels; roots 2 mm or more from a face):
 
 | | V1V2 crest | V1V2 crest, relabelled | V1V2 traverse | V1V2 traverse, relabelled | M1S1 crest | M1S1 crest, relabelled | M1S1 traverse | M1S1 traverse, relabelled |
 |---|---|---|---|---|---|---|---|---|

@@ -8,7 +8,8 @@ Plan and results: reports/Crossing paths and contacts from laminar profiles.md
 (*Pial-side label refinement*). Positions are voxel indices of the box; vox
 the voxel size (mm). Everything is 3D.
 
-1. Darkness (darkness). The log of echoes 2 and 3 minus their trend over the
+1. Darkness (darkness). The log of echoes 1, 2 and 3 (ECHOES) minus their
+   trend over the
    cortex (normalized convolution at column_traces.TREND voxels, as in
    column_traces.tissue), with the trend estimated again without the voxels
    the first pass found dark, so that a channel does not pull its own
@@ -21,12 +22,16 @@ the voxel size (mm). Everything is 3D.
    n_eff degrees of freedom (wishart_min_factor: the sample tensor's
    smallest eigenvalue is biased low), is sigma^2. A voxel is dark when
    - it is significantly darker than its local cortex: the noise-weighted
-     mean of the two echoes' log contrast, z = dbar / sigma_dbar, is below
+     mean of the echoes' log contrast, z = dbar / sigma_dbar, is below
      -k, k the one-sided normal quantile for alpha (false alarms per voxel);
    - it is more fluid than cortex: its fluid fraction, from linear
      intensities between the local cortex level and the box's fluid level
      (labelled fluid at least FLUID_DEPTH voxels from anything else), is
-     above one half (noise-weighted over the two echoes).
+     above one half (noise-weighted over the echoes).
+   Echo 1 has the most signal and the largest contrast of tissue against
+   the fomblin; echoes 2 and 3 add the T2* contrast of blood in vessels.
+   The fitted field T of step 3 is made, as in the column traces, from
+   echoes 2 and 3.
 2. Components (26-connected) of the dark cortex voxels, at least n_min
    voxels: the smallest size whose expected count in noise alone,
    N p (e (26 - 1) p)^(n - 1) (N cortex voxels, p the null probability of a
@@ -129,6 +134,8 @@ type F64 = npt.NDArray[np.float64]
 type I64 = npt.NDArray[np.int64]
 type Betti = tuple[int, int, int]
 
+#: The echoes the darkness test reads (0-based: echoes 1, 2 and 3).
+ECHOES = (0, 1, 2)
 #: False alarms per voxel of the darkness test and the pass-through test.
 ALPHA = 1e-3
 #: Steps (voxels) along grad T to leave a component.
@@ -202,12 +209,12 @@ def echo_noise(det: F64, ctx: Bool, sd: float = S.SD, si: float = S.SI) -> float
 class Darkness:
     """Step 1 on a box."""
 
-    #: (2, ...) log contrast of echoes 2 and 3 against the local cortex
+    #: (len(ECHOES), ...) log contrast of each echo against the local cortex
     d: F64
     #: noise of one voxel, per echo
-    sigma: tuple[float, float]
+    sigma: tuple[float, ...]
     #: the labelled fluid's level (linear), per echo
-    fluid: tuple[float, float]
+    fluid: tuple[float, ...]
     #: noise-weighted contrast in noise units (negative: darker), 0 outside the cortex
     z: F64
     #: fluid fraction (noise-weighted over the echoes), 0 outside the cortex
@@ -219,15 +226,15 @@ class Darkness:
     p_null: float
     n_min: int
     #: the cortex's MAD of each echo's contrast (noise and layers), for comparison
-    mad: tuple[float, float]
+    mad: tuple[float, ...]
 
 
 def _trend_contrast(t: CT.Tissue, mask: Bool) -> tuple[list[F64], list[F64]]:
-    """Per echo 2, 3: log intensity minus its trend over mask (zero outside
-    the cortex), and the trend."""
+    """Per echo of ECHOES: log intensity minus its trend over mask (zero
+    outside the cortex), and the trend."""
     d, tr = [], []
     m = mask.astype(float)
-    for i in (1, 2):
+    for i in ECHOES:
         L = np.log(np.maximum(t.patch.echoes[..., i].astype(float), 1.0))
         trend = S.masked_smooth(L, m, CT.TREND)
         d.append((L - trend) * t.ctx)
@@ -261,16 +268,17 @@ def darkness(t: CT.Tissue, alpha: float = ALPHA) -> Darkness:
     """Step 1 on a box (module docstring)."""
     k = NormalDist().inv_cdf(1.0 - alpha)
     ctx = t.ctx
-    fl = (fluid_level(t, 1), fluid_level(t, 2))
+    fl = tuple(fluid_level(t, i) for i in ECHOES)
+    ne = len(ECHOES)
 
     def classify(
-        d: list[F64], tr: list[F64], sig: tuple[float, float]
+        d: list[F64], tr: list[F64], sig: tuple[float, ...]
     ) -> tuple[F64, F64, Bool]:
         w = [1.0 / s**2 for s in sig]
-        dbar = (w[0] * d[0] + w[1] * d[1]) / (w[0] + w[1])
-        z: F64 = np.where(ctx, dbar * math.sqrt(w[0] + w[1]), 0.0)
+        dbar = sum(w[i] * d[i] for i in range(ne)) / sum(w)
+        z: F64 = np.where(ctx, dbar * math.sqrt(sum(w)), 0.0)
         fr, wf = np.zeros(ctx.shape), np.zeros(ctx.shape)
-        for i in range(2):
+        for i in range(ne):
             r = fl[i] / np.exp(tr[i])
             fi = (1.0 - np.exp(d[i])) / np.maximum(1.0 - r, 1e-6)
             wi = ((1.0 - r) / sig[i]) ** 2
@@ -281,16 +289,16 @@ def darkness(t: CT.Tissue, alpha: float = ALPHA) -> Darkness:
         return z, frac, dark
 
     d0, tr0 = _trend_contrast(t, ctx)
-    sig = (echo_noise(d0[0], ctx), echo_noise(d0[1], ctx))
+    sig = tuple(echo_noise(x, ctx) for x in d0)
     _, _, dark0 = classify(d0, tr0, sig)
     d, tr = _trend_contrast(t, ctx & ~dark0)
     z, frac, dark = classify(d, tr, sig)
     # null probability: z below -k and below the contrast of a half-fluid
     # voxel at the cortex's median level
     w = [1.0 / s**2 for s in sig]
-    r = [fl[i] / float(np.exp(np.median(tr[i][ctx]))) for i in range(2)]
-    dmid = [math.log((1.0 + r[i]) / 2.0) for i in range(2)]
-    zmid = (w[0] * dmid[0] + w[1] * dmid[1]) / math.sqrt(w[0] + w[1])
+    r = [fl[i] / float(np.exp(np.median(tr[i][ctx]))) for i in range(ne)]
+    dmid = [math.log((1.0 + r[i]) / 2.0) for i in range(ne)]
+    zmid = sum(w[i] * dmid[i] for i in range(ne)) / math.sqrt(sum(w))
     p = NormalDist().cdf(min(-k, zmid))
     mad = [float(1.4826 * np.median(np.abs(x[ctx] - np.median(x[ctx])))) for x in d0]
     return Darkness(
@@ -303,7 +311,7 @@ def darkness(t: CT.Tissue, alpha: float = ALPHA) -> Darkness:
         k,
         p,
         min_component(int(ctx.sum()), p),
-        (mad[0], mad[1]),
+        tuple(mad),
     )
 
 
@@ -728,9 +736,10 @@ def propose(
     info = dict(
         alpha=alpha,
         k=round(dk.k, 3),
-        sigma_echo2_3=[round(s, 4) for s in dk.sigma],
-        mad_echo2_3=[round(s, 4) for s in dk.mad],
-        fluid_level_echo2_3=[round(s, 1) for s in dk.fluid],
+        echoes=[i + 1 for i in ECHOES],
+        sigma=[round(s, 4) for s in dk.sigma],
+        mad=[round(s, 4) for s in dk.mad],
+        fluid_level=[round(s, 1) for s in dk.fluid],
         p_null=dk.p_null,
         n_min=dk.n_min,
         cortex_voxels=int(t.ctx.sum()),
