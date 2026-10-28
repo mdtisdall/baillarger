@@ -1,6 +1,8 @@
 """White-surface meshing and smoothing, and fronts seeded from a surface (finding 28).
 
-Prototype only: nothing here changes the package. Three parts.
+Prototype, except the mesh operations that moved to the package (baillarger.mesh_smoothing:
+edges, boundary_vertices, vertex_normals, relax, gauss_steps, twice, smooth_normals), which are
+imported from there. Three parts.
 
 1. Phantoms with a known smooth white surface. Each gives, at any point X (voxel
    units of the 1x grid, voxel centres at integer coordinates), the signed distance
@@ -55,6 +57,8 @@ from baillarger._jit import njit
 from baillarger.fronts.march import _heap_pop, _heap_push, _reverse, _stencils
 from baillarger.fronts.selling import selling
 from baillarger.mesh import marching_tetrahedra
+from baillarger.mesh_smoothing import (  # noqa: F401  (the package's, re-exported)
+    boundary_vertices, edges, gauss_steps, relax, smooth_normals, twice, umbrella, vertex_normals)
 
 type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.int64]
@@ -288,29 +292,6 @@ def blade(w=3.0, a=2.0, lam=48.0, T=12.0, n=64, deg=25.0) -> Phantom:
 # ------------------------------------------------------------------ meshes
 
 
-def edges(f: Int) -> Int:
-    e = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), 1)
-    return np.unique(e, axis=0)
-
-
-def boundary_vertices(f: Int, nv: int) -> Bool:
-    e = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), 1)
-    key, cnt = np.unique(e[:, 0] * nv + e[:, 1], return_counts=True)
-    b = np.zeros(nv, bool)
-    once = key[cnt == 1]
-    b[once // nv] = True
-    b[once % nv] = True
-    return b
-
-
-def vertex_normals(v: Float, f: Int) -> Float:
-    fn = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
-    vn = np.zeros_like(v)
-    for k in range(3):
-        np.add.at(vn, f[:, k], fn)
-    return vn / (np.linalg.norm(vn, axis=1, keepdims=True) + 1e-12)
-
-
 def contour(wm: Bool, sigma: float) -> tuple[Float, Int]:
     """Marching tetrahedra at 0.5 of the label smoothed by sigma voxels; faces
     oriented outward (out of the WM)."""
@@ -320,12 +301,8 @@ def contour(wm: Bool, sigma: float) -> tuple[Float, Int]:
 
 
 def _umbrella(v: Float, f: Int):
-    E = edges(f)
-    nv = len(v)
-    C = sparse.coo_matrix((np.ones(len(E)), (E[:, 0], E[:, 1])), shape=(nv, nv))
-    A = (C + C.T).tocsr()
-    deg = np.maximum(np.asarray(A.sum(1)).ravel(), 1)
-    return A, deg, E
+    A, deg = umbrella(v, f)
+    return A, deg, edges(f)
 
 
 def taubin(v: Float, f: Int, iters: int, lam: float = 0.6307, mu: float = -0.6732) -> Float:
@@ -342,62 +319,6 @@ def taubin(v: Float, f: Int, iters: int, lam: float = 0.6307, mu: float = -0.673
             d = (A @ x) / deg[:, None] - x
             d[fixed] = 0
             x = x + s * d
-    return x
-
-
-def gauss_steps(v: Float, f: Int, sigma: float, lam: float = 0.5) -> int:
-    """Umbrella steps of size lam for a Gaussian of sigma (same units as v): on a
-    regular mesh of edge e, one step multiplies a plane wave of wavenumber w by about
-    1 - lam w^2 e^2 / 4, so n steps give exp(-w^2 sigma^2 / 2) with
-    sigma^2 = n lam <e^2> / 2."""
-    E = edges(f)
-    e2 = float(np.mean(np.sum((v[E[:, 0]] - v[E[:, 1]]) ** 2, 1)))
-    return max(1, int(round(2 * sigma**2 / (lam * e2))))
-
-
-def twice(v: Float, f: Int, sigma: float, lam: float = 0.5) -> Float:
-    """Gaussian smoothing along the mesh with its shrinkage removed by twicing
-    (Tukey): x = 2 G v - G G v, G = n umbrella steps of lam (gauss_steps). G's
-    eigenvalues g lie in [0, 1] (lam <= 1/2), so the response 1 - (1 - g)^2 lies in
-    [0, 1]: nothing is amplified, and the low frequencies' loss (shrinkage) is
-    second order, (n lam k)^2 against n lam k. Box-face boundary vertices are fixed."""
-    A, deg, _ = _umbrella(v, f)
-    fixed = boundary_vertices(f, len(v))
-    n = gauss_steps(v, f, sigma, lam)
-
-    def G(x):
-        for _ in range(n):
-            d = (A @ x) / deg[:, None] - x
-            d[fixed] = 0
-            x = x + lam * d
-        return x
-
-    g = G(v.copy())
-    return 2 * g - G(g)
-
-
-def smooth_normals(v: Float, f: Int, iters: int = 10) -> Float:
-    """Area-weighted vertex normals, then iters steps of Laplacian smoothing along
-    the edges (as baillarger.frame.white_mesh)."""
-    n = vertex_normals(v, f)
-    A, deg, _ = _umbrella(v, f)
-    for _ in range(iters):
-        n = 0.5 * n + 0.5 * (A @ n) / deg[:, None]
-        n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-12
-    return n
-
-
-def relax(v: Float, f: Int, iters: int = 5, step: float = 0.5) -> Float:
-    """Tangential relaxation toward the neighbours' centroid."""
-    A, deg, _ = _umbrella(v, f)
-    fixed = boundary_vertices(f, len(v))
-    x = v.copy()
-    for _ in range(iters):
-        n = vertex_normals(x, f)
-        d = (A @ x) / deg[:, None] - x
-        d -= np.sum(d * n, 1, keepdims=True) * n
-        d[fixed] = 0
-        x = x + step * d
     return x
 
 
