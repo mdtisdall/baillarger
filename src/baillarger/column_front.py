@@ -1,6 +1,7 @@
-"""Column traces as a growing surface: the white mesh advanced outward along
-the fitted field, with its neighbours coupled, and each vertex's trajectory
-its column (column_traces.METHODS "front").
+"""Column traces past T's crest, by one crossing rule, traced independently or
+as a growing surface: column_traces.METHODS "traverse" (sigma 0: each vertex
+on its own) and "front" (the white mesh advanced outward along the fitted
+field with its neighbours coupled). Each vertex's trajectory is its column.
 
 Plan: reports/Crossing paths and contacts from laminar profiles.md (*Columns
 as a growing surface*). Positions are voxel index coordinates; vox the voxel

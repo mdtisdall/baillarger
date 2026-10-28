@@ -36,7 +36,7 @@ from scipy.spatial import cKDTree
 from baillarger import column_traces as CT
 from baillarger import streamlines as S
 
-METHODS = ("crest", "one-pass", "front")
+METHODS = ("crest", "traverse", "one-pass", "front")
 SITES = {"V1V2_banks": (198, 58, 65), "M1S1": (378, 224, 448)}
 T0 = time.time()
 

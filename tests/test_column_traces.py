@@ -178,10 +178,10 @@ def test_crest_method_crosses_parallel_fused_banks() -> None:
 def test_traces_of_a_slab_are_straight_open_columns(tracer: str, method: str) -> None:
     """Layers parallel to a flat white surface: every trace away from the
     side faces goes straight up (along x) to the fluid, OPEN, in one cortex
-    thickness, by every method (the front grows along the fitted field
+    thickness, by every method (traverse and front follow the fitted field
     only)."""
     t = slab_tissue()
-    if (tracer, method) == ("current", "front"):
+    if tracer == "current" and method in ("traverse", "front"):
         with pytest.raises(ValueError):
             CT.trace_columns(t, tracer, method)
         return
@@ -234,23 +234,22 @@ def test_a_handle_free_label_replaces_the_aseg_wm_everywhere() -> None:
 
 def test_traverse_crosses_parallel_fused_banks_straight() -> None:
     """Two parallel WM slabs with fused cortex between: traverse columns go
-    through the crest (x = 17.5) into the far slab's WM, opposite their root
-    to within the one lattice step of the crossing, and their samples stay
-    STEP_MM apart."""
+    through the crest (x = 17.5) into the far slab's WM, straight opposite
+    their root, begin to descend T within the crest's stencil beyond the
+    midline, and their samples stay STEP_MM apart."""
     rim = np.full((36, 30, 24), 3)
     rim[:6] = 2
     rim[30:] = 2
     R = CT.trace_columns(box_tissue(rim), "fitted_blend", "traverse")
+    assert R.turn_at is not None and R.area is None
     x0 = R.v[R.tv]
     mid = (R.nrm[R.tv, 0] > 0.9) & np.all(np.abs(x0[:, 1:] - [15, 12]) < 4, 1)
     i = np.flatnonzero(mid)
     assert i.size > 5 and np.all(R.cls[i] == CT.CROSS)
     end = R.pos[i, R.ns[i] - 1].astype(float)
     assert np.all(np.round(end[:, 0]) == 30)
-    # the crossing is one lattice step along the kink test's best direction:
-    # a diagonal one carries the column one voxel sideways, no more
-    off = np.abs(end[:, 1:] - x0[i, 1:]).max(1)
-    assert off.max() <= 1.0 + 1e-6 and np.mean(off < 1e-6) > 0.9
+    assert np.max(np.abs(end[:, 1:] - x0[i, 1:])) < 0.1
+    assert np.all(np.abs(R.pos[i, R.turn_at[i], 0] - 17.5) <= 3.0)
     steps = np.linalg.norm(np.diff(R.pos[i[0], : R.ns[i[0]]], axis=0) * VOX, axis=1)
     assert np.allclose(steps, S.STEP_MM, atol=0.01)
 
@@ -280,27 +279,6 @@ def test_traverse_crosses_oblique_fused_banks() -> None:
     assert np.mean(far & (end[:, 0] > 12)) > 0.9
 
 
-def test_traverse_does_not_slide_along_a_narrow_fused_fundus() -> None:
-    """The narrow fused V of the crest test: traverse columns from one wall
-    cross the bisector (y = 15) and end in the other wall's WM, instead of
-    riding the crest out to the fluid."""
-    shape = (34, 30, 20)
-    x, y = np.indices(shape)[:2].astype(float)
-    rim = np.full(shape, 3)
-    rim[np.abs(y - 15) > (x - 6) / 3 + 1.5] = 2
-    rim[x < 6] = 2
-    rim[x >= 30] = 1
-    R = CT.trace_columns(box_tissue(rim), "fitted_blend", "traverse")
-    x0 = R.v[R.tv]
-    met = np.flatnonzero((R.crest_at >= 0) & ~R.near_face)
-    assert met.size > 10
-    end = R.pos[met, R.ns[met] - 1].astype(float)
-    q = np.round(end).astype(int)
-    in_wm = rim[tuple(q.T)] == 2
-    opposite = np.sign(end[:, 1] - 15.0) != np.sign(x0[met, 1] - 15.0)
-    assert np.mean(in_wm & opposite) > 0.9
-
-
 def test_traverse_leaves_columns_open_beside_a_narrow_open_sulcus() -> None:
     """Two WM slabs (x < 6, x >= 30) with a 2-voxel fluid slot at x = 21-22,
     off the WM midline (x = 17.5). T's sign comes from the WM distance through
@@ -324,29 +302,6 @@ def test_traverse_leaves_columns_open_beside_a_narrow_open_sulcus() -> None:
     assert np.mean(R.crest_at[i] < 0) > 0.9
     end = R.pos[i, R.ns[i] - 1].astype(float)
     assert np.all(np.round(end[:, 0]) <= 22)
-
-
-def test_traverse_ends_a_column_where_its_crossing_meets_fluid() -> None:
-    """traverse: a column whose crest hit is at x = 10, crossing along +x,
-    with fluid at x = 11 just past the crest: it ends in that fluid (FLUID),
-    and does not jump it."""
-    shape = (24, 8, 8)
-    rim = np.full(shape, 3)
-    rim[11] = 1
-    t = box_tissue(rim)
-    x = np.arange(shape[0], dtype=float)
-    T = np.tile((10.0 - np.abs(x - 10.0))[:, None, None] * VOX, (1, 8, 8))
-    nmax = CT.NMAX
-    pos = np.full((1, nmax, 3), np.nan, np.float32)
-    path = np.c_[np.arange(3.0, 10.01, 0.25), np.full(29, 4.0), np.full(29, 4.0)]
-    pos[0, : len(path)] = path
-    ns = np.array([len(path)])
-    out = np.array([S.TURN])
-    across = np.zeros((*shape, 3), np.int8)
-    across[10, :, :] = (1, 0, 0)
-    CT.traverse(pos, ns, out, np.array([len(path) - 1]), across, T, t)
-    assert out[0] == S.FLUID
-    assert np.round(pos[0, ns[0] - 1, 0]) == 11
 
 
 # ---------------------------------------------------------------- front
@@ -440,13 +395,15 @@ def test_front_crosses_parallel_fused_banks() -> None:
     assert np.all(np.abs(R.pos[i, R.turn_at[i], 0] - 17.5) <= 3.0)
 
 
-@pytest.mark.parametrize("method", ["crest", "front"])
+@pytest.mark.parametrize("method", ["crest", "traverse", "front"])
 def test_columns_of_a_narrow_fused_fundus(method: str) -> None:
     """A V of WM with cortex fused in it (as above). T's crest on the
     bisector rises toward the opening, and the sampled grad T at the kink
     points along it: the crest method's columns slide along it to the fluid;
-    front columns keep their heading through the kink, then descend into
-    the far wall, near the height they started (no slide)."""
+    traverse and front columns keep their heading through the kink, then
+    descend into the far wall, near the height they started (no slide).
+    Wall roots from 9 to 20 voxels up: nearer the opening a column reaches
+    the fluid first, and the apex's floor is another wall."""
     shape = (34, 30, 20)
     x, y = np.indices(shape)[:2].astype(float)
     rim = np.full(shape, 3)
