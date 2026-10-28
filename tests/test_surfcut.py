@@ -406,3 +406,52 @@ def test_qpbo_does_not_depend_on_the_c_rand_state(pruned: bool) -> None:
         libc.srand(s)
         out.append(tuple(solve(M).labels))
     assert len(set(out)) == 1
+
+
+def overlapping_levels(
+    rng: np.random.Generator, n: int, L: int = 4, K: int = 13
+) -> Model:
+    """n columns in a chain, L levels each on overlapping windows (all origins 0), so
+    that the ordering bounds force binary nodes: lateral hinges, ordering lo = 1
+    between levels."""
+    N = n * L
+    unary: list[Float] = [np.round(rng.normal(size=K), 3) for _ in range(N)]
+    a = np.arange(n - 1)
+    hinge: list[Hinge] = []
+    for lev in range(L):
+        t = ints(rng.integers(-1, 2, n - 1))
+        w = np.round(rng.uniform(0.1, 1, n - 1), 3)
+        hinge.append((ints(lev * n + a), ints(lev * n + a + 1), t, w))
+    c = np.arange(n)
+    hard: list[Hard] = []
+    for lev in range(L - 1):
+        lo, hi = ints(np.full(n, 1)), ints(np.full(n, 10**6))
+        hard.append((ints(lev * n + c), ints((lev + 1) * n + c), lo, hi))
+    return Model(ints(np.full(N, K)), ints(np.zeros(N)), unary, hard, hinge)
+
+
+def test_qpbo_bound_is_precise_with_forced_nodes() -> None:
+    """Certified everywhere (submodular), so the bound equals the optimum up to
+    rounding; a hard cost 1000 times too large made it 1.3e-2 off here."""
+    M = overlapping_levels(np.random.default_rng(2000), 2000)
+    r = qpbo(M)
+    assert r.certified.all()
+    assert abs(r.lower_bound - r.energy) <= 1e-6 * abs(r.energy)
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_reduce_default_big_with_large_tables(seed: int) -> None:
+    """With reduce's own big cost and tables 100 times larger than the other terms,
+    the reduced model's optimum plus its constant equals the full optimum with the
+    same variables fixed."""
+    rng = np.random.default_rng(18000 + seed)
+    M = random_model(rng, ties=True, tables="any")
+    M.table = [(a, b, 100.0 * T) for a, b, T in M.table]
+    fixed = rng.random(M.n) < 0.5
+    lab = ints([rng.integers(0, K) for K in M.K])
+    full = restricted_brute(M)(fixed, lab)
+    if not np.isfinite(full):
+        return
+    R, free, const = reduce(M, fixed, lab)
+    best_r, _ = brute(R) if R.n else (energy(R, ints([])), None)
+    assert abs(best_r + const - full) < 1e-6

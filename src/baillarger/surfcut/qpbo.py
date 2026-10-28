@@ -20,6 +20,11 @@ x_i < k, and some global minimum lies in every variable's interval at once
 (the depths QPBO could not rule out; zero width where certified). On a
 submodular model every variable is certified and the labelling is the global
 minimum.
+
+The lower bound is a double-precision sum in which the hard terms' costs
+cancel: on large models with many forced nodes it is good to about 1e-7 of
+the energy, not exactly (8000 x 4 variables: within 3e-4 of an optimum of
+-20797).
 """
 
 from collections.abc import Callable
@@ -48,7 +53,18 @@ from baillarger.surfcut.model import (
     tie_terms,
 )
 
-HARD = 1e3  # a hard term's cost: this times the total of every finite cost
+
+def finite_range(M: Model) -> float:
+    """An upper bound on the range (max - min) of the finite energy over labellings:
+    each term's own range, summed (a hinge or tie over its two labels, a table over
+    its valid entries)."""
+    K = ints(M.K)
+    r = sum(float(np.ptp(floats(u))) for u in M.unary)
+    for a, b, _, w in (hinge_terms(M), tie_terms(M)):
+        r += float(np.sum(w * ((K[a] - 1) + (K[b] - 1))))
+    for _, _, T in M.table:
+        r += float(np.sum(np.nanmax(T, axis=(1, 2)) - np.nanmin(T, axis=(1, 2))))
+    return r
 
 
 @dataclass
@@ -110,9 +126,16 @@ def qpbo(
     def bid(nodes: Int) -> Int:
         return ints(bstart[var[nodes]] + lab[nodes] - 1)
 
+    # a hard term costs more than every finite term together, binary labellings that
+    # break a chain included: the sum of the finite capacities, the ties' terms, plus
+    # 1. No more: QPBO's lower bound is a double-precision sum in which these costs
+    # cancel, and a larger one loses precision (at 1000 times this, a bound 0.07
+    # above the optimum on 8000 x 4 variables).
     fin = np.isfinite(caps)
-    big = HARD * (
-        1.0 + float(caps[fin].sum()) + float(np.sum(w_t)) * float(K.max(initial=1)) * 2
+    big = (
+        1.0
+        + float(caps[fin].sum())
+        + 2.0 * float(np.sum(w_t)) * float(K.max(initial=1))
     )
     caps = np.where(fin, caps, big)
     ms = rows == s
@@ -253,13 +276,8 @@ def reduce(
     x = o + np.where(fx, lab, 0)
     U = [floats(M.unary[i]).copy() for i in free]
     const = float(sum(float(M.unary[i][lab[i]]) for i in np.flatnonzero(fx)))
-    if big is None:
-        big = HARD * (
-            1.0
-            + sum(float(np.ptp(u)) for u in M.unary)
-            + float(np.sum(hinge_terms(M)[3])) * float(K.max(initial=1))
-            + float(np.sum(tie_terms(M)[3])) * float(K.max(initial=1))
-        )
+    if big is None:  # more than the finite energy can vary over labellings
+        big = 1.0 + finite_range(M)
     hard: list[Hard] = []
     hinge: list[Hinge] = []
     tie: list[Tie] = []
