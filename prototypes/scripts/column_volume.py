@@ -3,11 +3,15 @@
 
 1-3. The traces (baillarger.column_traces, --tracer, --columns): the white mesh and one root per
    voxel cell and normal side; the primary streamline from each root (default fitted_blend: the
-   fitted field T, started along the mesh normal); where it cannot go on, by --columns: "crest"
-   (the default: T extended into the fluid and the WM, and a column that bends sharply, where it
-   meets a contact, ends at the bend) or "one-pass" (the method before: the turn rule, and the
-   one pass's ascent as the fallback); the classes (open, crossing, own bank, to the contact,
-   failed; roots within 2 mm of a face flagged), with the bank rule on mesh patches.
+   fitted field T, started along the mesh normal); where it meets another bank, by --columns:
+   - "crest" (the default): T extended into the fluid and the WM; columns traced through with no
+     turn rule and no fallback; where one meets another bank's field (T's crest) it is recorded
+     (crest_at), and one that reflects back into its own WM is cut at T's maximum;
+   - "traverse": as crest, but a column that meets the crest crosses it and descends T into the
+     far bank, so every column is a complete ray to fluid or WM;
+   - "one-pass" (the method before): the turn rule, and the one pass's ascent as the fallback.
+   The classes: open, crossing, own bank, to the contact, failed (roots within 2 mm of a face
+   flagged), with the bank rule on mesh patches.
 4. Features: echo 2 and echo 3 (trend removed) at each sample, centre line, no disc.
 5. Horizons (mm from the root): top; far WM; the contact (where a to-the-contact column ends; key
    "fallback contact"); the profile's split (E1 top-anchored) on a random subsample of crossing
@@ -23,11 +27,11 @@ with "points_full0": [[i, j, k], ...] in 0-based full-grid voxels.
 Writes <work>/column_volume_<name>.npz and .json, <figures>/column_volume_<name>_*.png.
 Usage: column_volume.py <figures dir> <work dir> --name NAME (--patch P | --box I J K [--size N ...])
                         [--points FILE] [--tracer {current,fitted,fitted_blend}]
-                        [--columns {crest,one-pass}] [--wm-changes FILE] [--figs-only]
+                        [--columns {crest,traverse,one-pass}] [--wm-changes FILE] [--figs-only]
 --wm-changes: the handle-free WM label (baillarger.white.wm_changes, saved with WMChanges.save)
 replaces the aseg's everywhere (mesh, field, stops, classes); without it, the aseg's.
-The npz also holds tracer_name, column_method, wm_label and crest_at (--columns crest: per column,
-the first sample where it meets another bank's field, T's crest; -1 if none).
+The npz also holds tracer_name, column_method, wm_label and crest_at (crest and traverse: per
+column, the first sample where it meets another bank's field, T's crest; -1 if none).
 The two marked faces of the plan: --name M1S1 --box 378 224 448; --name V1V2_banks --box 198 58 65.
 """
 

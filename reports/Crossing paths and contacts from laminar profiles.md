@@ -946,28 +946,79 @@ Crossings kink where they meet a contact at an angle, by about the angle between
 
 **The crest is not the contact.** In the kissing pair (banks 2.0 and 2.6 mm thick, contact at r = 3.6 mm), the crest lies at r = 3.9 mm (p10–p90 3.8–4.0). That is the midline between the two WM surfaces, 1.6 and 6.2 mm. It lies there in the fused sector, and also in the open sector, where a fluid gap separates the banks: T follows the WM-distance direction in the fluid, so it does not see the gap. So the crest is recorded on each column (`crest_at`) and not used to end it: the boundary there has to come from the reading of the columns.
 
-**Both methods at the sites:**
+**At the sites:** see *Traverse, and T's sign through tissue*, which compares the three methods on the current field.
 
-| | V1V2: crest | V1V2: one-pass | M1S1: crest | M1S1: one-pass |
-|---|---|---|---|---|
-| Open | 34,583 | 35,752 | 27,587 | 29,586 |
-| Crossing | 5,952 | 5,369 | 14,258 | 12,122 |
-| Own bank | 2,348 | 970 | 2,411 | 479 |
-| To the contact | 7,389 | 4,139 | 7,031 | 4,100 |
-| Failed (box face / other / missing / length / ridge) | 13,843 (9,620 / 2,253 / 608 / 1,362 / 0) | 17,885 (9,513 / 2,253 / 777 / 0 / 5,342) | 21,063 (20,785 / 0 / 0 / 278 / 0) | 26,063 (19,039 / 0 / 0 / 0 / 7,024) |
-| Columns meeting a crest (open / crossing / own / to the contact) | 19,168 / 5,926 / 2,309 / 7,088 | — | 13,328 / 14,231 / 2,409 / 7,013 | — |
-| Profile split at the marked points (median, p90 mm; points) | 0.058, 0.234 (16) | 0.067, 0.165 (16) | 0.489, 0.595 (23) | 0.384, 0.584 (23) |
-| Contact at the marked points (median, p90 mm; points) | 0.24, 0.40 (9) | 1.2, 2.2 (22) | 0.64, 0.70 (2) | 0.77, 0.81 (8) |
+### Traverse, and T's sign through tissue
 
-- **Most failures are the box, not the method.** Box faces are 70 % (V1V2) and 99 % (M1S1) of `crest`'s failures: traces from deeper roots run into the 2 mm margin of the 22.5 mm crop. `crest`'s own failures are the length cap, where traces slide along a crest: 2 % and 0.4 % of roots. `one-pass`'s are its ridge stops.
-- **The profile split is mixed.** It is about the same at V1V2's median but worse at the p90, and worse at M1S1's median (0.49 against 0.38 mm). The crossing columns differ between the methods, so the split reads different profiles. The estimator already had a +0.2 mm bias at M1S1.
-- **The crest flag is not specific on open columns.** About half of them meet a crest (55 % at V1V2, 48 % at M1S1), because T's crest also lies in cortex beside narrow open sulci. On crossing and to-the-contact columns it is nearly always set, as it should be.
+**Code.**
+- `baillarger.column_traces`: `--columns traverse` (`crest` stays the default).
+- `baillarger.streamlines`:
+  - `crest_kinks`: the crest test, which also returns the lattice direction across each kink;
+  - `tissue_wm_direction`;
+  - `fitted_field`: leaves out edges with fluid at both ends.
+- `prototypes/scripts/`:
+  - `methods_phantoms.py`: all three methods on the fold phantoms, through the package;
+  - `crest_planes.py`: crest voxels on a site's marked planes.
+- Tests (exact answers):
+  - traverse crosses parallel fused banks, opposite the root to within one lattice step, with samples 0.04 mm apart;
+  - it crosses banks at 30° (90 % or more end in the far WM);
+  - it crosses the narrow fused V (90 % or more end in the opposite wall's WM);
+  - it leaves columns open beside an off-centre fluid slot;
+  - a crossing that meets fluid ends there;
+  - the WM direction through tissue does not flip beside an open slot, and flips where banks are fused.
+
+**Traverse.**
+- Up to its first crest voxel, a column is traced as in `crest`.
+- There it crosses the kink, one lattice step along the direction the kink test found, signed to agree with its heading. The test itself puts that neighbour past the kink. The step keeps the column's own offset within the voxel, and it is sampled every 0.04 mm.
+- It then descends −∇T into the far bank.
+- A crossing that enters fluid, WM, missing or other tissue ends there.
+- Every column is then a complete ray, and the reading of the columns chooses where to cut it.
+
+**T's sign through tissue** (all crest-based methods). T's target direction was signed by the straight-line distance to the nearest WM. Beside an open sulcus, that flips inside a bank's cortex, so T had a crest short of the fluid. It is now signed by the WM distance through tissue (fast marching, with fluid, other labels and missing tissue as obstacles):
+- smoothed over tissue only;
+- obstacle voxels take their nearest tissue voxel's direction;
+- the fit leaves out edges with fluid at both ends, so two banks' fluid layers across a narrow sulcus do not couple.
+
+On an off-centre 2-voxel slot, T now rises in each bank up to the fluid, with no crest in the cortex.
+
+**At the sites** (handle-free WM, fitted_blend, roots 2 mm or more from a box face; `scratch/traverse/`):
+
+| | V1V2: crest | V1V2: traverse | V1V2: one-pass | M1S1: crest | M1S1: traverse | M1S1: one-pass |
+|---|---|---|---|---|---|---|
+| Open | 34,668 | 15,336 | 35,752 | 27,755 | 14,746 | 29,586 |
+| Crossing | 6,001 | 4,967 | 5,369 | 14,418 | 9,916 | 12,122 |
+| Own bank | 2,394 | 32,320 | 970 | 2,353 | 30,568 | 479 |
+| To the contact | 7,325 | 194 | 4,139 | 6,796 | 8 | 4,100 |
+| Failed | 13,727 | 11,298 | 17,885 | 21,028 | 17,112 | 26,063 |
+| …box face / other / missing / length / ridge | 9,447 / 2,253 / 662 / 1,365 / 0 | 6,607 / 2,253 / 297 / 17 / 2,124 | 9,513 / 2,253 / 777 / 0 / 5,342 | 20,757 / 0 / 0 / 271 / 0 | 16,765 / 0 / 0 / 123 / 224 | 19,039 / 0 / 0 / 0 / 7,024 |
+| Open columns meeting a crest | 62 % | 14 % | — | 56 % | 18 % | — |
+| Profile split at the marked points (median, p90 mm; points) | 0.065, 0.415 (17) | 0.066, 0.165 (25) | 0.067, 0.165 (16) | 0.236, 0.827 (21) | 0.41, 0.63 (21) | 0.384, 0.584 (23) |
+
+**On the phantoms** (right class, at V1V2's features; M1S1's within 0.03):
+
+| | Crowns | Fundus, 0.16 mm slot | Fundus, 0.48 mm slot | Kissing pair | Kissing pair, no dark band |
+|---|---|---|---|---|---|
+| crest | 0.94–0.95 | 0.95 | 0.96 | 0.90 | 0.90 |
+| traverse | 0.92–0.94 | 0.55 | 0.79 | 0.82 | 0.78 |
+| one-pass | 0.94–0.95 | 0.93–0.94 | 0.95 | 0.90 | 0.90 |
+
+**Where traverse goes wrong: the cortex label.**
+- **The symptom:** traverse sends more than half of the open columns at both sites into the opposite bank's WM ("own bank"), and does worse on the open-fundus phantoms.
+- **Where the crests are:** on V1V2's marked planes (`crest_planes.py`; crops in ITK-SNAP), they lie along the marked "contact", which the user identified in 3D as a thin fluid channel; the crest follows it, departing into cortex at points. They also lie around a dark structure in thick cortex, which the user identified as a small piece of superficial vessel outside the cortex.
+- **Why:** both are labelled cortex by the aseg. T treats them as cortex, so the two banks' fields meet across them, and the crest marks the meeting. Traverse then crosses what is really an open sulcus or a vessel.
+- **On the phantoms:** in the fundus phantoms, columns converge into the slot's edge, tighter than the voxel grid resolves. The crest test flags that focus and traverse crosses it.
+- **So:**
+  - traverse depends on a cortex label that excludes fluid channels and vessels;
+  - until the pial-side labels are refined, it is an option, not the default;
+  - crest voxels without a fused contact mark places where the label is wrong, which makes them a useful flag in their own right.
 
 **Not done:**
-- Padded boxes, so that traces can run past the crop. A 4 mm margin is about 2.5 × the volume, roughly 11 GB.
-- A top boundary for T at the pia, so that its crest, and the flag, respect fluid.
-- Columns moved as a surface: the white mesh advanced along the field with tangential relaxation, which keeps neighbours together, gives the equivolume depth from each vertex's area, and detects collisions between banks exactly (`mesh_intersect`).
-- Step 2's use of `crest_at`, for example an edit-priority layer.
+- The pial-side label refinement: thin dark channels and superficial vessels inside the aseg's cortex, relabelled while preserving topology. Then traverse is measured again.
+- The comparison with the surface-growing ("front") method's crossing rule (its session), on the same inputs.
+- Padded boxes, so that traces can run past the crop. A 4 mm margin is about 2.5 × the volume, roughly 11 GB. Most failures are still the box face.
+- A full top boundary for T at the pia. The sign through tissue makes T respect labelled fluid; a fluid label that misses a channel still hides it.
+- Columns moved as a surface: the surface-growing session (`column_front`), with a coupled mesh and equivolume area.
+- Step 2's use of `crest_at`, for example an edit-priority layer of crests without a fused contact, as likely label errors.
 
 ### A pia editor on an inflated surface
 
