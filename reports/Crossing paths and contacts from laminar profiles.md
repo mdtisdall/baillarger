@@ -866,6 +866,12 @@ Then open http://127.0.0.1:8782/ (the server binds 127.0.0.1 only). The other ta
 - *Sections.* The two sections run along the screen's horizontal and vertical at the clicked point. Each is drawn on the 3D view and on the flat overview (cyan and yellow), so you can see where it really runs.
 - *Edits.* A click on a section at a depth adds a pending edit. *Re-solve* (R = 1, 2 or 4 mm) makes the pending edits one step. *Undo step* puts the last step's edits back to pending. *OK mark* records "looked at, no change".
 - *Worklist.* *Next* (key `n`) moves to the next worklist patch with no edit or OK mark.
+- *Streamlines.* The panel *Streamlines at the crosshair* (below the sections) shows, in true geometry and in mm, the traces at the crosshair's root:
+  - *from*: every trace rooted within r of the root along the white mesh (r = 0.5, 1 or 2 mm);
+  - *to*: every other trace whose last sample is within r of the root in space, mostly crossing traces from the facing bank;
+  - the true white mesh and the GM boundary (the cortex label's contour, translucent, its opacity on a slider) in a box of ± 3, 5 or 8 mm.
+
+  Traces are coloured by class. Fallback traces are darker and *to* traces paler. The pia, current and as saved, is a dot on each subsampled trace. The panel draws the column volume's traces as saved, so it shows whichever tracer made `column_volume_<site>.npz`, and it names that tracer and the WM label (`tracer_name`, `wm_label`; files made before these were saved say so). Drag rotates, shift-drag pans, the wheel zooms. Its camera starts at the main view's orientation.
 - *Files.* *Save* writes `pia_edits_<tag>.json` and `pia_edits_<tag>_levels.npz` in `prototypes/scripts`. *Load* replays the saved list. *Replay check* rebuilds the pia from the list and reports the largest difference from the current pia.
 
 **What the sections show.** Echo 2 (trend removed) along the traces, depth down from the white surface. Over it:
@@ -888,6 +894,7 @@ At a contact, the facing trace (through the crosshair trace's tie, or the neares
 - *Sections* (`pia_sections.py`). The plane through the root that holds the direction and the normal cuts the true mesh in a polyline, which is followed both ways from the root. Distances are arc lengths along it. The traces shown are those rooted within 0.12 mm of the plane and of the curve. An earlier version ordered a band of vertices along its longest geodesic, as `volume_views.section_traces` does. Where the band forked (measured at M1S1) it mixed two branches. A plane cannot fork on a manifold mesh, so the polyline does not have this fault.
 - *Re-solve.* Each step is `edit_resolve.local_solve(D, z, neighbourhood(G, roots, the step's traces, R), h = 0.04, edits = every edit so far)`. The steps replay in order from `joint_<tag>.npz`.
 - *Determinism.* QPBO-I (`thinqpbo.improve()`, called by `baillarger.surfcut.qpbo_pruned`) visits variables in an order drawn from the C library's `rand()`. With identical inputs, the same step changed one trace by 0.12 mm depending on that state (seed 3 against seeds 1, 2, 7 and 12345). `surfcut` now reseeds `rand()` itself (`qpbo_pruned(seed=0)`, PR #33). With an older `surfcut` installed, the editor reseeds before every step. Either way the pia depends only on the list. Tested under two other `rand()` states, and the test fails without the reseed.
+- *Streamlines* (`streamline_view.py`). *From* uses the geodesic distance along the mesh, not the distance in space. Across a sulcus the facing bank's roots can be closer in space than the root's own neighbours, so they are not counted as *from*. Their traces show as *to* where they end at the root. The GM boundary is contoured from a crop padded by the smoothing's reach (σ = 1 voxel, for display only), then clipped to the box and left open where the box cuts it.
 - *Flat overview* (`flat_map.py`). A least-squares conformal map of each piece of the white mesh. Pieces of genus > 0 are first cut along their shortest non-separating loops (greedy homotopy basis, cones in the holes).
 
 **Edit records.** Each edit stores:
@@ -898,7 +905,7 @@ At a contact, the facing trace (through the crosshair trace's tie, or the neares
 
 Each step stores R and its solve: free traces, seconds, number of pia changes, largest change.
 
-**Tests** (exact answers, or a stated tolerance where only the limit is exact). 20 pass:
+**Tests** (exact answers, or a stated tolerance where only the limit is exact). 25 pass:
 - `test_flat_map.py` (9):
   - a plane maps isometrically up to a similarity (1e-9);
   - a polygonal cylinder strip unrolls exactly;
@@ -910,6 +917,12 @@ Each step stores R and its solve: free traces, seconds, number of pia changes, l
 - `test_inflate.py` (5): a uniform plane grid does not move; the boundary stays pinned; convergence to the discrete harmonic membrane; the tangent transfer is the face map; the sulcal depth.
 - `test_pia_sections.py` (5): a plane gives the row at Euclidean distances; a cylinder gives the ring at arc lengths; a U fold gives the U at arc lengths; the directions; the points.
 - `test_pia_editor.py` (1): replay equals the live result under other `rand()` states.
+- `test_streamline_view.py` (5):
+  - on a plane, *from* is the geodesic disk and *to* the traces ending within r;
+  - on a U fold, the facing sheet's traces are *to*, never *from*;
+  - the mesh crop keeps exactly the faces in the box;
+  - a ball's GM boundary is a closed sphere at its radius, and the box clips it open;
+  - the pia point lies on the trace at its arc length.
 
 **Results.**
 
@@ -926,6 +939,7 @@ Each step stores R and its solve: free traces, seconds, number of pia changes, l
 | one edit: free traces, solve time | 213, 0.41 s | 192, 0.40 s |
 | one edit: pia changes (largest) | 3 (0.32 mm) | 13 (0.24 mm) |
 | replay difference | 0 mm | 0 mm |
+| streamline panel at one point, r = 1 mm, box ± 5 mm | 110–133 from, 0–57 to; 0.2–0.4 s | — |
 
 **V1V2's two handles** (worth a look in ITK-SNAP):
 - **Handle 1**, ITK-SNAP voxel (49, 134, 43): a loop 0.09 mm round, where two sheets of the mesh touch at a pinhole. A segmentation or meshing artefact.

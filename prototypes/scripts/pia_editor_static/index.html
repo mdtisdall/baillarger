@@ -34,6 +34,11 @@
   #log { font-size: 11px; color: var(--mute); white-space: pre-wrap; max-height: 7em; overflow-y: auto; }
   .key span { display: inline-block; margin-right: 10px; font-size: 11px; }
   .sw { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 3px; }
+  #slwrap { position: relative; height: 460px; flex: none; padding: 0; overflow: hidden; }
+  #sl { width: 100%; height: 100%; display: block; cursor: grab; }
+  #slbar { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 12px; color: var(--mute); }
+  #slinfo { position: absolute; left: 8px; top: 6px; font-size: 11px; color: var(--fg); background: #000a; padding: 2px 6px;
+            border-radius: 4px; white-space: pre-wrap; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -79,6 +84,19 @@
     <div class="card sec" id="facing" style="display:none">
       <h3 id="hfu">facing u</h3><canvas id="cfu"></canvas>
       <h3 id="hfv" style="margin-top:6px">facing v</h3><canvas id="cfv"></canvas>
+    </div>
+    <div class="card">
+      <div id="slbar"><b style="color:var(--fg)">Streamlines at the crosshair</b>
+        <label><input type="checkbox" id="slon" checked> show</label>
+        <label>from/to within <select id="slr"><option>0.5</option><option selected>1</option><option>2</option></select> mm</label>
+        <label>box ± <select id="slh"><option>3</option><option selected>5</option><option>8</option></select> mm</label>
+        <label>GM <input type="range" id="slgm" min="0" max="0.6" step="0.02" value="0.18" style="width:80px"></label>
+        <label><input type="checkbox" id="slfrom" checked> from</label><label><input type="checkbox" id="slto" checked> to</label>
+        <label><input type="checkbox" id="slwm" checked> WM surface</label>
+      </div>
+      <div class="key" id="slkey" style="margin:3px 0"></div>
+      <div class="card" id="slwrap"><canvas id="sl"></canvas><div id="slinfo"></div>
+        <div style="position:absolute;right:8px;bottom:6px;font-size:11px;color:var(--mute);background:#000a;padding:2px 6px;border-radius:4px">drag: rotate · shift-drag: pan · wheel: zoom (true geometry, mm)</div></div>
     </div>
   </div>
 </div>
@@ -191,12 +209,14 @@ function rotAxis(ax, t) { const [x, y, z] = ax, c = Math.cos(t), s = Math.sin(t)
   return [c + x*x*C, x*y*C - z*s, x*z*C + y*s, y*x*C + z*s, c + y*y*C, y*z*C - x*s, z*x*C - y*s, z*y*C + x*s, c + z*z*C]; }
 function viewOf(p) { const R = GL.R, q = [p[0]-GL.target[0], p[1]-GL.target[1], p[2]-GL.target[2]];
   return [R[0]*q[0]+R[1]*q[1]+R[2]*q[2], R[3]*q[0]+R[4]*q[1]+R[5]*q[2], R[6]*q[0]+R[7]*q[1]+R[8]*q[2] - GL.dist]; }
-function projMat(W, H) { const f = 1 / Math.tan(0.35), n = Math.max(0.05, GL.dist - 3 * GL.radius), fa = GL.dist + 3 * GL.radius;
+function projMatOf(cam, W, H) { const f = 1 / Math.tan(0.35), n = Math.max(0.05, cam.dist - 3 * cam.radius), fa = cam.dist + 3 * cam.radius;
   return { f, a: W / H, n, fa }; }
-function mvp() {   // column-major 4x4: P * V, V = [R | -R t - (0,0,dist)]
-  const c = $("gl"), P = projMat(c.clientWidth, c.clientHeight), R = GL.R, t = GL.target;
+function projMat(W, H) { return projMatOf(GL, W, H); }
+function mvp() { const c = $("gl"); return mvpOf(GL, c.clientWidth, c.clientHeight); }
+function mvpOf(cam, W, H) {   // column-major 4x4: P * V, V = [R | -R t - (0,0,dist)]
+  const P = projMatOf(cam, W, H), R = cam.R, t = cam.target;
   const V = [R[0], R[3], R[6], 0, R[1], R[4], R[7], 0, R[2], R[5], R[8], 0,
-    -(R[0]*t[0]+R[1]*t[1]+R[2]*t[2]), -(R[3]*t[0]+R[4]*t[1]+R[5]*t[2]), -(R[6]*t[0]+R[7]*t[1]+R[8]*t[2]) - GL.dist, 1];
+    -(R[0]*t[0]+R[1]*t[1]+R[2]*t[2]), -(R[3]*t[0]+R[4]*t[1]+R[5]*t[2]), -(R[6]*t[0]+R[7]*t[1]+R[8]*t[2]) - cam.dist, 1];
   const A = (P.fa + P.n) / (P.n - P.fa), B = 2 * P.fa * P.n / (P.n - P.fa);
   const Pm = [P.f / P.a, 0, 0, 0, 0, P.f, 0, 0, 0, 0, A, -1, 0, 0, B, 0];
   const o = new Float32Array(16);
@@ -317,7 +337,7 @@ async function setCrosshair(i, keepWl) {
   if (i < 0) return; CUR = i; if (!keepWl) wlIndex = META.worklist.findIndex(p => p.traces.includes(i));
   SEC = FRAME ? await post("/section3d", Object.assign({ trace: i, half: +$("half").value }, FRAME))
               : await get(`/section?i=${i}&half=${$("half").value}`);
-  showInfo(); drawMap(); draw3d(); drawSections();
+  showInfo(); drawMap(); draw3d(); drawSections(); loadStreamlines();
 }
 function showInfo() {
   if (!SEC) return; const f = SEC.info, wl = wlIndex >= 0 ? META.worklist[wlIndex] : null;
@@ -406,6 +426,105 @@ for (const id of ["cu", "cv", "cfu", "cfv"]) {
   });
 }
 
+// ---------------------------------------------------------------- streamlines at the crosshair (true geometry, mm)
+// GET /streamlines: the traces rooted within r of the crosshair's root along the mesh (from) and the
+// other traces ending within r of it (to), as the column volume saved them (whatever its tracer); the
+// true white mesh and the GM boundary in the box; the pia (current, saved) on the subsampled traces.
+const SL = { g: null, R: [1,0,0, 0,1,0, 0,0,1], target: [0,0,0], dist: 15, radius: 5, D: null, gen: 0 };
+const CLS = [["open", "#1baf7a"], ["crossing", "#2a78d6"], ["own bank", "#eb6834"], ["to the pass's contact", "#c79a00"], ["failed", "#e34948"]];
+const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
+const SVS = `#version 300 es
+in vec3 pos; in vec3 nrm; uniform mat4 mvp; uniform mat3 rot; out float vlit;
+void main() { gl_Position = mvp * vec4(pos, 1.0); vlit = abs(normalize(rot * nrm).z); }`;
+const SFS = `#version 300 es
+precision mediump float; in float vlit; uniform vec4 col; out vec4 o; void main() { o = vec4(col.rgb * (0.3 + 0.7 * vlit), col.a); }`;
+const LVS = `#version 300 es
+in vec3 pos; in vec3 col; uniform mat4 mvp; out vec3 vc; void main() { gl_Position = mvp * vec4(pos, 1.0); vc = col; }`;
+const LFS = `#version 300 es
+precision mediump float; in vec3 vc; out vec4 o; void main() { o = vec4(vc, 1.0); }`;
+function faceNormals(v, f) {
+  const n = new Float32Array(v.length);
+  for (let k = 0; k < f.length; k += 3) { const a = 3 * f[k], b = 3 * f[k + 1], c = 3 * f[k + 2];
+    const u = [v[b] - v[a], v[b+1] - v[a+1], v[b+2] - v[a+2]], w = [v[c] - v[a], v[c+1] - v[a+1], v[c+2] - v[a+2]];
+    const x = u[1]*w[2] - u[2]*w[1], y = u[2]*w[0] - u[0]*w[2], z = u[0]*w[1] - u[1]*w[0];
+    for (const i of [a, b, c]) { n[i] += x; n[i+1] += y; n[i+2] += z; } }
+  return n;
+}
+function slMesh(g, v, n, f) {
+  const o = { vao: g.createVertexArray(), count: f.length }; g.bindVertexArray(o.vao);
+  for (const [arr, name] of [[v, "pos"], [n, "nrm"]]) { const b = g.createBuffer(), loc = g.getAttribLocation(SL.mprog, name);
+    g.bindBuffer(g.ARRAY_BUFFER, b); g.bufferData(g.ARRAY_BUFFER, arr, g.STATIC_DRAW); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 3, g.FLOAT, false, 0, 0); }
+  const ib = g.createBuffer(); g.bindBuffer(g.ELEMENT_ARRAY_BUFFER, ib); g.bufferData(g.ELEMENT_ARRAY_BUFFER, f, g.STATIC_DRAW);
+  g.bindVertexArray(null); return o;
+}
+function slLines() {   // the shown traces as segment pairs, coloured by class (fallback darker, "to" paler)
+  const g = SL.g, D = SL.D, show = { from: $("slfrom").checked, to: $("slto").checked }, P = [], C = [];
+  for (const l of D.lines) { if (!show[l.kind]) continue;
+    let c = hex(CLS[l.cls][1]); if (l.fallback) c = c.map(x => 0.55 * x); if (l.kind === "to") c = c.map(x => x + 0.45 * (1 - x));
+    for (let k = 3; k < l.xyz.length; k += 3) { P.push(l.xyz[k-3], l.xyz[k-2], l.xyz[k-1], l.xyz[k], l.xyz[k+1], l.xyz[k+2]); C.push(...c, ...c); } }
+  if (!SL.lvao) { SL.lvao = g.createVertexArray(); g.bindVertexArray(SL.lvao); SL.lb = [g.createBuffer(), g.createBuffer()];
+    for (const [b, name] of [[SL.lb[0], "pos"], [SL.lb[1], "col"]]) { const loc = g.getAttribLocation(SL.lprog, name);
+      g.bindBuffer(g.ARRAY_BUFFER, b); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 3, g.FLOAT, false, 0, 0); }
+    g.bindVertexArray(null); }
+  g.bindBuffer(g.ARRAY_BUFFER, SL.lb[0]); g.bufferData(g.ARRAY_BUFFER, new Float32Array(P), g.DYNAMIC_DRAW);
+  g.bindBuffer(g.ARRAY_BUFFER, SL.lb[1]); g.bufferData(g.ARRAY_BUFFER, new Float32Array(C), g.DYNAMIC_DRAW);
+  SL.nl = P.length / 3;
+}
+function slPoints(g, M, arr, col, size) {
+  if (!arr.length) return; g.useProgram(SL.pprog); g.bindVertexArray(SL.pvao);
+  g.bindBuffer(g.ARRAY_BUFFER, SL.pbuf); g.bufferData(g.ARRAY_BUFFER, new Float32Array(arr), g.DYNAMIC_DRAW);
+  g.uniformMatrix4fv(g.getUniformLocation(SL.pprog, "mvp"), false, M);
+  g.uniform3fv(g.getUniformLocation(SL.pprog, "pcol"), col); g.uniform1f(g.getUniformLocation(SL.pprog, "psize"), size * (window.devicePixelRatio || 1));
+  g.drawArrays(g.POINTS, 0, arr.length / 3);
+}
+function drawSl() {
+  const c = $("sl"), g = SL.g; if (!g || !SL.D) return; const dpr = window.devicePixelRatio || 1;
+  if (c.width !== c.clientWidth * dpr || c.height !== c.clientHeight * dpr) { c.width = c.clientWidth * dpr; c.height = c.clientHeight * dpr; }
+  g.viewport(0, 0, c.width, c.height); g.clearColor(0.03, 0.035, 0.045, 1); g.clear(g.COLOR_BUFFER_BIT | g.DEPTH_BUFFER_BIT); g.enable(g.DEPTH_TEST);
+  const M = mvpOf(SL, c.clientWidth, c.clientHeight), R = SL.R, rot = new Float32Array([R[0], R[3], R[6], R[1], R[4], R[7], R[2], R[5], R[8]]);
+  const mesh = (m, col) => { g.useProgram(SL.mprog); g.bindVertexArray(m.vao); g.uniformMatrix4fv(g.getUniformLocation(SL.mprog, "mvp"), false, M);
+    g.uniformMatrix3fv(g.getUniformLocation(SL.mprog, "rot"), false, rot); g.uniform4fv(g.getUniformLocation(SL.mprog, "col"), col);
+    g.drawElements(g.TRIANGLES, m.count, g.UNSIGNED_INT, 0); };
+  if ($("slwm").checked && SL.wm.count) mesh(SL.wm, [0.78, 0.78, 0.8, 1]);
+  if (SL.nl) { g.useProgram(SL.lprog); g.bindVertexArray(SL.lvao); g.uniformMatrix4fv(g.getUniformLocation(SL.lprog, "mvp"), false, M); g.drawArrays(g.LINES, 0, SL.nl); }
+  slPoints(g, M, SL.D.pia_saved, [1, 0.6, 0.9], 4); slPoints(g, M, SL.D.pia, [1, 0.17, 0.84], 6); slPoints(g, M, SL.D.x0, [1, 1, 1], 10);
+  const a = +$("slgm").value;   // the GM boundary last, translucent, not writing depth
+  if (a > 0 && SL.gm.count) { g.enable(g.BLEND); g.blendFunc(g.SRC_ALPHA, g.ONE_MINUS_SRC_ALPHA); g.depthMask(false);
+    mesh(SL.gm, [0.55, 0.8, 1.0, a]); g.depthMask(true); g.disable(g.BLEND); }
+}
+async function loadStreamlines() {
+  if (CUR === null || !SL.g || !$("slon").checked) return; const gen = ++SL.gen;
+  const D = await get(`/streamlines?i=${CUR}&radius=${$("slr").value}&half=${$("slh").value}`); if (gen !== SL.gen) return;
+  const g = SL.g; SL.D = D;
+  const wv = new Float32Array(D.wm.v), gv = new Float32Array(D.gm.v), gf = new Uint32Array(D.gm.f);
+  SL.wm = slMesh(g, wv, new Float32Array(D.wm.n), new Uint32Array(D.wm.f)); SL.gm = slMesh(g, gv, faceNormals(gv, gf), gf);
+  slLines(); SL.target = D.x0.slice(); SL.radius = D.half * 1.8; SL.dist = 3.2 * D.half; SL.R = GL.R.slice();
+  const fb = D.lines.filter(l => l.fallback).length;
+  $("slinfo").textContent = `trace ${D.trace}: ${D.n_from} from, ${D.n_to} to (${fb} by the fallback); pia on ${D.n_sub} subsampled\n` +
+    `tracer: ${D.tracer}\nWM label: ${D.wm_label}`;
+  const cnt = c => D.lines.filter(l => l.cls === c).length;
+  $("slkey").innerHTML = CLS.map(([n, col], c) => `<span><i class="sw" style="background:${col}"></i>${n} (${cnt(c)})</span>`).join("") +
+    `<span>darker: fallback · paler: to</span><span style="color:#ff2bd6">● pia</span><span style="color:#ff99e6">● pia saved</span><span>○ root</span>`;
+  drawSl();
+}
+function initSl() {
+  const c = $("sl"), g = c.getContext("webgl2", { antialias: true }); if (!g) { log("no WebGL2 for the streamline view"); return; }
+  SL.g = g; SL.mprog = program(g, SVS, SFS); SL.lprog = program(g, LVS, LFS); SL.pprog = program(g, PVS, PFS);
+  SL.pvao = g.createVertexArray(); g.bindVertexArray(SL.pvao); SL.pbuf = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, SL.pbuf);
+  const loc = g.getAttribLocation(SL.pprog, "pos"); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 3, g.FLOAT, false, 0, 0); g.bindVertexArray(null);
+  let d = null;
+  c.addEventListener("mousedown", e => { d = { x: e.offsetX, y: e.offsetY, shift: e.shiftKey }; });
+  window.addEventListener("mouseup", () => { d = null; });
+  c.addEventListener("mousemove", e => { if (!d) return; const dx = e.offsetX - d.x, dy = e.offsetY - d.y; d.x = e.offsetX; d.y = e.offsetY;
+    if (d.shift) { const s = 2 * SL.dist * Math.tan(0.35) / c.clientHeight, R = SL.R; for (let k = 0; k < 3; k++) SL.target[k] -= s * (dx * R[k] - dy * R[3 + k]); }
+    else SL.R = m3mul(rotAxis([1, 0, 0], dy * 0.008), m3mul(rotAxis([0, 1, 0], dx * 0.008), SL.R));
+    drawSl(); });
+  c.addEventListener("wheel", e => { e.preventDefault(); SL.dist *= Math.exp(e.deltaY * 0.0015); drawSl(); }, { passive: false });
+  for (const id of ["slr", "slh", "slon"]) $(id).onchange = loadStreamlines;
+  for (const id of ["slfrom", "slto"]) $(id).onchange = () => { if (SL.D) { slLines(); drawSl(); } };
+  $("slwm").onchange = drawSl; $("slgm").oninput = drawSl;
+}
+
 // ---------------------------------------------------------------- actions
 async function act(u, body) { STATE = await post(u, body); if (STATE.message) log(STATE.message); await loadLayer(); if (CUR !== null) await setCrosshair(CUR, true); updWl(); }
 $("resolve").onclick = () => { log("re-solving…"); act("/resolve", { R: +$("R").value }); };
@@ -430,14 +549,14 @@ document.addEventListener("keydown", e => {
   if (e.target.tagName === "SELECT") return;
   if (e.key === "n") $("next").click(); else if (e.key === "r") $("resolve").click(); else if (e.key === "o") $("ok").click();
 });
-window.addEventListener("resize", () => { drawMap(); draw3d(); if (SEC) drawSections(); });
+window.addEventListener("resize", () => { drawMap(); draw3d(); if (SEC) drawSections(); drawSl(); });
 $("level").onchange = async () => { await loadMesh(+$("level").value, false); if (FRAME) FRAME.level = GL.level; draw3d(); };
 (async () => {
   META = await get("/meta"); STATE = META;
   $("title").textContent = `Pia editor — ${META.tag}`; document.title = `Pia editor ${META.site}`;
   for (const n of META.layers) { const o = document.createElement("option"); o.textContent = n; $("layer").appendChild(o); }
   META.levels.forEach((n, k) => { const o = document.createElement("option"); o.value = k; o.textContent = n; $("level").appendChild(o); });
-  initGL(); const lv = Math.min(2, META.levels.length - 1); $("level").value = lv; await loadMesh(lv, true); FRAME = screenFrame();
+  initGL(); initSl(); const lv = Math.min(2, META.levels.length - 1); $("level").value = lv; await loadMesh(lv, true); FRAME = screenFrame();
   $("layer").value = "combined";
   fitMap(); await loadLayer(); updWl();
   log(`loaded ${META.n} traces; ${META.worklist.length} worklist patches; priority: ${META.priority}`);
