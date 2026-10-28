@@ -4,7 +4,10 @@ thinqpbo (Kolmogorov's QPBO, double precision) has no type stubs, so mypy
 sees it as untyped. The protocol lists the methods used here.
 """
 
+import ctypes
 from typing import Protocol, cast
+
+_LIBC = ctypes.CDLL(None)
 
 
 class QPBOGraph(Protocol):
@@ -26,3 +29,9 @@ def new_graph(nodes: int, edges: int) -> QPBOGraph:
     import thinqpbo
 
     return cast(QPBOGraph, thinqpbo.QPBODouble(nodes, edges))
+
+
+def seed_rand(seed: int) -> None:
+    """Seed C rand(), from which QPBO's Improve() (called without an order, the
+    only form thinqpbo exposes) draws its order of variables."""
+    _LIBC.srand(ctypes.c_uint(seed & 0xFFFFFFFF))
