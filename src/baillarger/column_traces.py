@@ -10,7 +10,8 @@ index coordinates of the box; vox the voxel size (mm); lengths in mm.
 
 1. Tissue (load_tissue, tissue): the rim labels of the box, with the WM
    label of choice (the aseg's, or the handle-free label from
-   baillarger.white), the missing tissue
+   baillarger.white), optionally the pial-side label changes
+   (baillarger.pial_labels: cortex relabelled as fluid), the missing tissue
    (baillarger.frame.missing_tissue), and echoes 2 and 3 with their trend
    removed (log intensity minus its normalized convolution over the cortex
    at 4 voxels), zero outside the cortex. Labels: 0 cortex, 1 fluid, 2 WM,
@@ -83,7 +84,7 @@ Prototype entry point: prototypes/scripts/column_volume.py (--tracer).
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
@@ -96,6 +97,9 @@ from baillarger.data import Patch, load_box
 from baillarger.frame import mesh_curvatures, missing_tissue
 from baillarger.fronts import Fronts, march, riemann_from_direction
 from baillarger.white import WhiteMesh, WMChanges, white_matter_box, white_mesh_normals
+
+if TYPE_CHECKING:
+    from baillarger.pial_labels import LabelChanges
 
 type Bool = npt.NDArray[np.bool_]
 type F32 = npt.NDArray[np.float32]
@@ -157,19 +161,29 @@ def face_distance(shape: tuple[int, ...], vox: F64) -> F64:
     return out
 
 
-def tissue(p: Patch, wm: Bool | None = None) -> Tissue:
+def tissue(
+    p: Patch,
+    wm: Bool | None = None,
+    pial_changes: "LabelChanges | None" = None,
+    reviewed_only: bool = False,
+) -> Tissue:
     """Step 1 on a loaded box. wm: the WM label to use (default the aseg's,
     rim == 2). It replaces the aseg's in the rim labels before anything is
     derived from them: voxels it adds become WM, and aseg WM voxels it leaves
     out (a cut across a bridge or a pinhole) become cortex. So the white
     mesh, the fitted field's boundary, the trace stops, the one pass and the
-    classes all see the same WM."""
+    classes all see the same WM. pial_changes: the pial-side label changes
+    (baillarger.pial_labels: cortex relabelled as fluid, accepted in review,
+    and brush edits; with proposed, the unreviewed proposals too), applied
+    after the WM label and never to a WM voxel."""
     rim = p.rim.copy()
     if wm is not None:
         if wm.shape != rim.shape:
             raise ValueError(f"WM label {wm.shape} is not on the box {rim.shape}")
         rim[(rim == 2) & ~wm] = 3
         rim[wm] = 2
+    if pial_changes is not None:
+        rim = pial_changes.apply(rim, p.lo, reviewed_only)
     vox = np.array(p.voxel_mm)
     miss = missing_tissue(rim, p.flash, p.voxel_mm)
     ctx = (rim == 3) & ~miss
@@ -195,13 +209,16 @@ def load_tissue(
     name: str = "box",
     directory: Path | None = None,
     changes: WMChanges | None = None,
+    pial_changes: "LabelChanges | None" = None,
+    reviewed_only: bool = False,
 ) -> Tissue:
     """The box [lo, hi) of the full grid (0-based voxels): step 1. changes:
     the handle-free WM label's changes (baillarger.white.wm_changes); None
-    keeps the aseg's WM label."""
+    keeps the aseg's WM label. pial_changes, reviewed_only: the pial-side label changes
+    (baillarger.pial_labels.LabelChanges; see tissue)."""
     p = load_box(lo, hi, name=name, directory=directory)
     wm = None if changes is None else white_matter_box(lo, hi, changes, directory)
-    return tissue(p, wm)
+    return tissue(p, wm, pial_changes, reviewed_only)
 
 
 def base_tensor(t: Tissue) -> F64:
@@ -718,6 +735,35 @@ def finish(
     return pos, ns, outc, fallback, end_patch, cls
 
 
+@dataclass
+class Crest:
+    """The fitted field of the crest methods and its crest."""
+
+    T: F64
+    notes: dict[str, Any]
+    #: step_noise: T's noise over one voxel step (mm)
+    noise: F64
+    crest: Bool
+    #: the lattice direction across the kink at each crest voxel
+    across: I8
+
+
+def fitted_crest(t: Tissue, base: F64, v: F64, f: I64, nrm: F64) -> Crest:
+    """T as the crest methods fit it (extended one voxel into the fluid and
+    WM_BAND_MM into the WM), its step noise, and its crest
+    (streamlines.crest_kinks, with the white mesh's level-set curvature)."""
+    T, notes = S.fitted_field(
+        base, t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=WM_BAND_MM
+    )
+    g = S.tissue_wm_direction(t.wm, t.ctx, t.vox)
+    noise, _ = S.step_noise(base, t.ctx, g, t.vox)
+    del g
+    kappa = level_set_concavity(v, f, nrm, T, t.ctx, t.vox)
+    free = S.fitted_free(t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=WM_BAND_MM)
+    crest, across = S.crest_kinks(T, t.ctx, noise, kappa, t.vox, free=free)
+    return Crest(T, notes, noise, crest, across)
+
+
 def trace_columns(
     t: Tissue,
     tracer: str = "fitted_blend",
@@ -765,19 +811,10 @@ def trace_columns(
         end_patch = P.of_vertex[G.crossing_vertex(v, nrm, endp, last, t.vox)]
         cls = classify(outc, P.D[root_patch, end_patch])
     elif method in ("crest", "traverse"):
-        T, notes = S.fitted_field(
-            base, t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=WM_BAND_MM
-        )
+        C = fitted_crest(t, base, v, f, nrm)
+        T, notes, crest, across = C.T, C.notes, C.crest, C.across
         field = base if tracer == "current" else S.gradient_tensor(T, t.vox)
-        g = S.tissue_wm_direction(t.wm, t.ctx, t.vox)
-        noise, _ = S.step_noise(base, t.ctx, g, t.vox)
-        del base, nh, g
-        kappa = level_set_concavity(v, f, nrm, T, t.ctx, t.vox)
-        free = S.fitted_free(
-            t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=WM_BAND_MM
-        )
-        crest, across = S.crest_kinks(T, t.ctx, noise, kappa, t.vox, free=free)
-        del noise, kappa
+        del base, nh, C
         pos, ns1, out1 = S.trace(
             field, t.labels, t.dface, x0, nrm[tv], t.vox, NMAX, blend,
             turn_deg=bend_deg, turn_mm=BEND_MM,
