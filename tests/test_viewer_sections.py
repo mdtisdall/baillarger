@@ -150,3 +150,58 @@ def test_a_u_fold_section_runs_round_the_fold_by_arc_length() -> None:
     chord = np.r_[0, np.cumsum(np.linalg.norm(np.diff(P, axis=0), axis=1))]
     assert np.allclose(d, chord[k] - chord[k0], atol=1e-9) and np.all(np.diff(d) > 0)
     assert k.max() > nu - 20  # reaches the upper arm, round the fold
+
+
+def test_rotate_by_90_swaps_u_and_v_up_to_sign() -> None:
+    tu, tv = np.array([1.0, 0, 0]), np.array([0, 1.0, 0])
+    a, b = PS.rotate(tu, tv, 90.0)
+    assert np.allclose(a, tv) and np.allclose(b, -tu)
+    a, b = PS.rotate(tu, tv, 30.0)
+    assert np.allclose(a, [np.sqrt(3) / 2, 0.5, 0]) and np.allclose(
+        b, [-0.5, np.sqrt(3) / 2, 0]
+    )
+    a, b = PS.rotate(*PS.rotate(tu, tv, 25.0), -25.0)
+    assert np.allclose(a, tu) and np.allclose(b, tv)
+
+
+def test_snap_puts_the_nearest_axis_in_the_plane() -> None:
+    n = np.array([0, 0, 1.0])
+    tu, tv = np.array([1.0, 0, 0]), np.array([0, 1.0, 0])
+    g = np.array([0, 1.0, 0])  # the plane y = const holds t_u at 0 and t_v at 90
+    assert PS.snap(tu, tv, n, g, 10.0) == pytest.approx((0.0, "u", 0.0))
+    r, ax, tilt = PS.snap(tu, tv, n, g, 80.0)  # type: ignore[misc]
+    assert r == pytest.approx(90.0) and ax == "v" and tilt == pytest.approx(0.0)
+    r, ax, _ = PS.snap(tu, tv, n, g, -170.0)  # type: ignore[misc]
+    assert r == pytest.approx(180.0) and ax == "u"
+    assert PS.snap(tu, tv, n, n, 0.0) is None  # the tangent plane is that plane
+    # a plane at 30 degrees round z: t_u turned by 30 lies in it; a normal tilted
+    # 20 degrees towards the plane's normal leaves that tilt between the planes
+    g = np.array([-np.sin(np.radians(30)), np.cos(np.radians(30)), 0])
+    nt = np.array([0, -np.sin(np.radians(20)), np.cos(np.radians(20))])
+    tv2 = np.cross(nt, tu)
+    r, ax, tilt = PS.snap(tu, tv2, nt, g, 0.0)  # type: ignore[misc]
+    a, _ = PS.rotate(tu, tv2, r)
+    assert ax == "u" and a @ g == pytest.approx(0.0, abs=1e-12)
+    m = np.cross(nt, a)  # the section plane's normal: the angle between the planes
+    assert tilt == pytest.approx(np.degrees(np.arccos(abs(m @ g))))
+    assert tilt == pytest.approx(20.0 * np.cos(np.radians(30)), abs=0.5)
+
+
+def test_section_curve_is_the_row_through_the_root() -> None:
+    nx, ny, h = 41, 21, 0.1
+    i, j = np.meshgrid(np.arange(nx), np.arange(ny), indexing="ij")
+    v = np.c_[i.ravel() * h, j.ravel() * h, np.zeros(nx * ny)]
+    f = grid(nx, ny)
+    G = graph(v, f)
+    roots_of = np.arange(len(v))
+    root = 20 * ny + 10
+    n = np.array([0, 0, 1.0])
+    # a plane between the rows (offset by a quarter step) so that every crossing is
+    # on an edge: the curve is the line y = y_root + h / 4, x within half of the root
+    x0 = v[root] + [0, h / 4, 0]
+    _, _, c = PS.section_curve(
+        v, G, root, x0, n, np.array([1.0, 0, 0]), roots_of, half=1.0, band=0.04, f=f
+    )
+    assert np.allclose(c[:, 1], x0[1]) and np.allclose(c[:, 2], 0)
+    assert np.all(np.diff(c[:, 0]) > 0) and np.abs(c[:, 0] - x0[0]).max() <= 1.0 + 1e-9
+    assert c[:, 0].min() < x0[0] - 0.9 and c[:, 0].max() > x0[0] + 0.9
