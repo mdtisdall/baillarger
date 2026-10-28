@@ -30,7 +30,7 @@
   #sections { overflow-y: auto; }
   .sec h3 { margin: 4px 8px 2px; font-size: 12px; font-weight: 600; color: var(--mute); }
   .sec canvas { width: calc(100% - 16px); margin: 0 8px; height: 260px; display: block; background: #000; }
-  #info { font-size: 12px; white-space: pre-wrap; padding: 4px 8px; max-height: 8.5em; overflow-y: auto; flex: none;
+  #info { font-size: 12px; white-space: pre-wrap; padding: 4px 8px; height: 6.2em; overflow-y: auto; flex: none;
           border-top: 1px solid var(--line); }
   #log { font-size: 11px; color: var(--mute); white-space: pre-wrap; padding: 2px 8px 4px; max-height: 4.5em; overflow-y: auto; flex: none; }
   .key span { display: inline-block; margin-right: 10px; font-size: 11px; }
@@ -68,12 +68,12 @@
     </div>
     <div class="key pbar" id="vkey"></div>
     <div class="fill"><canvas id="nv"></canvas><div id="vstat"></div>
-      <div class="help">click a slice: crosshair (to the nearest root within 1 mm) · right-drag: contrast</div></div>
+      <div class="help">click a slice: move the crosshair · shift-click: WM selection to the nearest white-surface point · right-drag: contrast</div></div>
   </div>
   <div class="pane" id="p-surface">
     <h2><span>White surface</span><label>surface <select id="level"></select></label></h2>
     <div class="fill"><canvas id="gl"></canvas>
-      <div class="help">drag: rotate · shift-drag: pan · wheel: zoom · click: crosshair (sections along the screen's axes)</div></div>
+      <div class="help">click: WM selection (sections along the screen's axes) · shift-click: crosshair to that point · drag: rotate · shift-drag: pan · wheel: zoom</div></div>
   </div>
   <div class="pane" id="p-map">
     <h2><span>Flat overview</span></h2>
@@ -101,13 +101,13 @@
     </div>
   </div>
 </div>
-<div id="info">Click the white surface, the flat overview or a slice to place the crosshair.</div>
+<div id="info">Two points: the crosshair (the slices) and the WM selection (on the white surface: the sections and streamlines). In each pane a click moves that pane's own point and a shift-click moves the other one.</div>
 <div id="log"></div>
 <script type="module">
 import { Niivue, SLICE_TYPE, SHOW_RENDER } from "https://cdn.jsdelivr.net/npm/@niivue/niivue@0.69.0/+esm";
 const $ = id => document.getElementById(id);
 const ME = Math.random().toString(36).slice(2);
-let META = null, VALS = null, CUR = null, SEC = null, FRAME = null;
+let META = null, VALS = null, CUR = null, SEC = null, FRAME = null, SELN = null, CROSS = null;
 const q = new URLSearchParams(location.search);
 const PANES = (q.get("panes") || "volume,surface,map,sections").split(",");
 const MAGMA = [[0,0,4],[40,11,84],[101,21,110],[159,42,99],[212,72,66],[245,125,21],[250,193,39],[252,253,191]];
@@ -143,10 +143,8 @@ async function apply(st) {
   applying = true;
   try {
     if ("layer" in st && st.layer && st.layer !== $("layer").value) { $("layer").value = st.layer; await loadLayer(); }
-    if ("trace" in st || "frame" in st) {
-      if (st.trace !== null && st.trace !== undefined) { FRAME = st.frame || null; await showTrace(st.trace); }
-      else if (st.mm) moveVolumeCrosshair(st.mm);
-    } else if (st.mm) moveVolumeCrosshair(st.mm);
+    if ("crosshair" in st && st.crosshair) { CROSS = st.crosshair; moveVolumeCrosshair(st.crosshair); }
+    if ("selection" in st) await setSelection(st.selection, st.frame || null);
   } finally { applying = false; }
 }
 function connect() {
@@ -155,10 +153,19 @@ function connect() {
   es.onmessage = e => { const m = JSON.parse(e.data); if (m.sender !== ME) apply(m.patch); };
   es.onerror = () => { $("sync").textContent = "not connected: retrying"; };
 }
-async function setTrace(t, frame) {   // a crosshair chosen in this window
-  FRAME = frame || null; await showTrace(t);
-  share({ trace: t, frame: FRAME, mm: SEC ? SEC.info.world_mm : null });
+// the two points: the crosshair (a world point: the slices) and the WM selection (a vertex of the
+// true white surface, with the shown trace there: the sections, the streamlines, the markers)
+async function setSelection(sel, frame) {
+  SELN = sel; FRAME = frame;
+  showSelectionMarker();
+  if (sel && sel.trace !== null) await showTrace(sel.trace);
+  else { CUR = null; SEC = null; clearSections(); drawMap(); draw3d();
+    if (sel) log(`no shown trace within 1 mm of vertex ${sel.vertex}: no sections there`); }
 }
+async function selectHere(sel, frame) { await setSelection(sel, frame); share({ selection: sel, frame }); }
+function crossHere(mm) { CROSS = mm; moveVolumeCrosshair(mm); share({ crosshair: mm }); }
+const selectVertex = async (v, frame) => selectHere(await get(`/vertex?v=${v}`), frame);
+const crossVertex = async v => crossHere((await get(`/vertex?v=${v}`)).world_mm);
 
 // ---------------------------------------------------------------- layer
 let lo = 0, hi = 1, diverging = false;
@@ -222,7 +229,9 @@ $("map").addEventListener("mousemove", e => {
   if (!mdrag) return; const dx = e.offsetX - mdrag.x, dy = e.offsetY - mdrag.y; if (Math.abs(dx) + Math.abs(dy) > 3) mdrag.moved = true;
   if (mdrag.moved) { view.x = mdrag.vx - dx / view.s; view.y = mdrag.vy + dy / view.s; drawMap(); }
 });
-$("map").addEventListener("mouseup", e => { const d = mdrag; mdrag = null; if (d && !d.moved) setTrace(nearestTrace(toMm(e.offsetX, e.offsetY)), null); });
+$("map").addEventListener("mouseup", e => { const d = mdrag; mdrag = null; if (!d || d.moved) return;
+  const t = nearestTrace(toMm(e.offsetX, e.offsetY)); if (t < 0) return;
+  if (e.shiftKey) crossVertex(META.rv[t]); else selectVertex(META.rv[t], null); });
 $("map").addEventListener("wheel", e => {
   e.preventDefault(); const m = toMm(e.offsetX, e.offsetY), f = Math.exp(-e.deltaY * 0.0015);
   view.s *= f; view.x = m[0] - e.offsetX / view.s; view.y = m[1] - ($("map").clientHeight - e.offsetY) / view.s; drawMap();
@@ -311,7 +320,8 @@ function draw3d() {
   g.drawElements(g.TRIANGLES, 3 * GL.nf, g.UNSIGNED_INT, 0);
   if (SEC) { points(g, M, rootPos(SEC.u.traces), [0.19, 0.84, 1], 3); points(g, M, rootPos(SEC.v.traces), [1, 0.82, 0.25], 3);
     if (SEC.facing) points(g, M, rootPos(SEC.facing.u.traces.concat(SEC.facing.v.traces)), [1, 0.55, 0.26], 3); }
-  if (CUR !== null) points(g, M, rootPos([CUR]), [1, 1, 1], 11);
+  if (CUR !== null) points(g, M, rootPos([CUR]), [1, 1, 1], 7);
+  if (SELN) { const v = SELN.vertex; points(g, M, new Float32Array([GL.pos[3*v], GL.pos[3*v+1], GL.pos[3*v+2]]), [0.2, 1, 1], 11); }
 }
 function pick3d(px, py) {
   const c = $("gl"), W = c.clientWidth, H = c.clientHeight, P = projMat(W, H), R = GL.R, t = GL.target, p = GL.pos;
@@ -341,9 +351,8 @@ function initGL() {
     draw3d();
   });
   c.addEventListener("mouseup", e => { const dd = d; d = null; if (!dd || dd.moved) return;
-    const v = pick3d(e.offsetX, e.offsetY); if (v < 0) return; const t = GL.vtrace[v];
-    if (t < 0) { log("no shown trace within 0.5 mm of that vertex"); return; }
-    setTrace(t, screenFrame()); });
+    const v = pick3d(e.offsetX, e.offsetY); if (v < 0) return;
+    if (e.shiftKey) crossVertex(v); else selectVertex(v, screenFrame()); });
   c.addEventListener("wheel", e => { e.preventDefault(); GL.dist *= Math.exp(e.deltaY * 0.0015); draw3d(); }, { passive: false });
 }
 $("level").onchange = async () => { await loadMesh(+$("level").value, false); draw3d(); };
@@ -361,9 +370,13 @@ async function initVolume() {
   await nv.setVolumeRenderIllumination(-1);   // the 3D tile shows the three slices, so the meshes inside stay visible
   setView();
   nv.onLocationChange = d => {
-    $("vstat").textContent = `${Array.from(d.mm).slice(0, 3).map(x => x.toFixed(2)).join(", ")} mm  voxel ${d.vox.join(", ")}`;
-    if (!applying && !NV.moving) volumeClick(Array.from(d.mm).slice(0, 3));
+    const mm = Array.from(d.mm).slice(0, 3);
+    if (NV.shift) { const back = NV.shift.back; NV.shift = null; volumeShiftClick(mm, back); return; }
+    $("vstat").textContent = `crosshair ${mm.map(x => x.toFixed(2)).join(", ")} mm  voxel ${d.vox.join(", ")}`;
+    if (!applying && !NV.moving) { CROSS = mm; share({ crosshair: mm }); }
   };
+  // a shift-click: note it before NiiVue moves its crosshair, then treat that move as a WM click
+  $("nv").addEventListener("pointerdown", e => { NV.shift = e.shiftKey && e.button === 0 ? { back: CROSS } : null; }, true);
   await loadPoints();
   log(`volume pane ready (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
 }
@@ -386,13 +399,16 @@ function moveVolumeCrosshair(mm) {
   if (!NV.nv || !mm) return; NV.moving = true;
   try { NV.nv.scene.crosshairPos = NV.nv.mm2frac(mm); NV.nv.drawScene(); NV.nv.createOnLocationChange(); } finally { NV.moving = false; }
 }
-async function volumeClick(mm) {   // a click on a slice: the nearest root within 1 mm, else only the point
-  const r = await get(`/locate?mm=${mm.join(",")}`);
-  if (r.trace !== null) await setTrace(r.trace, null);
-  else { share({ trace: null, mm }); log("no root within 1 mm of that point: crosshair only"); }
+async function volumeShiftClick(mm, back) {   // the WM selection to the white-surface vertex nearest the click
+  if (back) moveVolumeCrosshair(back);   // the crosshair stays where it was
+  await selectHere(await get(`/snap?mm=${mm.join(",")}`), null);
 }
-function nodes(name, pts, color, size) {
-  return { name, showLegend: false, nodeColormap: "warm", nodeColormapNegative: "winter", nodeMinColor: 0, nodeMaxColor: 1, nodeScale: 1,
+function showSelectionMarker() {
+  if (!NV.nv) return; if (NV.sel) { dropMesh(NV.sel); NV.sel = null; }
+  if (SELN) NV.sel = addNodes(nodes("WM selection", [SELN.world_mm], 0.5, 0.18, "winter"));
+}
+function nodes(name, pts, color, size, cmap = "warm") {
+  return { name, showLegend: false, nodeColormap: cmap, nodeColormapNegative: "winter", nodeMinColor: 0, nodeMaxColor: 1, nodeScale: 1,
            edgeColormap: "warm", edgeColormapNegative: "winter", edgeMin: 0, edgeMax: 1, edgeScale: 0,
            nodes: pts.map((p, k) => ({ name: String(k + 1), x: p[0], y: p[1], z: p[2], colorValue: color, sizeValue: size })), edges: [] };
 }
@@ -435,11 +451,18 @@ async function showTrace(i) {
   SEC = await get(u);
   if (CUR !== i) return;
   showInfo(); drawMap(); draw3d(); if (has("sections")) drawSections();
-  if (NV.nv) { moveVolumeCrosshair(SEC.info.world_mm); loadStreamlines(i); }
+  if (NV.nv) loadStreamlines(i);
+}
+function clearSections() {
+  for (const id of ["cu", "cv", "cfu", "cfv"]) { const c = $(id); c.getContext("2d").clearRect(0, 0, c.width, c.height); }
+  $("facing").style.display = "none";
+  if (NV.nv) { for (const m of NV.tracts) NV.nv.removeMesh(m.mesh); NV.tracts = []; if (NV.pia) { dropMesh(NV.pia); NV.pia = null; } }
+  $("info").textContent = SELN ? `WM selection: vertex ${SELN.vertex} at (${SELN.world_mm}) mm; no shown trace within 1 mm` : "";
 }
 function showInfo() {
   const f = SEC.info;
   $("info").textContent =
+    (SELN ? `WM selection: vertex ${SELN.vertex} at (${SELN.world_mm}) mm; its trace's root is ${SELN.root_mm} mm away\n` : "") +
     `trace ${f.trace} (${f.cls}${f.fallback ? ", fallback tracer" : ""})  root ITK-SNAP voxel (${f.root_itksnap})  full grid (${f.root_full_grid0})  world (${f.world_mm}) mm\n` +
     (f.pia_mm !== null ? `pia ${f.pia_mm} mm  ${f.certified ? "certified" : "NOT certified"}` : "no levels (no joint result loaded)") +
     (f.tie !== null ? `  tie -> ${f.tie}` : "") + `\nsections along the ${SEC.frame}, orthogonal on the true surface; the carried v-axis is off by ${SEC.angle_error_deg}°` +

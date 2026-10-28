@@ -969,15 +969,27 @@ Then open http://127.0.0.1:8791/ (127.0.0.1 only). Only the column volume is req
 
 The flat map and the inflation are computed on the first start (41 s at M1S1) and cached in `--cache`, keyed by a hash of the mesh. A rebuilt column volume gets new ones.
 
-**Panes and windows.** Each window shows the panes named in its address: `?panes=volume,surface,map,sections` (the default), or any subset. *New window* opens another one. Every window gets every crosshair move and layer change from the server as it happens (Server-Sent Events from `/events`), so the panes can be spread over several windows, browsers or screens. A window opened later starts at the current crosshair.
+**Two points.** The viewer keeps two points:
+- the *crosshair*: a world point, which sets the three slices of the volume pane;
+- the *WM selection*: a vertex of the true white surface, with the shown trace there. It sets the sections, the streamlines and the info line. That trace is the one rooted nearest along the mesh within 0.5 mm, else the root nearest in space within 1 mm, else none.
+
+In each pane a click moves that pane's own point, and a shift-click moves the other one:
+
+| pane | click | shift-click |
+|---|---|---|
+| volume (slices) | the crosshair | the WM selection, to the white-surface vertex nearest the clicked point |
+| surface (true or inflated), map | the WM selection | the crosshair, to that point of the true white surface |
+
+The WM selection is drawn as a sphere in the volume pane and as a cyan dot on the surface.
+
+**Panes and windows.** Each window shows the panes named in its address: `?panes=volume,surface,map,sections` (the default), or any subset. *New window* opens another one. Every window gets every move of either point, and every layer change, from the server as it happens (Server-Sent Events from `/events`), so the panes can be spread over several windows, browsers or screens. A window opened later starts at the current points.
 - *volume* (NiiVue 0.69, world mm):
   - echo 2 of the box in three orthogonal views and 3D, with the white surface and the GM boundary (translucent) where they cut each slice;
   - the traces from and to the crosshair, coloured by class (*to* paler), with the pia on them as small spheres, and your points;
   - optionally every 4th shown trace.
 
-  A click on a slice moves the crosshair to the nearest root within 1 mm, or to the point alone.
-- *surface*: the white surface, true or inflated, coloured by the layer. A click gives sections along the screen's axes.
-- *map*: the flat overview. A click gives sections along the map's axes.
+- *surface*: the white surface, true or inflated, coloured by the layer. A WM selection made here gives sections along the screen's axes.
+- *map*: the flat overview. A WM selection made here gives sections along the map's axes.
 - *sections*: the depth sections along the traces, as in the editor, without the edits.
 
 The volume pane names the tracer and the WM label that made the column volume (`tracer_name`, `wm_label`). Files made before these were saved say "not saved".
@@ -990,6 +1002,7 @@ The volume pane names the tracer and the WM label that made the column volume (`
   - the site reads its tracer and WM label;
   - the flat map and the inflation are cached by mesh, not recomputed for the same mesh, and recomputed for another;
   - world mm is the box's crop of the echo affine, and `locate` finds a root within 1 mm and nothing beyond;
+  - a WM selection snaps to the nearest white-surface vertex and takes its trace; a vertex with no trace near it along the mesh takes the nearest root within 1 mm, or none;
   - the volume is exactly the box of the full grid;
   - sections and streamlines without a joint result; a point's depth along its trace;
   - two pages share state through the server: a POST from one page arrives on another's event stream, tracks come back as TCK, and a path outside `static/` is refused.
@@ -999,6 +1012,13 @@ The volume pane names the tracer and the WM label that made the column volume (`
 - A click on the inflated surface moved the sections, the flat map's crosshair and the NiiVue slices to trace 19920, with 130 traces from it.
 - A second window (`?panes=volume`) opened at the same voxel. A click on the first window's flat map moved the second window's crosshair to the same voxel (86, 104, 66).
 - The traces at the crosshair reload with each move (172 from; then 155 from, 2 to).
+- The two points:
+  - a click on the surface set the WM selection and left the crosshair alone;
+  - a shift-click there moved the crosshair to the same vertex (242090);
+  - a click on a slice moved only the crosshair;
+  - a shift-click on a slice moved only the WM selection (to vertex 91408).
+
+  A second window (`?panes=surface,map`) opened at the current WM selection and followed a shift-click made in the first.
 
 **Open.**
 - Placing new points from the volume pane: NiiVue has drawing tools, not yet wired to a points file.
