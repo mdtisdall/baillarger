@@ -613,9 +613,19 @@ Levels at V1V2 τ 0.177 / 0.375 / 0.802 and at M1S1 τ 0.146 / 0.333 / 0.823 (sn
 | Levels at the bands, band weight 0 | 0.14 / 0.40 mm | +0.12 mm (27 / 2) | 0.119 (0.26) |
 | … band weight 0.25 | 0.20 / 0.34 mm | +0.20 mm (25 / 2) | 0.067 (0.14) |
 | … band weight 0.5 | 0.20 / 0.34 mm | — | 0.072 (0.15) |
+| … band weight 0.5, chain prior (`--vert chain`) | **0.08 / 0.32 mm** | — | **0.074 (0.16)** |
 
 - Moving the levels to the bands' τ already moves the pia deep with no band evidence; the evidence adds to it, the same at half the weight. At M1S1 the same step moved the pia shallow, toward the points (+0.18 → +0.06 mm).
-- [inference, not tested] The coupling is the vertical prior |z_ℓ − τ·z_pia|: each band level pulls the pia to band depth / τ with τ one constant for the box, so wherever a band sits at another fraction of the thickness (V1V2 stria: τ 0.40 on crossing traces, 0.36 on open ones), the pia moves. Test: keep the vertical prior between inner levels and drop it from inner levels to the pia; the stria should stay tight and the pia return.
+- **The cause is the vertical prior (tested).** The prior |z_ℓ − τ·z_pia| ties each band level to the pia with τ one constant for the box, so wherever a band sits at another fraction of the thickness (V1V2 stria: τ 0.40 on crossing traces, 0.36 on open ones), it moves the pia. The chain prior (`Params(vert="chain")`) keeps the prior between inner levels, |z_ℓ − (τ_ℓ/τ_ℓ₊₁)·z_ℓ₊₁|, and drops it from the last inner level to the pia. With it the pia returns and the stria stays tight:
+
+| Chain prior, band weight 0.5 (all converged, 100 % certified) | Pia: median / p90 | Stria spread in τ (mm) | Run |
+|---|---|---|---|
+| V1V2 banks, 31 points | **0.08 / 0.32 mm** (pia-coupled 0.20 / 0.34; fixed levels 0.12 / 0.36) | 0.074 (0.16) | 443 s, peak 10.0 GB |
+| M1S1, 21 points | 0.08 / 0.30 mm (pia-coupled **0.08 / 0.22**) | 0.088 (0.23; pia-coupled 0.084) | 377 s, peak 11.3 GB |
+
+  - V1V2: the best pia at the points of any run so far, with the stria as tight as with the pia-coupled prior. Five points remain over 0.3 mm (0.32–0.52 mm), against seven for the single-surface horizon on the same traces.
+  - M1S1: the median holds and the tail grows (p90 0.22 → 0.30 mm; points 18 and 23 at 0.32 and 0.36 mm). Not diagnosed: at M1S1 the pia-coupled prior had moved the pia toward the points, so the coupling may have been helping there.
+  - Signed medians were not scored for these runs. Figures: `joint_<site>_s0.16_bands_vchain_{sections,tau_sections,profiles}.png`.
 
 **The reported lower bounds were imprecise** (fixed in PR #32, `fix/surfcut-hard-cost`): in runs with hard bounds, QPBO's bound was 0.75–49 off the energy, sometimes above it. The labels and the certification were right: QPBO's binary encoding plus its offset equals `energy()` to 3e-12 on the real model. The cause was the hard-term cost, 1000 times the total of finite costs; QPBO's double-precision bound cancels those costs. At 1 + that total (the definition stated earlier) the error falls about 1000 times (real subsampled model: +0.0019 and −0.0007 against −0.75 and +0.86). `reduce`'s own big cost also left the tables out (latent; fixed in the same PR). The "bound" and "gap" figures above from runs with hard bounds overstate the gap; the energies and labels stand.
 
