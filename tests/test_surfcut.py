@@ -322,3 +322,70 @@ def folded_model(rng: np.random.Generator, n_side: int = 12, K: int = 14) -> Mod
 def test_qpbo_against_cpsat_folded(seed: int) -> None:
     M = folded_model(np.random.default_rng(9000 + seed))
     check_against(M, cpsat(M), lambda cert, lab: cpsat(M, (cert, lab)))
+
+
+# ------------------------------------------------ ambiguity intervals
+
+
+def box_brute(M: Model, lo: Int, hi: Int) -> float:
+    """The minimum over labellings with lo <= k <= hi."""
+    b = float("inf")
+    for k in itertools.product(
+        *[range(int(a), int(c) + 1) for a, c in zip(lo, hi, strict=True)]
+    ):
+        b = min(b, energy(M, np.array(k)))
+    return b
+
+
+@pytest.mark.parametrize("seed", range(40))
+@pytest.mark.parametrize("tables", [None, "any"])
+def test_intervals_hold_a_minimum(seed: int, tables: str | None) -> None:
+    """Weak persistency: some global minimum lies in every variable's
+    interval at once; certified variables have a zero-width interval at
+    their label."""
+    M = random_model(np.random.default_rng(18000 + seed), ties=True, tables=tables)
+    best, _ = brute(M)
+    if not np.isfinite(best):
+        return
+    r = qpbo(M)
+    assert np.all((0 <= r.interval_lo) & (r.interval_lo <= r.interval_hi))
+    assert np.all(r.interval_hi < M.K)
+    c = r.certified
+    assert np.array_equal(r.interval_lo[c], r.certified_labels[c])
+    assert np.array_equal(r.interval_hi[c], r.certified_labels[c])
+    assert abs(box_brute(M, r.interval_lo, r.interval_hi) - best) < 1e-6
+
+
+def test_intervals_of_an_unlabelled_variable() -> None:
+    """Three binary variables, each pair tied by w |x_a + x_b - 1| (prefers
+    differing labels): an odd frustrated cycle, where roof duality labels no
+    node, so each interval is its whole window."""
+    pairs = [(0, 1), (1, 2), (0, 2)]
+    M = Model(
+        ints([2, 2, 2]),
+        ints([0, 0, 0]),
+        [np.zeros(2) for _ in range(3)],
+        tie=[(ints(a), ints(b), ints(1), np.array([1.0])) for a, b in pairs],
+    )
+    r = qpbo(M)
+    assert not r.certified.any()
+    assert list(r.interval_lo) == [0, 0, 0] and list(r.interval_hi) == [1, 1, 1]
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_intervals_hold_a_minimum_folded(seed: int) -> None:
+    M = folded_model(np.random.default_rng(9000 + seed))
+    r = qpbo(M)
+    fix = r.interval_lo == r.interval_hi
+    assert np.array_equal(fix, r.certified)
+    assert abs(cpsat_box(M, r.interval_lo, r.interval_hi) - cpsat(M)) < 1e-6
+
+
+def cpsat_box(M: Model, lo: Int, hi: Int) -> float:
+    """cpsat() with lo <= k <= hi: unary costs outside the box made large."""
+    big = 1e4
+    U = [
+        np.where((np.arange(K) < a) | (np.arange(K) > c), big, u)
+        for u, K, a, c in zip(M.unary, M.K, lo, hi, strict=True)
+    ]
+    return cpsat(Model(M.K, M.o, U, M.hard, M.hinge, M.tie, M.table))

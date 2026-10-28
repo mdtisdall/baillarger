@@ -14,8 +14,12 @@ It returns a partial labelling that agrees with some global minimum (weak
 persistency) and a lower bound; QPBO-I (Rother et al. 2007, "Optimizing
 binary MRFs via extended roof duality") then completes it from a start
 labelling and never ends above that start. Where every binary node of a
-variable is labelled, the variable is certified. On a submodular model every
-variable is certified and the labelling is the global minimum.
+variable is labelled, the variable is certified. Where only some are, the
+labelled ones still bound it: y_(i,k) = 1 says x_i >= k, y_(i,k) = 0 says
+x_i < k, and some global minimum lies in every variable's interval at once
+(the depths QPBO could not rule out; zero width where certified). On a
+submodular model every variable is certified and the labelling is the global
+minimum.
 """
 
 from collections.abc import Callable
@@ -59,6 +63,8 @@ class Result:
     chain_ok: bool  # QPBO-I left every variable's binary nodes consistent
     binary_nodes: int
     pairwise: int
+    interval_lo: Int  # lowest label the labelled binary nodes allow
+    interval_hi: Int  # highest; lo == hi == the label where certified
     n_free: int = -1  # qpbo_pruned: variables left to QPBO-I
 
 
@@ -179,6 +185,7 @@ def qpbo(
     certified = np.ones(n, bool)
     cert_lab = np.zeros(n, np.int64)
     bvar = np.repeat(np.arange(n), K - 1)
+    lo_k, hi_k = np.zeros(n, np.int64), ints(K - 1)
     same = bvar[1:] == bvar[:-1]
     if NB:
         unl = np.bincount(bvar, (yl < 0).astype(np.float64), minlength=n) > 0
@@ -188,6 +195,9 @@ def qpbo(
         cert_lab = np.bincount(
             bvar, np.clip(yl, 0, 1).astype(np.float64), minlength=n
         ).astype(np.int64)
+        kb = np.arange(NB) - bstart[bvar] + 1  # y_(i,k): k
+        np.maximum.at(lo_k, bvar[yl == 1], kb[yl == 1])
+        np.minimum.at(hi_k, bvar[yl == 0], kb[yl == 0] - 1)
     cert_lab = ints(np.where(certified, cert_lab, -1))
     k0 = cut(M) if start_labels is None else ints(start_labels)
     y0 = (
@@ -207,7 +217,18 @@ def qpbo(
         k, e = k0, e0
     # the encoding drops constants: relate the two scales at the start labelling
     offset = e0 - _binary_energy(E0, E1, pi, pj, p10, p11, y0)
-    return Result(k, e, certified, cert_lab, lower + offset, chain_ok, NB, int(uk.size))
+    return Result(
+        k,
+        e,
+        certified,
+        cert_lab,
+        lower + offset,
+        chain_ok,
+        NB,
+        int(uk.size),
+        lo_k,
+        hi_k,
+    )
 
 
 def reduce(
