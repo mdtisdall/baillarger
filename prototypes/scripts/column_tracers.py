@@ -31,8 +31,10 @@ number of samples, the outcome code) from roots x0 started along d0 (the white m
   weights w_k = max(0, g . e_k)^2 over the six axis directions (sum 1), T(x) = sum_k w_k(x)
   mconv(J w_k), so voxels whose g are opposite (the two banks of a contact) never mix.
 
-The fallback (ascent of the equal-arrival pass) and the classes are column_volume.py's, so that
-the outputs stay compatible.
+current, fitted and fitted_blend, the white mesh, the fallback (ascent of the equal-arrival pass)
+and the classes are the package's (baillarger.streamlines, baillarger.column_traces); this module
+wraps them with the same calls as the candidates, which stay here for fold_eval.py and
+column_diag.py.
 """
 
 import numpy as np
@@ -41,33 +43,23 @@ from scipy import sparse
 
 import crossing_lib as X
 import flatten_fused2 as F
-import mesh_smoothing as MS
+from baillarger import column_traces as PCT
+from baillarger import streamlines as S
 
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
-CLASS = {OPEN: "open", CROSS: "crossing", OWN: "own bank", TOCONTACT: "to the pass's contact", FAILED: "failed"}
+CLASS = dict(enumerate(PCT.CLASS))
 TRACERS = ["current", "laplace", "fitted", "fitted_blend", "multiscale", "blend", "perbank"]
 
 
 # ---------------------------------------------------------------- mesh (as column_volume.py)
 
 def white_mesh(wm):
-    v0, f = MS.contour(wm, 0.0)
-    v = MS.twice(MS.relax(v0, f), f, 2.0)
-    return v, f, MS.smooth_normals(v, f)
+    return PCT.white_mesh(wm)
 
 
 def pick_vertices(v, n):
-    """One vertex per voxel cell and normal side (dominant axis and sign): the one nearest the
-    cell's centre."""
-    ax = np.argmax(np.abs(n), 1)
-    side = ax * 2 + (n[np.arange(len(n)), ax] > 0)
-    cell = np.floor(v).astype(np.int64)
-    key = np.c_[cell, side]
-    dist = np.linalg.norm(v - (cell + 0.5), axis=1)
-    o = np.lexsort((dist, *key.T[::-1]))
-    k = key[o]
-    first = np.r_[True, np.any(k[1:] != k[:-1], 1)]
-    return np.sort(o[first])
+    """One vertex per voxel cell and normal side (column_traces.root_vertices)."""
+    return PCT.root_vertices(v, n)
 
 
 # ---------------------------------------------------------------- tensors
@@ -86,21 +78,7 @@ def base_tensor(B):
 
 def eig(Tc, chunk=2_000_000):
     """Leading unit eigenvector (..., 3) and coherence (w3 - w2) / (w3 + w2) of a tensor field."""
-    shp = Tc.shape[1:]
-    flat = Tc.reshape(6, -1)
-    n = flat.shape[1]
-    vec = np.zeros((n, 3), np.float32)
-    coh = np.zeros(n, np.float32)
-    for a in range(0, n, chunk):
-        t = flat[:, a:a + chunk]
-        M = np.empty((t.shape[1], 3, 3))
-        M[:, 0, 0], M[:, 0, 1], M[:, 0, 2] = t[0], t[1], t[2]
-        M[:, 1, 1], M[:, 1, 2], M[:, 2, 2] = t[3], t[4], t[5]
-        M[:, 1, 0], M[:, 2, 0], M[:, 2, 1] = t[1], t[2], t[4]
-        w, V = np.linalg.eigh(M)
-        vec[a:a + chunk] = V[:, :, 2]
-        coh[a:a + chunk] = np.clip((w[:, 2] - w[:, 1]) / np.maximum(w[:, 2] + w[:, 1], 1e-12), 0, 1)
-    return vec.reshape(*shp, 3), coh.reshape(shp)
+    return S.eigen(Tc, chunk)
 
 
 def normalized(Tc):
@@ -118,10 +96,8 @@ def multiscale_tensor(B, base=None):
 
 
 def wm_direction(wm, vox):
-    """Unit gradient of the smoothed WM distance (away from the nearest WM), as onepass_lib."""
-    d_wm = ndi.distance_transform_edt(~wm, sampling=vox)
-    g = np.stack(np.gradient(ndi.gaussian_filter(d_wm, 1.0), *vox), -1)
-    return g / (np.linalg.norm(g, axis=-1, keepdims=True) + 1e-12)
+    """Unit gradient of the smoothed WM distance (away from the nearest WM)."""
+    return S.wm_direction(wm, vox)
 
 
 def perbank_tensor(B):
@@ -290,132 +266,21 @@ def laplace_tensor(B, labels, Tc=None):
 # ---------------------------------------------------------------- (i-b) the fitted field
 
 def fitted(B, Tc=None, lam=0.1, tol=1e-8):
-    """T with T = 0 on the WM voxels 6-adjacent to the cortex and grad T fitted in least squares to
-    F = c n sgn + lam g (normalized) over the 6-neighbour edges of the cortex (fit_T.solve_field's
-    system; solved here by smoothed aggregation on the normal equations). Returns T on the full
-    grid (nearest fill outside the domain) and the solver's info."""
-    from fit_T import edges, fill
-
+    """streamlines.fitted_field on the box: T (full grid) and the solver's info."""
     Tc = base_tensor(B) if Tc is None else Tc
-    ctx, wm, vox = B["ctx"], B["wm"], np.asarray(B["vox"], float)
-    n, c = eig(Tc)
-    c = np.where(ctx, c, 0.0)
-    g = wm_direction(wm, vox)
-    sgn = np.sign((n * g).sum(-1))
-    sgn[sgn == 0] = 1
-    Fv = c[..., None] * n * sgn[..., None] + lam * g
-    Fv /= np.linalg.norm(Fv, axis=-1, keepdims=True) + 1e-12
-    dom = ctx | (wm & ndi.binary_dilation(ctx))
-    fixed = dom & wm
-    idx, E = edges(dom)
-    nd = int(dom.sum())
-    free = ~fixed[dom]
-    fmap = -np.ones(nd, np.int64)
-    fmap[free] = np.arange(free.sum())
-    rows, cols, vals, rhs = [], [], [], []
-    r = 0
-    for a, i0, i1, pos in E:
-        p1 = pos.copy()
-        p1[:, a] += 1
-        f = 0.5 * (Fv[..., a][tuple(pos.T)] + Fv[..., a][tuple(p1.T)]) * vox[a]
-        rr = np.arange(r, r + len(i0))
-        for ii, s_ in ((i1, 1.0), (i0, -1.0)):
-            fr = fmap[ii]
-            ok = fr >= 0
-            rows.append(rr[ok])
-            cols.append(fr[ok])
-            vals.append(np.full(ok.sum(), s_))
-        rhs.append(f)
-        r += len(i0)
-    A = sparse.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
-                          shape=(r, int(free.sum())))
-    b = np.concatenate(rhs)
-    N = (A.T @ A + 1e-6 * sparse.identity(A.shape[1])).tocsr()
-    import pyamg
-
-    ml = pyamg.smoothed_aggregation_solver(N, symmetry="symmetric")
-    res = []
-    t = ml.solve(A.T @ b, tol=tol, accel="cg", maxiter=500, residuals=res)
-    T = np.full(dom.shape, np.nan)
-    tv = np.zeros(nd)
-    tv[free] = t
-    T[dom] = tv
-    return fill(T), dict(solver="pyamg sa+cg", iters=len(res), resid=float(res[-1] / max(res[0], 1e-30)))
+    return S.fitted_field(Tc, B["ctx"], B["wm"], B["vox"], lam, tol)
 
 
 def fitted_tensor(B, Tc=None):
     T, info = fitted(B, Tc)
-    gT = np.stack(np.gradient(T, *B["vox"]), -1)
-    u = gT / (np.linalg.norm(gT, axis=-1, keepdims=True) + 1e-12)
-    return rank1(u), T, info
+    return S.gradient_tensor(T, B["vox"]), T, info
 
 
 # ---------------------------------------------------------------- (iii) the blended start
 
-def _eig_at(Tc, x):
-    M = X._tensor_at(Tc, x)
-    w, V = np.linalg.eigh(M)
-    c = np.clip((w[:, 2] - w[:, 1]) / np.maximum(w[:, 2] + w[:, 1], 1e-12), 0, 1)
-    return V[:, :, 2], c
-
-
-def trace_blend(Tc, labels, dface, x0, d0, vox, nmax, blend_mm=0.3, step_mm=X.STEP_MM, face_mm=2.0,
-                wm_after=0.3, turn_deg=60.0, turn_mm=0.3):
-    """As crossing_lib.trace_array, with the direction w d_data + (1 - w) n_mesh (normalized),
-    w = min(1, c s / blend_mm), c the interpolated tensor's coherence and s the arc length at the
-    step's start; d_data flipped to agree with the previous direction. Midpoint (RK2) as there."""
-    x = np.asarray(x0, float).copy()
-    n = x.shape[0]
-    nm = np.asarray(d0, float) / np.linalg.norm(d0, axis=1, keepdims=True)
-    d = nm.copy()
-    vox = np.asarray(vox, float)
-    h = step_mm / vox
-    shape = np.array(labels.shape)
-    pos = np.full((n, nmax, 3), np.nan, np.float32)
-    pos[:, 0] = x
-    nsamp = np.ones(n, int)
-    out = np.full(n, X.RUNNING)
-    lag = max(1, int(round(turn_mm / step_mm)))
-    hist = np.zeros((lag + 1, n, 3))
-    hist[:] = d
-    act = np.arange(n)
-
-    def direction(xa, ref, s, nma):
-        v, c = _eig_at(Tc, xa)
-        v *= np.where((v * ref).sum(1) < 0, -1.0, 1.0)[:, None]
-        w = np.minimum(1.0, c * s / blend_mm)[:, None]
-        dd = w * v + (1 - w) * nma
-        return dd / np.maximum(np.linalg.norm(dd, axis=1, keepdims=True), 1e-12)
-
-    for i in range(1, nmax):
-        if not act.size:
-            break
-        xa, da, nma = x[act], d[act], nm[act]
-        s = (i - 1) * step_mm
-        d1 = direction(xa, da, s, nma)
-        d2 = direction(xa + 0.5 * d1 * h, d1, s + 0.5 * step_mm, nma)
-        xa = xa + d2 * h
-        x[act], d[act] = xa, d2
-        pos[act, i] = xa
-        nsamp[act] = i + 1
-        q = np.clip(np.round(xa).astype(int), 0, shape - 1)
-        lab = labels[tuple(q.T)]
-        inside = np.all((xa >= 0) & (xa <= shape - 1), 1)
-        code = np.full(act.size, X.RUNNING)
-        code[(lab == 2) & (i * step_mm > wm_after)] = X.WM
-        code[lab == 1] = X.FLUID
-        code[lab == 3] = X.MISSING
-        code[(lab > 3) | (lab < 0)] = X.OTHER
-        code[(code == X.RUNNING) & ((dface[tuple(q.T)] < face_mm) | ~inside)] = X.FACE
-        old = hist[i % (lag + 1)][act]
-        hist[i % (lag + 1)][act] = d2
-        if i > lag:
-            code[(code == X.RUNNING) & (np.abs((old * d2).sum(1)) < np.cos(np.radians(turn_deg)))] = X.TURN
-        if i == nmax - 1:
-            code[code == X.RUNNING] = X.LENGTH
-        out[act] = code
-        act = act[code == X.RUNNING]
-    return pos, nsamp, out
+def trace_blend(Tc, labels, dface, x0, d0, vox, nmax, blend_mm=0.3, **kw):
+    """streamlines.trace with the blended start."""
+    return S.trace(Tc, labels, dface, x0, d0, vox, nmax, blend_mm, **kw)
 
 
 # ---------------------------------------------------------------- fields per tracer
@@ -444,61 +309,43 @@ def fields(B, labels, which=TRACERS, verbose=False, base=None):
 def primary(name, Tc, labels, dface, x0, d0, vox, nmax, **kw):
     if name in ("blend", "fitted_blend"):
         return trace_blend(Tc, labels, dface, x0, d0, vox, nmax, **kw)
-    return X.trace_array(Tc, labels, dface, x0, d0, vox, nmax, **kw)
+    return S.trace(Tc, labels, dface, x0, d0, vox, nmax, None, **kw)
 
 
 # ---------------------------------------------------------------- the fallback and classes (column_volume.py)
 
 def orientation(B):
-    """click_evidence.orientation (copied: that module reads argv at import): the coherence-weighted
-    data normal, signed by the WM distance gradient, plus 0.1 x that gradient."""
-    import curv_lib as C
+    """The one pass's direction: the coherence-weighted data normal, signed by the WM distance
+    gradient, plus 0.1 x that gradient (column_traces.trace_columns)."""
+    nh, coh = PCT.data_normal(base_tensor(B), B["ctx"])
+    return S.oriented_normal(nh, coh, S.wm_direction(B["wm"], B["vox"]), 0.1)
 
-    vox = B["vox"]
-    nh, coh = C.tensor_normal(B)
-    d_wm = ndi.distance_transform_edt(~B["wm"], sampling=vox)
-    g = np.stack(np.gradient(ndi.gaussian_filter(d_wm, 1.0), *vox), -1)
-    gh = g / (np.linalg.norm(g, axis=-1, keepdims=True) + 1e-12)
-    sgn = np.sign((nh * gh).sum(-1))
-    sgn[sgn == 0] = 1
-    dirv = coh[..., None] * nh * sgn[..., None] + 0.1 * gh
-    return dirv / (np.linalg.norm(dirv, axis=-1, keepdims=True) + 1e-12)
+
+class _Tissue:
+    """The fields of column_traces.Tissue that one_pass reads, from a curv_lib.load dict."""
+
+    def __init__(self, B):
+        self.wm, self.ctx, self.vox = B["wm"], B["ctx"], np.asarray(B["vox"], float)
 
 
 class Pass:
-    """The equal-arrival one pass of column_volume.py, its root patches and their distances along
-    the white surface, for the fallback and the classes."""
+    """column_traces.one_pass on the box (its root patches and their distances), for the fallback
+    and the classes."""
 
     def __init__(self, B, patch=6, ratio=3.0, limit_mm=8.0):
-        from scipy.sparse.csgraph import dijkstra
-        from scipy.spatial import cKDTree
-
-        from onepass_lib import run, setup
-
-        wm, ctx = B["wm"], B["ctx"]
-        h = float(np.mean(B["vox"]))
-        self.s = s = setup(wm, ctx, patch=patch, direction=orientation(B))
-        self.f_eq = run(s, ratio=ratio)
-        seed_pos = np.stack(np.unravel_index(s.sflat, wm.shape), -1).astype(float)
-        self.tree = cKDTree(seed_pos)
-        self.seed_patch = s.patch.ravel()[s.sflat]
-        D = np.full((s.npatch, s.npatch), np.inf, np.float32)
-        for a in range(0, s.npatch, 200):
-            d = dijkstra(s.graph, indices=s.rep[a:a + 200], limit=limit_mm / h)
-            D[a:a + 200] = d[:, s.rep] * h
-        self.D = D
-        arr = self.f_eq.arrival
-        self.u = np.where(wm, 0.0, np.where(np.isfinite(arr), arr, np.nanmax(arr[np.isfinite(arr)])))
+        assert patch == PCT.PATCH and ratio == PCT.RATIO
+        op = PCT.one_pass(_Tissue(B), orientation(B), limit_mm)
+        self.op, self.s, self.f_eq, self.D, self.u = op, op.setup, op.fronts, op.D, op.u
 
     def patch_at(self, x):
-        return self.seed_patch[self.tree.query(x)[1]]
+        return self.op.patch_at(x)
 
 
 def with_fallback(Pa, B, labels, x0, pos1, ns1, out1, nmax, same_mm=5.0):
-    """column_volume.py's fallback where the primary turned or ran to the cap, and its classes.
-    Returns pos, ns, outc, tracer (0 primary, 1 fallback), cls, root_patch, end_patch."""
+    """column_traces.trace_columns' fallback where the primary turned or ran to the cap, and its
+    classes. Returns pos, ns, outc, tracer (0 primary, 1 fallback), cls, root_patch, end_patch."""
     root_patch = Pa.patch_at(x0)
-    fb = np.flatnonzero((out1 == X.TURN) | (out1 == X.LENGTH))
+    fb = np.flatnonzero((out1 == S.TURN) | (out1 == S.LENGTH))
     lab_eq = Pa.f_eq.label
 
     def far(i_paths, q):
@@ -509,7 +356,7 @@ def with_fallback(Pa, B, labels, x0, pos1, ns1, out1, nmax, same_mm=5.0):
     pos, ns = pos1, ns1.copy()
     outc = out1.copy()
     if fb.size:
-        pos2, ns2, out2 = X.ascend(Pa.u, labels, B["dface"], x0[fb], B["vox"], nmax, far)
+        pos2, ns2, out2 = S.ascend(Pa.u, labels, B["dface"], x0[fb], B["vox"], nmax, far)
         pos[fb] = pos2
         ns[fb] = ns2
         outc[fb] = out2
@@ -517,12 +364,7 @@ def with_fallback(Pa, B, labels, x0, pos1, ns1, out1, nmax, same_mm=5.0):
     tracer[fb] = 1
     endp = pos[np.arange(len(x0)), ns - 1].astype(float)
     end_patch = Pa.patch_at(endp)
-    sep = Pa.D[root_patch, end_patch]
-    cls = np.full(len(x0), FAILED, np.int8)
-    cls[outc == X.FLUID] = OPEN
-    cls[(outc == X.WM) & (sep >= same_mm)] = CROSS
-    cls[(outc == X.WM) & (sep < same_mm)] = OWN
-    cls[outc == X.CONTACT] = TOCONTACT
+    cls = PCT.classify(outc, Pa.D[root_patch, end_patch], same_mm)
     return pos, ns, outc, tracer, cls, root_patch, end_patch
 
 

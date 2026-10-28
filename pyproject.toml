@@ -8,6 +8,7 @@ dependencies = [
     "nibabel>=5.4.2",
     "numba>=0.68.0",
     "numpy>=2.5.4",
+    "pyamg>=5.3.0",
     "scikit-fmm>=2025.6.23",
     "scipy>=1.18.1",
     "thinqpbo>=0.1.5",
@@ -18,7 +19,6 @@ dev = [
   "matplotlib>=3.11.2",
   "mypy",
   "ortools>=9.15.6755",
-  "pyamg>=5.3.0",
   "pytest",
   "ruff",
   "scikit-image>=0.26.0",
@@ -46,11 +46,11 @@ exclude = ["^\\.worktrees/"]
 # unannotated too.
 untyped_calls_exclude = ["skimage", "nibabel", "numba"]
 
-# numba, llvmlite, scikit-fmm, scikit-learn and thinqpbo have no type stubs.
+# numba, llvmlite, pyamg, scikit-fmm, scikit-learn and thinqpbo have no type stubs.
 # baillarger._jit gives njit a typed signature; baillarger.surfcut._thinqpbo
 # gives thinqpbo's graph a typed protocol.
 [[tool.mypy.overrides]]
-module = ["numba", "numba.*", "llvmlite", "llvmlite.*", "skfmm", "skfmm.*",
+module = ["numba", "numba.*", "llvmlite", "llvmlite.*", "pyamg", "pyamg.*", "skfmm", "skfmm.*",
   "sklearn", "sklearn.*", "thinqpbo", "thinqpbo.*"]
 ignore_missing_imports = true
 
