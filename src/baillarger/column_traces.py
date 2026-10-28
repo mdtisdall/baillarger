@@ -63,8 +63,9 @@ index coordinates of the box; vox the voxel size (mm); lengths in mm.
    - "front": as "traverse", with the columns linked: the white mesh grown
      outward as one surface (baillarger.column_front), the moving vertices'
      directions smoothed along the mesh at MESH_SIGMA; each root's
-     trajectory is its column, and its dual area and swept volume (Bok's
-     measure) are recorded per sample (area, vol).
+     trajectory is its column, and its dual area (area, mm^2) and the
+     volume it swept per unit root area (vol, mm: Bok's measure; vol /
+     vol[end] is an equivolume relative depth) are recorded per sample.
 5. Patches (mesh_patches): geodesic Voronoi cells PATCH_MM apart on the
    white mesh, and the distances between their centres along it
    (baillarger.mesh_graph). A trace's end patch is the patch of the vertex
@@ -476,7 +477,8 @@ class ColumnTraces:
     #: the fitted field's solver info, if any
     notes: dict[str, Any]
     #: method "front": per sample, the root vertex's dual area (mm^2) and the
-    #: volume its column swept since the root (mm^3); "traverse" and "front":
+    #: volume its column swept since the root per unit root area (mm; vol /
+    #: vol[end] is an equivolume relative depth); "traverse" and "front":
     #: the sample where it began to descend T (-1 if never); None otherwise
     area: F32 | None = None
     vol: F32 | None = None
@@ -734,6 +736,10 @@ def trace_columns(
         T=T,
         notes=notes,
         area=front.area if method == "front" and front is not None else None,
-        vol=front.vol if method == "front" and front is not None else None,
+        vol=(
+            front.vol / front.area[:, :1]
+            if method == "front" and front is not None
+            else None
+        ),
         turn_at=None if front is None else front.turn_at,
     )

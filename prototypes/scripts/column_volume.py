@@ -33,7 +33,7 @@ replaces the aseg's everywhere (mesh, field, stops, classes); without it, the as
 The npz also holds tracer_name, column_method, wm_label and crest_at (crest, traverse and front:
 per column, the first sample where it meets another bank's field, T's crest; -1 if none). With
 --columns front (baillarger.column_front: the white mesh grown as one coupled surface) also area
-and vol (per sample, the root vertex's dual area, mm^2, and the volume its column swept, mm^3) and
+and vol (per sample, the root vertex's dual area, mm^2, and the volume its column swept per unit root area, mm) and
 turn_at (the sample where the column began to descend T, -1 if never).
 The two marked faces of the plan: --name M1S1 --box 378 224 448; --name V1V2_banks --box 198 58 65.
 """

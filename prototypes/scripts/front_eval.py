@@ -121,11 +121,10 @@ def front_area_vs_truth(fold, truth, R, keep):
         true = (r / r0[m]) ** p[m]
         got = R.area[m, i] / R.area[m, 0]
         vt = np.where(p[m] == 0, s, r0[m] / (p[m] + 1) * sg[m] * ((r / r0[m]) ** (p[m] + 1) - 1))
-        vg = R.vol[m, i] / R.area[m, 0]
         out[f"{s} mm"] = dict(n=int(m.sum()),
                               area_front_over_true_p10_50_90=np.percentile(got / true, [10, 50, 90]).round(3).tolist(),
                               area_total_front_over_true=round(float((R.area[m, i]).sum() / (R.area[m, 0] * true).sum()), 4),
-                              vol_total_front_over_true=round(float(R.vol[m, i].sum() / (R.area[m, 0] * vt).sum()), 4))
+                              vol_total_front_over_true=round(float((R.vol[m, i] * R.area[m, 0]).sum() / (R.area[m, 0] * vt).sum()), 4))
     return out
 
 
@@ -207,8 +206,8 @@ def sites(A):
         a0, a1 = zf["area"][k, 0], zf["area"][k, zf["ns"][k] - 1]
         L = (zf["ns"][k] - 1) * S.STEP_MM
         r["front, open columns: top area / root area p10/50/90"] = pct(a1 / a0, (10, 50, 90))
-        r["front, open columns: swept volume / (root area x length) p10/50/90"] = pct(
-            zf["vol"][k, zf["ns"][k] - 1] / (a0 * L), (10, 50, 90))
+        r["front, open columns: swept volume per root area / length p10/50/90"] = pct(
+            zf["vol"][k, zf["ns"][k] - 1] / L, (10, 50, 90))
         res[site] = r
         say(f"{site}: " + json.dumps(r))
     json.dump(res, open(f"{A.work}/front_eval_sites.json", "w"), indent=1)

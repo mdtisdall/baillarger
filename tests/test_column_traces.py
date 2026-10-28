@@ -351,7 +351,7 @@ def test_front_of_a_ball_and_a_cylinder_is_radial_with_bok_areas(
     assert abs(a1.sum() / (a0 * grow).sum() - 1) < 0.01
     assert abs(np.median(a1 / a0 / grow) - 1) < 0.03
     vol = a0 * r0 / (power + 1) * ((1 + s / r0) ** (power + 1) - 1)
-    assert abs(R.vol[ok, i].sum() / vol.sum() - 1) < 0.01
+    assert abs((R.vol[ok, i] * a0).sum() / vol.sum() - 1) < 0.01
     # radial: the angle between the column's chord and the root's radius
     radial = x0[ok] - c
     if power == 1:
@@ -365,14 +365,14 @@ def test_front_of_a_ball_and_a_cylinder_is_radial_with_bok_areas(
 
 def test_front_of_a_slab_keeps_its_area() -> None:
     """Layers parallel to a flat white surface: the front's dual areas stay
-    as they were, and the swept volume is area times length."""
+    as they were, and the swept volume per unit root area is the length."""
     R = CT.trace_columns(slab_tissue(), "fitted_blend", "front")
     assert R.area is not None and R.vol is not None and R.turn_at is not None
     x0 = R.v[R.tv]
     up = (R.nrm[R.tv, 0] > 0.9) & np.all((x0[:, 1:] > 9) & (x0[:, 1:] < 20), 1)
     i = 30
     assert np.allclose(R.area[up, i], R.area[up, 0], rtol=1e-3)
-    assert np.allclose(R.vol[up, i], R.area[up, 0] * i * S.STEP_MM, rtol=1e-3)
+    assert np.allclose(R.vol[up, i], i * S.STEP_MM, rtol=1e-3)
     assert np.all(R.turn_at[up] == -1)
 
 
