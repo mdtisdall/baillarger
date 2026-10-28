@@ -1,0 +1,5 @@
+# outputs of the prototype scripts
+*.npz
+*.pkl
+*.nii.gz
+*.png
