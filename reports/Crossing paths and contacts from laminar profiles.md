@@ -941,6 +941,63 @@ Each step stores R and its solve: free traces, seconds, number of pia changes, l
 - The colour layers wait for `edit_priority_<tag>.npz`.
 - Whether the gray regions (no subsampled trace) hide cortex that should have traces.
 
+### A handle-free white surface
+
+The white mesh is made from the aseg's WM label (41), and every piece of it must have genus 0 for all later processing (flat map, inflation, editor). The label is corrected once, on the full grid, by `baillarger.handles.remove_handles`. Each box crops the corrected label (`wm_handles.fixed_wm`). No question is asked per handle.
+
+**How it works.**
+- *Topology.* Marching tetrahedra contours on the Kuhn tetrahedralization, so the mesh's topology is that of the voxels with the 14-neighbour Kuhn adjacency, for object and background alike. The Betti numbers (b0, b1, b2) are computed on that complex. When b1 = 0, every surface piece cut out by any box has genus 0.
+- *Competing fronts.* Each component is treated on its own, with its cavities filled until the end:
+  - an object front grows from the deepest voxel, and a background front from the border;
+  - both grow by simple points only, deepest first;
+  - the fronts meet themselves at walls across each handle's bridge and across its tunnel;
+  - the smaller wall, in voxels, is given to the other front, which is a cut or a fill.
+- *Blocked walls.* An object wall and a background wall can block each other, so that no single voxel is simple for either front. Then sets are claimed whole, smallest first: a wall, two touching walls, or a cluster of walls. The test is that the front's homology stays the same (Mayer–Vietoris on the set and its front neighbours).
+- *Left over.* Object voxels that still cannot be claimed are removed as 'stranded'. Each of them, put back alone, would make a handle.
+
+**Tests** (`tests/test_handles.py`, 13, exact answers):
+- the tetrahedra and the link match the mesher, and χ(mesh) = 2·χ(voxels);
+- the Betti numbers of known solids;
+- the simple-point table against an independent link check, for all 2^14 cases;
+- a drilled 2 × 2 tunnel is filled (4 voxels);
+- a one-voxel bridge is cut (1 voxel);
+- a thick ring is cut, not filled;
+- a pinhole between two sheets is cut at the contact;
+- cavities and islands are kept;
+- random blobs end with b1 = 0 and genus-0 meshes, and any box crop has genus 0;
+- on finer blobs, which made blocked walls in 40 of the first 75 seeds before the set claims, every stranded voxel would make a handle if put back.
+
+**Hemisphere** (`prototypes/scripts/wm_handles.py`, 4 min, 19 GB peak):
+- WM label: 31.6 M voxels; (b0, b1, b2) goes from (1, 243, 31) to (1, 0, 31).
+- 101 cuts remove 3,334 voxels and 118 fills add 1,998. None are stranded.
+- Most moves are tiny. The median cut is 2 voxels and the median fill is 1; 49 cuts and 69 fills are one voxel.
+- The largest move is a cut of 2,047 voxels (8.4 mm³), around ITK-SNAP voxel (230, 92, 651) of the full grid. It spreads over 5 × 18 × 20 mm, where a blocked cluster was claimed whole. It is outside both boxes. **Worth a look in ITK-SNAP** (overlay `wm_handles_overlay.nii.gz`: 1 cut, 2 fill).
+
+**The boxes** (`prototypes/scripts/wm_handles_boxes.py`; mesh as `column_volume.white_mesh`):
+
+| | M1S1 | V1V2 banks |
+|---|---|---|
+| voxels removed / added in the box | 0 / 0 | 198 / 0 |
+| pieces before → after | 3 → 3 | 5 → 6 |
+| largest piece, genus before → after | 0 → 0 | 2 → 0 |
+| every piece genus 0 after | yes | yes |
+| white surface area, mm² | 2128.6 → 2128.6 | 1863.8 → 1866.4 |
+
+V1V2's three cuts, in ITK-SNAP voxels (1-based, box):
+- **(51, 136, 45), 1 voxel.** This is handle 1, the 0.09 mm pinhole at (49, 134, 43).
+- **(124, 120, 15), 71 voxels** (0.29 mm³, a cut across the bridge). This is handle 2, the 5.8 mm loop at (123, 119, 14), so the cut takes the possible white-matter bridge apart.
+- **(116, 139, 38), 126 voxels in the box** (144 in all), 0.32 mm from the box face. The handle closes outside the box. In the box, this cut separates a 38.7 mm² piece from the largest piece, which is the sixth piece. The cut runs along a thin strand of white matter rather than straight across it. The wall where the fronts meet need not be the smallest cut.
+
+**Views.** In `scratch/topofix` (not kept):
+- `wm_handles_<site>.png`: slices through the changes in each box;
+- `wm_handles_<site>_overlay.nii.gz` and `wm_handles_<site>_wm_fixed.nii.gz` on the box grid.
+
+**Not done yet.** `column_volume_<site>.npz` and everything built from it still use the uncorrected label. A rebuild needs the user's go-ahead.
+
+**Open.**
+- The 2,047-voxel cut.
+- Whether a cut should be the smallest cross-section rather than the meeting wall, as in V1V2's third cut.
+
 ### Across both faces
 
 - **The principle survives at V1V2 and fails as estimated at M1S1** (principle, roles, estimators): the same estimators with the same settings place a V1 contact within about half a voxel and miss an M1/S1 contact by 3–5 voxels, while placing open-cortex joins at both within a third of a voxel.
