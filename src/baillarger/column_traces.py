@@ -75,6 +75,15 @@ index coordinates of the box; vox the voxel size (mm); lengths in mm.
      trajectory is its column, and its dual area (area, mm^2) and the
      volume it swept per unit root area (vol, mm: Bok's measure; vol /
      vol[end] is an equivolume relative depth) are recorded per sample.
+   - "front-equivolume": no field: the white mesh grown along its own
+     smoothed normals at equivolume speed, A0 / A (column_front.
+     grow_equivolume), so the fronts are the equivolume layers and the
+     columns bend to stay normal to them; tau records each sample's
+     equivolume coordinate (mm, the front's time), and area and vol as
+     "front" (vol / tau falls below 1 where the speed cap binds). Stops as
+     "normal". crest_at is where the column meets another bank's front: its
+     first sample in a voxel that a column from SAME_MM or more along the
+     white surface reached first, at a smaller tau (meet_at).
 5. Patches (mesh_patches): geodesic Voronoi cells PATCH_MM apart on the
    white mesh, and the distances between their centres along it
    (baillarger.mesh_graph). A trace's end patch is the patch of the vertex
@@ -120,7 +129,7 @@ TRACERS = ("current", "fitted", "fitted_blend")
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
 CLASS = ("open", "crossing", "own bank", "to the contact", "failed")
 #: How a column ends where its trace cannot go on (module docstring, step 4).
-METHODS = ("crest", "traverse", "normal", "one-pass", "front")
+METHODS = ("crest", "traverse", "normal", "one-pass", "front", "front-equivolume")
 #: The fitted field's band into the WM for the crest method (mm), and the
 #: window of its optional bend rule (mm).
 WM_BAND_MM, BEND_MM = 0.5, 0.3
@@ -501,16 +510,19 @@ class ColumnTraces:
     #: per sample, the volume the column has swept per unit area of its root
     #: (mm), NaN past the end; a relative equivolume depth is vol / vol at
     #: the end. Method "normal": from the root's principal curvatures, A(s) =
-    #: (1 + k1 s)(1 + k2 s); "front": measured, the flux of the root vertex's
-    #: dual area vector over the steps over its dual area at the root. None
-    #: otherwise
+    #: (1 + k1 s)(1 + k2 s); "front" and "front-equivolume": measured, the
+    #: flux of the root vertex's dual area vector over the steps over its
+    #: dual area at the root. None otherwise
     vol: F32 | None = None
-    #: method "front": per sample, the root vertex's dual area (mm^2); None
-    #: otherwise
+    #: methods "front" and "front-equivolume": per sample, the root vertex's
+    #: dual area (mm^2); None otherwise
     area: F32 | None = None
     #: methods "traverse" and "front": the sample where the column began to
     #: descend T (-1 if never); None otherwise
     turn_at: I64 | None = None
+    #: method "front-equivolume": per sample, the equivolume coordinate (mm,
+    #: the front's time; column_front.grow_equivolume); None otherwise
+    tau: F32 | None = None
 
 
 def level_set_concavity(
@@ -588,6 +600,31 @@ def equivolume(
     out[:, 1:] = np.cumsum(0.5 * (A[:, 1:] + A[:, :-1]) * S.STEP_MM, axis=1)
     out[np.arange(NMAX)[None, :] >= ns[:, None]] = np.nan
     return out.astype(np.float32)
+
+
+def meet_at(
+    pos: F32, ns: I64, tau: F32, root_patch: I64, D: F32, same_mm: float = SAME_MM
+) -> I64:
+    """Per column, its first sample in a voxel (rounded position) that a
+    column whose root patch is same_mm or more from its own along the white
+    surface reached first (smallest tau): where its bank's front meets
+    another's. -1 if none."""
+    n, m = tau.shape
+    col, i = np.nonzero(np.arange(m)[None, :] < ns[:, None])
+    q = np.round(pos[col, i]).astype(np.int64)
+    q -= q.min(0)
+    e = q.max(0) + 1
+    key = (q[:, 0] * e[1] + q[:, 1]) * e[2] + q[:, 2]
+    o = np.lexsort((tau[col, i], key))
+    first = np.r_[True, key[o][1:] != key[o][:-1]]
+    owner = np.empty(len(key), np.int64)
+    grp = np.cumsum(first) - 1
+    owner[o] = col[o][first][grp]
+    far = D[root_patch[col], root_patch[owner]] >= same_mm
+    out = np.full(n, m, np.int64)
+    np.minimum.at(out, col[far], i[far])
+    out[out == m] = -1
+    return out
 
 
 def end_at_bend(pos: F32, ns: I64, out: I64, lag: int) -> I64:
@@ -728,7 +765,23 @@ def trace_columns(
     notes: dict[str, Any] = {}
     vol: F32 | None = None
     front: CF.Front | None = None
-    if method == "normal":
+    if method == "front-equivolume":
+        del base, nh
+        front = CF.grow_equivolume(t.labels, t.dface, v, f, tv, t.vox, NMAX)
+        assert front.tau is not None
+        pos, ns1, out1 = front.pos, front.ns, front.out
+        end1 = pos[np.arange(len(tv)), ns1 - 1].copy()
+        ns, outc = ns1.copy(), out1.copy()
+        crest_at = meet_at(pos, ns, front.tau, root_patch, P.D)
+        vol = front.vol / front.area[:, :1]
+        fallback = np.zeros(len(tv), np.int8)
+        k = np.arange(len(tv))
+        endp = pos[k, ns - 1].astype(float)
+        last = endp - pos[k, np.maximum(ns - 2, 0)]
+        last = np.where((ns > 1)[:, None], last, -nrm[tv])
+        end_patch = P.of_vertex[G.crossing_vertex(v, nrm, endp, last, t.vox)]
+        cls = classify(outc, P.D[root_patch, end_patch])
+    elif method == "normal":
         del base, nh
         pos, ns1, out1 = S.ray(t.labels, t.dface, x0, nrm[tv], t.vox, NMAX)
         end1 = pos[np.arange(len(tv)), ns1 - 1].copy()
@@ -829,6 +882,7 @@ def trace_columns(
         T=T,
         notes=notes,
         vol=vol,
-        area=front.area if method == "front" and front is not None else None,
+        area=front.area if method in ("front", "front-equivolume") and front else None,
         turn_at=None if front is None else front.turn_at,
+        tau=None if front is None else front.tau,
     )

@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from baillarger import column_front as CF
 from baillarger import column_traces as CT
 from baillarger import streamlines as S
 from baillarger import white
@@ -568,3 +569,131 @@ def test_front_leaves_columns_open_beside_a_narrow_open_sulcus() -> None:
     end = R.pos[i, R.ns[i] - 1].astype(float)
     assert np.all(np.round(end[:, 0]) == 21)
     assert np.all((R.turn_at[i] == -1) | (R.turn_at[i] >= R.ns[i] - 3))
+
+
+# ---------------------------------------------------------------- equivolume front
+
+EQ = "front-equivolume"
+
+
+@pytest.mark.parametrize("axes, power", [((0, 1, 2), 2), ((0, 1), 1)])
+def test_equivolume_front_of_a_ball_and_a_cylinder_follows_equal_volume(
+    axes: tuple[int, ...], power: int
+) -> None:
+    """Equivolume front columns from a WM ball (cylinder) of radius r0 stay
+    radial, and the front sweeps equal volume per unit root area: at radius
+    r its coordinate is tau = (r^3 - r0^3) / (3 r0^2) (tau = (r^2 - r0^2) /
+    (2 r0)). r0 is the label surface's radius (the mean over the roots): the
+    mesh's sub-voxel bumps (sd about 0.17 voxel in a root's radius) are
+    carried out as an offset, so the column through r at a given tau does not
+    know its own root's bump. The median column, at 0.4 to 1.6 mm of arc,
+    within 2 % (a polyhedron's offset, as the field front's 1-3 %). The
+    front is convex, so the speed stays under the cap and the flux agrees,
+    per column: vol = tau."""
+    shape = (44, 44, 44) if power == 2 else (44, 44, 24)
+    t, c, dist = shell_tissue(axes, shape)
+    R = CT.trace_columns(t, "fitted_blend", EQ)
+    assert R.area is not None and R.vol is not None and R.tau is not None
+    x0 = R.v[R.tv]
+    keep = np.ones(len(R.tv), bool) if power == 2 else np.abs(x0[:, 2] - 12) < 5
+    assert np.all(R.outc[keep] == S.FLUID)
+    r0 = dist(x0[keep]).mean() * VOX
+    for i in (10, 20, 30, 40):  # the fluid is at 1.76 mm
+        ok = keep & (R.ns > i)
+        assert ok.mean() > 0.9 * keep.mean()
+        r = np.median(dist(R.pos[ok, i].astype(float))) * VOX
+        exact = (r ** (power + 1) - r0 ** (power + 1)) / ((power + 1) * r0**power)
+        assert abs(np.median(R.tau[ok, i]) / exact - 1) < 0.02
+        assert np.allclose(R.vol[ok, i], R.tau[ok, i], rtol=0.02)
+    radial = x0[ok] - c
+    if power == 1:
+        radial[:, 2] = 0
+    radial /= np.linalg.norm(radial, axis=1, keepdims=True)
+    chord = R.pos[ok, i] - x0[ok]
+    chord /= np.linalg.norm(chord, axis=1, keepdims=True)
+    ang = np.degrees(np.arccos(np.clip((radial * chord).sum(1), -1, 1)))
+    assert np.median(ang) < 5 and ang.max() < 10
+
+
+def test_equivolume_front_of_a_slab_is_straight_at_unit_speed() -> None:
+    """A flat white surface: the columns are straight, the area stays as it
+    was, and the equivolume coordinate is the arc length."""
+    R = CT.trace_columns(slab_tissue(), "fitted_blend", EQ)
+    assert R.area is not None and R.tau is not None
+    x0 = R.v[R.tv]
+    up = (R.nrm[R.tv, 0] > 0.9) & np.all((x0[:, 1:] > 9) & (x0[:, 1:] < 20), 1)
+    assert np.all(R.outc[up] == S.FLUID)
+    i = 30
+    assert np.allclose(R.tau[up, i], i * S.STEP_MM, rtol=1e-3)
+    assert np.allclose(R.area[up, i], R.area[up, 0], rtol=1e-3)
+    assert np.max(np.abs(R.pos[up, i, 1:] - x0[up, 1:])) < 0.01
+
+
+def test_equivolume_front_in_a_tube_of_cortex_speeds_up_as_r0_over_r() -> None:
+    """The inside of a WM tube (radius r0 = 15 voxels; cortex down to 5
+    voxels, fluid within): the concave model of a fundus, where the front
+    shrinks and speeds up. Columns stay radial and inward, and at radius r
+    the coordinate is tau = (r0^2 - r^2) / (2 r0) (the area falls as r / r0,
+    so the speed rises as r0 / r, to 3 at the fluid: under the cap). As the
+    ball's: the median column within 2 %, the flux per column."""
+    shape = (44, 44, 24)
+    c = np.array([21.7, 22.2])
+    x, y = np.indices(shape)[:2].astype(float)
+    rr = np.hypot(x - c[0], y - c[1])
+    rim = np.full(shape, 2)
+    rim[rr < 15] = 3
+    rim[rr < 5] = 1
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", EQ)
+    assert R.tau is not None and R.vol is not None and R.area is not None
+    x0 = R.v[R.tv]
+    r0v = np.hypot(x0[:, 0] - c[0], x0[:, 1] - c[1])
+    keep = (np.abs(x0[:, 2] - 12) < 5) & (r0v < 16)
+    assert keep.sum() > 50 and np.all(R.outc[keep] == S.FLUID)
+    r0 = r0v[keep].mean() * VOX
+    for i in (10, 20, 30, 35):  # the fluid is at 1.6 mm
+        ok = keep & (R.ns > i)
+        assert ok.mean() > 0.9 * keep.mean()
+        p = R.pos[ok, i].astype(float)
+        r = np.median(np.hypot(p[:, 0] - c[0], p[:, 1] - c[1])) * VOX
+        exact = (r0**2 - r**2) / (2 * r0)
+        assert abs(np.median(R.tau[ok, i]) / exact - 1) < 0.02
+        assert np.allclose(R.vol[ok, i], R.tau[ok, i], rtol=0.02)
+    chord = p - x0[ok]
+    radial = np.c_[c - x0[ok, :2], np.zeros(ok.sum())]
+    radial /= np.linalg.norm(radial, axis=1, keepdims=True)
+    chord /= np.linalg.norm(chord, axis=1, keepdims=True)
+    ang = np.degrees(np.arccos(np.clip((radial * chord).sum(1), -1, 1)))
+    assert np.median(ang) < 5 and ang.max() < 10
+
+
+def test_equivolume_front_caps_its_speed_at_a_focus() -> None:
+    """A tube of cortex down to 3 voxels: past 3.75 voxels the exact speed
+    (r0 / r) passes the cap, SPEED_CAP = 4 times the root's. No column
+    moves more than one voxel per step_mm of tau (tau rises at least
+    step_mm / 4 per step_mm of arc, the stop's partial sample left out);
+    the swept volume per root area falls below tau (the median column
+    lags; at an edge or a fold a column goes straight and its flux is no
+    longer its own column's); and the columns still reach the fluid, at
+    least 99 % (the ring shrinks fivefold and tangles near the core: the
+    few that miss it go on straight, as through a fused fundus)."""
+    shape = (44, 44, 24)
+    c = np.array([21.7, 22.2])
+    x, y = np.indices(shape)[:2].astype(float)
+    rr = np.hypot(x - c[0], y - c[1])
+    rim = np.full(shape, 2)
+    rim[rr < 15] = 3
+    rim[rr < 3] = 1
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", EQ)
+    assert R.tau is not None and R.vol is not None and R.area is not None
+    x0 = R.v[R.tv]
+    r0v = np.hypot(x0[:, 0] - c[0], x0[:, 1] - c[1])
+    keep = (np.abs(x0[:, 2] - 12) < 5) & (r0v < 16)
+    k = np.flatnonzero(keep)
+    assert np.mean(R.outc[k] == S.FLUID) >= 0.99
+    tau = R.tau[k].astype(float)
+    dtau = np.diff(tau, axis=1)
+    whole = np.arange(dtau.shape[1])[None, :] < (R.ns[k] - 2)[:, None]
+    assert np.min(dtau[whole]) >= S.STEP_MM / CF.SPEED_CAP * (1 - 1e-3)
+    last = R.ns[k] - 1
+    lag = R.vol[k, last] / tau[np.arange(len(k)), last]
+    assert np.median(lag) < 1.0

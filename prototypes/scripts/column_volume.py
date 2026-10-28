@@ -31,7 +31,7 @@ with "points_full0": [[i, j, k], ...] in 0-based full-grid voxels.
 Writes <work>/column_volume_<name>.npz and .json, <figures>/column_volume_<name>_*.png.
 Usage: column_volume.py <figures dir> <work dir> --name NAME (--patch P | --box I J K [--size N ...])
                         [--points FILE] [--tracer {current,fitted,fitted_blend}]
-                        [--columns {crest,traverse,normal,one-pass,front}] [--wm-changes FILE] [--mesh FILE]
+                        [--columns {crest,traverse,normal,one-pass,front,front-equivolume}] [--wm-changes FILE] [--mesh FILE]
                         [--label-changes FILE [--reviewed-only]] [--figs-only]
 --wm-changes: the handle-free WM label (baillarger.white.wm_changes, saved with WMChanges.save)
 replaces the aseg's everywhere (mesh, field, stops, classes); without it, the aseg's.
@@ -45,6 +45,10 @@ column, the first sample where it meets another bank's field, T's crest; -1 if n
 it passes another bank's front); with --columns normal or front, vol (per sample, the volume swept
 per unit root area, mm: the equivolume coordinate); with front, also area (the root vertex's dual
 area, mm^2); with traverse or front, turn_at (the sample where the column began to descend T).
+With --columns front-equivolume (no field: the white mesh grown along its own normals at
+equivolume speed, column_front.grow_equivolume) vol and area as front, and tau (per sample, the
+front's time: the equivolume coordinate, mm, whose levels are the layers; vol, the measured flux,
+falls below it where the speed cap binds); crest_at is where the column meets another bank's front.
 The two marked faces of the plan: --name M1S1 --box 378 224 448; --name V1V2_banks --box 198 58 65.
 """
 
@@ -215,6 +219,7 @@ def main():
         **({} if R.vol is None else dict(vol=R.vol)),
         **({} if R.area is None else dict(area=R.area)),
         **({} if R.turn_at is None else dict(turn_at=R.turn_at)),
+        **({} if R.tau is None else dict(tau=R.tau)),
         **{"H_" + k: H[k] for k in HOR})
     json.dump(dict(turn=turn), open(f"{WORK}/column_volume_{SITE}_turn.json", "w"))
     say("saved")
