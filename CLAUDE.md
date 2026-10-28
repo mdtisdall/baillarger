@@ -29,6 +29,15 @@ this project:
   worktree outside the project directory, inside another worktree, or with a
   different tool. The hook blocks `git worktree add` and `git worktree move`
   to any other path.
+- Scratch: `scratch/` in the main checkout is git-ignored, and each new
+  worktree gets a link to it (`.worktree-links`), so every worktree sees the
+  same files. Use it for outputs that a later run, possibly in another
+  worktree, reads: for example, give a prototype script
+  `scratch/<task>/figures scratch/<task>` as its output directories. Use one
+  subdirectory for each task, so that parallel runs do not overwrite each
+  other's files. No script or test names `scratch/`: it is only ever a path
+  that you pass. Nothing in it is kept; results to keep go to a tracked path
+  through a PR.
 - Dependency sync, one time in each new worktree, before sub-agents start:
   `nix develop --command uv sync`
 - GitHub CLI: `gh ...`. In Claude Code's Bash commands, the

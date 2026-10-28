@@ -210,3 +210,5 @@ About 30–35 minutes per box in all, on one core.
 - `scripts/`: the pipeline above, its libraries (`crossing_lib.py`, `flatten_lib.py`, `joint_levels.py`, `volume_views.py`, …) and their tests (`test_*.py`; run with `nix develop --command uv run pytest -q prototypes/scripts/test_joint_levels.py`, for example). The many other scripts are earlier experiments behind the reports' findings; `reports/Seismic flattening for cortical layers.md` (*Code, data and figures*) says which produced what.
 - `data/`: crops for ITK-SNAP, overlays, and the marked points (`M1S1_points_full0.json`, `V1V2_banks_points_full0.json`, and the earlier per-site point files).
 - `figures/`: the figures written by the steps and cited in the reports.
+
+The scripts take their directories as arguments. In a worktree, `prototypes/scripts` and `prototypes/figures` hold only the tracked files, not earlier outputs. To pass outputs from one run to a later one, possibly in another worktree, give the shared `scratch/<task>` (at the top of the checkout, linked into every worktree; see `CLAUDE.md`) as the output directories, and the same path to the later run.

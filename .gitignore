@@ -16,3 +16,5 @@ build/
 *.egg-info/
 # Example data: large, not in git (see DATA.md)
 /data
+# Shared scratch for outputs passed between worktrees (see CLAUDE.md)
+/scratch
