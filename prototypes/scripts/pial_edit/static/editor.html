@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pial editor</title>
+<style>
+  :root { --bg: #111; --panel: #181818; --fg: #ddd; --muted: #8a8984; --line: #333;
+    --white: #1baf7a; --pial: #eb6834; --top: #2a78d6; --contact: #d64bd6; --free: #f2c230; --bad: #e34948; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
+  #wrap { display: grid; grid-template-rows: auto 1fr auto; grid-template-columns: 1fr 280px; height: 100%; }
+  header { grid-column: 1 / 3; display: flex; gap: 10px; align-items: center; padding: 6px 12px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+  header label, .muted { color: var(--muted); }
+  button, select, input { background: #222; color: var(--fg); border: 1px solid #444; border-radius: 4px; padding: 2px 8px; font: inherit; }
+  button.primary { border-color: var(--pial); }
+  button.primary.dirty { background: #3a2a1a; }
+  button:disabled { opacity: 0.4; }
+  #canvasbox { min-height: 0; position: relative; }
+  #gl { width: 100%; height: 100%; display: block; }
+  #over { position: absolute; left: 0; top: 0; pointer-events: none; }
+  #over.drag { pointer-events: auto; cursor: crosshair; }
+  button[aria-pressed="true"] { background: #1a2a3a; border-color: #2ac3d6; }
+  .k-drag { color: #2ac3d6; }
+  aside { border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 8px; }
+  aside h2 { font-size: 13px; margin: 0 0 6px; }
+  #points { list-style: none; margin: 0; padding: 0; }
+  #points li.held { background: #3a1f3a; }
+  #points li { display: grid; grid-template-columns: 1fr auto auto; gap: 4px; align-items: center; padding: 3px 0; border-bottom: 1px solid #222; }
+  .k-top { color: var(--top); } .k-contact { color: var(--contact); } .k-free { color: var(--free); } .bad { color: var(--bad); }
+  pre { grid-column: 1 / 3; margin: 0; padding: 6px 12px; max-height: 6em; overflow: auto; color: var(--muted); border-top: 1px solid var(--line); }
+  #help { font-size: 12px; margin-top: 10px; }
+  kbd { border: 1px solid #555; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <strong>Pial editor</strong> <span id="patch" class="muted"></span>
+    <button id="b-remesh" class="primary" title="m">Remesh</button>
+    <button id="b-drag" aria-pressed="false" title="d">Drag vertices</button>
+    <label title="Where a drag would cross another pial sheet, push that sheet ahead of it (the white surface still stops a drag). Shift on release does the opposite for one drag."><input id="push" type="checkbox"> Push</label>
+    <label title="v: the pial vertices on the slice (the ones you can drag)"><input id="verts" type="checkbox" checked> Vertices</label>
+    <button id="b-undo" title="u">Undo</button><button id="b-redo" title="r">Redo</button>
+    <label>Zoom <select id="zoom"><option>1</option><option>2</option><option selected>4</option><option>8</option></select></label>
+    <span title="The crosshair in world mm. Edit a box and press Return or Tab to move the crosshair there.">Crosshair mm
+      x <input id="cx" type="number" step="0.1" style="width:5.5em">
+      y <input id="cy" type="number" step="0.1" style="width:5.5em">
+      z <input id="cz" type="number" step="0.1" style="width:5.5em"></span>
+    <label>Range mm <input id="range" type="number" step="0.25" min="0.5" style="width:4.5em"></label>
+    <label>Touch mm <input id="touch" type="number" step="0.05" min="0.01" style="width:4.5em" title="sheets closer than this (not crossing) are shown as touching"></label>
+    <label>Base <select id="base"></select></label>
+    <button id="b-save" title="s">Save</button><button id="b-load">Load saved</button>
+    <span id="status" class="muted"></span>
+  </header>
+  <div id="canvasbox"><canvas id="gl"></canvas><canvas id="over"></canvas></div>
+  <aside>
+    <h2>Points</h2>
+    <ul id="points"></ul>
+    <div id="help" class="muted">
+      Click to move the crosshair, then <kbd>t</kbd> top here, <kbd>k</kbd> contact here,
+      <kbd>f</kbd> free point here. <kbd>d</kbd> drag mode: press on a pial line, drag within
+      the slice, release to place and remesh. <kbd>m</kbd> remesh, <kbd>u</kbd> undo, <kbd>r</kbd> redo,
+      <kbd>s</kbd> save, <kbd>z</kbd> centre the zoom on the crosshair, <kbd>x</kbd> next crossing,
+      <kbd>v</kbd> vertex dots (the vertices on the slice: in drag mode, press on one; the one a press would pick is ringed).<br>
+      <span style="color:#e34948">Thick red</span>: triangles that cross another pial triangle or the white surface;
+      <span style="color:#9b8cff">thick violet</span>: touching, within "Touch mm" of a facing sheet or of the white surface.
+      A drag that would make new ones stops short of them.<br>
+      Lines: <span style="color:var(--white)">white surface</span>, <span style="color:var(--pial)">pial surface</span>.
+      Points: <span class="k-top">top</span>, <span class="k-contact">contact</span>, <span class="k-free">free</span>,
+      <span class="k-drag">drag</span> (a line from the vertex's base position; small squares: the points of another sheet it pushes);
+      hollow until the next remesh; <span class="bad">red</span>: fell back to a free point.
+    </div>
+  </aside>
+  <pre id="log"></pre>
+</div>
+<script type="module">
+import { Niivue, NVMesh } from "https://cdn.jsdelivr.net/npm/@niivue/niivue@0.69.0/+esm";
+
+const $ = (id) => document.getElementById(id);
+window.editLog = [];
+function log(msg) { $("log").textContent = msg + "\n" + $("log").textContent; }
+
+// Niivue's own hotkeys for clip planes (c) and view modes (v) are moved out of the way
+const nv = new Niivue({ backColor: [0, 0, 0, 1], isColorbar: false, crosshairColor: [1, 0.3, 0.3, 1],
+  clipPlaneHotKey: "F19", viewModeHotKey: "F20" });
+window.nv = nv;
+await nv.attachTo("gl");
+await nv.loadVolumes([{ url: "/volume.nii.gz", name: "echo2_detrended.nii.gz" }]);
+
+async function getMesh(path, rgba) {
+  const buf = await (await fetch(path)).arrayBuffer();
+  const [nvert, ntri] = new Uint32Array(buf, 0, 2);
+  const pts = new Float32Array(buf, 8, nvert * 3).slice();
+  const tris = new Uint32Array(buf, 8 + nvert * 12, ntri * 3).slice();
+  const m = new NVMesh(pts, tris, path, new Uint8Array(rgba), 1.0, true, nv.gl);
+  nv.addMesh(m);
+  return m;
+}
+const white = await getMesh("/mesh/white", [27, 175, 122, 255]);
+const pial = await getMesh("/mesh/pial", [235, 104, 52, 255]);
+nv.setSliceType(nv.sliceTypeMultiplanar);
+nv.setMeshThicknessOn2D(0);
+// vertices shown on a slice (and draggable): within half the median pial edge of its plane
+const SLAB = (() => {
+  const P = pial.pts, T = pial.tris, e = [];
+  for (let k = 0; k < T.length && e.length < 30000; k += 3 * 7) {
+    const a = T[k], b = T[k + 1];
+    e.push(Math.hypot(P[3 * a] - P[3 * b], P[3 * a + 1] - P[3 * b + 1], P[3 * a + 2] - P[3 * b + 2]));
+  }
+  e.sort((x, y) => x - y);
+  return 0.5 * e[e.length >> 1];
+})();
+// outward vertex normals (area-weighted, at the current positions), to tell facing sheets apart
+const faceSign = new Int8Array(await (await fetch("/mesh/pial_sign")).arrayBuffer());
+const vertFaces = (() => {  // the triangles on each vertex (CSR)
+  const T = pial.tris, n = pial.pts.length / 3, start = new Uint32Array(n + 1);
+  for (let k = 0; k < T.length; k++) start[T[k] + 1]++;
+  for (let i = 0; i < n; i++) start[i + 1] += start[i];
+  const fill = start.slice(0, n), list = new Uint32Array(T.length);
+  for (let k = 0; k < T.length; k++) list[fill[T[k]]++] = (k / 3) | 0;
+  return { start, list };
+})();
+function vertexNormal(i) {
+  const P = pial.pts, T = pial.tris, n = [0, 0, 0];
+  for (let k = vertFaces.start[i]; k < vertFaces.start[i + 1]; k++) {
+    const f = vertFaces.list[k], a = 3 * T[3 * f], b = 3 * T[3 * f + 1], c = 3 * T[3 * f + 2], s = faceSign[f];
+    const u = [P[b] - P[a], P[b + 1] - P[a + 1], P[b + 2] - P[a + 2]], w = [P[c] - P[a], P[c + 1] - P[a + 1], P[c + 2] - P[a + 2]];
+    n[0] += s * (u[1] * w[2] - u[2] * w[1]); n[1] += s * (u[2] * w[0] - u[0] * w[2]); n[2] += s * (u[0] * w[1] - u[1] * w[0]);
+  }
+  const l = Math.hypot(...n) || 1;
+  return [n[0] / l, n[1] / l, n[2] / l];
+}
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const FACING = -0.5;  // as the server's touching test: normals facing each other
+let tileDots = [];   // per 2D tile: {L, T, W, H, idx, x, y} of the vertices drawn as dots
+let hoverVertex = -1;
+let state = await (await fetch("/state")).json();
+
+// ---- zoom about the crosshair (tile centre = (c0 - pan) / zoom; c0 the centre at zoom 1)
+nv.setPan2Dxyzmm([0, 0, 0, 1]); nv.drawScene();
+// tiles by orientation (the list also holds the 3D render tile, in a layout-dependent place)
+const tile = (k) => nv.screenSlices.find((s) => s.axCorSag === k);
+const axial = tile(0), coronal = tile(1);
+const c0 = [axial.leftTopMM[0] + axial.fovMM[0] / 2, axial.leftTopMM[1] + axial.fovMM[1] / 2,
+            coronal.leftTopMM[1] + coronal.fovMM[1] / 2];
+function zoomHere() {
+  const z = +$("zoom").value, X = nv.frac2mm(nv.scene.crosshairPos);
+  nv.setPan2Dxyzmm([c0[0] - z * X[0], c0[1] - z * X[1], c0[2] - z * X[2], z]);
+  drawSections();
+}
+
+// ---- exact plane sections of the meshes, and the points, on an overlay canvas
+const over = $("over"), octx = over.getContext("2d");
+const PLANE = [2, 1, 0], SX = [0, 0, 1], SY = [1, 2, 2];
+function section(m, axis, c) {
+  const p = m.pts, t = m.tris, out = [];
+  for (let f = 0; f < t.length; f += 3) {
+    const a = t[f], b = t[f + 1], d = t[f + 2];
+    const da = p[3 * a + axis] - c, db = p[3 * b + axis] - c, dd = p[3 * d + axis] - c;
+    if ((da > 0 && db > 0 && dd > 0) || (da <= 0 && db <= 0 && dd <= 0)) continue;
+    const q = [];
+    for (const [i, j, di, dj] of [[a, b, da, db], [b, d, db, dd], [d, a, dd, da]]) {
+      if ((di > 0) !== (dj > 0)) {
+        const s = di / (di - dj);
+        q.push(p[3 * i] + s * (p[3 * j] - p[3 * i]), p[3 * i + 1] + s * (p[3 * j + 1] - p[3 * i + 1]),
+               p[3 * i + 2] + s * (p[3 * j + 2] - p[3 * i + 2]));
+      }
+    }
+    if (q.length === 6) out.push(...q);
+  }
+  return out;
+}
+const KIND_COL = { top: "#2a78d6", contact: "#d64bd6", free: "#f2c230", drag: "#2ac3d6" };
+function drawSections() {
+  const t0 = performance.now();
+  nv.drawScene(); // refreshes screenSlices
+  const gc = nv.gl.canvas;
+  over.width = gc.width; over.height = gc.height;
+  over.style.width = gc.clientWidth + "px"; over.style.height = gc.clientHeight + "px";
+  octx.clearRect(0, 0, over.width, over.height);
+  tileDots = [];
+  const cross = nv.frac2mm(nv.scene.crosshairPos);
+  ["cx", "cy", "cz"].forEach((id, a) => { if (document.activeElement !== $(id)) $(id).value = cross[a].toFixed(2); });
+  for (const s of nv.screenSlices) {
+    if (s.axCorSag > 2) continue;
+    const [L, T, W, H] = s.leftTopWidthHeight, ax = PLANE[s.axCorSag], sx = SX[s.axCorSag], sy = SY[s.axCorSag];
+    const X = (v) => L + (v - s.leftTopMM[0]) / s.fovMM[0] * W, Y = (v) => T + H - (v - s.leftTopMM[1]) / s.fovMM[1] * H;
+    octx.save(); octx.beginPath(); octx.rect(L, T, W, H); octx.clip();
+    for (const [mesh, col] of [[white, "#1baf7a"], [pial, "#eb6834"]]) {
+      const seg = section(mesh, ax, cross[ax]);
+      octx.strokeStyle = col; octx.lineWidth = devicePixelRatio * 1.2; octx.beginPath();
+      for (let i = 0; i < seg.length; i += 6) {
+        octx.moveTo(X(seg[i + sx]), Y(seg[i + sy])); octx.lineTo(X(seg[i + 3 + sx]), Y(seg[i + 3 + sy]));
+      }
+      octx.stroke();
+    }
+    for (const [tris, col] of [[touchTris, "#9b8cff"], [crossTris, "#e34948"]]) {
+      if (!tris.length) continue;
+      const seg = section({ pts: pial.pts, tris }, ax, cross[ax]);
+      octx.strokeStyle = col; octx.lineWidth = devicePixelRatio * 3; octx.beginPath();
+      for (let i = 0; i < seg.length; i += 6) {
+        octx.moveTo(X(seg[i + sx]), Y(seg[i + sy])); octx.lineTo(X(seg[i + 3 + sx]), Y(seg[i + 3 + sy]));
+      }
+      octx.stroke();
+    }
+    for (const p of state.points) {
+      if (p.kind === "drag" && Math.abs(p.from_mm[ax] - cross[ax]) <= 0.25) {
+        octx.strokeStyle = KIND_COL.drag; octx.lineWidth = devicePixelRatio; octx.setLineDash([4, 3]);
+        octx.beginPath(); octx.moveTo(X(p.from_mm[sx]), Y(p.from_mm[sy])); octx.lineTo(X(p.mm[sx]), Y(p.mm[sy])); octx.stroke();
+        octx.setLineDash([]);
+      }
+      if (p.kind === "drag" && p.pushes && p.sides !== 0) {
+        octx.strokeStyle = KIND_COL.drag; octx.lineWidth = devicePixelRatio;
+        const w = 3 * devicePixelRatio;
+        for (const u of p.pushes) {
+          if (Math.abs(u.mm[ax] - cross[ax]) > 0.25) continue;
+          octx.strokeRect(X(u.mm[sx]) - w, Y(u.mm[sy]) - w, 2 * w, 2 * w);
+        }
+      }
+      if (Math.abs(p.mm[ax] - cross[ax]) > 0.25) continue;
+      const superseded = p.kind === "drag" && p.sides === 0;
+      const col = p.fallback ? "#e34948" : superseded ? "#8a8984" : KIND_COL[p.kind], done = p.miss_mm !== undefined && !state.dirty;
+      octx.strokeStyle = col; octx.fillStyle = col; octx.lineWidth = 2 * devicePixelRatio;
+      octx.beginPath(); octx.arc(X(p.mm[sx]), Y(p.mm[sy]), 4 * devicePixelRatio, 0, 2 * Math.PI);
+      done ? octx.fill() : octx.stroke();
+    }
+    if ($("verts").checked || dragOn()) {
+      const P = pial.pts, c = cross[ax], idx = [], xs = [], ys = [];
+      for (let i = 0; i < P.length / 3; i++) {
+        if (Math.abs(P[3 * i + ax] - c) > SLAB && !(drag && drag.vertex === i)) continue;
+        const x = X(P[3 * i + sx]), y = Y(P[3 * i + sy]);
+        if (x < L || x > L + W || y < T || y > T + H) continue;
+        idx.push(i); xs.push(x); ys.push(y);
+      }
+      tileDots.push({ L, T, W, H, ax, idx, xs, ys });
+      octx.fillStyle = "#f5b38a";
+      const r = 1.6 * devicePixelRatio;
+      octx.beginPath();
+      for (let k = 0; k < idx.length; k++) { octx.moveTo(xs[k] + r, ys[k]); octx.arc(xs[k], ys[k], r, 0, 2 * Math.PI); }
+      octx.fill();
+      for (const v of [hoverVertex, drag ? drag.vertex : -1]) {
+        const k = idx.indexOf(v); if (k < 0) continue;
+        octx.strokeStyle = "#ffffff"; octx.lineWidth = 1.5 * devicePixelRatio;
+        octx.beginPath(); octx.arc(xs[k], ys[k], 5 * devicePixelRatio, 0, 2 * Math.PI); octx.stroke();
+      }
+    }
+    octx.restore();
+  }
+  return performance.now() - t0;
+}
+window.drawSections = drawSections;
+nv.onLocationChange = () => drawSections();
+new ResizeObserver(() => setTimeout(drawSections, 50)).observe(nv.gl.canvas);
+
+// ---- talking to the server
+let busy = false, heldBy = new Set();  // the contact points holding the last refused drag
+let crossings = null, crossTris = new Uint32Array(0), touchTris = new Uint32Array(0), clusterIdx = -1;
+async function call(path, body) {
+  if (busy) return null;
+  busy = true;
+  try {
+    const t0 = performance.now();
+    if (path === "/remesh" || path === "/load") $("status").textContent = "remeshing…";
+    const r = await fetch(path, { method: "POST", body: JSON.stringify(body ?? {}) });
+    if (r.headers.get("Content-Type") === "application/json") {
+      const j = await r.json();
+      if (!r.ok) { $("status").textContent = j.error; log("error: " + j.error); return null; }
+      state = j; heldBy = new Set(); renderState(); drawSections();
+      return j;
+    }
+    const buf = await r.arrayBuffer();
+    const t1 = performance.now();
+    const hl = new Uint32Array(buf, 0, 1)[0];
+    const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hl)));
+    state = head.state; crossings = head.crossings ?? null; window.lastHead = head;
+    let off;
+    if (head.sparse) {  // only the vertices that moved
+      const n = new Uint32Array(buf, 4 + hl, 1)[0], vi = new Uint32Array(buf, 8 + hl, n);
+      const vp = new Float32Array(buf, 8 + hl + 4 * n, 3 * n), Pp = pial.pts;
+      for (let k = 0; k < n; k++) { Pp[3 * vi[k]] = vp[3 * k]; Pp[3 * vi[k] + 1] = vp[3 * k + 1]; Pp[3 * vi[k] + 2] = vp[3 * k + 2]; }
+      off = 8 + hl + 16 * n;
+    } else {
+      pial.pts.set(new Float32Array(buf, 4 + hl, pial.pts.length));
+      off = 4 + hl + 4 * pial.pts.length;
+    }
+    const nx = new Uint32Array(buf, off, 1)[0];
+    const ci = new Uint32Array(buf, off + 4, nx), T = pial.tris;
+    crossTris = new Uint32Array(3 * nx);
+    for (let k = 0; k < nx; k++) { crossTris[3 * k] = T[3 * ci[k]]; crossTris[3 * k + 1] = T[3 * ci[k] + 1]; crossTris[3 * k + 2] = T[3 * ci[k] + 2]; }
+    const off2 = off + 4 + 4 * nx, nt = new Uint32Array(buf, off2, 1)[0];
+    const ti = new Uint32Array(buf, off2 + 4, nt);
+    touchTris = new Uint32Array(3 * nt);
+    for (let k = 0; k < nt; k++) { touchTris[3 * k] = T[3 * ti[k]]; touchTris[3 * k + 1] = T[3 * ti[k] + 1]; touchTris[3 * k + 2] = T[3 * ti[k] + 2]; }
+    clusterIdx = -1;
+    pial.updateMesh(nv.gl);
+    drawSections(); nv.gl.finish();
+    const t2 = performance.now();
+    renderState();
+    const rec = { op: path, ...state.timings, round_trip_ms: t1 - t0, draw_ms: t2 - t1, total_ms: t2 - t0 };
+    window.editLog.push(rec);
+    const fb = state.points.filter((p) => p.fallback).length;
+    let msg = `remeshed: ${state.points.length} points (${fb} fell back to free), ${(rec.total_ms / 1000).toFixed(1)} s`;
+    const where = (b) => b ? ` (first at ${b.mm.map((x) => x.toFixed(2)).join(", ")} mm, ${b.away_mm} mm from the vertex, against the ${b.against})` : "";
+    const pushed = head.drag?.pushes ? `, pushing the other sheet at ${head.drag.pushes} points` : "";
+    if (head.drag) msg = head.drag.fraction < 1
+      ? `drag ${head.drag.push_failed ? "(pushing could not clear the crossings, so not pushed) " : ""}pulled back to ${(100 * head.drag.fraction).toFixed(0)} % of its path${pushed}: further, it would make triangles cross in a new place${where(head.drag.blocked)}` +
+        (head.drag.held_by.length
+          ? `; held by contact point${head.drag.held_by.length > 1 ? "s" : ""} ` +
+            head.drag.held_by.map((h) => `#${h.i} (${h.mm_away} mm away)`).join(", ") +
+            ` (highlighted in the list): delete ${head.drag.held_by.length > 1 ? "them" : "it"} to pull these sheets apart`
+          : "")
+      : `drag placed${pushed}`;
+    if (head.drag) heldBy = new Set(head.drag.held_by.map((h) => h.i));
+    if (crossings && crossings.faces) {
+      const other = crossings.n_clusters - crossings.at_contact;
+      msg += ` — crossings: ${crossings.faces} triangles in ${crossings.n_clusters} places` +
+        (crossings.at_contact ? ` (${crossings.at_contact} at contact points, expected)` : "") + (other ? "; x jumps to the next" : "");
+    } else msg += " — no crossings";
+    if (head.drag && head.drag.touching_pending) msg += "; touching updating…";
+    else if (crossings && crossings.touching_faces)
+      msg += `; touching (< ${crossings.touch_mm} mm): ${crossings.touching_faces} triangles in ${crossings.touching_places} places` +
+        (crossings.touching_at_contact ? ` (${crossings.touching_at_contact} at contact points)` : "");
+    if (head.touching_done) msg = (window.lastDragMsg ?? "") + (crossings.touching_faces
+      ? `; touching (< ${crossings.touch_mm} mm): ${crossings.touching_faces} triangles in ${crossings.touching_places} places`
+      : "; no touching");
+    if (head.drag) window.lastDragMsg = msg.replace("; touching updating…", "");
+    $("status").textContent = msg;
+    const parts = Object.entries(state.timings).filter(([k]) => k.endsWith("_ms") && k !== "total_ms")
+      .map(([k, v]) => `${k.replace("_ms", "")} ${v}`).join(", ");
+    log(`${path}: ${rec.total_ms.toFixed(0)} ms (server ${state.timings.total_ms} ms: ${parts}; ` +
+        `transfer ${(rec.round_trip_ms - state.timings.total_ms).toFixed(0)}, draw ${rec.draw_ms.toFixed(0)}` +
+        `${head.sparse ? `; ${head.drag?.moved ?? "?"} vertices moved` : ""})`);
+    return rec;
+  } finally { busy = false; }
+}
+window.call = call;
+const crossMM = () => Array.from(nv.frac2mm(nv.scene.crosshairPos)).slice(0, 3);
+window.addAt = (kind, mm) => call("/add", { kind, mm: mm ?? crossMM() });
+
+function renderState() {
+  $("patch").textContent = state.edits_path.split("/").pop();
+  $("b-undo").disabled = !state.can_undo; $("b-redo").disabled = !state.can_redo;
+  $("b-remesh").classList.toggle("dirty", state.dirty);
+  if (document.activeElement !== $("range")) $("range").value = state.range_mm;
+  if (document.activeElement !== $("touch")) $("touch").value = state.touch_mm;
+  $("base").innerHTML = state.bases.map((b) => `<option ${b === state.base ? "selected" : ""}>${b}</option>`).join("");
+  $("points").innerHTML = state.points.map((p) => {
+    const moved = p.kind === "drag" ? Math.hypot(p.mm[0] - p.from_mm[0], p.mm[1] - p.from_mm[1], p.mm[2] - p.from_mm[2]) : 0;
+    const res = p.miss_mm === undefined ? "not remeshed yet"
+      : p.kind === "drag" ? (p.sides === 0 ? "superseded by a later drag of this vertex"
+        : `moved ${moved.toFixed(2)} mm` + (p.pulled_back ? ` (pulled back to ${(100 * p.fraction).toFixed(0)} %: further would cross` +
+          (p.held_by?.length ? `; held by ${p.held_by.map((h) => "#" + h.i).join(", ")})` : ")") : "") +
+          (p.pushes?.length ? `, pushing ${p.pushes.length} points of the other sheet` : ""))
+      : `miss ${p.miss_mm.map((m) => m.toFixed(2)).join(" / ")} mm${p.kind === "contact" ? `, ${p.sides} side(s)` : ""}`;
+    return `<li${heldBy.has(p.i) ? ' class="held" title="holds the last refused drag"' : ""}><span class="k-${p.kind}${p.fallback ? " bad" : ""}">#${p.i} ${p.kind}${p.fallback ? " → free" : ""}` +
+      `<br><span class="muted">${res}</span></span>` +
+      `<button data-go="${p.i}" title="Move the crosshair here">go</button><button data-del="${p.i}" title="Delete">×</button></li>`;
+  }).join("");
+}
+$("points").onclick = (ev) => {
+  const go = ev.target.dataset.go, del = ev.target.dataset.del;
+  if (go !== undefined) { nv.scene.crosshairPos = nv.mm2frac(state.points[+go].mm); zoomHere(); }
+  if (del !== undefined) call("/delete", { i: +del });
+};
+renderState();
+
+// ---- controls
+$("b-remesh").onclick = () => call("/remesh");
+$("b-undo").onclick = () => call("/undo");
+$("b-redo").onclick = () => call("/redo");
+$("b-save").onclick = async () => { if (await call("/save")) $("status").textContent = "saved to " + state.edits_path; };
+$("b-load").onclick = () => call("/load");
+$("range").onchange = (e) => call("/range", { mm: +e.target.value });
+$("touch").onchange = (e) => call("/touch", { mm: +e.target.value });
+$("base").onchange = (e) => call("/base", { name: e.target.value });
+$("zoom").onchange = zoomHere;
+for (const id of ["cx", "cy", "cz"]) $(id).onchange = () => {  // move the crosshair there, then zoom about it
+  const mm = ["cx", "cy", "cz"].map((b) => parseFloat($(b).value));
+  if (!mm.every(Number.isFinite)) { $("status").textContent = "crosshair: x, y and z must all be numbers"; return; }
+  nv.scene.crosshairPos = nv.mm2frac(mm); zoomHere();
+};
+$("verts").onchange = () => drawSections();
+// the editor's keys, taken in the capture phase and stopped there: Niivue's own keys on the
+// canvas (k moves the crosshair a voxel along j, m cycles its drag mode) never see them
+const EDITOR_KEYS = new Set(["t", "k", "f", "m", "u", "r", "s", "z", "d", "v", "x"]);
+window.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  const k = e.key.toLowerCase();
+  if ((e.metaKey || e.ctrlKey) && k === "z") { call(e.shiftKey ? "/redo" : "/undo"); e.preventDefault(); e.stopPropagation(); return; }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (EDITOR_KEYS.has(k)) e.stopPropagation();
+  if (k === "t") window.addAt("top");
+  else if (k === "k") window.addAt("contact");
+  else if (k === "f") window.addAt("free");
+  else if (k === "m") call("/remesh");
+  else if (k === "u") call("/undo");
+  else if (k === "r") call("/redo");
+  else if (k === "s") $("b-save").click();
+  else if (k === "z") zoomHere();
+  else if (k === "d") dragBtn.click();
+  else if (k === "v") { $("verts").checked = !$("verts").checked; drawSections(); }
+  else if (k === "x" && crossings && crossings.clusters.length) {
+    const cl = crossings.clusters.filter((c) => !c.at_contact);
+    const list = cl.length ? cl : crossings.clusters;
+    clusterIdx = (clusterIdx + 1) % list.length;
+    nv.scene.crosshairPos = nv.mm2frac(list[clusterIdx].mm); zoomHere();
+    $("status").textContent = `crossing ${clusterIdx + 1} of ${list.length}: ${list[clusterIdx].faces} triangles` +
+      (list[clusterIdx].at_contact ? " (at a contact point)" : "");
+  }
+}, true);
+
+// ---- dragging a pial vertex within the slice: a local preview, then a drag point and a remesh
+const dragBtn = $("b-drag");
+function setDrag(on) { dragBtn.setAttribute("aria-pressed", String(on)); over.classList.toggle("drag", on); }
+dragBtn.onclick = () => setDrag(dragBtn.getAttribute("aria-pressed") !== "true");
+function eventMM(ev) {
+  const x = ev.offsetX * devicePixelRatio, y = ev.offsetY * devicePixelRatio;
+  for (const s of nv.screenSlices) {
+    if (s.axCorSag > 2) continue;
+    const [L, T, W, H] = s.leftTopWidthHeight;
+    if (x < L || x > L + W || y < T || y > T + H) continue;
+    const ax = PLANE[s.axCorSag], sx = SX[s.axCorSag], sy = SY[s.axCorSag];
+    const mm = crossMM();
+    mm[sx] = s.leftTopMM[0] + (x - L) / W * s.fovMM[0];
+    mm[sy] = s.leftTopMM[1] + (T + H - y) / H * s.fovMM[1];
+    return { mm, ax };
+  }
+  return null;
+}
+let drag = null, frame = 0;
+function dragOn() { return document.getElementById("b-drag").getAttribute("aria-pressed") === "true"; }
+function dotsAt(ev, maxpx = 10) {
+  // the vertices drawn within maxpx screen pixels of the pointer, in the tile under it, nearest first
+  const x = ev.offsetX * devicePixelRatio, y = ev.offsetY * devicePixelRatio, m = (maxpx * devicePixelRatio) ** 2;
+  for (const t of tileDots) {
+    if (x < t.L || x > t.L + t.W || y < t.T || y > t.T + t.H) continue;
+    const near = [];
+    for (let k = 0; k < t.idx.length; k++) {
+      const d = (t.xs[k] - x) ** 2 + (t.ys[k] - y) ** 2;
+      if (d < m) near.push([d, t.idx[k]]);
+    }
+    return near.sort((a, b) => a[0] - b[0]).map((a) => a[1]);
+  }
+  return [];
+}
+const dotAt = (ev) => dotsAt(ev)[0] ?? -1;
+over.addEventListener("mousedown", (ev) => {
+  if (busy) return;
+  const hit = eventMM(ev); if (!hit) return;
+  const near = dotsAt(ev), v = near[0] ?? -1;
+  if (v < 0) { $("status").textContent = "no vertex dot within 10 pixels: press on a dot of the pial line"; return; }
+  // where two sheets touch, their dots overlap: the nearest dot of the facing sheet is the
+  // other candidate, and the first movement picks the sheet it pulls away from the other
+  const n0 = vertexNormal(v), alt = near.find((u) => dot3(vertexNormal(u), n0) < FACING) ?? -1;
+  const P = pial.pts;
+  drag = { vertex: v, ax: hit.ax, start: [P[3 * v], P[3 * v + 1], P[3 * v + 2]], mm: null, alt,
+           press: [ev.offsetX, ev.offsetY], pressMM: hit.mm };
+  $("status").textContent = alt < 0 ? `dragging vertex ${v}`
+    : `two facing sheets under the pointer (vertices ${v} and ${alt}): the drag moves the one it pulls away from the other`;
+});
+over.addEventListener("mousemove", (ev) => {
+  if (!drag) {  // hover: ring the vertex a press would pick
+    const v = dotAt(ev);
+    if (v !== hoverVertex) { hoverVertex = v; if (!frame) frame = requestAnimationFrame(() => { frame = 0; drawSections(); }); }
+    return;
+  }
+  const hit = eventMM(ev); if (!hit) return;
+  if (drag.alt >= 0) {  // two sheets: wait for 4 pixels of movement, then take the sheet whose outward normal opposes it
+    if (Math.hypot(ev.offsetX - drag.press[0], ev.offsetY - drag.press[1]) < 4) return;
+    const d = [0, 1, 2].map((a) => (a === drag.ax ? 0 : hit.mm[a] - drag.pressMM[a]));
+    if (dot3(vertexNormal(drag.alt), d) < dot3(vertexNormal(drag.vertex), d)) {
+      const u = drag.alt, P = pial.pts;
+      drag.vertex = u; drag.start = [P[3 * u], P[3 * u + 1], P[3 * u + 2]];
+    }
+    $("status").textContent = `pulling vertex ${drag.vertex} away from the other sheet`;
+    drag.alt = -1;
+  }
+  const mm = hit.mm; mm[drag.ax] = drag.start[drag.ax];  // within the slice: across it the vertex stays
+  drag.mm = mm;
+  const P = pial.pts; P[3 * drag.vertex] = mm[0]; P[3 * drag.vertex + 1] = mm[1]; P[3 * drag.vertex + 2] = mm[2];
+  if (!frame) frame = requestAnimationFrame(() => { frame = 0; drawSections(); });
+});
+window.addEventListener("mouseup", async (ev) => {
+  if (!drag) return;
+  const d = drag; drag = null;
+  const P = pial.pts; P[3 * d.vertex] = d.start[0]; P[3 * d.vertex + 1] = d.start[1]; P[3 * d.vertex + 2] = d.start[2];
+  if (!d.mm || Math.hypot(d.mm[0] - d.start[0], d.mm[1] - d.start[1], d.mm[2] - d.start[2]) < 0.02) {
+    drawSections(); $("status").textContent = ""; return;
+  }
+  await dragTo(d.vertex, d.mm, $("push").checked !== ev.shiftKey);
+});
+// a drag answers with positions and crossings; touching follows in a second request
+async function dragTo(vertex, mm, push = false) {
+  const r = await call("/drag", { vertex, mm, push });
+  if (r && window.lastHead?.drag?.touching_pending) await call("/touching");
+  return r;
+}
+window.dragTo = dragTo;
+
+zoomHere();
+window.editorReady = true;
+log("ready");
+</script>
+</body>
+</html>

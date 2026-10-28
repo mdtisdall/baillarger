@@ -1,0 +1,60 @@
+{
+ "site": "PCC_SPL",
+ "crop": "PCC_SPL_echo2_detrended.nii.gz",
+ "numbering": "ITK-SNAP voxel coordinates of this crop, as the Cursor Inspector shows them (1-based); keep each between 39 and 137",
+ "pieces": {
+  "1": {
+   "about": "largest face, near-equal open thickness (2.54 / 2.69 mm); start at the centre; it spans about i 41-92, j 39-92, k 51-111",
+   "centre": [67, 62, 85],
+   "contact_points": [
+    [70, 80, 85],
+    [73, 80, 85],
+    [79, 79, 85],
+    [63, 81, 85],
+    [58, 80, 85],
+    [58, 79, 91],
+    [62, 79, 91],
+    [66, 79, 91],
+    [73, 78, 91],
+    [76, 77, 91],
+    [69, 77, 95],
+    [65, 78, 95],
+    [59, 78, 95],
+    [55, 78, 95],
+    [68, 65, 109],
+    [68, 69, 105],
+    [68, 72, 102],
+    [68, 75, 99],
+    [68, 78, 92],
+    [68, 81, 85],
+    [68, 81, 77],
+    [68, 82, 71]
+   ]
+  },
+  "2": {
+   "about": "unequal (2.81 / 2.31 mm); spans about i 87-137, j 101-132, k 50-72",
+   "centre": [119, 117, 63],
+   "contact_points": [
+    [130, 113, 44],
+    [136, 116, 44],
+    [154, 122, 44],
+    [159, 124, 44],
+    [167, 125, 42],
+    [161, 123, 42],
+    [156, 121, 42],
+    [152, 120, 42],
+    [147, 118, 42],
+    [142, 117, 42],
+    [136, 114, 42],
+    [131, 111, 42],
+    [131, 111, 42]
+   ]
+  },
+  "3": {
+   "about": "unequal the other way (2.19 / 3.02 mm); spans about i 72-134, j 97-124, k 119-131",
+   "centre": [95, 111, 126],
+   "contact_points": []
+  }
+ },
+ "notes": "piece 1: the lower part of the sheet (j about 39-70, k about 70-90) is not a contact; the user saw nothing there"
+}

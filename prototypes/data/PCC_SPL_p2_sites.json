@@ -1,0 +1,89 @@
+{
+ "name": "PCC_SPL_p2",
+ "full_lo": [
+  504,
+  141,
+  307
+ ],
+ "full_hi": [
+  645,
+  282,
+  448
+ ],
+ "shape": [
+  141,
+  141,
+  141
+ ],
+ "numbering": "ITK-SNAP voxel numbering of this crop (0-based crop index + 1); full grid = crop index + full_lo",
+ "pieces": [
+  {
+   "id": 1,
+   "voxels": 3894,
+   "centre_itk": [
+    88,
+    59,
+    59
+   ],
+   "extent_mm": [
+    9.5,
+    9.8,
+    5.6
+   ],
+   "conflicts": 0,
+   "facing_pairs": 3476,
+   "sides": [
+    {
+     "wall_voxels": 5485,
+     "open_thickness_mm": 2.8052163593173702,
+     "open_thickness_iqr": 0.5774442818384848,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.22647136097372877,
+     "mean_curvature": 0.07415566263321598
+    },
+    {
+     "wall_voxels": 4725,
+     "open_thickness_mm": 2.5718963319972157,
+     "open_thickness_iqr": 0.40892567826577597,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.4375894705369228,
+     "mean_curvature": 0.25087599229708024
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "voxels": 897,
+   "centre_itk": [
+    41,
+    69,
+    91
+   ],
+   "extent_mm": [
+    11.1,
+    6.7,
+    3.7
+   ],
+   "conflicts": 0,
+   "facing_pairs": 505,
+   "sides": [
+    {
+     "wall_voxels": 5880,
+     "open_thickness_mm": 2.7986958458642515,
+     "open_thickness_iqr": 0.6166124749949797,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.3864713573974501,
+     "mean_curvature": -0.1106512291562736
+    },
+    {
+     "wall_voxels": 4032,
+     "open_thickness_mm": 2.358895013156472,
+     "open_thickness_iqr": 0.5932269539928989,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.32055750489234924,
+     "mean_curvature": -0.053632624812722324
+    }
+   ]
+  }
+ ]
+}

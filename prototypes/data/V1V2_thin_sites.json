@@ -1,0 +1,55 @@
+{
+ "name": "V1V2_thin",
+ "full_lo": [
+  225,
+  16,
+  197
+ ],
+ "full_hi": [
+  366,
+  157,
+  338
+ ],
+ "shape": [
+  141,
+  141,
+  141
+ ],
+ "numbering": "ITK-SNAP voxel numbering of this crop (0-based crop index + 1); full grid = crop index + full_lo",
+ "pieces": [
+  {
+   "id": 1,
+   "voxels": 9688,
+   "centre_itk": [
+    46,
+    100,
+    86
+   ],
+   "extent_mm": [
+    12.3,
+    13.9,
+    16.2
+   ],
+   "conflicts": 0,
+   "facing_pairs": 126,
+   "sides": [
+    {
+     "wall_voxels": 22360,
+     "open_thickness_mm": 2.4615899590599284,
+     "open_thickness_iqr": 0.6071233798565676,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.38694713791579466,
+     "mean_curvature": 0.0007553726114637761
+    },
+    {
+     "wall_voxels": 1,
+     "open_thickness_mm": 2.5450451002941246,
+     "open_thickness_iqr": 0.2691741184657781,
+     "beyond_last_top_mm": 0.0,
+     "fused_roots_to_nearest_top_median_mm": 0.0,
+     "mean_curvature": 0.09180539674958693
+    }
+   ]
+  }
+ ]
+}

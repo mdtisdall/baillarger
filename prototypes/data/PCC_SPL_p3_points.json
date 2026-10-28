@@ -1,0 +1,10 @@
+{
+ "site": "PCC_SPL_p3",
+ "crop": "PCC_SPL_p3_echo2_detrended.nii.gz",
+ "numbering": "ITK-SNAP voxel coordinates of this crop, as the Cursor Inspector shows them (1-based); keep each between 39 and 103",
+ "about": "PCC_SPL piece 3, re-centred: unequal (open 2.19 / 3.01 mm); centre (71, 72, 71); small, about 10 x 4 x 2 mm, so 10-15 points are enough",
+ "contact_points": [
+   []
+ ],
+ "notes": ""
+}
