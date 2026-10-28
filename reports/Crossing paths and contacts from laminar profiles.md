@@ -905,8 +905,8 @@ At a contact, the facing trace (through the crosshair trace's tie, or the neares
 
 Each step stores R and its solve: free traces, seconds, number of pia changes, largest change.
 
-**Tests** (exact answers, or a stated tolerance where only the limit is exact). 25 pass:
-- `test_flat_map.py` (9):
+**Tests** (exact answers, or a stated tolerance where only the limit is exact). The flat map, inflation, section and streamline code now lives in `baillarger.viewer` (*A viewer in the package*, below), and its tests moved with it to `tests/`:
+- `tests/test_viewer_flatmap.py` (9):
   - a plane maps isometrically up to a similarity (1e-9);
   - a polygonal cylinder strip unrolls exactly;
   - a hemisphere cap keeps angles: the area-weighted mean of s1/s2 − 1 is under 0.025 at 4000 sphere points and halves when the spacing halves;
@@ -914,10 +914,10 @@ Each step stores R and its solve: free traces, seconds, number of pia changes, l
   - a genus-1 surface with a hole is cut to genus 0, then to a disk;
   - a long tube needs the disk cut (free-boundary LSCM folds on it);
   - packing and scale.
-- `test_inflate.py` (5): a uniform plane grid does not move; the boundary stays pinned; convergence to the discrete harmonic membrane; the tangent transfer is the face map; the sulcal depth.
-- `test_pia_sections.py` (5): a plane gives the row at Euclidean distances; a cylinder gives the ring at arc lengths; a U fold gives the U at arc lengths; the directions; the points.
-- `test_pia_editor.py` (1): replay equals the live result under other `rand()` states.
-- `test_streamline_view.py` (5):
+- `tests/test_viewer_inflation.py` (5): a uniform plane grid does not move; the boundary stays pinned; convergence to the discrete harmonic membrane; the tangent transfer is the face map; the sulcal depth.
+- `tests/test_viewer_sections.py` (5): a plane gives the row at Euclidean distances; a cylinder gives the ring at arc lengths; a U fold gives the U at arc lengths; the directions; the points.
+- `prototypes/scripts/test_pia_editor.py` (1): replay equals the live result under other `rand()` states.
+- `tests/test_viewer_streamlines.py` (6, with the TCK round trip):
   - on a plane, *from* is the geodesic disk and *to* the traces ending within r;
   - on a U fold, the facing sheet's traces are *to*, never *from*;
   - the mesh crop keeps exactly the faces in the box;
@@ -952,8 +952,57 @@ Each step stores R and its solve: free traces, seconds, number of pia changes, l
 
 **Open.**
 - At strong inflation the carried vertical can be far from v. It was 56° at the V1V2 handle and 10–31° elsewhere in the checks. The sections stay orthogonal on the true surface, but their directions on screen are then only approximate.
-- The colour layers wait for `edit_priority_<tag>.npz`.
 - Whether the gray regions (no subsampled trace) hide cortex that should have traces.
+
+### A viewer in the package
+
+`baillarger.viewer` shows a site's column data in the browser, for looking only: nothing in it edits or re-solves the pia. Which correction steps are useful, and how to do them, waits until the data can be seen well. The prototype editor (`prototypes/scripts/pia_editor.py`, above) still runs and imports the same code from the package.
+
+**How to use it.** From the repository root, for example:
+
+    nix develop --command scripts/memguard 8 uv run python -m baillarger.viewer prototypes/scripts/column_volume_M1S1.npz --cache scratch/viewer --joint prototypes/scripts/joint_M1S1_s0.16_r3.npz --pia prototypes/scripts/pia_M1S1.npz --priority prototypes/scripts/edit_priority_M1S1_s0.16_r3.npz --port 8791
+
+Then open http://127.0.0.1:8791/ (127.0.0.1 only). Only the column volume is required:
+- without `--joint`, every trace is shown, with no levels;
+- without `--priority`, there are no priority layers;
+- `--echo` gives echo 2 of the full grid (default: the data directory).
+
+The flat map and the inflation are computed on the first start (41 s at M1S1) and cached in `--cache`, keyed by a hash of the mesh. A rebuilt column volume gets new ones.
+
+**Panes and windows.** Each window shows the panes named in its address: `?panes=volume,surface,map,sections` (the default), or any subset. *New window* opens another one. Every window gets every crosshair move and layer change from the server as it happens (Server-Sent Events from `/events`), so the panes can be spread over several windows, browsers or screens. A window opened later starts at the current crosshair.
+- *volume* (NiiVue 0.69, world mm):
+  - echo 2 of the box in three orthogonal views and 3D, with the white surface and the GM boundary (translucent) where they cut each slice;
+  - the traces from and to the crosshair, coloured by class (*to* paler), with the pia on them as small spheres, and your points;
+  - optionally every 4th shown trace.
+
+  A click on a slice moves the crosshair to the nearest root within 1 mm, or to the point alone.
+- *surface*: the white surface, true or inflated, coloured by the layer. A click gives sections along the screen's axes.
+- *map*: the flat overview. A click gives sections along the map's axes.
+- *sections*: the depth sections along the traces, as in the editor, without the edits.
+
+The volume pane names the tracer and the WM label that made the column volume (`tracer_name`, `wm_label`). Files made before these were saved say "not saved".
+
+**Why both NiiVue and our own WebGL.** NiiVue does the volume views, meshes, tracks and spheres with little code. It reads TCK tracks and GIfTI meshes that the server writes on the fly. Clicking a mesh in its 3D tile did not move the crosshair in 0.69 (left or right click), so the surface pane stays our own WebGL view. That view already picks a vertex and gives the screen axes that the sections need.
+
+**Tests** (exact answers):
+- `tests/test_viewer_streamlines.py` (6) and the three moved test files above.
+- `tests/test_viewer_data.py` (6), on a synthetic site (a plane of roots, straight traces, a cortex slab, a full grid whose values are their own index):
+  - the site reads its tracer and WM label;
+  - the flat map and the inflation are cached by mesh, not recomputed for the same mesh, and recomputed for another;
+  - world mm is the box's crop of the echo affine, and `locate` finds a root within 1 mm and nothing beyond;
+  - the volume is exactly the box of the full grid;
+  - sections and streamlines without a joint result; a point's depth along its trace;
+  - two pages share state through the server: a POST from one page arrives on another's event stream, tracks come back as TCK, and a path outside `static/` is refused.
+
+**Checked in the browser (M1S1).**
+- All four panes loaded with no console errors (volume pane 3.5 s).
+- A click on the inflated surface moved the sections, the flat map's crosshair and the NiiVue slices to trace 19920, with 130 traces from it.
+- A second window (`?panes=volume`) opened at the same voxel. A click on the first window's flat map moved the second window's crosshair to the same voxel (86, 104, 66).
+- The traces at the crosshair reload with each move (172 from; then 155 from, 2 to).
+
+**Open.**
+- Placing new points from the volume pane: NiiVue has drawing tools, not yet wired to a points file.
+- The camera is not shared between windows. Each 3D view keeps its own.
 
 ### A handle-free white surface
 
