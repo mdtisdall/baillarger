@@ -77,23 +77,29 @@ the voxel size (mm). Everything is 3D.
    three voxels into the fluid opens from the fluid inward. The rest (cells
    of hidden channels that reach no fluid, and cells whose relabel would
    open a cavity, a tunnel or a split, as a channel between two banks does)
-   are proposed: the review queue. The review can overturn any of them.
+   are proposed: the review queue, the cells worth a look first. The
+   review can overturn any of them.
 
 The change file (LabelChanges): full-grid voxels, their new rim label
 (baillarger.data: 1 outside for fluid, 3 cortex for a brush that gives
 cortex back), the component of each (-1 a brush edit), each component's
-status (proposed, accepted, rejected) and its descriptors. apply applies the
-accepted components and the brush edits (and, on request, the unreviewed
-proposals) to a box's rim labels, never to a WM voxel.
+status (proposed, accepted, rejected) and its descriptors. The default is
+to trust the detector: apply applies its best guess, every cell that is not
+rejected (accepted and proposed) and the brush edits, to a box's rim
+labels, never to a WM voxel; with reviewed_only, only the accepted cells
+and the brush edits. Corrections go into the change file (the review:
+with_status, with_brush), not into the labels.
 
 Command line:
 
     python -m baillarger.pial_labels propose --out DIR --name NAME --lo X Y Z
         --hi X Y Z [--wm-changes FILE] [--columns column_volume_<name>.npz]
 
-writes pial_labels_<NAME>.npz (the change file, every review cell
-accepted, proposed or rejected by step 7), .json (summary and the ranked components) and
-_overlay.nii.gz (box grid; overlay's codes).
+writes, in DIR: pial_labels_<NAME>.npz (the change file, every review cell
+accepted, proposed or rejected by step 7); .json (summary and the ranked
+cells); _labels.nii.gz (the box's rim labels with the WM changes and the
+best guess applied: 0 other, 1 outside, 2 WM, 3 cortex); _overlay.nii.gz
+(box grid; overlay's codes).
 """
 
 import argparse
@@ -485,22 +491,25 @@ class LabelChanges:
             betti_after=(b1[0], b1[1], b1[2]),
         )
 
-    def applied(self, proposed: bool = False) -> Bool:
-        """Which entries apply: accepted components' voxels and brush edits
-        (and proposed components' voxels, with proposed)."""
+    def applied(self, reviewed_only: bool = False) -> Bool:
+        """Which entries apply: the cells that are not rejected (accepted
+        and proposed; with reviewed_only, accepted only) and brush edits."""
         c = np.maximum(self.component, 0)
         st = np.where(self.component >= 0, self.status[c], ACCEPTED)
-        ok: Bool = (st == ACCEPTED) | (proposed & (st == PROPOSED))
+        ok: Bool = (st == ACCEPTED) | ((not reviewed_only) & (st == PROPOSED))
         return ok
 
     def apply(
-        self, rim: npt.NDArray[np.int16], lo: npt.ArrayLike, proposed: bool = False
+        self,
+        rim: npt.NDArray[np.int16],
+        lo: npt.ArrayLike,
+        reviewed_only: bool = False,
     ) -> npt.NDArray[np.int16]:
         """rim (a box's rim labels, its corner lo on the full grid) with the
         applied entries, in order (a later brush edit of a voxel wins); WM
         voxels are never changed."""
         out = rim.copy()
-        ok = self.applied(proposed)
+        ok = self.applied(reviewed_only)
         p = self.voxels[ok].astype(np.int64) - np.asarray(lo)
         lab = self.label[ok]
         inside = np.all((p >= 0) & (p < np.array(rim.shape)), 1)
@@ -532,7 +541,7 @@ class LabelChanges:
     def finalize(self, rim: npt.NDArray[np.int16]) -> "LabelChanges":
         """With the Betti numbers of the box's tissue (rim, the box's rim
         labels before the changes; not outside) before and after the applied
-        changes."""
+        changes (the best guess)."""
         before = kuhn_betti(rim != RIM_OUTSIDE)
         after = kuhn_betti(self.apply(rim, self.lo) != RIM_OUTSIDE)
         return replace(self, betti_before=before, betti_after=after)
@@ -766,13 +775,18 @@ def summary(changes: LabelChanges) -> dict[str, Any]:
 
 
 def write(p: Proposal, t: CT.Tissue, out: Path, name: str) -> dict[str, Any]:
-    """pial_labels_<name>.npz, .json and _overlay.nii.gz in out; returns the
-    summary."""
+    """pial_labels_<name>.npz, .json, _labels.nii.gz and _overlay.nii.gz in
+    out (module docstring); returns the summary."""
     out.mkdir(parents=True, exist_ok=True)
     ch = p.changes.finalize(t.rim)
     stem = f"pial_labels_{name}"
     ch.save(out / f"{stem}.npz")
     s = summary(ch)
+    rim = ch.apply(t.rim, ch.lo)
+    s["betti_accepted_only"] = list(
+        kuhn_betti(ch.apply(t.rim, ch.lo, reviewed_only=True) != RIM_OUTSIDE)
+    )
+    nib.save(nib.nifti1.Nifti1Image(rim, t.patch.affine), out / f"{stem}_labels.nii.gz")
     (out / f"{stem}.json").write_text(json.dumps(s, indent=1))
     ov = overlay(ch, p.dark.dark & (p.comp == 0))
     nib.save(nib.nifti1.Nifti1Image(ov, t.patch.affine), out / f"{stem}_overlay.nii.gz")

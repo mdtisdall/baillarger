@@ -1,11 +1,14 @@
 """Tests for baillarger.column_traces: roots, root patches, classes, and the
 traces of a synthetic box with known columns."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from baillarger import column_traces as CT
 from baillarger import streamlines as S
+from baillarger import white
 from baillarger.data import Patch
 
 VOX = 0.16
@@ -340,3 +343,96 @@ def test_traverse_ends_a_column_where_its_crossing_meets_fluid() -> None:
     CT.traverse(pos, ns, out, np.array([len(path) - 1]), across, T, t)
     assert out[0] == S.FLUID
     assert np.round(pos[0, ns[0] - 1, 0]) == 11
+
+
+def test_normal_rays_from_a_ball_are_radial_with_the_equivolume_coordinate() -> None:
+    """A ball of WM (R = 9 voxels) in cortex, fluid beyond r = 21: normal
+    columns are radial and reach the fluid; their equivolume coordinate
+    follows the swept volume of a sphere's offsets, s + s^2/R + s^3/(3 R^2)
+    (mm), within the mesh curvature's accuracy."""
+    n = 48
+    idx = np.indices((n, n, n)).astype(float)
+    c = np.array([23.7, 24.2, 23.9])
+    r = np.sqrt(((idx - c[:, None, None, None]) ** 2).sum(0))
+    rim = np.full(r.shape, 3)
+    rim[r <= 9] = 2
+    rim[r > 21] = 1
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", "normal")
+    assert R.vol is not None
+    k = np.flatnonzero(~R.near_face)
+    assert np.mean(R.cls[k] == CT.OPEN) > 0.95
+    x0 = R.v[R.tv[k]]
+    end = R.pos[k, R.ns[k] - 1].astype(float)
+    radial = (x0 - c) / np.linalg.norm(x0 - c, axis=1, keepdims=True)
+    step = (end - x0) / np.linalg.norm(end - x0, axis=1, keepdims=True)
+    assert np.median((radial * step).sum(1)) > 0.995
+    s = (R.ns[k] - 1) * S.STEP_MM
+    Rm = 9.0 * VOX
+    want = s + s**2 / Rm + s**3 / (3 * Rm**2)
+    got = R.vol[k, R.ns[k] - 1]
+    assert np.median(np.abs(got / want - 1)) < 0.1
+
+
+def test_normal_rays_cross_parallel_fused_banks_and_meet_at_the_midline() -> None:
+    rim = np.full((36, 30, 24), 3)
+    rim[:6] = 2
+    rim[30:] = 2
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", "normal")
+    x0 = R.v[R.tv]
+    mid = (R.nrm[R.tv, 0] > 0.9) & np.all(np.abs(x0[:, 1:] - [15, 12]) < 4, 1)
+    i = np.flatnonzero(mid)
+    assert i.size > 5 and np.all(R.cls[i] == CT.CROSS)
+    assert np.all(R.crest_at[i] >= 0)
+    assert np.all(np.abs(R.pos[i, R.crest_at[i], 0] - 17.5) <= 1.0)
+    end = R.pos[i, R.ns[i] - 1].astype(float)
+    assert np.max(np.abs(end[:, 1:] - x0[i, 1:])) < 0.3
+
+
+def test_normal_rays_meet_on_the_bisector_of_a_narrow_fused_v() -> None:
+    shape = (34, 30, 20)
+    x, y = np.indices(shape)[:2].astype(float)
+    rim = np.full(shape, 3)
+    rim[np.abs(y - 15) > (x - 6) / 3 + 1.5] = 2
+    rim[x < 6] = 2
+    rim[x >= 30] = 1
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", "normal")
+    wall = (np.abs(R.nrm[R.tv, 1]) > 0.8) & ~R.near_face
+    met = np.flatnonzero(wall & (R.crest_at >= 0))
+    assert met.size > 10
+    at = R.pos[met, R.crest_at[met]].astype(float)
+    assert np.median(np.abs(at[:, 1] - 15.0)) < 1.0
+
+
+def test_normal_rays_see_no_meeting_beside_an_open_slot() -> None:
+    rim = np.full((36, 30, 24), 3)
+    rim[:6] = 2
+    rim[30:] = 2
+    rim[21:23] = 1
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", "normal")
+    x0 = R.v[R.tv]
+    left = (
+        (R.nrm[R.tv, 0] > 0.9)
+        & (x0[:, 0] < 7)
+        & np.all(np.abs(x0[:, 1:] - [15, 12]) < 4, 1)
+    )
+    i = np.flatnonzero(left)
+    assert i.size > 5
+    assert np.all(R.cls[i] == CT.OPEN) and np.all(R.crest_at[i] < 0)
+
+
+def test_a_saved_white_mesh_gives_the_same_traces(tmp_path: Path) -> None:
+    """trace_columns with the box's saved WhiteMesh gives the traces it gives
+    when it makes the mesh itself, and refuses a mesh of another WM label."""
+    t = slab_tissue()
+    m = white.box_mesh(t.wm, t.patch.lo, t.patch.hi, t.patch.affine)
+    m.save(tmp_path / "m.npz")
+    m = white.WhiteMesh.load(tmp_path / "m.npz")
+    R0 = CT.trace_columns(t, "fitted_blend", "crest")
+    R1 = CT.trace_columns(t, "fitted_blend", "crest", mesh=m)
+    for k in ("v", "f", "nrm", "tv", "pos", "ns", "cls", "crest_at"):
+        assert np.array_equal(getattr(R1, k), getattr(R0, k), equal_nan=True), k
+    other = t.wm.copy()
+    other[6, 3, 3] = True
+    m2 = white.box_mesh(other, t.patch.lo, t.patch.hi, t.patch.affine)
+    with pytest.raises(ValueError, match="WM label"):
+        CT.trace_columns(t, "fitted_blend", "crest", mesh=m2)

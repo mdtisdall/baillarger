@@ -189,10 +189,11 @@ def changes() -> PL.LabelChanges:
     )
 
 
-def test_apply_takes_accepted_and_brush_and_proposed_on_request(
+def test_apply_takes_the_best_guess_or_the_reviewed_cells(
     tmp_path: Path,
 ) -> None:
-    """Accepted applies, proposed only on request, rejected never; a later
+    """Accepted and proposed apply (proposed not with reviewed_only), rejected
+    never; a later
     brush edit of a voxel wins; WM is never changed; the file round-trips."""
     rim = np.full((4, 4, 4), RIM_CORTEX, np.int16)
     rim[0, 0, 0] = 2
@@ -202,11 +203,11 @@ def test_apply_takes_accepted_and_brush_and_proposed_on_request(
     ch = PL.LabelChanges.load(tmp_path / "c.npz")
     a = ch.apply(rim, (10, 10, 10))
     assert a[1, 1, 1] == RIM_CORTEX  # accepted, then brushed back
-    assert a[2, 2, 2] == RIM_CORTEX  # proposed
+    assert a[2, 2, 2] == RIM_OUTSIDE  # proposed: the best guess
     assert a[3, 3, 3] == RIM_OUTSIDE  # rejected, then brushed
     assert a[0, 0, 0] == 2  # WM
-    b = ch.apply(rim, (10, 10, 10), proposed=True)
-    assert b[2, 2, 2] == RIM_OUTSIDE
+    b = ch.apply(rim, (10, 10, 10), reviewed_only=True)
+    assert b[2, 2, 2] == RIM_CORTEX and b[1, 1, 1] == RIM_CORTEX
     assert ch.components[1]["kind"] == "blob"
     ov = PL.overlay(ch)
     assert ov[2, 2, 2] == 1 and ov[1, 1, 1] == PL.OV_BRUSH_CORTEX
@@ -303,7 +304,7 @@ def test_relabelled_channel_removes_the_crest() -> None:
     t = synthetic(rim, {1.0: chan, 0.7: stria})
     p = PL.propose(t)
     before = p.crest[16:20, 4:20].sum()
-    t2 = CT.tissue(t.patch, pial_changes=p.changes, proposed=True)
+    t2 = CT.tissue(t.patch, pial_changes=p.changes)
     inner = chan.copy()
     inner[:, :2] = False
     assert (t2.labels[inner] == 1).mean() > 0.95
