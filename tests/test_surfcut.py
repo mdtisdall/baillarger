@@ -389,3 +389,20 @@ def cpsat_box(M: Model, lo: Int, hi: Int) -> float:
         for u, K, a, c in zip(M.unary, M.K, lo, hi, strict=True)
     ]
     return cpsat(Model(M.K, M.o, U, M.hard, M.hinge, M.tie, M.table))
+
+
+@pytest.mark.parametrize("pruned", [False, True])
+def test_qpbo_does_not_depend_on_the_c_rand_state(pruned: bool) -> None:
+    """QPBO-I's order of variables comes from C rand(); a model on which it matters
+    (folded, seed 1: 3 labellings under 5 srand values) gives the same labels
+    whatever the process's rand state was before the call."""
+    import ctypes
+
+    libc = ctypes.CDLL(None)
+    M = folded_model(np.random.default_rng(1))
+    solve = qpbo_pruned if pruned else qpbo
+    out = []
+    for s in (1, 2, 3, 7, 12345):
+        libc.srand(s)
+        out.append(tuple(solve(M).labels))
+    assert len(set(out)) == 1

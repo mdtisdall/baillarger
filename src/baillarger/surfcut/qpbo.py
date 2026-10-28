@@ -28,7 +28,7 @@ from dataclasses import dataclass
 import numpy as np
 import numpy.typing as npt
 
-from baillarger.surfcut._thinqpbo import new_graph
+from baillarger.surfcut._thinqpbo import new_graph, seed_rand
 from baillarger.surfcut.cut import cut, graph
 from baillarger.surfcut.model import (
     Bool,
@@ -85,9 +85,12 @@ def qpbo(
     start_labels: npt.ArrayLike | None = None,
     improve: bool = True,
     log: Callable[[str], None] | None = None,
+    seed: int = 0,
 ) -> Result:
     """Every term by QPBO, then QPBO-I from start_labels (default: cut(),
-    the optimum without the non-submodular terms)."""
+    the optimum without the non-submodular terms). QPBO-I visits the variables
+    in an order drawn from C rand(); it is reseeded with `seed` first, so the
+    result depends only on the inputs."""
     say = log or (lambda m: None)
     n, K, o = M.n, ints(M.K), ints(M.o)
     a_t, b_t, L_t, w_t = tie_terms(M)
@@ -208,6 +211,7 @@ def qpbo(
     k, chain_ok = k0, True
     if improve and NB:
         np.vectorize(g.set_label, otypes=[object])(allb, y0)
+        seed_rand(seed)
         g.improve()
         yl2 = np.vectorize(g.get_label, otypes=[np.int64])(allb)
         k = ints(np.bincount(bvar, np.clip(yl2, 0, 1).astype(np.float64), minlength=n))
@@ -315,9 +319,11 @@ def qpbo_pruned(
     M: Model,
     start_labels: npt.ArrayLike | None = None,
     log: Callable[[str], None] | None = None,
+    seed: int = 0,
 ) -> Result:
     """QPBO on M; then the certified variables fixed (reduce) and QPBO-I on
-    the rest only, from start_labels (never ending above them)."""
+    the rest only, from start_labels (never ending above them), with `seed` as
+    in qpbo."""
     r = qpbo(M, improve=False, log=log)
     if r.certified.all():
         k = r.certified_labels.copy()
@@ -328,6 +334,7 @@ def qpbo_pruned(
         R,
         start_labels=None if start_labels is None else ints(start_labels)[free],
         log=log,
+        seed=seed,
     )
     k = ints(np.where(r.certified, r.certified_labels, 0))
     k[free] = r2.labels
