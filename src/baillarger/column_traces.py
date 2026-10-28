@@ -52,6 +52,14 @@ index coordinates of the box; vox the voxel size (mm); lengths in mm.
      -grad T into the far bank (traverse). Every column is then a complete
      ray, from its root to the fluid or to WM, through any contact; the
      reading of the columns chooses where to cut it.
+   - "normal": no field: each root's column is the straight path of its
+     point of the white surface moving along its (smoothed) normal at
+     constant speed (streamlines.ray), so the fronts are offsets of the white
+     surface. It stops only at fluid, WM (after 0.3 mm), missing or other
+     tissue, a face or the length cap. Where it passes the meeting of its
+     bank's front with another's (the WM distance through tissue stops rising
+     along it; streamlines.first_fall), crest_at records it. vol is the
+     equivolume coordinate along it, from the root's curvatures.
    - "one-pass": T as fitted on the cortex alone, the turn rule (60 deg
      within 0.3 mm), and where the primary turned or reached the length cap,
      the fallback: ascent of the equal-arrival one pass (one_pass, an
@@ -102,7 +110,7 @@ TRACERS = ("current", "fitted", "fitted_blend")
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
 CLASS = ("open", "crossing", "own bank", "to the contact", "failed")
 #: How a column ends where its trace cannot go on (module docstring, step 4).
-METHODS = ("crest", "traverse", "one-pass")
+METHODS = ("crest", "traverse", "normal", "one-pass")
 #: The fitted field's band into the WM for the crest method (mm), and the
 #: window of its optional bend rule (mm).
 WM_BAND_MM, BEND_MM = 0.5, 0.3
@@ -468,6 +476,11 @@ class ColumnTraces:
     T: F64 | None
     #: the fitted field's solver info, if any
     notes: dict[str, Any]
+    #: method "normal": the equivolume coordinate per sample, the volume the
+    #: column has swept per unit area of its root (mm; A(s) = (1 + k1 s)
+    #: (1 + k2 s) from the root's principal curvatures), NaN past the end; a
+    #: relative equivolume depth is vol / vol at the end. None otherwise
+    vol: F32 | None = None
 
 
 def level_set_concavity(
@@ -526,6 +539,25 @@ def first_in(mask: Bool, pos: F32, ns: I64) -> I64:
         if hit.size:
             out[i] = hit[0]
     return out
+
+
+def equivolume(
+    v: F64, f: I64, nrm: F64, tv: I64, ns: I64, vox: F64, sigma_mm: float = 0.5
+) -> F32:
+    """Per column (n, NMAX), the volume swept per unit area of its root at
+    each sample (mm): the integral of A(s) = (1 + k1 s)(1 + k2 s), k1 >= k2
+    the white surface's principal curvatures at the root (frame.
+    mesh_curvatures, smoothed over sigma_mm; > 0 convex), for a straight
+    column along the root's normal (an offset front). A is clipped at 0 past
+    a focus. NaN past each column's end."""
+    k1, k2 = mesh_curvatures(v * vox, f, nrm, sigma_mm)
+    s = np.arange(NMAX) * S.STEP_MM
+    A = np.clip((1 + k1[tv, None] * s) * (1 + k2[tv, None] * s), 0.0, None)
+    # trapezoidal, from 0 at the root
+    out = np.zeros((len(tv), NMAX))
+    out[:, 1:] = np.cumsum(0.5 * (A[:, 1:] + A[:, :-1]) * S.STEP_MM, axis=1)
+    out[np.arange(NMAX)[None, :] >= ns[:, None]] = np.nan
+    return out.astype(np.float32)
 
 
 def traverse(
@@ -711,7 +743,24 @@ def trace_columns(
     op: OnePass | None = None
     T: F64 | None = None
     notes: dict[str, Any] = {}
-    if method in ("crest", "traverse"):
+    vol: F32 | None = None
+    if method == "normal":
+        del base, nh
+        pos, ns1, out1 = S.ray(t.labels, t.dface, x0, nrm[tv], t.vox, NMAX)
+        end1 = pos[np.arange(len(tv)), ns1 - 1].copy()
+        ns, outc = ns1.copy(), out1.copy()
+        D = S.tissue_wm_distance(t.wm, t.ctx, t.vox)
+        crest_at = S.first_fall(D, pos, ns)  # NaN in obstacles: skipped
+        del D
+        vol = equivolume(v, f, nrm, tv, ns, t.vox)
+        fallback = np.zeros(len(tv), np.int8)
+        k = np.arange(len(tv))
+        endp = pos[k, ns - 1].astype(float)
+        last = endp - pos[k, np.maximum(ns - 2, 0)]
+        last = np.where((ns > 1)[:, None], last, -nrm[tv])
+        end_patch = P.of_vertex[G.crossing_vertex(v, nrm, endp, last, t.vox)]
+        cls = classify(outc, P.D[root_patch, end_patch])
+    elif method in ("crest", "traverse"):
         T, notes = S.fitted_field(
             base, t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=WM_BAND_MM
         )
@@ -798,4 +847,5 @@ def trace_columns(
         one_pass=op,
         T=T,
         notes=notes,
+        vol=vol,
     )

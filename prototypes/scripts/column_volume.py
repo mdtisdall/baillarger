@@ -9,6 +9,10 @@
      (crest_at), and one that reflects back into its own WM is cut at T's maximum;
    - "traverse": as crest, but a column that meets the crest crosses it and descends T into the
      far bank, so every column is a complete ray to fluid or WM;
+   - "normal": no field; each column is the straight path of its root moving along the white
+     surface's normal at constant speed (offset fronts), stopped only by fluid or WM labels;
+     crest_at records where it passes another bank's front, and vol holds its equivolume
+     coordinate (swept volume per unit root area, mm);
    - "one-pass" (the method before): the turn rule, and the one pass's ascent as the fallback.
    The classes: open, crossing, own bank, to the contact, failed (roots within 2 mm of a face
    flagged), with the bank rule on mesh patches.
@@ -27,11 +31,12 @@ with "points_full0": [[i, j, k], ...] in 0-based full-grid voxels.
 Writes <work>/column_volume_<name>.npz and .json, <figures>/column_volume_<name>_*.png.
 Usage: column_volume.py <figures dir> <work dir> --name NAME (--patch P | --box I J K [--size N ...])
                         [--points FILE] [--tracer {current,fitted,fitted_blend}]
-                        [--columns {crest,traverse,one-pass}] [--wm-changes FILE] [--figs-only]
+                        [--columns {crest,traverse,normal,one-pass}] [--wm-changes FILE] [--figs-only]
 --wm-changes: the handle-free WM label (baillarger.white.wm_changes, saved with WMChanges.save)
 replaces the aseg's everywhere (mesh, field, stops, classes); without it, the aseg's.
 The npz also holds tracer_name, column_method, wm_label and crest_at (crest and traverse: per
-column, the first sample where it meets another bank's field, T's crest; -1 if none).
+column, the first sample where it meets another bank's field, T's crest; -1 if none; normal: where
+it passes another bank's front) and, with --columns normal, vol (the equivolume coordinate).
 The two marked faces of the plan: --name M1S1 --box 378 224 448; --name V1V2_banks --box 198 58 65.
 """
 
@@ -191,6 +196,7 @@ def main():
         disp=disp.astype(np.float32), ctx=ctx, coh=coh.astype(np.float32), wm=wm,
         labels=labels.astype(np.int8),  # 0 cortex, 1 fluid, 2 WM, 3 missing, 4 other
         tracer_name=A.tracer, column_method=A.columns, wm_label=WM_LABEL, crest_at=R.crest_at,
+        **({} if R.vol is None else dict(vol=R.vol)),
         **{"H_" + k: H[k] for k in HOR})
     json.dump(dict(turn=turn), open(f"{WORK}/column_volume_{SITE}_turn.json", "w"))
     say("saved")
