@@ -42,6 +42,7 @@ from scipy.spatial import cKDTree
 from baillarger.data import crop_affine, echo_path
 from baillarger.mesh_smoothing import edges
 from baillarger.streamlines import STEP_MM
+from baillarger.viewer import filters as VF
 from baillarger.viewer import flatmap as FM
 from baillarger.viewer import inflation as IN
 from baillarger.viewer import sections as PS
@@ -127,6 +128,7 @@ class Site:
     ) -> None:
         t0 = time.time()
         self.cache = Path(cache)
+        self.column_volume = Path(column_volume)
         stem = Path(column_volume).name.removesuffix(".npz")
         self.name = stem.removeprefix("column_volume_")
         self.log = log
@@ -226,6 +228,13 @@ class Site:
         self.vertex_tree = cKDTree(self.world(self.v_vox))
         self.hits = self.point_hits()
         self._bytes: dict[str, bytes] = {}
+        # filters (baillarger.viewer.filters): none shown until one is chosen
+        self.jobs = VF.FilterJobs(
+            self.column_volume, self.cache, self.name, key, log=log
+        )
+        self.filter: VF.Result | None = None
+        self.frow = -np.ones(self.n, np.int64)
+        self.fvmax = 1.0
         log(
             f"site {self.name}: {self.n:,} traces shown of {len(self.tv_all):,}, "
             f"tracer {self.tracer_name}, WM label {self.wm_label} "
@@ -291,6 +300,54 @@ class Site:
                 self.cert = Q["cert"].astype(bool)
                 self.lo_mm, self.hi_mm = Q["lo"].astype(float), Q["hi"].astype(float)
 
+    def use_filter(self, key: str | None) -> dict[str, Any]:
+        """Show filter result `key` (a finished one), or the raw echo 2 (None)."""
+        if key is None:
+            self.filter = None
+            self.frow = -np.ones(self.n, np.int64)
+        else:
+            r = self.jobs.get(key)
+            row = -np.ones(len(self.tv_all), np.int64)
+            row[r.keep] = np.arange(len(r.keep))
+            self.filter, self.frow = r, row[self.sub]
+            shown = r.prof[self.frow[self.frow >= 0]]
+            fin = np.abs(shown[np.isfinite(shown)])
+            self.fvmax = float(np.percentile(fin, 97)) if fin.size else 1.0
+        return self.filter_meta()
+
+    def filter_meta(self) -> dict[str, Any]:
+        r = self.filter
+        return dict(
+            key=None if r is None else r.key,
+            label="raw echo 2" if r is None else r.params.label(),
+            frame="depth" if r is None else r.frame,
+            shown=int((self.frow >= 0).sum()),
+            layers=list(self.layers()),
+        )
+
+    def profile(self, t: int) -> Float:
+        """Trace t's profile as shown: the filter's row (empty where the filter has
+        none), else the raw echo 2."""
+        if self.filter is None:
+            out: Float = self.echo[t, : self.ns[t]].astype(float)
+            return out
+        k = int(self.frow[t])
+        if k < 0:
+            return np.zeros(0)
+        row = self.filter.prof[k]
+        fin = np.flatnonzero(np.isfinite(row))
+        return row[: fin[-1] + 1] if fin.size else np.zeros(0)
+
+    def depths(self, t: int, d: Arr) -> Float:
+        """Depths (mm from the root) on trace t in the shown frame."""
+        d = np.asarray(d, float)
+        if self.filter is None:
+            return d
+        k = int(self.frow[t])
+        if k < 0:
+            return np.full(d.shape, np.nan)
+        return self.filter.depth_to_frame(k, d)
+
     def layers(self) -> dict[str, Float]:
         out = dict(self.prio)
         if self.z is not None:
@@ -302,6 +359,10 @@ class Site:
         out["class at the root"] = self.cls_all[self.sub].astype(float)
         out["fallback tracer"] = self.fallback_all[self.sub].astype(float)
         out["log2 map area factor"] = self.log2_area
+        if self.filter is not None:
+            for k, v in self.filter.layers.items():
+                ok = self.frow >= 0
+                out[VF.PREFIX + k] = np.where(ok, v[np.maximum(self.frow, 0)], np.nan)
         return out
 
     # ------------------------------------------------------------ points
@@ -401,15 +462,19 @@ class Site:
         def r2(a: Arr) -> list[float | None]:
             return [None if not np.isfinite(x) else round(float(x), 3) for x in a]
 
-        img = [
-            np.clip(
-                np.round(np.nan_to_num(self.echo[t, : self.ns[t]]) / self.vmax * 127),
-                -127,
-                127,
+        def fr(a: Arr) -> Float:  # a depth per trace of tr, in the shown frame
+            a = np.asarray(a, float)
+            return np.array(
+                [self.depths(int(t), a[k : k + 1])[0] for k, t in enumerate(tr)]
             )
+
+        vmax = self.vmax if self.filter is None else self.fvmax
+        prof = [self.profile(int(t)) for t in tr]
+        img = [
+            np.clip(np.round(np.nan_to_num(p) / vmax * 127), -127, 127)
             .astype(int)
             .tolist()
-            for t in tr
+            for p in prof
         ]
         unc = ~self.cert[tr]
         nan = np.full(tr.size, np.nan)
@@ -417,17 +482,24 @@ class Site:
             traces=tr.tolist(),
             dist=r2(dist),
             img=img,
-            ns=self.ns[tr].tolist(),
-            levels=[] if self.z is None else [r2(lv[tr]) for lv in self.z],
-            lo=None if self.lo_mm is None else r2(np.where(unc, self.lo_mm[tr], nan)),
-            hi=None if self.hi_mm is None else r2(np.where(unc, self.hi_mm[tr], nan)),
+            ns=[len(p) for p in prof],
+            frame="depth" if self.filter is None else self.filter.frame,
+            levels=[] if self.z is None else [r2(fr(lv[tr])) for lv in self.z],
+            lo=None
+            if self.lo_mm is None
+            else r2(fr(np.where(unc, self.lo_mm[tr], nan))),
+            hi=None
+            if self.hi_mm is None
+            else r2(fr(np.where(unc, self.hi_mm[tr], nan))),
             uncertified=unc.astype(int).tolist(),
-            top=r2(self.top[tr]),
-            single=None if self.single is None else r2(self.single[tr]),
+            top=r2(fr(self.top[tr])),
+            single=None if self.single is None else r2(fr(self.single[tr])),
             points=[
-                dict(k=k, point=p, depth=round(d, 3))
+                dict(k=k, point=p, depth=round(float(dd), 3))
                 for k, t in enumerate(tr.tolist())
                 for p, d in self.hits.get(t, [])
+                for dd in self.depths(t, np.array([d]))
+                if np.isfinite(dd)
             ],
             tied=[int(t in self.partner) for t in tr.tolist()],
         )
@@ -573,6 +645,7 @@ class Site:
             else [],
             vmax=self.vmax,
             has_levels=self.z is not None,
+            filter=self.filter_meta(),
             tracer=self.tracer_name,
             wm_label=self.wm_label,
         )

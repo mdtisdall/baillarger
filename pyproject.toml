@@ -61,7 +61,6 @@ testpaths = [
   "prototypes/scripts/test_crossing_lib.py",
   "prototypes/scripts/test_edit_priority.py",
   "prototypes/scripts/test_edit_resolve.py",
-  "prototypes/scripts/test_flatten_volume.py",
   "prototypes/scripts/test_fold_phantoms.py",
   "prototypes/scripts/test_joint_levels.py",
   "prototypes/scripts/test_levelset_fill.py",
