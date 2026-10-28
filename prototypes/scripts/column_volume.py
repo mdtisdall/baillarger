@@ -27,11 +27,14 @@ with "points_full0": [[i, j, k], ...] in 0-based full-grid voxels.
 Writes <work>/column_volume_<name>.npz and .json, <figures>/column_volume_<name>_*.png.
 Usage: column_volume.py <figures dir> <work dir> --name NAME (--patch P | --box I J K [--size N ...])
                         [--points FILE] [--tracer {current,fitted,fitted_blend}]
-                        [--columns {crest,traverse,one-pass}] [--wm-changes FILE] [--figs-only]
+                        [--columns {crest,traverse,one-pass,front}] [--wm-changes FILE] [--figs-only]
 --wm-changes: the handle-free WM label (baillarger.white.wm_changes, saved with WMChanges.save)
 replaces the aseg's everywhere (mesh, field, stops, classes); without it, the aseg's.
-The npz also holds tracer_name, column_method, wm_label and crest_at (crest and traverse: per
-column, the first sample where it meets another bank's field, T's crest; -1 if none).
+The npz also holds tracer_name, column_method, wm_label and crest_at (crest, traverse and front:
+per column, the first sample where it meets another bank's field, T's crest; -1 if none). With
+--columns front (baillarger.column_front: the white mesh grown as one coupled surface) also area
+and vol (per sample, the root vertex's dual area, mm^2, and the volume its column swept, mm^3) and
+turn_at (the sample where the column began to descend T, -1 if never).
 The two marked faces of the plan: --name M1S1 --box 378 224 448; --name V1V2_banks --box 198 58 65.
 """
 
@@ -191,6 +194,7 @@ def main():
         disp=disp.astype(np.float32), ctx=ctx, coh=coh.astype(np.float32), wm=wm,
         labels=labels.astype(np.int8),  # 0 cortex, 1 fluid, 2 WM, 3 missing, 4 other
         tracer_name=A.tracer, column_method=A.columns, wm_label=WM_LABEL, crest_at=R.crest_at,
+        **({} if R.area is None else dict(area=R.area, vol=R.vol, turn_at=R.turn_at)),
         **{"H_" + k: H[k] for k in HOR})
     json.dump(dict(turn=turn), open(f"{WORK}/column_volume_{SITE}_turn.json", "w"))
     say("saved")

@@ -1,6 +1,8 @@
 """Tests for baillarger.column_traces: roots, root patches, classes, and the
 traces of a synthetic box with known columns."""
 
+from collections.abc import Callable
+
 import numpy as np
 import pytest
 
@@ -176,8 +178,13 @@ def test_crest_method_crosses_parallel_fused_banks() -> None:
 def test_traces_of_a_slab_are_straight_open_columns(tracer: str, method: str) -> None:
     """Layers parallel to a flat white surface: every trace away from the
     side faces goes straight up (along x) to the fluid, OPEN, in one cortex
-    thickness, by either method."""
+    thickness, by every method (the front grows along the fitted field
+    only)."""
     t = slab_tissue()
+    if (tracer, method) == ("current", "front"):
+        with pytest.raises(ValueError):
+            CT.trace_columns(t, tracer, method)
+        return
     R = CT.trace_columns(t, tracer, method)
     x0 = R.v[R.tv]
     up = (R.nrm[R.tv, 0] > 0.9) & np.all((x0[:, 1:] > 9) & (x0[:, 1:] < 20), 1)
@@ -340,3 +347,168 @@ def test_traverse_ends_a_column_where_its_crossing_meets_fluid() -> None:
     CT.traverse(pos, ns, out, np.array([len(path) - 1]), across, T, t)
     assert out[0] == S.FLUID
     assert np.round(pos[0, ns[0] - 1, 0]) == 11
+
+
+# ---------------------------------------------------------------- front
+
+
+def shell_tissue(
+    axes: tuple[int, ...], shape: tuple[int, int, int]
+) -> tuple[CT.Tissue, np.ndarray, Callable[[np.ndarray], np.ndarray]]:
+    """WM within 6 voxels of a centre (a ball) or of an axis (a cylinder: the
+    distance over the given axes only), cortex out to 17 voxels, fluid
+    beyond. Returns the tissue, the centre and the distance function."""
+    c = np.array([21.7, 22.2, 21.9])[: len(shape)]
+
+    def dist(p: np.ndarray) -> np.ndarray:
+        out: np.ndarray = np.sqrt(sum((p[..., a] - c[a]) ** 2 for a in axes))
+        return out
+
+    r = dist(np.moveaxis(np.indices(shape).astype(float), 0, -1))
+    rim = np.full(shape, 1)
+    rim[r <= 17] = 3
+    rim[r <= 6] = 2
+    return box_tissue(rim), c, dist
+
+
+@pytest.mark.parametrize("axes, power", [((0, 1, 2), 2), ((0, 1), 1)])
+def test_front_of_a_ball_and_a_cylinder_is_radial_with_bok_areas(
+    axes: tuple[int, ...], power: int
+) -> None:
+    """Front columns from a WM ball (cylinder) stay radial, and the front's
+    dual areas grow as (1 + k s)^2 (as 1 + k s), k = 1 / the root's radius:
+    in total within 1 % (a polyhedron's offset), per vertex at the median
+    within 3 %; the swept volume is the integral of that area."""
+    shape = (44, 44, 44) if power == 2 else (44, 44, 24)
+    t, c, dist = shell_tissue(axes, shape)
+    R = CT.trace_columns(t, "fitted_blend", "front")
+    assert R.area is not None and R.vol is not None
+    x0 = R.v[R.tv]
+    keep = np.ones(len(R.tv), bool) if power == 2 else np.abs(x0[:, 2] - 12) < 5
+    assert np.all(R.outc[keep] == S.FLUID)
+    i = 40  # 1.6 mm out, before any reaches the fluid at 11 voxels (1.76 mm)
+    ok = keep & (R.ns > i)
+    assert ok.mean() > 0.9 * keep.mean()
+    s = i * S.STEP_MM
+    r0 = dist(x0[ok]) * VOX
+    grow = (1 + s / r0) ** power
+    a0, a1 = R.area[ok, 0], R.area[ok, i]
+    assert abs(a1.sum() / (a0 * grow).sum() - 1) < 0.01
+    assert abs(np.median(a1 / a0 / grow) - 1) < 0.03
+    vol = a0 * r0 / (power + 1) * ((1 + s / r0) ** (power + 1) - 1)
+    assert abs(R.vol[ok, i].sum() / vol.sum() - 1) < 0.01
+    # radial: the angle between the column's chord and the root's radius
+    radial = x0[ok] - c
+    if power == 1:
+        radial[:, 2] = 0
+    radial /= np.linalg.norm(radial, axis=1, keepdims=True)
+    chord = R.pos[ok, i] - x0[ok]
+    chord /= np.linalg.norm(chord, axis=1, keepdims=True)
+    ang = np.degrees(np.arccos(np.clip((radial * chord).sum(1), -1, 1)))
+    assert np.median(ang) < 5 and ang.max() < 10
+
+
+def test_front_of_a_slab_keeps_its_area() -> None:
+    """Layers parallel to a flat white surface: the front's dual areas stay
+    as they were, and the swept volume is area times length."""
+    R = CT.trace_columns(slab_tissue(), "fitted_blend", "front")
+    assert R.area is not None and R.vol is not None and R.turn_at is not None
+    x0 = R.v[R.tv]
+    up = (R.nrm[R.tv, 0] > 0.9) & np.all((x0[:, 1:] > 9) & (x0[:, 1:] < 20), 1)
+    i = 30
+    assert np.allclose(R.area[up, i], R.area[up, 0], rtol=1e-3)
+    assert np.allclose(R.vol[up, i], R.area[up, 0] * i * S.STEP_MM, rtol=1e-3)
+    assert np.all(R.turn_at[up] == -1)
+
+
+def test_front_crosses_parallel_fused_banks() -> None:
+    """Two parallel WM slabs with fused cortex between: front columns cross
+    to the far bank (crossing) straight, and begin to descend T beyond the
+    midline x = 17.5, within the crest's stencil."""
+    rim = np.full((36, 30, 24), 3)
+    rim[:6] = 2
+    rim[30:] = 2
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", "front")
+    assert R.turn_at is not None
+    x0 = R.v[R.tv]
+    mid = (R.nrm[R.tv, 0] > 0.9) & np.all(np.abs(x0[:, 1:] - [15, 12]) < 4, 1)
+    i = np.flatnonzero(mid)
+    assert i.size > 5 and np.all(R.cls[mid] == CT.CROSS)
+    end = R.pos[i, R.ns[i] - 1]
+    assert np.max(np.abs(end[:, 1:] - x0[i, 1:])) < 0.1
+    assert np.all(R.turn_at[i] >= 0)
+    assert np.all(np.abs(R.pos[i, R.turn_at[i], 0] - 17.5) <= 3.0)
+
+
+@pytest.mark.parametrize("method", ["crest", "front"])
+def test_columns_of_a_narrow_fused_fundus(method: str) -> None:
+    """A V of WM with cortex fused in it (as above). T's crest on the
+    bisector rises toward the opening, and the sampled grad T at the kink
+    points along it: the crest method's columns slide along it to the fluid;
+    front columns keep their heading through the kink, then descend into
+    the far wall, near the height they started (no slide)."""
+    shape = (34, 30, 20)
+    x, y = np.indices(shape)[:2].astype(float)
+    rim = np.full(shape, 3)
+    rim[np.abs(y - 15) > (x - 6) / 3 + 1.5] = 2
+    rim[x < 6] = 2
+    rim[x >= 30] = 1
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", method)
+    x0 = R.v[R.tv]
+    wall = (x0[:, 0] > 9) & (x0[:, 0] < 20) & (np.abs(x0[:, 1] - 15) > 1)
+    wall &= (x0[:, 2] > 4) & (x0[:, 2] < 15)
+    i = np.flatnonzero(wall)
+    end = R.pos[i, R.ns[i] - 1].astype(float)
+    dx = np.abs(end[:, 0] - x0[i, 0])
+    if method == "crest":
+        assert np.all(R.outc[i] == S.FLUID) and np.median(dx) > 10
+    else:
+        assert np.all(R.outc[i] == S.WM)
+        assert np.all(np.sign(end[:, 1] - 15) != np.sign(x0[i, 1] - 15))
+        assert np.median(dx) < 2 and dx.max() < 5
+
+
+def test_front_crosses_oblique_fused_banks() -> None:
+    """The banks at 30 degrees of the traverse test: front columns from the
+    left bank meet the crest at an angle, T stops rising along them past the
+    kink, and they descend into the right bank's WM. At least 90 %, as for
+    traverse."""
+    shape = (44, 40, 20)
+    x, y = np.indices(shape)[:2].astype(float)
+    rim = np.full(shape, 3)
+    rim[x < 6] = 2
+    rim[x - 30 > (y - 20) * np.tan(np.radians(30))] = 2
+    rim[(x >= 6) & (rim == 3) & (y > 34)] = 1
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", "front")
+    assert R.turn_at is not None
+    x0 = R.v[R.tv]
+    left = (R.nrm[R.tv, 0] > 0.9) & np.all(np.abs(x0[:, 1:] - [16, 10]) < 4, 1)
+    i = np.flatnonzero(left & ~R.near_face)
+    assert i.size > 5
+    assert np.mean(R.turn_at[i] >= 0) > 0.9
+    end = R.pos[i, R.ns[i] - 1].astype(float)
+    far = rim[tuple(np.round(end).astype(int).T)] == 2
+    assert np.mean(far & (end[:, 0] > 12)) > 0.9
+
+
+def test_front_leaves_columns_open_beside_a_narrow_open_sulcus() -> None:
+    """The off-centre fluid slot of the traverse test: T rises in each bank up
+    to the fluid, so front columns from the left bank never descend and stay
+    open, ending at the slot."""
+    rim = np.full((36, 30, 24), 3)
+    rim[:6] = 2
+    rim[30:] = 2
+    rim[21:23] = 1
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", "front")
+    assert R.turn_at is not None
+    x0 = R.v[R.tv]
+    left = (
+        (R.nrm[R.tv, 0] > 0.9)
+        & (x0[:, 0] < 7)
+        & np.all(np.abs(x0[:, 1:] - [15, 12]) < 4, 1)
+    )
+    i = np.flatnonzero(left)
+    assert i.size > 5
+    assert np.all(R.cls[i] == CT.OPEN) and np.all(R.turn_at[i] == -1)
+    end = R.pos[i, R.ns[i] - 1].astype(float)
+    assert np.all(np.round(end[:, 0]) == 21)

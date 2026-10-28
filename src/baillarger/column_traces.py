@@ -59,6 +59,14 @@ index coordinates of the box; vox the voxel size (mm); lengths in mm.
      baillarger.fronts), stopped at the pass's contact (a voxel whose root
      patch is SAME_MM or more along the white surface from the path's own).
      The method before the crest method, kept for comparison.
+   - "front": the white mesh grown outward along the extended T as one
+     coupled surface (baillarger.column_front): each vertex climbs grad T
+     until the climb reverses at T's crest, then descends it into the far
+     bank; the moving vertices' directions are smoothed along the mesh at
+     MESH_SIGMA; each root's trajectory is its column, and its dual area and
+     swept volume (Bok's measure) are recorded per sample (area, vol). Stops
+     as "crest"; nothing is cut; crest_at as "crest", and turn_at the sample
+     where the column began to descend.
 5. Patches (mesh_patches): geodesic Voronoi cells PATCH_MM apart on the
    white mesh, and the distances between their centres along it
    (baillarger.mesh_graph). A trace's end patch is the patch of the vertex
@@ -82,6 +90,7 @@ import numpy.typing as npt
 from scipy import ndimage as ndi
 from scipy.sparse import coo_matrix, csr_matrix
 
+from baillarger import column_front as CF
 from baillarger import mesh_graph as G
 from baillarger import streamlines as S
 from baillarger.data import Patch, load_box
@@ -102,7 +111,7 @@ TRACERS = ("current", "fitted", "fitted_blend")
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
 CLASS = ("open", "crossing", "own bank", "to the contact", "failed")
 #: How a column ends where its trace cannot go on (module docstring, step 4).
-METHODS = ("crest", "traverse", "one-pass")
+METHODS = ("crest", "traverse", "one-pass", "front")
 #: The fitted field's band into the WM for the crest method (mm), and the
 #: window of its optional bend rule (mm).
 WM_BAND_MM, BEND_MM = 0.5, 0.3
@@ -468,6 +477,12 @@ class ColumnTraces:
     T: F64 | None
     #: the fitted field's solver info, if any
     notes: dict[str, Any]
+    #: method "front": per sample, the root vertex's dual area (mm^2) and the
+    #: volume its column swept since the root (mm^3), and the sample where it
+    #: began to descend T (-1 if never); None for the other methods
+    area: F32 | None = None
+    vol: F32 | None = None
+    turn_at: I64 | None = None
 
 
 def level_set_concavity(
@@ -711,11 +726,16 @@ def trace_columns(
     op: OnePass | None = None
     T: F64 | None = None
     notes: dict[str, Any] = {}
-    if method in ("crest", "traverse"):
+    front: CF.Front | None = None
+    if method in ("crest", "traverse", "front"):
+        if method == "front" and tracer == "current":
+            raise ValueError("method 'front' grows along the fitted field")
         T, notes = S.fitted_field(
             base, t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=WM_BAND_MM
         )
-        field = base if tracer == "current" else S.gradient_tensor(T, t.vox)
+        field: F64 | None = None
+        if method != "front":
+            field = base if tracer == "current" else S.gradient_tensor(T, t.vox)
         g = S.tissue_wm_direction(t.wm, t.ctx, t.vox)
         noise, _ = S.step_noise(base, t.ctx, g, t.vox)
         del base, nh, g
@@ -725,11 +745,18 @@ def trace_columns(
         )
         crest, across = S.crest_kinks(T, t.ctx, noise, kappa, t.vox, free=free)
         del noise, kappa
-        pos, ns1, out1 = S.trace(
-            field, t.labels, t.dface, x0, nrm[tv], t.vox, NMAX, blend,
-            turn_deg=bend_deg, turn_mm=BEND_MM,
-        )  # fmt: skip
-        del field
+        if field is None:
+            front = CF.grow(
+                T, t.labels, t.dface, v, f, nrm, tv, t.vox, NMAX, MESH_SIGMA,
+                blend, crest,
+            )  # fmt: skip
+            pos, ns1, out1 = front.pos, front.ns, front.out
+        else:
+            pos, ns1, out1 = S.trace(
+                field, t.labels, t.dface, x0, nrm[tv], t.vox, NMAX, blend,
+                turn_deg=bend_deg, turn_mm=BEND_MM,
+            )  # fmt: skip
+            del field
         end1 = pos[np.arange(len(tv)), ns1 - 1].copy()
         ns, outc = ns1.copy(), out1.copy()
         if method == "traverse":
@@ -740,7 +767,8 @@ def trace_columns(
             cut_at_crest(sub_pos, sub_ns, sub_out, T, nrm[tv][k_])
             pos[k_], ns[k_], outc[k_] = sub_pos, sub_ns, sub_out
         else:
-            cut_at_crest(pos, ns, outc, T, nrm[tv])
+            if method == "crest":
+                cut_at_crest(pos, ns, outc, T, nrm[tv])
             if bend_deg is not None:
                 end_at_bend(pos, ns, outc, max(1, int(round(BEND_MM / S.STEP_MM))))
             crest_at = first_in(crest, pos, ns)
@@ -798,4 +826,7 @@ def trace_columns(
         one_pass=op,
         T=T,
         notes=notes,
+        area=None if front is None else front.area,
+        vol=None if front is None else front.vol,
+        turn_at=None if front is None else front.turn_at,
     )
