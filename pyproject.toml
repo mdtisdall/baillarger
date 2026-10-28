@@ -64,6 +64,7 @@ testpaths = [
   "prototypes/scripts/test_flatten_volume.py",
   "prototypes/scripts/test_fold_phantoms.py",
   "prototypes/scripts/test_joint_levels.py",
+  "prototypes/scripts/test_layer_maps.py",
   "prototypes/scripts/test_levelset_fill.py",
   "prototypes/scripts/test_mesh_smoothing.py",
   "prototypes/scripts/test_onepass_lib.py",
