@@ -10,7 +10,8 @@ index coordinates of the box; vox the voxel size (mm); lengths in mm.
 
 1. Tissue (load_tissue, tissue): the rim labels of the box, with the WM
    label of choice (the aseg's, or the handle-free label from
-   baillarger.white), the missing tissue
+   baillarger.white), optionally the pial-side label changes
+   (baillarger.pial_labels: cortex relabelled as fluid), the missing tissue
    (baillarger.frame.missing_tissue), and echoes 2 and 3 with their trend
    removed (log intensity minus its normalized convolution over the cortex
    at 4 voxels), zero outside the cortex. Labels: 0 cortex, 1 fluid, 2 WM,
@@ -53,6 +54,14 @@ index coordinates of the box; vox the voxel size (mm); lengths in mm.
      independently (column_front.grow with no coupling). Nothing is cut; the
      reading of the columns chooses where to cut. crest_at as "crest", and
      turn_at the sample where the column began to descend.
+   - "normal": no field: each root's column is the straight path of its
+     point of the white surface moving along its (smoothed) normal at
+     constant speed (streamlines.ray), so the fronts are offsets of the white
+     surface. It stops only at fluid, WM (after 0.3 mm), missing or other
+     tissue, a face or the length cap. Where it passes the meeting of its
+     bank's front with another's (the WM distance through tissue stops rising
+     along it; streamlines.first_fall), crest_at records it. vol is the
+     equivolume coordinate along it, from the root's curvatures.
    - "one-pass": T as fitted on the cortex alone, the turn rule (60 deg
      within 0.3 mm), and where the primary turned or reached the length cap,
      the fallback: ascent of the equal-arrival one pass (one_pass, an
@@ -82,7 +91,7 @@ Prototype entry point: prototypes/scripts/column_volume.py (--tracer).
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
@@ -95,9 +104,10 @@ from baillarger import streamlines as S
 from baillarger.data import Patch, load_box
 from baillarger.frame import mesh_curvatures, missing_tissue
 from baillarger.fronts import Fronts, march, riemann_from_direction
-from baillarger.mesh_smoothing import smooth_normals
-from baillarger.white import WMChanges, white_matter_box
-from baillarger.white import white_mesh as white_surface
+from baillarger.white import WhiteMesh, WMChanges, white_matter_box, white_mesh_normals
+
+if TYPE_CHECKING:
+    from baillarger.pial_labels import LabelChanges
 
 type Bool = npt.NDArray[np.bool_]
 type F32 = npt.NDArray[np.float32]
@@ -110,7 +120,7 @@ TRACERS = ("current", "fitted", "fitted_blend")
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
 CLASS = ("open", "crossing", "own bank", "to the contact", "failed")
 #: How a column ends where its trace cannot go on (module docstring, step 4).
-METHODS = ("crest", "traverse", "one-pass", "front")
+METHODS = ("crest", "traverse", "normal", "one-pass", "front")
 #: The fitted field's band into the WM for the crest method (mm), and the
 #: window of its optional bend rule (mm).
 WM_BAND_MM, BEND_MM = 0.5, 0.3
@@ -159,19 +169,29 @@ def face_distance(shape: tuple[int, ...], vox: F64) -> F64:
     return out
 
 
-def tissue(p: Patch, wm: Bool | None = None) -> Tissue:
+def tissue(
+    p: Patch,
+    wm: Bool | None = None,
+    pial_changes: "LabelChanges | None" = None,
+    reviewed_only: bool = False,
+) -> Tissue:
     """Step 1 on a loaded box. wm: the WM label to use (default the aseg's,
     rim == 2). It replaces the aseg's in the rim labels before anything is
     derived from them: voxels it adds become WM, and aseg WM voxels it leaves
     out (a cut across a bridge or a pinhole) become cortex. So the white
     mesh, the fitted field's boundary, the trace stops, the one pass and the
-    classes all see the same WM."""
+    classes all see the same WM. pial_changes: the pial-side label changes
+    (baillarger.pial_labels: cortex relabelled as fluid, accepted in review,
+    and brush edits; with proposed, the unreviewed proposals too), applied
+    after the WM label and never to a WM voxel."""
     rim = p.rim.copy()
     if wm is not None:
         if wm.shape != rim.shape:
             raise ValueError(f"WM label {wm.shape} is not on the box {rim.shape}")
         rim[(rim == 2) & ~wm] = 3
         rim[wm] = 2
+    if pial_changes is not None:
+        rim = pial_changes.apply(rim, p.lo, reviewed_only)
     vox = np.array(p.voxel_mm)
     miss = missing_tissue(rim, p.flash, p.voxel_mm)
     ctx = (rim == 3) & ~miss
@@ -197,13 +217,16 @@ def load_tissue(
     name: str = "box",
     directory: Path | None = None,
     changes: WMChanges | None = None,
+    pial_changes: "LabelChanges | None" = None,
+    reviewed_only: bool = False,
 ) -> Tissue:
     """The box [lo, hi) of the full grid (0-based voxels): step 1. changes:
     the handle-free WM label's changes (baillarger.white.wm_changes); None
-    keeps the aseg's WM label."""
+    keeps the aseg's WM label. pial_changes, reviewed_only: the pial-side label changes
+    (baillarger.pial_labels.LabelChanges; see tissue)."""
     p = load_box(lo, hi, name=name, directory=directory)
     wm = None if changes is None else white_matter_box(lo, hi, changes, directory)
-    return tissue(p, wm)
+    return tissue(p, wm, pial_changes, reviewed_only)
 
 
 def base_tensor(t: Tissue) -> F64:
@@ -240,8 +263,7 @@ def white_mesh(wm: Bool, sigma: float = MESH_SIGMA) -> tuple[F64, I64, F64]:
     """Vertices (voxel coordinates), faces (oriented out of the WM) and unit
     normals (out of the WM) of the binary WM label's surface: step 2
     (baillarger.white.white_mesh, and baillarger.mesh_smoothing's normals)."""
-    v, f = white_surface(wm, sigma)
-    return v, f, smooth_normals(v, f)
+    return white_mesh_normals(wm, sigma)
 
 
 def root_vertices(v: F64, n: F64) -> I64:
@@ -476,12 +498,18 @@ class ColumnTraces:
     T: F64 | None
     #: the fitted field's solver info, if any
     notes: dict[str, Any]
-    #: method "front": per sample, the root vertex's dual area (mm^2) and the
-    #: volume its column swept since the root per unit root area (mm; vol /
-    #: vol[end] is an equivolume relative depth); "traverse" and "front":
-    #: the sample where it began to descend T (-1 if never); None otherwise
-    area: F32 | None = None
+    #: per sample, the volume the column has swept per unit area of its root
+    #: (mm), NaN past the end; a relative equivolume depth is vol / vol at
+    #: the end. Method "normal": from the root's principal curvatures, A(s) =
+    #: (1 + k1 s)(1 + k2 s); "front": measured, the flux of the root vertex's
+    #: dual area vector over the steps over its dual area at the root. None
+    #: otherwise
     vol: F32 | None = None
+    #: method "front": per sample, the root vertex's dual area (mm^2); None
+    #: otherwise
+    area: F32 | None = None
+    #: methods "traverse" and "front": the sample where the column began to
+    #: descend T (-1 if never); None otherwise
     turn_at: I64 | None = None
 
 
@@ -541,6 +569,25 @@ def first_in(mask: Bool, pos: F32, ns: I64) -> I64:
         if hit.size:
             out[i] = hit[0]
     return out
+
+
+def equivolume(
+    v: F64, f: I64, nrm: F64, tv: I64, ns: I64, vox: F64, sigma_mm: float = 0.5
+) -> F32:
+    """Per column (n, NMAX), the volume swept per unit area of its root at
+    each sample (mm): the integral of A(s) = (1 + k1 s)(1 + k2 s), k1 >= k2
+    the white surface's principal curvatures at the root (frame.
+    mesh_curvatures, smoothed over sigma_mm; > 0 convex), for a straight
+    column along the root's normal (an offset front). A is clipped at 0 past
+    a focus. NaN past each column's end."""
+    k1, k2 = mesh_curvatures(v * vox, f, nrm, sigma_mm)
+    s = np.arange(NMAX) * S.STEP_MM
+    A = np.clip((1 + k1[tv, None] * s) * (1 + k2[tv, None] * s), 0.0, None)
+    # trapezoidal, from 0 at the root
+    out = np.zeros((len(tv), NMAX))
+    out[:, 1:] = np.cumsum(0.5 * (A[:, 1:] + A[:, :-1]) * S.STEP_MM, axis=1)
+    out[np.arange(NMAX)[None, :] >= ns[:, None]] = np.nan
+    return out.astype(np.float32)
 
 
 def end_at_bend(pos: F32, ns: I64, out: I64, lag: int) -> I64:
@@ -621,20 +668,56 @@ def finish(
     return pos, ns, outc, fallback, end_patch, cls
 
 
+@dataclass
+class Crest:
+    """The fitted field of the crest methods and its crest."""
+
+    T: F64
+    notes: dict[str, Any]
+    #: step_noise: T's noise over one voxel step (mm)
+    noise: F64
+    crest: Bool
+    #: the lattice direction across the kink at each crest voxel
+    across: I8
+
+
+def fitted_crest(t: Tissue, base: F64, v: F64, f: I64, nrm: F64) -> Crest:
+    """T as the crest methods fit it (extended one voxel into the fluid and
+    WM_BAND_MM into the WM), its step noise, and its crest
+    (streamlines.crest_kinks, with the white mesh's level-set curvature)."""
+    T, notes = S.fitted_field(
+        base, t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=WM_BAND_MM
+    )
+    g = S.tissue_wm_direction(t.wm, t.ctx, t.vox)
+    noise, _ = S.step_noise(base, t.ctx, g, t.vox)
+    del g
+    kappa = level_set_concavity(v, f, nrm, T, t.ctx, t.vox)
+    free = S.fitted_free(t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=WM_BAND_MM)
+    crest, across = S.crest_kinks(T, t.ctx, noise, kappa, t.vox, free=free)
+    return Crest(T, notes, noise, crest, across)
+
+
 def trace_columns(
     t: Tissue,
     tracer: str = "fitted_blend",
     method: str = "crest",
     bend_deg: float | None = None,
+    mesh: WhiteMesh | None = None,
 ) -> ColumnTraces:
-    """Steps 2-6 on a box."""
+    """Steps 2-6 on a box. mesh: a saved white mesh of this box and WM label
+    (baillarger.white.WhiteMesh; ValueError if it is not) instead of making
+    it (white_mesh)."""
     if tracer not in TRACERS:
         raise ValueError(f"tracer {tracer!r}: not one of {TRACERS}")
     if method not in METHODS:
         raise ValueError(f"method {method!r}: not one of {METHODS}")
     base = base_tensor(t)
     nh, coh = data_normal(base, t.ctx)
-    v, f, nrm = white_mesh(t.wm)
+    if mesh is None:
+        v, f, nrm = white_mesh(t.wm)
+    else:
+        mesh.check(t.patch.lo, t.patch.hi, t.wm)
+        v, f, nrm = mesh.v, mesh.f, mesh.normals
     tv = root_vertices(v, nrm)
     P = mesh_patches(v, f, t.vox)
     root_patch = P.of_vertex[tv]
@@ -643,25 +726,33 @@ def trace_columns(
     op: OnePass | None = None
     T: F64 | None = None
     notes: dict[str, Any] = {}
+    vol: F32 | None = None
     front: CF.Front | None = None
-    if method in ("crest", "traverse", "front"):
+    if method == "normal":
+        del base, nh
+        pos, ns1, out1 = S.ray(t.labels, t.dface, x0, nrm[tv], t.vox, NMAX)
+        end1 = pos[np.arange(len(tv)), ns1 - 1].copy()
+        ns, outc = ns1.copy(), out1.copy()
+        D = S.tissue_wm_distance(t.wm, t.ctx, t.vox)
+        crest_at = S.first_fall(D, pos, ns)  # NaN in obstacles: skipped
+        del D
+        vol = equivolume(v, f, nrm, tv, ns, t.vox)
+        fallback = np.zeros(len(tv), np.int8)
+        k = np.arange(len(tv))
+        endp = pos[k, ns - 1].astype(float)
+        last = endp - pos[k, np.maximum(ns - 2, 0)]
+        last = np.where((ns > 1)[:, None], last, -nrm[tv])
+        end_patch = P.of_vertex[G.crossing_vertex(v, nrm, endp, last, t.vox)]
+        cls = classify(outc, P.D[root_patch, end_patch])
+    elif method in ("crest", "traverse", "front"):
         if method != "crest" and tracer == "current":
             raise ValueError(f"method {method!r} follows the fitted field")
-        T, notes = S.fitted_field(
-            base, t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=WM_BAND_MM
-        )
+        C = fitted_crest(t, base, v, f, nrm)
+        T, notes, crest = C.T, C.notes, C.crest
         field: F64 | None = None
         if method == "crest":
             field = base if tracer == "current" else S.gradient_tensor(T, t.vox)
-        g = S.tissue_wm_direction(t.wm, t.ctx, t.vox)
-        noise, _ = S.step_noise(base, t.ctx, g, t.vox)
-        del base, nh, g
-        kappa = level_set_concavity(v, f, nrm, T, t.ctx, t.vox)
-        free = S.fitted_free(
-            t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=WM_BAND_MM
-        )
-        crest = S.crest_voxels(T, t.ctx, noise, kappa, t.vox, free=free)
-        del noise, kappa
+        del base, nh, C
         if field is None:
             sigma = MESH_SIGMA if method == "front" else 0.0
             front = CF.grow(
@@ -669,6 +760,8 @@ def trace_columns(
                 crest,
             )  # fmt: skip
             pos, ns1, out1 = front.pos, front.ns, front.out
+            if method == "front":
+                vol = front.vol / front.area[:, :1]
         else:
             pos, ns1, out1 = S.trace(
                 field, t.labels, t.dface, x0, nrm[tv], t.vox, NMAX, blend,
@@ -735,11 +828,7 @@ def trace_columns(
         one_pass=op,
         T=T,
         notes=notes,
+        vol=vol,
         area=front.area if method == "front" and front is not None else None,
-        vol=(
-            front.vol / front.area[:, :1]
-            if method == "front" and front is not None
-            else None
-        ),
         turn_at=None if front is None else front.turn_at,
     )

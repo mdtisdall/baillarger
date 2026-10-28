@@ -9,6 +9,10 @@
      (crest_at), and one that reflects back into its own WM is cut at T's maximum;
    - "traverse": as crest, but a column that meets the crest crosses it and descends T into the
      far bank, so every column is a complete ray to fluid or WM;
+   - "normal": no field; each column is the straight path of its root moving along the white
+     surface's normal at constant speed (offset fronts), stopped only by fluid or WM labels;
+     crest_at records where it passes another bank's front, and vol holds its equivolume
+     coordinate (swept volume per unit root area, mm);
    - "one-pass" (the method before): the turn rule, and the one pass's ascent as the fallback.
    The classes: open, crossing, own bank, to the contact, failed (roots within 2 mm of a face
    flagged), with the bank rule on mesh patches.
@@ -27,14 +31,20 @@ with "points_full0": [[i, j, k], ...] in 0-based full-grid voxels.
 Writes <work>/column_volume_<name>.npz and .json, <figures>/column_volume_<name>_*.png.
 Usage: column_volume.py <figures dir> <work dir> --name NAME (--patch P | --box I J K [--size N ...])
                         [--points FILE] [--tracer {current,fitted,fitted_blend}]
-                        [--columns {crest,traverse,one-pass,front}] [--wm-changes FILE] [--figs-only]
+                        [--columns {crest,traverse,normal,one-pass,front}] [--wm-changes FILE] [--mesh FILE]
+                        [--label-changes FILE [--reviewed-only]] [--figs-only]
 --wm-changes: the handle-free WM label (baillarger.white.wm_changes, saved with WMChanges.save)
 replaces the aseg's everywhere (mesh, field, stops, classes); without it, the aseg's.
-The npz also holds tracer_name, column_method, wm_label and crest_at (crest, traverse and front:
-per column, the first sample where it meets another bank's field, T's crest; -1 if none). With
---columns front (baillarger.column_front: the white mesh grown as one coupled surface) also area
-and vol (per sample, the root vertex's dual area, mm^2, and the volume its column swept per unit root area, mm) and
-turn_at (the sample where the column began to descend T, -1 if never).
+--mesh: a saved white mesh of the same box and WM label (python -m baillarger.white mesh, WhiteMesh)
+instead of making it; the run stops if its box or WM label differ.
+--label-changes: the pial-side label changes (baillarger.pial_labels, LabelChanges.save): the
+detector's best guess (every cell not rejected) and the brush edits; with --reviewed-only, only the
+accepted cells and the brush edits.
+The npz also holds tracer_name, column_method, wm_label, pial_label, white_mesh (the --mesh file or "made here") and crest_at (crest, traverse and front: per
+column, the first sample where it meets another bank's field, T's crest; -1 if none; normal: where
+it passes another bank's front); with --columns normal or front, vol (per sample, the volume swept
+per unit root area, mm: the equivolume coordinate); with front, also area (the root vertex's dual
+area, mm^2); with traverse or front, turn_at (the sample where the column began to descend T).
 The two marked faces of the plan: --name M1S1 --box 378 224 448; --name V1V2_banks --box 198 58 65.
 """
 
@@ -59,7 +69,8 @@ import crossing_lib as X
 from baillarger import column_traces as CT
 from baillarger.data import PATCHES
 from baillarger.mesh_smoothing import edges as mesh_edges
-from baillarger.white import WMChanges
+from baillarger.pial_labels import LabelChanges
+from baillarger.white import WhiteMesh, WMChanges
 
 ap = argparse.ArgumentParser()
 ap.add_argument("fig")
@@ -73,10 +84,16 @@ ap.add_argument("--tracer", choices=CT.TRACERS, default="fitted_blend")
 ap.add_argument("--columns", choices=CT.METHODS, default="crest")
 ap.add_argument("--wm-changes", help="the handle-free WM label's changes (baillarger.white, WMChanges.save); "
                 "default: the aseg's WM label")
+ap.add_argument("--label-changes", help="pial-side label changes (baillarger.pial_labels)")
+ap.add_argument("--reviewed-only", action="store_true",
+                help="with --label-changes: apply only the accepted cells and brush edits, not the queue")
+ap.add_argument("--mesh", help="a saved white mesh of this box and WM label (baillarger.white, WhiteMesh); "
+                "default: made here")
 ap.add_argument("--figs-only", action="store_true")
 A = ap.parse_args()
 FIG, WORK, SITE, FIGS_ONLY = A.fig, A.work, A.name, A.figs_only
 WM_LABEL = f"handle-free: {A.wm_changes}" if A.wm_changes else "aseg"
+PIAL_LABEL = (f"{A.label_changes}" + (" (reviewed only)" if A.reviewed_only else "")) if A.label_changes else "aseg"
 SAME_MM, TPL_MM = CT.SAME_MM, 6.0
 N_PROFILE, TPL_MAX = 3000, 400
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
@@ -121,17 +138,18 @@ def box_and_points():
 def main():
     lo, hi, P = box_and_points()
     changes = WMChanges.load(Path(A.wm_changes)) if A.wm_changes else None
+    relabel = LabelChanges.load(Path(A.label_changes)) if A.label_changes else None
     t = CT.load_tissue(tuple(int(a) for a in lo), tuple(int(a) for a in hi), f"column_volume_{SITE}",
-                       changes=changes)
+                       changes=changes, pial_changes=relabel, reviewed_only=A.reviewed_only)
     vox = t.vox
     wm, ctx, labels = t.wm, t.ctx, t.labels
     feats = [t.det[1], t.det[2]]
     disp = t.det[1]
     d_wm = ndi.distance_transform_edt(~wm, sampling=vox)
-    say(f"{SITE}: box {tuple(int(a) for a in hi - lo)}; {len(P)} points; tracer {A.tracer}; columns {A.columns}; WM {WM_LABEL}")
+    say(f"{SITE}: box {tuple(int(a) for a in hi - lo)}; {len(P)} points; tracer {A.tracer}; columns {A.columns}; WM {WM_LABEL}; pial labels {PIAL_LABEL}")
 
     # ---- steps 1-3 (baillarger.column_traces): mesh, roots, T, primary, fallback, classes
-    R = CT.trace_columns(t, A.tracer, A.columns)
+    R = CT.trace_columns(t, A.tracer, A.columns, mesh=WhiteMesh.load(Path(A.mesh)) if A.mesh else None)
     v, f, nrm, tv = R.v, R.f, R.nrm, R.tv
     pos, ns, out1, outc, tracer, cls = R.pos, R.ns, R.out1, R.outc, R.fallback, R.cls
     root_patch, end_patch, near_face, coh = R.root_patch, R.end_patch, R.near_face, R.coh
@@ -193,8 +211,10 @@ def main():
         end_patch=end_patch, near_face=near_face, P=P, vox=vox, lo=lo,
         disp=disp.astype(np.float32), ctx=ctx, coh=coh.astype(np.float32), wm=wm,
         labels=labels.astype(np.int8),  # 0 cortex, 1 fluid, 2 WM, 3 missing, 4 other
-        tracer_name=A.tracer, column_method=A.columns, wm_label=WM_LABEL, crest_at=R.crest_at,
-        **({} if R.area is None else dict(area=R.area, vol=R.vol, turn_at=R.turn_at)),
+        tracer_name=A.tracer, column_method=A.columns, wm_label=WM_LABEL, pial_label=PIAL_LABEL, white_mesh=A.mesh or "made here", crest_at=R.crest_at,
+        **({} if R.vol is None else dict(vol=R.vol)),
+        **({} if R.area is None else dict(area=R.area)),
+        **({} if R.turn_at is None else dict(turn_at=R.turn_at)),
         **{"H_" + k: H[k] for k in HOR})
     json.dump(dict(turn=turn), open(f"{WORK}/column_volume_{SITE}_turn.json", "w"))
     say("saved")

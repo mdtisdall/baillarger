@@ -1049,9 +1049,154 @@ Contact error at the kissing pairs (median / p90, mm): crest 0.045 / 0.085 and 0
 - Rebuild on the refined pial labels (PR #49) and measure again; crests where no banks meet should fall.
 - Whether the crest test marks too much: 10.5 % of V1V2's cortex, mostly with kink directions out of the plane of the columns; a resliced view across those patches is the next look.
 - The field-free equivolume front (speed ∝ A0/A, its own session) and `--columns normal` (PR #47), compared at the marked points.
+- A full top boundary for T at the pia. The sign through tissue makes T respect labelled fluid; a fluid label that misses a channel still hides it.
 - Padded boxes, so that columns can run past the crop (most failures). A 4 mm margin is about 2.5 × the volume, roughly 11 GB.
 - Collisions between banks on the moving front, detected exactly (`mesh_intersect`), recorded, not acted on.
 - Step 2's use of `crest_at` and `turn_at`, for example an edit-priority layer of crests without a fused contact, as likely label errors.
+
+### Pial-side label refinement
+
+A GM refinement step at the front of the pipeline, like the WM one: `baillarger.pial_labels` finds voxels that the aseg labels cortex but the image shows are fluid, writes a change file (`LabelChanges`, the counterpart of `baillarger.white.WMChanges`), and `column_traces.load_tissue(..., pial_changes=...)` applies it after the handle-free WM. Everything downstream (T, the crest, the columns, the viewer) reads the refined labels. The detector is trusted by default: its best guess, every cell it does not reject, is what the step writes and what `load_tissue` applies. Corrections go into the change file (statuses and brush edits), and the cells most worth a look are ranked first in a review queue; the review pane in `baillarger.viewer` is a separate step.
+
+**What the image shows.** At V1V2 the fluid is fomblin at the noise floor (45 in every echo, against 514 for cortex in echo 2). The aseg's cortex runs one to three voxels into it around most sulci, and fills the thin channels of sulci it fused, such as the user's marked "contact" at (270, 133, 139). The vessel the user identified at (324, 146, 139) is a one-voxel-wide dotted dark line, partial-volumed.
+
+**The method** (all closed-form; module docstring):
+1. **Darkness.** Echoes 2 and 3, log, minus their trend over the cortex (as in `column_traces.tissue`, re-estimated without the voxels the first pass found dark). A voxel is dark when two things hold:
+   - it is significantly darker than its local cortex: the noise-weighted contrast is below −k, k the normal quantile for α = 10⁻³ per voxel;
+   - it is more fluid than cortex: its fluid fraction, between the local cortex level and the box's labelled-fluid level, is above ½.
+2. **Noise.** Per echo, from the structure tensor: the median smallest eigenvalue over the cortex (away from its edges), divided by the derivative filter's gain and by the median smallest eigenvalue of a Wishart matrix with `n_eff` degrees of freedom (the sample tensor's smallest eigenvalue is biased low: 0.68 at n_eff = 39).
+   - On white noise it is within a few per cent, high (tests).
+   - The real noise is spatially correlated: neighbour correlation 0.5–0.67, even in deep WM. The estimate is then the white noise with the same gradient power.
+   - At V1V2 it gives 0.208 / 0.300 (echo 2 / 3), against a cortex MAD of 0.188 / 0.272, which includes the layers. At M1S1: 0.140 / 0.221 against 0.137 / 0.207.
+3. **Components.** 26-connected components of the dark voxels, at least n_min voxels. n_min is the smallest size expected less than once in noise: N p (e·25·p)^(n−1) < 1, the bound on connected sets in a graph of degree 26. That gives 3 at V1V2 and 1 at M1S1. Each component is split into review cells, geodesic Voronoi cells 0.96 mm apart (the root patches' spacing), because the rim and a fused channel are often one component.
+4. **Position** (per component). A component is "outer" when it touches fluid or other labels, or when T does not pass through it within one bank:
+   - step along ∇T out of the component on both sides;
+   - T passes through a voxel when both ends are cortex and T rises significantly into it and beyond it (k times `step_noise` per voxel step, as in `crest_kinks`);
+   - more than half passing through means "inside a bank": rejected.
+
+   **The stria trap.** The stria of Gennari is a dark band inside one bank: T passes through it, so it is rejected even when it is as dark as a 70 % fluid mixture. A fused channel lies where the banks' fields meet, and a superficial vessel at the top of the cortex, so T does not pass through either. **Limitation:** a hidden channel off T's crest that reaches no fluid looks like a band inside a bank, and is left to the brush.
+5. **Status, per cell.**
+   - Cells of "inside" components are rejected.
+   - Cells of components that touch fluid are accepted at once when their relabel keeps the tissue's Betti numbers (Kuhn adjacency, as in `baillarger.handles`) in a box round the cell, given the cells accepted so far. This runs in passes, so the rim opens from the fluid inward.
+   - The rest are proposed, the review queue: hidden channels, and cells that would open a cavity, a tunnel or a split (as a channel between two banks does). Proposed cells are part of the best guess; the status only says which cells to look at first.
+6. **Ranking.** By the columns of a column volume that pass through the cell, then the crest voxels within one voxel of it, then size. Descriptors per cell: shape (Westin: tube, sheet or blob), fluid fraction, contrast, and local Betti numbers before and after.
+
+**The step on its own:** `python -m baillarger.pial_labels propose --out DIR --name NAME --lo I J K --hi I J K --wm-changes FILE [--columns column_volume_<name>.npz]`, as the WM step runs with `python -m baillarger.white changes`. It writes, on the box grid:
+- `pial_labels_<NAME>.npz`, the change file;
+- `_labels.nii.gz`, the refined rim labels, i.e. the WM changes and the best guess applied (0 other, 1 outside, 2 WM, 3 cortex);
+- a `.json` summary with the cells in rank order;
+- an ITK-SNAP overlay of the statuses.
+
+A status can be changed and brush edits added with `LabelChanges.with_status` and `with_brush`. `load_tissue(..., pial_changes=FILE)` and `column_volume.py --label-changes FILE` apply the best guess (every cell not rejected) and the brush edits; with `reviewed_only` / `--reviewed-only`, only the accepted cells and brush edits.
+
+**Tests** (exact answers, synthetic boxes):
+- the noise from white noise and from a layered cube;
+- the gain of central differences;
+- the Wishart factor's limit;
+- the component-size bound;
+- the fluid fraction of a known mixture;
+- shapes, cells, the Betti change of a slot, a cavity and a tunnel, and traces counted per cell;
+- the change file's round trip, application order, WM protection and overlay;
+- `tissue` with changes.
+
+**Proposals:**
+- **The stria trap on fused banks.** A hidden fluid channel at the WM midline is proposed (queue: it reaches no fluid). Two dark bands, one per bank, 90 % of whose voxels are dark, are not proposed.
+- **The stria trap on a slab with a vessel.** A mid-depth dark band is not proposed. A tube on the pial surface is accepted, and its shape is a tube.
+- **The channel removes the crest.** With the channel relabelled, T's crest at the midline falls below a tenth of what it was.
+
+**At the sites** (handle-free WM; `scratch/pial-labels/`, with a README):
+
+| | V1V2 | M1S1 |
+|---|---|---|
+| Cortex voxels | 1,081,775 | 1,599,739 |
+| Dark voxels | 51,034 (4.7 %) | 27,581 (1.7 %) |
+| Components (n_min) | 405 (3) | 1,671 (1) |
+| Cells accepted (voxels) | 1,992 (37,172) | 2,141 (23,562) |
+| Cells in the queue (voxels; reaching no fluid) | 494 (11,076; 176) | 578 (2,422; 527) |
+| Cells rejected, inside a bank (voxels) | 191 (1,624) | 438 (1,597) |
+| Tissue Betti numbers of the box (components, tunnels, cavities), aseg | (1, 9, 6) | (1, 11, 5) |
+| … with the accepted cells | (1, 9, 6) | (1, 11, 5) |
+| … with the best guess (accepted and queue: the default) | (6, 314, 324) | (1, 63, 560) |
+
+**The user's three places at V1V2:**
+- The marked "contact" (270, 133, 139): an accepted cell one voxel away (a tube of 15 voxels, fluid fraction 0.71).
+- The dark pocket (289, 118, 139): the top of the queue (676 columns; it reaches no fluid).
+- The vessel (324, 146, 139): only fragments within 5 voxels (a 7-voxel queue cell). A vessel one voxel wide rarely reaches a majority-fluid voxel at this noise, so it is left to the brush.
+
+The best guess changes the tissue's topology a lot. The queue is, by definition, the cells whose relabel opens a cavity, a tunnel or a split: dark pockets with no mouth to the fluid in the box (hidden channels, or noise), and channels that cut the tissue at the box faces. The user chose to trust it by default and correct it in the review (2026-10-28).
+
+**The former traverse re-measured** (its lattice step along the kink direction, before the shared rule of *One crossing rule: traverse and front*; the best guess, unreviewed: accepted and queue; roots 2 mm or more from a face):
+
+| | V1V2 crest | V1V2 crest, relabelled | V1V2 traverse | V1V2 traverse, relabelled | M1S1 crest | M1S1 crest, relabelled | M1S1 traverse | M1S1 traverse, relabelled |
+|---|---|---|---|---|---|---|---|---|
+| Open | 34,668 | 49,286 | 15,336 | 26,712 | 27,755 | 36,865 | 14,746 | 22,429 |
+| Crossing | 6,001 | 717 | 4,967 | 641 | 14,418 | 9,611 | 9,916 | 7,385 |
+| Own bank | 2,394 | 1,060 | 32,320 | 27,670 | 2,353 | 2,178 | 30,568 | 26,790 |
+| To the contact | 7,325 | 3,218 | 194 | 10 | 6,796 | 4,547 | 8 | 9 |
+| Failed | 13,727 | 9,834 | 11,298 | 9,082 | 21,028 | 19,149 | 17,112 | 15,737 |
+| Open columns meeting a crest | 62 % | 56 % | 14 % | 19 % | 56 % | 49 % | 18 % | 16 % |
+
+- **Most of what crossed was fluid.** At V1V2, relabelling turns most crossing columns into open ones (crest: 6,001 → 717 crossing, 34,668 → 49,286 open). Most of the fused stretch, the user's marked contacts included, is a fluid channel the aseg filled. At M1S1 a third of the crossings go.
+- **The former traverse improves but is still wrong** for more than half of the open columns: own bank −14 % at V1V2 and −12 % at M1S1, open +74 % and +52 %.
+- **The crest test fires inside the cortex.** The crest still covers 9.9 % of V1V2's cortex and 5.2 % of M1S1's (10.4 % and 5.9 % before; `crest_after_<site>.png`). Of the own-bank columns' crest meetings, only 12 % (V1V2) and 9 % (M1S1) lie within one voxel of fluid. So the remaining failure is the crest test's hits inside the cortex, mostly in thick cortex, not the labels. Traverse stays an option, not the default.
+- **The profile split at the points** is made on a random subsample of crossing columns. With relabelling, far fewer columns cross at the marked points (V1V2: 10–14 of 35 points), so its numbers are not comparable.
+
+**Not done:**
+- **The user's corrections** at both sites. The table applies the best guess; corrections can take queue cells out, overturn an accepted or rejected cell, or add brush edits.
+- **An automatic topology fix for the queue,** like `remove_handles` for the WM: open a mouth for a pocket, or leave it as cortex.
+- **A detector for thin vessels and channels:** a line / sheet-matched statistic (Hessian at one voxel) would raise the SNR of one-voxel-wide structures above the per-voxel test.
+- **The whole hemisphere at once,** as the WM refinement does; now per box.
+- **The crest test's hits** in the cortex, which the former traverse crossed sideways (*One crossing rule: traverse and front*).
+### Normal rays: columns without a field
+
+**Code.**
+- `baillarger.column_traces`: `--columns normal`; `equivolume`; `ColumnTraces.vol`.
+- `baillarger.streamlines`: `ray` (straight paths in mm steps), `first_fall`, `tissue_wm_distance`.
+- Tests (exact answers):
+  - rays from a ball are radial, and `vol` matches s + s²/R + s³/(3R²) (median relative error < 0.1);
+  - rays cross parallel fused banks and meet at the midline;
+  - rays meet on the bisector of a narrow fused V;
+  - rays see no meeting beside an open slot;
+  - `ray` is a straight line in 0.04 mm steps; `first_fall` finds where a field stops rising.
+
+**The method.** Each column leaves its root along the smoothed white-surface normal and goes straight at a constant speed. It stops only at fluid or WM labels (or missing or other tissue, the box face, the 8 mm length cap). It does not use T or the image.
+- `crest_at`: the first sample where the WM distance through tissue stops rising along the ray. There the ray has passed the midline between its own bank and another bank, so it records the geometric meeting, not T's crest.
+- `vol`: the equivolume coordinate per sample, the swept volume per unit root area, with area (1 + k1 s)(1 + k2 s) from the root's principal curvatures. vol / vol at the end is an equivolume relative depth. The speed stays constant; a speed set by curvature is the equivolume-front session's option.
+
+**At the sites** (same field, labels and roots as the former traverse's table; `scratch/normal-columns/`):
+
+| | V1V2: crest | V1V2: traverse | V1V2: normal | M1S1: crest | M1S1: traverse | M1S1: normal |
+|---|---|---|---|---|---|---|
+| Open | 34,668 | 15,336 | 38,625 | 27,755 | 14,746 | 31,863 |
+| Crossing | 6,001 | 4,967 | 4,946 | 14,418 | 9,916 | 13,658 |
+| Own bank | 2,394 | 32,320 | 386 | 2,353 | 30,568 | 26 |
+| To the contact | 7,325 | 194 | 0 | 6,796 | 8 | 0 |
+| Failed | 13,727 | 11,298 | 20,158 | 21,028 | 17,112 | 26,803 |
+| …box face / length | 9,447 / 1,365 | 6,607 / 17 | 14,507 / 2,673 | 20,757 / 271 | 16,765 / 123 | 23,039 / 3,764 |
+| Open columns meeting another bank | 62 % | 14 % | 12 % | 56 % | 18 % | 6 % |
+| Profile split at the marked points (median, p90 mm; points) | 0.065, 0.415 (17) | 0.066, 0.165 (25) | 0.075, 0.183 (24) | 0.236, 0.827 (21) | 0.41, 0.63 (21) | 0.169, 0.597 (20) |
+
+**On the phantoms** (right class, at V1V2's features; M1S1's within 0.02):
+
+| | Crowns | Fundus, 0.16 mm slot | Fundus, 0.48 mm slot | Kissing pair | Kissing pair, no dark band |
+|---|---|---|---|---|---|
+| crest | 0.94–0.95 | 0.95 | 0.96 | 0.90 | 0.90 |
+| traverse (former lattice step) | 0.94 | 0.55 | 0.79 | 0.82 | 0.78 |
+| normal | 0.95 | 0.94 | 0.96 | 0.90 | 0.90 |
+| one-pass | 0.94–0.95 | 0.93–0.94 | 0.95 | 0.90 | 0.90 |
+
+The paths of normal are straight, so they are further from the phantoms' curved columns: path error p90 0.18–0.41 mm at the crowns, against 0.11–0.33 for crest; 0.25 at the kissing pairs, against 0.11–0.18.
+
+**What this says.**
+- Straight rays keep the right class as well as the field-based methods do, on every phantom, and they do not misroute through the fundus focus as traverse does: there is no field to focus.
+- At the sites they almost never return to their own bank (386 and 26 columns), and they cross fused banks about as often as crest does. Their open columns rarely meet another bank (12 % and 6 %), so most of crest's and traverse's crests on open columns come from T, not from the geometry, which agrees with the label errors found under traverse.
+- The profile split at the marked points is as good as the best method at V1V2 and the best at M1S1 (median 0.17 mm, against 0.24–0.41).
+- The cost: more failures. Straight rays leave the box more often (about 5,000 and 2,300 more at the faces) and reach the 8 mm cap more often (2,673 and 3,764). Apart from the face, the cap is nearly all of normal's failures. The others are V1V2's 'other' (2,253, the same for every method) and 'missing' (725) labels.
+- **The capped rays.** They start along the WM distance's gradient (cos 0.99, as crossing rays do), and 99.7 % or more pass another bank's front, at 2.4–2.7 mm. After that they run along the far bank's sheet, not into it: the median |cos| between the ray and the far WM distance's gradient is 0.3–0.4, against about 0.9 for crossing rays. They come within about 0.9 mm of WM and 0.5–0.7 mm of fluid, but reach neither in 8 mm. A straight ray crosses into a far bank that is not parallel to its own and grazes it. By the user's decision, normal rays stay straight; the capped rays are kept as rays that end in cortex (outcome "length").
+
+**Not done:**
+- The comparison with the equivolume-front method (its session), which reads these builds.
+- The crossing rays' cut: like traverse, normal's crossings depend on a cortex label without fluid channels and vessels; it is measured again after the pial-side label refinement.
 
 ### A pia editor on an inflated surface
 

@@ -13,7 +13,14 @@ white_mesh makes the white mesh of a label: marching tetrahedra at 0.5 of
 the binary label (so the mesh has the label's Kuhn topology, which
 baillarger.handles makes handle-free), then tangential relaxation and
 Gaussian smoothing without shrinkage (baillarger.mesh_smoothing), which move
-vertices but keep the faces.
+vertices but keep the faces. white_mesh_normals adds the smoothed vertex
+normals (out of the WM) that the column traces start from.
+
+A box's white mesh can be made once and saved (WhiteMesh: box_mesh, save),
+so that a series of experiments uses one surface. The file holds the box,
+its affine, sigma, the SHA-256 of the WM label the mesh was made from and the
+provenance of that label; WhiteMesh.check refuses a box or a WM label that
+is not the mesh's own (baillarger.column_traces.trace_columns, mesh=).
 
 The reports: changes_summary (the moves on the full grid), box_report (the
 white mesh of a box before and after, per piece, and the moves in it) and
@@ -22,17 +29,26 @@ overlay (an ITK-SNAP label image of the moves). The command line:
     python -m baillarger.white changes --out OUTDIR
     python -m baillarger.white box --changes OUTDIR/wm_changes.npz --out OUTDIR
         --name NAME --lo X Y Z --hi X Y Z
+    python -m baillarger.white mesh [--changes OUTDIR/wm_changes.npz]
+        --out OUTDIR --name NAME (--patch P | --lo X Y Z --hi X Y Z)
+        [--sigma S]
 
 changes writes wm_changes.npz (the changes), wm_changes.json
 (changes_summary) and wm_changes_overlay.nii.gz (full grid: 1 cut, 2 fill,
 3 stranded). box writes wm_box_<NAME>.json (box_report),
 wm_box_<NAME>_overlay.nii.gz and wm_box_<NAME>_wm_fixed.nii.gz (the box's
-handle-free label), on the box grid.
+handle-free label), on the box grid. mesh writes wm_mesh_<NAME>.npz (the
+WhiteMesh, the file that other tools load), wm_mesh_<NAME>.json (the box,
+mesh_pieces and the provenance) and wm_mesh_<NAME>.vtk (the mesh in RAS mm,
+for viewing); without --changes, the mesh is that of the aseg's WM label.
 """
 
 import argparse
+import datetime
+import hashlib
 import json
-from dataclasses import dataclass
+import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -40,10 +56,11 @@ import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 
+from baillarger import __version__
 from baillarger import mesh_smoothing as S
-from baillarger.data import ASEG_WM, Box, aseg_path, crop_affine
+from baillarger.data import ASEG_WM, PATCHES, Box, aseg_path, crop_affine
 from baillarger.handles import kuhn_betti, remove_handles
-from baillarger.mesh import marching_tetrahedra, topology
+from baillarger.mesh import marching_tetrahedra, topology, write_vtk
 
 type Bool = npt.NDArray[np.bool_]
 type Betti = tuple[int, int, int]
@@ -162,6 +179,109 @@ def white_mesh(wm: Bool, sigma: float = 2.0) -> tuple[Float, Int]:
     if not len(f):
         return v0, f
     return S.twice(S.relax(v0, f), f, sigma), f
+
+
+def white_mesh_normals(wm: Bool, sigma: float = 2.0) -> tuple[Float, Int, Float]:
+    """white_mesh and its smoothed unit vertex normals, out of the WM
+    (baillarger.mesh_smoothing.smooth_normals)."""
+    v, f = white_mesh(wm, sigma)
+    return v, f, S.smooth_normals(v, f)
+
+
+def label_sha256(wm: Bool) -> str:
+    """SHA-256 of a binary label: its shape and its voxels in C order."""
+    a = np.ascontiguousarray(np.asarray(wm, bool))
+    h = hashlib.sha256(repr(a.shape).encode())
+    h.update(np.packbits(a, axis=None).tobytes())
+    return h.hexdigest()
+
+
+@dataclass(frozen=True)
+class WhiteMesh:
+    """The white mesh of one box, made once and loaded by the tools that use
+    it."""
+
+    #: (n, 3) vertices, voxel coordinates of the box
+    v: Float
+    #: (m, 3) faces, oriented out of the WM
+    f: Int
+    #: (n, 3) smoothed unit vertex normals, out of the WM
+    normals: Float
+    lo: Box
+    hi: Box
+    #: voxel to RAS (mm) of the box
+    affine: Float
+    sigma: float
+    #: label_sha256 of the box's WM label that the mesh was made from
+    wm_sha256: str
+    #: where the WM label came from, and how and when the mesh was made
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def save(self, path: Path) -> None:
+        np.savez_compressed(
+            path,
+            v=self.v,
+            f=self.f,
+            normals=self.normals,
+            lo=np.array(self.lo),
+            hi=np.array(self.hi),
+            affine=self.affine,
+            sigma=np.array(self.sigma),
+            wm_sha256=np.array(self.wm_sha256),
+            provenance=np.array(json.dumps(self.provenance)),
+        )
+
+    @classmethod
+    def load(cls, path: Path) -> "WhiteMesh":
+        z = np.load(path)
+        lo, hi = z["lo"].tolist(), z["hi"].tolist()
+        return cls(
+            v=z["v"].astype(np.float64),
+            f=z["f"].astype(np.int64),
+            normals=z["normals"].astype(np.float64),
+            lo=(lo[0], lo[1], lo[2]),
+            hi=(hi[0], hi[1], hi[2]),
+            affine=z["affine"].astype(np.float64),
+            sigma=float(z["sigma"]),
+            wm_sha256=str(z["wm_sha256"]),
+            provenance=json.loads(str(z["provenance"])),
+        )
+
+    def check(self, lo: Box, hi: Box, wm: Bool) -> None:
+        """Raises ValueError unless [lo, hi) is the mesh's box and wm the WM
+        label that it was made from."""
+        if tuple(lo) != self.lo or tuple(hi) != self.hi:
+            raise ValueError(
+                f"box {tuple(lo)}-{tuple(hi)} is not the mesh's {self.lo}-{self.hi}"
+            )
+        if label_sha256(wm) != self.wm_sha256:
+            raise ValueError("the WM label is not the one the mesh was made from")
+
+
+def box_mesh(
+    wm: Bool,
+    lo: Box,
+    hi: Box,
+    affine: npt.ArrayLike,
+    sigma: float = 2.0,
+    provenance: dict[str, Any] | None = None,
+) -> WhiteMesh:
+    """The WhiteMesh of the WM label wm of the box [lo, hi)."""
+    shape = tuple(int(b - a) for a, b in zip(lo, hi, strict=True))
+    if wm.shape != shape:
+        raise ValueError(f"WM label {wm.shape} is not on the box {shape}")
+    v, f, n = white_mesh_normals(wm, sigma)
+    return WhiteMesh(
+        v,
+        f,
+        n,
+        lo,
+        hi,
+        np.asarray(affine, np.float64),
+        float(sigma),
+        label_sha256(wm),
+        dict(provenance or {}),
+    )
 
 
 def mesh_pieces(
@@ -336,6 +456,86 @@ def write_box(
     return rep
 
 
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _git_state() -> dict[str, Any]:
+    """The commit of the checkout this module is in, and whether tracked files
+    differ from it; None for both outside a git checkout."""
+    repo = Path(__file__).resolve().parent
+
+    def git(*args: str) -> str | None:
+        r = subprocess.run(
+            ["git", "-C", str(repo), *args], capture_output=True, text=True
+        )
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    status = git("status", "--porcelain", "--untracked-files=no")
+    return dict(
+        commit=git("rev-parse", "HEAD"),
+        dirty=None if status is None else bool(status),
+    )
+
+
+def write_mesh(
+    lo: Box,
+    hi: Box,
+    changes_path: Path | None,
+    out: Path,
+    stem: str,
+    sigma: float = 2.0,
+) -> WhiteMesh:
+    """<stem>.npz (the WhiteMesh), <stem>.json (the box, mesh_pieces and the
+    provenance) and <stem>.vtk (RAS mm) in out, for the WM label of the box
+    [lo, hi): the handle-free label of the changes at changes_path, or the
+    aseg's without. Returns the mesh."""
+    img = _aseg(None)
+    if changes_path is None:
+        if not all(0 <= a < b <= n for a, b, n in zip(lo, hi, img.shape, strict=True)):
+            raise ValueError(f"box {lo}-{hi} is not inside the grid {img.shape}")
+        sl = tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))
+        wm: Bool = np.asarray(img.dataobj[sl]) == ASEG_WM
+    else:
+        wm = white_matter_box(lo, hi, WMChanges.load(changes_path))
+    prov: dict[str, Any] = dict(
+        created=datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        wm_label="aseg" if changes_path is None else "handle-free",
+        aseg=dict(path=str(aseg_path().resolve()), sha256=_file_sha256(aseg_path())),
+        changes=None
+        if changes_path is None
+        else dict(path=str(changes_path.resolve()), sha256=_file_sha256(changes_path)),
+        process="baillarger.white.white_mesh_normals",
+        baillarger_version=__version__,
+        **_git_state(),
+    )
+    m = box_mesh(wm, lo, hi, crop_affine(img.affine, lo), sigma, prov)
+    out.mkdir(parents=True, exist_ok=True)
+    m.save(out / f"{stem}.npz")
+    vox = img.header.get_zooms()[:3]
+    rep = dict(
+        lo=list(lo),
+        hi=list(hi),
+        sigma=m.sigma,
+        vertices=len(m.v),
+        faces=len(m.f),
+        wm_sha256=m.wm_sha256,
+        npz_sha256=_file_sha256(out / f"{stem}.npz"),
+        pieces=mesh_pieces(m.v, m.f, (float(vox[0]), float(vox[1]), float(vox[2]))),
+        provenance=prov,
+    )
+    (out / f"{stem}.json").write_text(json.dumps(rep, indent=1))
+    _, flab = S.pieces(m.f, len(m.v))
+    piece = np.full(len(m.v), -1.0)
+    piece[m.f.ravel()] = np.repeat(flab, 3)
+    write_vtk(str(out / f"{stem}.vtk"), m.affine, m.v, m.f, {"piece": piece})
+    return m
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -347,8 +547,25 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--name", required=True)
     b.add_argument("--lo", required=True, type=int, nargs=3)
     b.add_argument("--hi", required=True, type=int, nargs=3)
+    m = sub.add_parser("mesh", help="save the white mesh of one box")
+    m.add_argument("--changes", type=Path, help="default: the aseg's WM label")
+    m.add_argument("--out", required=True, type=Path)
+    m.add_argument("--name", required=True)
+    m.add_argument("--patch", choices=sorted(PATCHES))
+    m.add_argument("--lo", type=int, nargs=3)
+    m.add_argument("--hi", type=int, nargs=3)
+    m.add_argument("--sigma", type=float, default=2.0)
     a = ap.parse_args(argv)
-    if a.cmd == "changes":
+    if a.cmd == "mesh":
+        if a.patch is not None and a.lo is None and a.hi is None:
+            lo, hi = PATCHES[a.patch]
+        elif a.patch is None and a.lo is not None and a.hi is not None:
+            lo, hi = (a.lo[0], a.lo[1], a.lo[2]), (a.hi[0], a.hi[1], a.hi[2])
+        else:
+            ap.error("mesh: give --patch, or --lo and --hi")
+        wmesh = write_mesh(lo, hi, a.changes, a.out, f"wm_mesh_{a.name}", a.sigma)
+        print(f"{a.name}: {len(wmesh.v)} vertices, {len(wmesh.f)} faces")
+    elif a.cmd == "changes":
         ch = wm_changes()
         write_changes(ch, a.out)
         b0, b1 = ch.betti_before, ch.betti_after
