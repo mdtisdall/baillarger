@@ -27,9 +27,12 @@ with "points_full0": [[i, j, k], ...] in 0-based full-grid voxels.
 Writes <work>/column_volume_<name>.npz and .json, <figures>/column_volume_<name>_*.png.
 Usage: column_volume.py <figures dir> <work dir> --name NAME (--patch P | --box I J K [--size N ...])
                         [--points FILE] [--tracer {current,fitted,fitted_blend}]
-                        [--columns {crest,traverse,one-pass}] [--wm-changes FILE] [--figs-only]
+                        [--columns {crest,traverse,one-pass}] [--wm-changes FILE]
+                        [--label-changes FILE [--proposed]] [--figs-only]
 --wm-changes: the handle-free WM label (baillarger.white.wm_changes, saved with WMChanges.save)
 replaces the aseg's everywhere (mesh, field, stops, classes); without it, the aseg's.
+--label-changes: the pial-side label changes (baillarger.pial_labels, LabelChanges.save): the
+accepted relabels and brush edits; with --proposed, the unreviewed proposals too.
 The npz also holds tracer_name, column_method, wm_label and crest_at (crest and traverse: per
 column, the first sample where it meets another bank's field, T's crest; -1 if none).
 The two marked faces of the plan: --name M1S1 --box 378 224 448; --name V1V2_banks --box 198 58 65.
@@ -56,6 +59,7 @@ import crossing_lib as X
 from baillarger import column_traces as CT
 from baillarger.data import PATCHES
 from baillarger.mesh_smoothing import edges as mesh_edges
+from baillarger.pial_labels import LabelChanges
 from baillarger.white import WMChanges
 
 ap = argparse.ArgumentParser()
@@ -70,10 +74,13 @@ ap.add_argument("--tracer", choices=CT.TRACERS, default="fitted_blend")
 ap.add_argument("--columns", choices=CT.METHODS, default="crest")
 ap.add_argument("--wm-changes", help="the handle-free WM label's changes (baillarger.white, WMChanges.save); "
                 "default: the aseg's WM label")
+ap.add_argument("--label-changes", help="pial-side label changes (baillarger.pial_labels)")
+ap.add_argument("--proposed", action="store_true", help="with --label-changes: apply the proposals too")
 ap.add_argument("--figs-only", action="store_true")
 A = ap.parse_args()
 FIG, WORK, SITE, FIGS_ONLY = A.fig, A.work, A.name, A.figs_only
 WM_LABEL = f"handle-free: {A.wm_changes}" if A.wm_changes else "aseg"
+PIAL_LABEL = (f"{A.label_changes}" + (" (with proposals)" if A.proposed else "")) if A.label_changes else "aseg"
 SAME_MM, TPL_MM = CT.SAME_MM, 6.0
 N_PROFILE, TPL_MAX = 3000, 400
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
@@ -118,14 +125,15 @@ def box_and_points():
 def main():
     lo, hi, P = box_and_points()
     changes = WMChanges.load(Path(A.wm_changes)) if A.wm_changes else None
+    relabel = LabelChanges.load(Path(A.label_changes)) if A.label_changes else None
     t = CT.load_tissue(tuple(int(a) for a in lo), tuple(int(a) for a in hi), f"column_volume_{SITE}",
-                       changes=changes)
+                       changes=changes, pial_changes=relabel, proposed=A.proposed)
     vox = t.vox
     wm, ctx, labels = t.wm, t.ctx, t.labels
     feats = [t.det[1], t.det[2]]
     disp = t.det[1]
     d_wm = ndi.distance_transform_edt(~wm, sampling=vox)
-    say(f"{SITE}: box {tuple(int(a) for a in hi - lo)}; {len(P)} points; tracer {A.tracer}; columns {A.columns}; WM {WM_LABEL}")
+    say(f"{SITE}: box {tuple(int(a) for a in hi - lo)}; {len(P)} points; tracer {A.tracer}; columns {A.columns}; WM {WM_LABEL}; pial labels {PIAL_LABEL}")
 
     # ---- steps 1-3 (baillarger.column_traces): mesh, roots, T, primary, fallback, classes
     R = CT.trace_columns(t, A.tracer, A.columns)
@@ -190,7 +198,7 @@ def main():
         end_patch=end_patch, near_face=near_face, P=P, vox=vox, lo=lo,
         disp=disp.astype(np.float32), ctx=ctx, coh=coh.astype(np.float32), wm=wm,
         labels=labels.astype(np.int8),  # 0 cortex, 1 fluid, 2 WM, 3 missing, 4 other
-        tracer_name=A.tracer, column_method=A.columns, wm_label=WM_LABEL, crest_at=R.crest_at,
+        tracer_name=A.tracer, column_method=A.columns, wm_label=WM_LABEL, pial_label=PIAL_LABEL, crest_at=R.crest_at,
         **{"H_" + k: H[k] for k in HOR})
     json.dump(dict(turn=turn), open(f"{WORK}/column_volume_{SITE}_turn.json", "w"))
     say("saved")
