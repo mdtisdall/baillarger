@@ -9,6 +9,7 @@ import pytest
 
 from baillarger import column_traces as CT
 from baillarger import pial_labels as PL
+from baillarger import white
 from baillarger.data import RIM_CORTEX, RIM_OUTSIDE, Patch
 
 VOX = 0.16
@@ -312,3 +313,28 @@ def test_relabelled_channel_removes_the_crest() -> None:
     C = CT.fitted_crest(t2, CT.base_tensor(t2), v, f, nrm)
     assert before > 50
     assert C.crest[16:20, 4:20].sum() < 0.1 * before
+
+
+def test_a_saved_white_mesh_gives_the_same_proposal(tmp_path: Path) -> None:
+    """propose with the box's saved WhiteMesh gives the change file it gives
+    when it makes the mesh itself, records the mesh, and refuses a mesh of
+    another WM label."""
+    rim = slab_rim((32, 24, 40))
+    vessel = np.zeros(rim.shape, bool)
+    vessel[24:26, 11:13] = True
+    t = synthetic(rim, {1.0: vessel})
+    m = white.box_mesh(t.wm, t.patch.lo, t.patch.hi, t.patch.affine)
+    m.save(tmp_path / "m.npz")
+    m = white.WhiteMesh.load(tmp_path / "m.npz")
+    p0 = PL.propose(t)
+    p1 = PL.propose(t, mesh=m)
+    for k in ("voxels", "label", "component", "status"):
+        assert np.array_equal(getattr(p1.changes, k), getattr(p0.changes, k)), k
+    assert np.array_equal(p1.crest, p0.crest)
+    assert p0.changes.info["white_mesh"] == "made here"
+    assert p1.changes.info["white_mesh"]["wm_sha256"] == m.wm_sha256
+    other = t.wm.copy()
+    other[0, 0, 0] = not other[0, 0, 0]
+    m2 = white.box_mesh(other, t.patch.lo, t.patch.hi, t.patch.affine)
+    with pytest.raises(ValueError, match="WM label"):
+        PL.propose(t, mesh=m2)
