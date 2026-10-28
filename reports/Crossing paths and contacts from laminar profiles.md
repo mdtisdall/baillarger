@@ -1056,7 +1056,7 @@ Contact error at the kissing pairs (median / p90, mm): crest 0.045 / 0.085 and 0
 
 ### Pial-side label refinement
 
-A GM refinement step at the front of the pipeline, like the WM one: `baillarger.pial_labels` finds voxels that the aseg labels cortex but the image shows are fluid, writes a change file (`LabelChanges`, the counterpart of `baillarger.white.WMChanges`), and `column_traces.load_tissue(..., pial_changes=...)` applies it after the handle-free WM. Everything downstream (T, the crest, the columns, the viewer) reads the refined labels. The detector is trusted by default: its best guess, every cell it does not reject, is what the step writes and what `load_tissue` applies. Corrections go into the change file (statuses and brush edits), and the cells most worth a look are ranked first in a review queue; the review pane in `baillarger.viewer` is a separate step.
+A GM refinement step at the front of the pipeline, like the WM one: `baillarger.pial_labels` finds voxels that the aseg labels cortex but the image shows are fluid, writes a change file (`LabelChanges`, the counterpart of `baillarger.white.WMChanges`), and `column_traces.load_tissue(..., pial_changes=...)` applies it after the handle-free WM. Everything downstream (T, the crest, the columns, the viewer) reads the refined labels. The detector is trusted by default: its best guess, every cell it does not reject, is what the step writes and what `load_tissue` applies. Corrections go into the change file (statuses and brush edits), and the cells most worth a look are ranked first in a review queue, reviewed in the viewer (below).
 
 **What the image shows.** At V1V2 the fluid is fomblin at the noise floor (45 in every echo, against 514 for cortex in echo 2). The aseg's cortex runs one to three voxels into it around most sulci, and fills the thin channels of sulci it fused, such as the user's marked "contact" at (270, 133, 139). The vessel the user identified at (324, 146, 139) is a one-voxel-wide dotted dark line, partial-volumed.
 
@@ -1089,6 +1089,14 @@ A GM refinement step at the front of the pipeline, like the WM one: `baillarger.
 
 A status can be changed and brush edits added with `LabelChanges.with_status` and `with_brush`. `load_tissue(..., pial_changes=FILE)` and `column_volume.py --label-changes FILE` apply the best guess (every cell not rejected) and the brush edits; with `reviewed_only` / `--reviewed-only`, only the accepted cells and brush edits.
 
+**Review in the viewer, before any column is traced:** `python -m baillarger.viewer --labels pial_labels_<site>.npz`, with no column volume (labels only: the volume and labels panes). With a column volume (`python -m baillarger.viewer <column volume> --cache DIR --labels ...`, panes "volume + labels") the traces and surfaces are there too.
+- The volume pane shows echo 1, 2 or 3 (a drop-down): the echoes the detector reads.
+- The labels pane lists the cells ranked, with status, kind, columns, crest hits, fluid fraction and topology. A row moves the crosshair to the cell, in every window.
+- Keys: j / k for next / previous; a, r, u for accept, reject, back to proposed.
+- The volume pane shows the overlay (proposed red, accepted green, rejected yellow, brush blue / magenta). A brush (to fluid or back to cortex, radius 0–3 voxels) paints a voxel ball at a clicked point.
+- Every change is saved at once to the change file; the first change keeps `.orig.npz`.
+- Checked in the browser at both sites: accept, reject, brush, the saved file and the overlay.
+
 **Tests** (exact answers, synthetic boxes):
 - the noise from white noise and from a layered cube;
 - the gain of central differences;
@@ -1097,7 +1105,7 @@ A status can be changed and brush edits added with `LabelChanges.with_status` an
 - the fluid fraction of a known mixture;
 - shapes, cells, the Betti change of a slot, a cavity and a tunnel, and traces counted per cell;
 - the change file's round trip, application order, WM protection and overlay;
-- `tissue` with changes.
+- `tissue` with changes, and the review backend (`tests/test_viewer_labels.py`).
 
 **Proposals:**
 - **The stria trap on fused banks.** A hidden fluid channel at the WM midline is proposed (queue: it reaches no fluid). Two dark bands, one per bank, 90 % of whose voxels are dark, are not proposed.

@@ -22,9 +22,15 @@ Requests:
   /streamlines?i=&radius= (the traces from and to trace i, by kind and class);
   /tracts/<i>/<radius>/<kind>_<class>.tck (the traces of one group, as .tck);
   /overview/<class>/<every>.tck (every k-th shown trace of a class);
-  /echo2.nii.gz, /white.gii, /gm.gii (world mm, for the volume pane).
+  /echo2.nii.gz, /white.gii, /gm.gii (world mm, for the volume pane);
+  with --labels (baillarger.viewer.labels): /labels/list, /labels.nii.gz,
+  /labels/echo<k>.nii.gz (k = 1, 2, 3: the echoes the detector reads).
+- Labels only (no column volume; --labels): /meta and /echo2.nii.gz come from the
+  review, and only the page, /events, /state and the label routes are served.
 - POST /state {from, patch}: merge patch into the state; every page gets
   {from, seq, patch}.
+- POST /labels/decide {from, id, status}, /labels/brush {from, mm, radius, label}:
+  change the pial-label review and save it; every page gets the new labels_seq.
 """
 
 import argparse
@@ -34,12 +40,13 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
 from baillarger.viewer.data import Site
+from baillarger.viewer.labels import LabelReview
 
 STATIC = Path(__file__).parent / "static"
 TYPES = {
@@ -90,9 +97,15 @@ def round3(a: Any) -> list[float | None]:
     return [None if not np.isfinite(x) else round(float(x), 4) for x in a]
 
 
+# the routes that need no column volume (labels-only mode serves these, /meta and
+# /echo2.nii.gz from the review)
+NO_SITE = ("/", "/index.html", "/events", "/state", "/labels/list", "/labels.nii.gz")
+
+
 class Handler(BaseHTTPRequestHandler):
-    site: Site
+    site: Site | None
     shared: Shared
+    labels: LabelReview | None = None
     lock = threading.Lock()  # one site computation at a time
     groups: dict[tuple[int, float], dict[str, list[int]]] = {}
 
@@ -130,11 +143,11 @@ class Handler(BaseHTTPRequestHandler):
         if key not in self.groups:
             if len(self.groups) > 64:
                 self.groups.clear()
-            self.groups[key] = self.site.streamlines(i, radius)["_groups"]
+            self.groups[key] = cast(Site, self.site).streamlines(i, radius)["_groups"]
         return self.groups[key]
 
     def streamline_summary(self, i: int, radius: float) -> dict[str, Any]:
-        out = self.site.streamlines(i, radius)
+        out = cast(Site, self.site).streamlines(i, radius)
         self.groups[(i, radius)] = out.pop("_groups")
         return out
 
@@ -163,7 +176,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
-        s = self.site
+        if self.site is None:  # labels only
+            if u.path == "/meta":
+                self.json(lambda: self.review().meta())
+                return
+            if u.path == "/echo2.nii.gz":
+                self.binary(lambda: self.review().echo_bytes(2))
+                return
+            if u.path not in NO_SITE and not u.path.startswith(
+                ("/static/", "/labels/")
+            ):
+                self.send_error(404)
+                return
+        # without a site only the NO_SITE routes, which do not use it, get here
+        s = cast(Site, self.site)
         if u.path in ("/", "/index.html"):
             self.send((STATIC / "index.html").read_bytes(), TYPES[".html"])
         elif u.path.startswith("/static/"):
@@ -225,23 +251,67 @@ class Handler(BaseHTTPRequestHandler):
             self.binary(s.white_bytes)
         elif u.path == "/gm.gii":
             self.binary(s.gm_bytes)
+        elif u.path == "/labels/list":
+            self.json(lambda: self.review().rows())
+        elif u.path.startswith("/labels/echo") and u.path.endswith(".nii.gz"):
+            k = int(u.path.removeprefix("/labels/echo").removesuffix(".nii.gz"))
+            self.binary(lambda: self.review().echo_bytes(k))
+        elif u.path == "/labels.nii.gz":
+            self.binary(lambda: self.review().overlay_bytes())
         else:
             self.send_error(404)
+
+    def review(self) -> LabelReview:
+        if self.labels is None:
+            raise ValueError("no label changes: start the viewer with --labels")
+        return self.labels
+
+    def label_change(self, fn: Any, sender: str) -> dict[str, Any]:
+        out: dict[str, Any] = fn()
+        self.shared.update(sender, dict(labels_seq=out["seq"]))
+        return out
 
     def do_POST(self) -> None:
         n = int(self.headers.get("Content-Length") or 0)
         req = json.loads(self.rfile.read(n)) if n else {}
+        sender = str(req.get("from", ""))
+        if self.path == "/labels/decide":
+            self.json(
+                lambda: self.label_change(
+                    lambda: self.review().decide(int(req["id"]), str(req["status"])),
+                    sender,
+                )
+            )
+            return
+        if self.path == "/labels/brush":
+            self.json(
+                lambda: self.label_change(
+                    lambda: self.review().brush(
+                        [float(x) for x in req["mm"]],
+                        int(req.get("radius", 1)),
+                        str(req["label"]),
+                    ),
+                    sender,
+                )
+            )
+            return
         if self.path != "/state":
             self.send_error(404)
             return
-        seq = self.shared.update(str(req.get("from", "")), dict(req.get("patch", {})))
+        seq = self.shared.update(sender, dict(req.get("patch", {})))
         self.send(json.dumps(dict(seq=seq)).encode(), "application/json")
 
 
-def serve(site: Site, port: int) -> ThreadingHTTPServer:
+def serve(
+    site: Site | None, port: int, labels: LabelReview | None = None
+) -> ThreadingHTTPServer:
+    """The server; without a site (labels only), labels is needed."""
+    if site is None and labels is None:
+        raise ValueError("give a column volume, or label changes to review")
     Handler.site = site
     Handler.shared = Shared()
     Handler.groups = {}
+    Handler.labels = labels
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     srv.daemon_threads = True
     return srv
@@ -252,17 +322,40 @@ def main(argv: list[str] | None = None) -> None:
         prog="python -m baillarger.viewer",
         description="View a site's column data in the browser (127.0.0.1 only).",
     )
-    ap.add_argument("column_volume", type=Path, help="column_volume_<name>.npz")
-    ap.add_argument("--cache", type=Path, required=True, help="flat map and inflation")
+    ap.add_argument(
+        "column_volume",
+        type=Path,
+        nargs="?",
+        help="column_volume_<name>.npz; without it, labels only (--labels)",
+    )
+    ap.add_argument("--cache", type=Path, help="flat map and inflation (with columns)")
     ap.add_argument("--joint", type=Path, help="joint_<tag>.npz: the levels")
     ap.add_argument("--pia", type=Path, help="pia_<name>.npz: single-surface horizon")
     ap.add_argument("--priority", type=Path, help="edit_priority_<tag>.npz")
     ap.add_argument("--echo", type=Path, help="echo 2 of the full grid (default: data)")
+    ap.add_argument(
+        "--labels",
+        type=Path,
+        help="pial_labels_<name>.npz (baillarger.pial_labels), saved in place",
+    )
     ap.add_argument("--port", type=int, default=8790)
     a = ap.parse_args(argv)
     t0 = time.time()
-    site = Site(a.column_volume, a.cache, a.joint, a.pia, a.priority, a.echo, log=print)
-    srv = serve(site, a.port)
+    site: Site | None = None
+    review: LabelReview | None = None
+    if a.column_volume is None:
+        if a.labels is None:
+            ap.error("give a column volume, or --labels to review the labels alone")
+        review = LabelReview.standalone(a.labels, a.echo)
+    else:
+        if a.cache is None:
+            ap.error("--cache is needed with a column volume")
+        site = Site(
+            a.column_volume, a.cache, a.joint, a.pia, a.priority, a.echo, log=print
+        )
+        if a.labels:
+            review = LabelReview(a.labels, site.lo, site.shape, site.affine)
+    srv = serve(site, a.port, review)
     print(
         f"serving on http://127.0.0.1:{a.port}/ ({time.time() - t0:.0f} s)", flush=True
     )
