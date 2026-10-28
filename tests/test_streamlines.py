@@ -310,3 +310,26 @@ def test_n_eff_is_the_variance_reduction_of_the_tensor_window() -> None:
     core = (slice(16, -16),) * 3
     ratio = float(np.var(g[core]) / np.var(avg[core]))
     assert abs(ratio / S.n_eff() - 1.0) < 0.1
+
+
+def test_tissue_wm_direction_does_not_flip_beside_an_open_sulcus() -> None:
+    """WM slabs x < 6 and x >= 30, cortex between, a fluid slot at x = 21-22:
+    through tissue, every left-bank cortex voxel is nearer the left WM, so
+    the direction points +x up to the fluid; the straight-line distance
+    flips at the WM midline x = 17.5. Fused (no slot): both flip there."""
+    shape = (36, 20, 20)
+    wm = np.zeros(shape, bool)
+    wm[:6] = True
+    wm[30:] = True
+    ctx = ~wm
+    ctx[21:23] = False  # the fluid slot
+    g = S.tissue_wm_direction(wm, ctx, VOX)
+    g0 = S.signed_wm_direction(wm, VOX)
+    core = (slice(None), slice(5, -5), slice(5, -5))
+    assert np.all(g[core][8:20, ..., 0] > 0.9)
+    assert np.all(g0[core][19:21, ..., 0] < -0.9)
+    fused = ~wm
+    gf = S.tissue_wm_direction(wm, fused, VOX)
+    assert np.all(gf[core][8:16, ..., 0] > 0.9) and np.all(
+        gf[core][19:28, ..., 0] < -0.9
+    )

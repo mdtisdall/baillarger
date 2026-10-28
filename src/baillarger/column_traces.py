@@ -46,6 +46,12 @@ index coordinates of the box; vox the voxel size (mm); lengths in mm.
      it (cut_at_crest), as CONTACT. With bend_deg, a column whose direction
      changes by more than bend_deg within BEND_MM also ends, at the bend's
      kink (end_at_bend), for comparison.
+   - "traverse": as "crest", but a column that meets T's crest goes on
+     through it: from its first crest voxel it crosses the kink to the far
+     side (along the direction the kink test found there) and then descends
+     -grad T into the far bank (traverse). Every column is then a complete
+     ray, from its root to the fluid or to WM, through any contact; the
+     reading of the columns chooses where to cut it.
    - "one-pass": T as fitted on the cortex alone, the turn rule (60 deg
      within 0.3 mm), and where the primary turned or reached the length cap,
      the fallback: ascent of the equal-arrival one pass (one_pass, an
@@ -96,7 +102,7 @@ TRACERS = ("current", "fitted", "fitted_blend")
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
 CLASS = ("open", "crossing", "own bank", "to the contact", "failed")
 #: How a column ends where its trace cannot go on (module docstring, step 4).
-METHODS = ("crest", "one-pass")
+METHODS = ("crest", "traverse", "one-pass")
 #: The fitted field's band into the WM for the crest method (mm), and the
 #: window of its optional bend rule (mm).
 WM_BAND_MM, BEND_MM = 0.5, 0.3
@@ -522,6 +528,89 @@ def first_in(mask: Bool, pos: F32, ns: I64) -> I64:
     return out
 
 
+def traverse(
+    pos: F32,
+    ns: I64,
+    out: I64,
+    crest_at: I64,
+    across: npt.NDArray[np.int8],
+    T: F64,
+    t: Tissue,
+) -> I64:
+    """The traverse method's continuation past the crest: each column with a
+    crest hit (crest_at >= 0) keeps its path up to that sample, crosses the
+    kink by one lattice step along the voxel's across direction (from
+    crest_kinks, signed to agree with the column's heading; the test itself
+    puts the neighbour that way past the kink, and the step keeps the
+    column's own offset within the voxel rather than snapping it to the
+    neighbour's centre), in a straight line sampled every STEP_MM (if that
+    line enters fluid, WM, missing or other tissue, the column ends there,
+    with that outcome), and then descends -grad T into the far bank
+    (streamlines.descend) until it stops: in the far bank's WM, in fluid, at
+    a minimum of T (RIDGE), or as trace does. Every column is then a
+    complete ray. pos, ns and out are updated in place; a column's samples
+    stay STEP_MM apart. Returns the columns continued."""
+    vox = t.vox
+    shape = np.array(T.shape)
+    went = np.flatnonzero(crest_at >= 0)
+    starts, heads = [], []
+    for i in went:
+        j = int(crest_at[i])
+        x = pos[i, j].astype(float)
+        q = np.clip(np.round(x).astype(int), 0, shape - 1)
+        e = across[tuple(q)].astype(float)
+        h = x - pos[i, max(j - 1, 0)].astype(float)
+        sgn = 1.0 if float(e @ h) >= 0 else -1.0
+        far = np.clip(x + sgn * e, 0, shape - 1)  # q + e, at the column's own offset
+        d = far - x
+        n = max(1, int(np.ceil(np.linalg.norm(d * vox) / S.STEP_MM)))
+        seg = x + d * (np.arange(1, n + 1) / n)[:, None]
+        starts.append(seg)
+        heads.append(j)
+    if not went.size:
+        return went
+    # the crossing line's samples: the first that is not cortex ends the column
+    stop = np.full(went.size, -1)
+    code = np.zeros(went.size, np.int64)
+    for a, sg in enumerate(starts):
+        q = np.clip(np.round(sg).astype(int), 0, shape - 1)
+        lab = t.labels[tuple(q.T)]
+        bad = np.flatnonzero(lab != 0)
+        if bad.size:
+            b = int(bad[0])
+            stop[a] = b
+            lb = int(lab[b])
+            code[a] = {1: S.FLUID, 2: S.WM, 3: S.MISSING}.get(lb, S.OTHER)
+    for b_ in np.flatnonzero(stop >= 0).tolist():
+        i, j, sg = went[b_], heads[b_], starts[b_]
+        path = np.concatenate([pos[i, : j + 1], sg[: stop[b_] + 1]])
+        m = min(len(path), NMAX)
+        pos[i] = np.nan
+        pos[i, :m] = path[:m]
+        ns[i] = m
+        out[i] = code[b_]
+    on = np.flatnonzero(stop < 0)
+    went_on = went[on]
+    starts = [starts[a] for a in on]
+    heads = [heads[a] for a in on]
+    if not went_on.size:
+        return went
+    x_far = np.stack([sg[-1] for sg in starts])
+    left = np.array(
+        [NMAX - (j + 1 + len(sg)) + 1 for j, sg in zip(heads, starts, strict=True)]
+    )
+    pd, nd, od = S.descend(T, t.labels, t.dface, x_far, vox, int(max(left.max(), 2)))
+    for a, i in enumerate(went_on):
+        j, sg = heads[a], starts[a]
+        path = np.concatenate([pos[i, : j + 1], sg[:-1], pd[a, : nd[a]]])
+        m = min(len(path), NMAX)
+        pos[i] = np.nan
+        pos[i, :m] = path[:m]
+        ns[i] = m
+        out[i] = od[a] if len(path) <= NMAX else S.LENGTH
+    return went
+
+
 def end_at_bend(pos: F32, ns: I64, out: I64, lag: int) -> I64:
     """Columns whose trace stopped at a bend (TURN) end at the bend itself: the
     sample, within the last lag steps, where the direction changed most from
@@ -622,19 +711,19 @@ def trace_columns(
     op: OnePass | None = None
     T: F64 | None = None
     notes: dict[str, Any] = {}
-    if method == "crest":
+    if method in ("crest", "traverse"):
         T, notes = S.fitted_field(
             base, t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=WM_BAND_MM
         )
         field = base if tracer == "current" else S.gradient_tensor(T, t.vox)
-        g = S.signed_wm_direction(t.wm, t.vox)
+        g = S.tissue_wm_direction(t.wm, t.ctx, t.vox)
         noise, _ = S.step_noise(base, t.ctx, g, t.vox)
         del base, nh, g
         kappa = level_set_concavity(v, f, nrm, T, t.ctx, t.vox)
         free = S.fitted_free(
             t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=WM_BAND_MM
         )
-        crest = S.crest_voxels(T, t.ctx, noise, kappa, t.vox, free=free)
+        crest, across = S.crest_kinks(T, t.ctx, noise, kappa, t.vox, free=free)
         del noise, kappa
         pos, ns1, out1 = S.trace(
             field, t.labels, t.dface, x0, nrm[tv], t.vox, NMAX, blend,
@@ -643,10 +732,19 @@ def trace_columns(
         del field
         end1 = pos[np.arange(len(tv)), ns1 - 1].copy()
         ns, outc = ns1.copy(), out1.copy()
-        cut_at_crest(pos, ns, outc, T, nrm[tv])
-        if bend_deg is not None:
-            end_at_bend(pos, ns, outc, max(1, int(round(BEND_MM / S.STEP_MM))))
-        crest_at = first_in(crest, pos, ns)
+        if method == "traverse":
+            crest_at = first_in(crest, pos, ns)
+            traverse(pos, ns, outc, crest_at, across, T, t)
+            k_ = np.flatnonzero(crest_at < 0)
+            sub_pos, sub_ns, sub_out = pos[k_], ns[k_], outc[k_]
+            cut_at_crest(sub_pos, sub_ns, sub_out, T, nrm[tv][k_])
+            pos[k_], ns[k_], outc[k_] = sub_pos, sub_ns, sub_out
+        else:
+            cut_at_crest(pos, ns, outc, T, nrm[tv])
+            if bend_deg is not None:
+                end_at_bend(pos, ns, outc, max(1, int(round(BEND_MM / S.STEP_MM))))
+            crest_at = first_in(crest, pos, ns)
+        del across
         fallback = np.zeros(len(tv), np.int8)
         k = np.arange(len(tv))
         endp = pos[k, ns - 1].astype(float)

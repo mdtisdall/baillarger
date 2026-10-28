@@ -68,6 +68,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 import pyamg
+import skfmm
 from scipy import ndimage as ndi
 from scipy import sparse
 
@@ -182,6 +183,43 @@ def signed_wm_direction(wm: Bool, vox: npt.ArrayLike, sigma: float = 1.0) -> F64
     return out
 
 
+def tissue_wm_direction(
+    wm: Bool, ctx: Bool, vox: npt.ArrayLike, sigma: float = 1.0
+) -> F64:
+    """The unit gradient (..., 3) of the signed WM distance (mm, positive
+    outside the WM) measured through tissue: second-order fast marching
+    (skfmm) over the WM and the cortex, with fluid, other labels and missing
+    tissue as obstacles; smoothed by sigma voxels over the tissue it reaches
+    (normalized convolution); the voxels it does not reach take the direction
+    of their nearest reached voxel.
+
+    Beside an open sulcus the far bank's WM is near in a straight line
+    across the fluid but far through tissue (round the sulcus), so the
+    direction does not flip in this bank's cortex; in fused cortex both
+    banks are reached through tissue, and it flips where they meet, as the
+    straight-line distance (signed_wm_direction) does everywhere."""
+    v = np.asarray(vox, np.float64)
+    free = wm | ctx
+    if not wm.any() or not ctx.any():
+        return signed_wm_direction(wm, v, sigma)
+    phi = np.ma.MaskedArray(np.where(wm, -1.0, 1.0), mask=~free)
+    D = skfmm.distance(phi, dx=v, order=2)
+    d = np.ma.filled(np.ma.MaskedArray(D).astype(np.float64), np.nan)
+    reached = free & np.isfinite(d)
+    # smoothed over tissue only (normalized convolution), then each obstacle
+    # voxel takes its nearest tissue voxel's value, so that a narrow sulcus's
+    # far bank cannot leak back across the fluid into this bank
+    sm = masked_smooth(np.where(reached, d, 0.0), reached, sigma)
+    sm = _fill(np.where(reached, sm, np.nan))
+    g = np.stack(gradient(sm, v), -1)
+    g /= np.linalg.norm(g, axis=-1, keepdims=True) + 1e-12
+    # obstacle voxels (the fluid layer the fit extends into) take the
+    # direction of their nearest tissue voxel, not a difference across the gap
+    _, ind = ndi.distance_transform_edt(~reached, return_indices=True)
+    out: F64 = np.where(reached[..., None], g, g[tuple(ind)])
+    return out
+
+
 def oriented_normal(
     n: npt.NDArray[np.floating[Any]],
     coh: npt.NDArray[np.floating[Any]],
@@ -229,7 +267,9 @@ def fitted_field(
     WM ones. Over every 6-neighbour edge of the domain, T1 - T0 is fitted to
     F_a h_a (F = oriented_normal of the tensor's normal, its coherence zero
     outside the cortex, at the edge midpoint; h_a the voxel size along the
-    edge). Outside the domain T is the nearest domain value.
+    edge). Outside the domain T is the nearest domain value. Edges with fluid
+    at both ends are left out, so that the fluid layers of two banks across a
+    narrow sulcus do not couple them.
 
     Extended (fluid given, or wm_band_mm > 0): the domain also takes the
     fluid voxels 6-adjacent to the cortex and the WM voxels within wm_band_mm
@@ -237,14 +277,17 @@ def fitted_field(
     WM (with the nearest-value fill alone, it flattens within a voxel of the
     domain's edge). There the data has no layers (coherence 0), so F is the
     unit gradient of the smoothed signed WM distance (positive outside the
-    WM), and T is negative in the WM band.
+    WM), and T is negative in the WM band. The sign of the data's normal and
+    that direction are taken from the WM distance through tissue
+    (tissue_wm_direction), so that T rises up to an open sulcus's fluid in
+    each bank, and has a crest only where banks meet through cortex.
     """
     v = np.asarray(vox, np.float64)
     n, c = eigen(tensor)
     c = np.where(ctx, c, 0.0)
     near = ndi.binary_dilation(ctx)
     extended = fluid is not None or wm_band_mm > 0
-    g = signed_wm_direction(wm, v) if extended else wm_direction(wm, v)
+    g = tissue_wm_direction(wm, ctx, v) if extended else wm_direction(wm, v)
     Fv = oriented_normal(n, c, g, lam)
     dom = ctx | (wm & near)
     if fluid is not None:
@@ -252,6 +295,9 @@ def fitted_field(
     if wm_band_mm > 0:
         dom |= wm & (ndi.distance_transform_edt(wm, sampling=v) <= wm_band_mm)
     fixed = wm & near
+    # fluid voxels are each bank's extrapolation a voxel outward, not a bridge:
+    # edges with fluid at both ends are left out of the fit
+    in_fluid = dom & ~ctx & ~wm
     idx = -np.ones(dom.shape, np.int64)
     nd = int(dom.sum())
     idx[dom] = np.arange(nd)
@@ -265,7 +311,7 @@ def fitted_field(
         sl1: list[slice] = [slice(None)] * 3
         sl0[a], sl1[a] = slice(0, -1), slice(1, None)
         i0, i1 = idx[tuple(sl0)], idx[tuple(sl1)]
-        ok = (i0 >= 0) & (i1 >= 0)
+        ok = (i0 >= 0) & (i1 >= 0) & ~(in_fluid[tuple(sl0)] & in_fluid[tuple(sl1)])
         pos = np.argwhere(ok)
         i0, i1 = i0[ok], i1[ok]
         p1 = pos.copy()
@@ -381,7 +427,7 @@ def step_noise(
     return out, sigma2
 
 
-def crest_voxels(
+def crest_kinks(
     T: F64,
     mask: Bool,
     noise: F64,
@@ -389,17 +435,22 @@ def crest_voxels(
     vox: npt.ArrayLike,
     alpha: float = 1e-3,
     free: Bool | None = None,
-) -> Bool:
-    """The voxels of mask where two rises of T meet in a kink: along some
-    lattice direction e (of the 26 neighbours; L its length in mm), T rises
-    significantly into the voxel, does not rise significantly beyond it, and
-    its slope changes across the voxel by more than a smooth level set's
-    curvature allows:
+) -> tuple[Bool, npt.NDArray[np.int8]]:
+    """The voxels of mask where two rises of T meet in a kink, and at each the
+    lattice direction across the kink (int8 (..., 3), zero elsewhere; its
+    sign is arbitrary): of the directions e (of the 26 neighbours; L its
+    length in mm) that pass the test, the one with the largest change of
+    slope per mm beyond what curvature and noise allow. The test, along e:
+    T rises significantly into the voxel, does not rise significantly beyond
+    it, and its slope changes across the voxel by more than a smooth level
+    set's curvature allows:
       a = T(x) - T(x - e) > k s,  b = T(x + e) - T(x) < k s,
       a - b > L^2 kappa(x) + sqrt(2) k s,
     s = noise(x) L / h (step_noise, for a step of L), kappa the curvature of
     T's level sets (1/mm), k the one-sided normal quantile for alpha / 26
-    (alpha: false alarms per voxel).
+    (alpha: false alarms per voxel). Since T rises into x from x - e and not
+    on to x + e, x + e lies past the kink: the neighbour along the
+    direction is on the far side by the test itself.
 
     In one bank T rises steadily along its flow (b > k s). A straight line
     tangent to a curved level set has a smooth maximum of T at the tangent
@@ -416,7 +467,8 @@ def crest_voxels(
     v = np.asarray(vox, np.float64)
     h = float(np.mean(v))
     k = NormalDist().inv_cdf(1.0 - alpha / 26.0)
-    out = np.zeros(T.shape, bool)
+    best = np.full(T.shape, -np.inf)
+    across = np.zeros((*T.shape, 3), np.int8)
     c = (slice(1, -1),) * 3
     t0, n0, kap = T[c], noise[c], kappa[c]
     fr = np.ones(T.shape, bool) if free is None else free
@@ -432,9 +484,27 @@ def crest_voxels(
         for up, dn in ((tb, tf), (tf, tb)):
             a_ = t0 - up
             b_ = dn - t0
-            out[c] |= ok & (a_ > ks) & (b_ < ks) & (a_ - b_ > curv + np.sqrt(2.0) * ks)
-    crest: Bool = out & mask
-    return crest
+            margin = (a_ - b_ - curv - np.sqrt(2.0) * ks) / L
+            hit = ok & (a_ > ks) & (b_ < ks) & (margin > 0) & (margin > best[c])
+            best[c] = np.where(hit, margin, best[c])
+            across[c][hit] = e
+    crest: Bool = np.isfinite(best) & mask
+    across[~crest] = 0
+    return crest, across
+
+
+def crest_voxels(
+    T: F64,
+    mask: Bool,
+    noise: F64,
+    kappa: F64,
+    vox: npt.ArrayLike,
+    alpha: float = 1e-3,
+    free: Bool | None = None,
+) -> Bool:
+    """The voxels of mask where two rises of T meet in a kink (crest_kinks,
+    without the directions)."""
+    return crest_kinks(T, mask, noise, kappa, vox, alpha, free)[0]
 
 
 def fitted_free(
