@@ -116,7 +116,7 @@ def main():
     it = np.flatnonzero(turned)
     k = np.arange(it.size)
     end = pos[it, ns[it] - 1].astype(float)
-    lag = CT._LAG
+    lag = max(1, int(round(CT.BEND_MM / S.STEP_MM)))  # the turn rule's 0.3 mm window
     i1 = np.maximum(ns[it] - 1 - lag, 0)
     i0 = np.maximum(ns[it] - 1 - 2 * lag, 0)
     d_before = pos[it, i1].astype(float) - pos[it, i0]

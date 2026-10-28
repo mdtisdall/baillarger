@@ -172,27 +172,37 @@ What would change the plan:
 
 ### Traces and their failures
 
-- **Primary tracer:** the streamline of the unsigned layer normal (`crossing_lib.trace`), started at the vertex along its outward normal; a WM label is ignored for the first 0.3 mm.
-- **Fallback, where the primary stops on a turn or the length cap:** ascent of the equal-arrival pass's arrival from the vertex. It stops at fluid, at WM, or where the pass's label belongs to a root more than 5 mm away along the white surface (the pass's contact).
-- **Recorded per trace:** which tracer made it; each tracer's outcome (fluid, WM, turn, length, face, missing, other); length; the root and end positions; and the end root's distance from the start root along the white surface.
+The tracing is in the package (`baillarger.column_traces`, `baillarger.streamlines`); `column_volume.py --columns` picks the method.
+
+- **Primary tracer:** the streamline of the fitted field T (`fitted_blend`), started at the vertex along its outward normal and blended into the field over 0.3 mm. A WM label is ignored for the first 0.3 mm.
+- **`--columns crest` (the default):**
+  - *The field.* T is extended one voxel into the fluid and 0.5 mm into the WM, so its gradient is T's own up to the pia.
+  - *No turn rule and no fallback.* Columns are traced through.
+  - *Crest hits are recorded, not acted on.* Where a column meets another bank's field it crosses T's crest, and `crest_at` records its first sample there. The crest is where T rises from two sides into a kink (`crest_voxels`: a noise- and curvature-bounded kink test, *Column traces without the one pass*). It is the midline between the two banks' WM, not the anatomical contact, which the reading of the columns places.
+  - *Reversals.* A column that reflects off a crest it cannot cross and goes back into its own WM is cut at T's largest value along it.
+- **`--columns one-pass` (the method before, for comparison):** T on the cortex alone, the turn rule (60° within 0.3 mm), and where the primary turned or reached the length cap, the fallback: ascent of the equal-arrival pass's arrival, stopped at fluid, at WM, or where the pass's label belongs to a root 5 mm or more away along the white surface.
+- **Recorded per trace:**
+  - which tracer made it (`one-pass` only);
+  - the outcome (fluid, WM, contact, turn, length, face, missing, other, ridge);
+  - the length and the root and end positions;
+  - the end's distance from the root along the white surface;
+  - `crest_at`.
 - **Trace classes:**
   - *open:* ends in fluid;
-  - *crossing:* ends on WM whose root is ≥ 5 mm away along the white surface (the gap of *Results*: under 1.9 or over 14 mm);
-  - *own bank:* ends on WM within 5 mm, back on its own bank;
-  - *to the contact:* the fallback stopped at the pass's contact;
-  - *failed:* face, missing, other, or both tracers failed.
-- **Faces:** traces whose root is within 2 mm of a box face are kept but flagged, and left out of every summary (the rules).
-- **The check first:** where do primary traces turn: depth along the trace, coherence there, and distance from the WM. A turn just above the WM points at the tracer's start (the normal is unreliable at WM edges); a turn mid-column at low coherence is what the fallback is for.
+  - *crossing:* ends on WM whose root is 5 mm or more away along the white surface, measured on geodesic patches of the white mesh (`baillarger.mesh_graph`);
+  - *own bank:* ends on WM within 5 mm;
+  - *to the contact:* a reversal cut at the crest (`crest`), or the fallback stopped at the pass's contact (`one-pass`);
+  - *failed:* face, missing, other, or the length cap (`one-pass`: also a ridge).
+- **Faces:** traces whose root is within 2 mm of a box face are kept but flagged, and left out of every summary. Most failures are traces from deeper roots that run into this margin (*Column traces without the one pass*).
 
 ### Horizons (per trace, in mm from the root; NaN where not defined)
 
 - **top:** the length of an open trace.
 - **far WM:** the length of a crossing trace (its L).
-- **contact estimates, on crossing traces:**
-  - the one pass's label boundary along the trace, equal and field weights (sides by root distance, as in *Results*);
-  - the field prior's pairwise posterior on L (μ, σ at the two end roots' patches);
-  - the profile's split, E1 top-anchored, with templates from open traces in the volume within 6 mm of each end root. This one is costly, so it is computed on a random subsample of crossing traces (about 3,000 per box) and marked as sparse.
-- **contact from the fallback:** the length of a trace stopped at the pass's contact.
+- **contact:** the length of a to-the-contact trace (key `fallback contact`).
+- **the profile's split, on crossing traces:** E1 top-anchored, with templates from open traces in the volume within 6 mm of each end root. This one is costly, so it is computed on a random subsample of crossing traces (about 3,000 per box) and marked as sparse.
+
+The one pass's horizons (its label boundary with equal and field weights, and the field prior's pairwise posterior) were debugging information and are no longer written.
 
 ### Views
 
@@ -851,6 +861,113 @@ Contact error (where the trace crosses the contact, from the true crossing point
 - Feed the joint warp's pia back as the field's top (Laplace between the white mesh and the estimated pia, contacts included) and its τ levels as laminae; iterate, checked on held-out points and the swap measure.
 - Phantoms with equivolume laminae (curved true columns) and with a perturbed pia, to test both.
 - The order measure at equal τ instead of equal arc length.
+
+### Column traces without the one pass
+
+**Code.**
+- In the package:
+  - `baillarger.column_traces`: `--columns crest` (the default) and `one-pass`; `crest_at`;
+  - `baillarger.streamlines`: the extended fitted field (`fitted_field(fluid=, wm_band_mm=)`), `crest_voxels`, `step_noise`, `n_eff`, `fitted_free`, `descend`;
+  - `baillarger.mesh_graph`: the white mesh's graph, geodesic patches, and the vertex where a path crossed the mesh.
+- Diagnostics in `prototypes/scripts/`:
+  - `turn_diag.py` and `turn_cases.py`: why the primaries turned;
+  - `turn_experiment.py`: the extended field, with and without the turn rule;
+  - `bend_sweep.py`: the bend threshold;
+  - `crest_noise.py`: the noise model and the crest test on the phantoms.
+- Inputs: all site results are on the handle-free WM label (`wm_handles.npz`) with `fitted_blend`, roots 2 mm or more from a box face.
+- Tests (exact answers):
+  - mesh graph: distances on a plane within the 8-neighbour bound; a blade's sides apart, and the crossing vertex on the entered side;
+  - extended field: the signed distance on a slab, with |grad T| = 1 at the pia;
+  - crest test: none in a curved single-source field (T = R − r), with or without a noise margin; exactly the kink plane between two flat banks;
+  - `n_eff`: the window's variance reduction, Monte Carlo within 10 %;
+  - crest method: columns cross parallel fused banks and meet the crest at the midline; in a narrow fused V they meet it on the bisector; on a slab they meet none;
+  - crest cut: a returning column is cut at T's maximum.
+
+**Patches on the white mesh.**
+- The bank rule's distances along the white surface now come from geodesic patches on the white mesh, not on the voxel seed graph.
+- The graph includes the edges across neighbouring triangles. Without them, Dijkstra overestimates by up to 41 % in some directions, because the triangles' own edges zigzag on a grid-aligned surface. With them, the bound on a plane is 8.2 %.
+- Against the straight line between the same patch centres at M1S1 (p10, p50 of geodesic ÷ chord):
+
+| Straight line | Seed graph | Mesh graph |
+|---|---|---|
+| 2–4 mm | 1.06, 1.11 | 1.01, 1.06 |
+| 4–6 mm | 1.07, 1.12 | 1.02, 1.07 |
+| 6–8 mm | 1.07, 1.11 | 1.02, 1.05 |
+
+- Moving the patches alone changed 944 (V1V2) and 1,471 (M1S1) classes: mostly traces near the 5 mm rule, and the fallback's contact stops.
+
+**Why the primaries turned** (`one-pass`'s tracer, on the handle-free label):
+- **Where:** about 2 mm out, not at the root: 0.5–2.4 % of turns within 0.3 mm of the WM. The blended start had removed the start spikes.
+- **Rate by root curvature at M1S1:** 59–65 % of fundus roots (H < −0.15 /mm) turn, against 8–16 % elsewhere. At V1V2 the rate is 19–35 % at every curvature.
+- **|grad T| at the turns:** 0.35 near the fluid, 0.43 in the interior, 0.51–0.58 at crests. Typically it is 0.96 (0.76–1.08) in single-bank cortex, and 0.97–0.98 along traces that end normally.
+- **Near the fluid:** an artefact. T was filled flat outside the cortex, so within a voxel of the pia its gradient shrank and tilted.
+- **Elsewhere:** at T's crests, where two or three banks' fields meet.
+- **The paths themselves were right:**
+  - their bodies bend 0.27° per 0.04 mm step;
+  - over the 0.3 mm before the turn they change heading by 15–20° (median);
+  - a one-step wiggle where the field is weak tripped the 60° rule;
+  - 14–16 % of roots then lost a good primary to the fallback.
+
+**The extended field and the turn rule** (`turn_experiment.py`; primaries only):
+
+| | Crowns and fundi, right class | Failed | Kissing pairs, right class |
+|---|---|---|---|
+| T as before, turn rule | 84–88 % | 12–16 % | 86–87 % |
+| T extended, turn rule | 95–96 % | 4–5 % | 90–91 % |
+
+- The phantoms' turns were all the pia artefact: with T extended, the turn rule changes nothing on them.
+- **At the sites:** extending T turns about 1,700–1,800 turned roots per site into open columns. Elsewhere paths move a median 0.02 mm (p99 0.12 mm).
+- **Without the turn rule:** of the remaining turned roots, 8,500 per site become "own bank", and they are bounces. They are half as long between their ends as along their path, half end on a wall facing like their root's, and only 1–3 % cross straight to an opposite wall. They reflect off a crest met at an angle.
+
+**A bend threshold cannot decide** (`bend_sweep.py`; columns ended at a bend sharper than the threshold within 0.3 mm):
+
+| Bend threshold | Classes changed from 60° | V1V2 crossing columns |
+|---|---|---|
+| 45° | 4.7–4.8 % | 4,665 |
+| 30° | 11–12.5 % | 3,128 |
+| 10° | 31–34 % | 365 |
+
+Crossings kink where they meet a contact at an angle, by about the angle between the banks' layers. So an angle slices a continuum of real crossings. On the phantoms, whose contacts are met head on, the results are stable from 30° to 60°.
+
+**The crest test** (`crest_noise.py`, on the fold phantoms at V1V2's features, noisy against noise-free):
+- **The rule:** a voxel is a crest if T rises significantly into it, does not rise significantly beyond it, and its slope changes across it by more than L²κ plus the noise margin. κ is the concave curvature of T's level sets, from the white mesh's k2 carried to depth as |k2| / (1 − |k2| d). A smooth tangential maximum changes slope by at most L²κ; a kink changes it by a finite amount. Only values T was solved for count: not pinned at the WM's edge, not filled.
+- **The noise model** (`step_noise`, no calibration):
+  - the noise power is the cortex's median smallest eigenvalue of the structure tensor;
+  - the angular error is σ²(S + σ²) / (S² N), with N = `n_eff` exact for the filters;
+  - one component of the curl-free part keeps a ninth of the variance.
+- **The noise power from λ₃** is within 1–7 % of the known value on the fundi and kissing pairs, and 25–45 % high on the crowns, where curvature leaks into λ₃.
+- **Actual ÷ predicted step noise:** 1.0–1.2, and 1.2–1.6 in the lowest quartile.
+
+| Phantom | Crest voxels (noisy) | Noisy crests within 1.5 voxels of the noise-free ones |
+|---|---|---|
+| Crowns | 0.01–0.03 % | 80–100 % |
+| Fundi (no contact) | 0.5–1.1 % | 98 % |
+| Kissing pairs | 5.3–6.2 % | 99.6–99.7 % |
+
+**The crest is not the contact.** In the kissing pair (banks 2.0 and 2.6 mm thick, contact at r = 3.6 mm), the crest lies at r = 3.9 mm (p10–p90 3.8–4.0). That is the midline between the two WM surfaces, 1.6 and 6.2 mm. It lies there in the fused sector, and also in the open sector, where a fluid gap separates the banks: T follows the WM-distance direction in the fluid, so it does not see the gap. So the crest is recorded on each column (`crest_at`) and not used to end it: the boundary there has to come from the reading of the columns.
+
+**Both methods at the sites:**
+
+| | V1V2: crest | V1V2: one-pass | M1S1: crest | M1S1: one-pass |
+|---|---|---|---|---|
+| Open | 34,583 | 35,752 | 27,587 | 29,586 |
+| Crossing | 5,952 | 5,369 | 14,258 | 12,122 |
+| Own bank | 2,348 | 970 | 2,411 | 479 |
+| To the contact | 7,389 | 4,139 | 7,031 | 4,100 |
+| Failed (box face / other / missing / length / ridge) | 13,843 (9,620 / 2,253 / 608 / 1,362 / 0) | 17,885 (9,513 / 2,253 / 777 / 0 / 5,342) | 21,063 (20,785 / 0 / 0 / 278 / 0) | 26,063 (19,039 / 0 / 0 / 0 / 7,024) |
+| Columns meeting a crest (open / crossing / own / to the contact) | 19,168 / 5,926 / 2,309 / 7,088 | — | 13,328 / 14,231 / 2,409 / 7,013 | — |
+| Profile split at the marked points (median, p90 mm; points) | 0.058, 0.234 (16) | 0.067, 0.165 (16) | 0.489, 0.595 (23) | 0.384, 0.584 (23) |
+| Contact at the marked points (median, p90 mm; points) | 0.24, 0.40 (9) | 1.2, 2.2 (22) | 0.64, 0.70 (2) | 0.77, 0.81 (8) |
+
+- **Most failures are the box, not the method.** Box faces are 70 % (V1V2) and 99 % (M1S1) of `crest`'s failures: traces from deeper roots run into the 2 mm margin of the 22.5 mm crop. `crest`'s own failures are the length cap, where traces slide along a crest: 2 % and 0.4 % of roots. `one-pass`'s are its ridge stops.
+- **The profile split is mixed.** It is about the same at V1V2's median but worse at the p90, and worse at M1S1's median (0.49 against 0.38 mm). The crossing columns differ between the methods, so the split reads different profiles. The estimator already had a +0.2 mm bias at M1S1.
+- **The crest flag is not specific on open columns.** About half of them meet a crest (55 % at V1V2, 48 % at M1S1), because T's crest also lies in cortex beside narrow open sulci. On crossing and to-the-contact columns it is nearly always set, as it should be.
+
+**Not done:**
+- Padded boxes, so that traces can run past the crop. A 4 mm margin is about 2.5 × the volume, roughly 11 GB.
+- A top boundary for T at the pia, so that its crest, and the flag, respect fluid.
+- Columns moved as a surface: the white mesh advanced along the field with tangential relaxation, which keeps neighbours together, gives the equivolume depth from each vertex's area, and detects collisions between banks exactly (`mesh_intersect`).
+- Step 2's use of `crest_at`, for example an edit-priority layer.
 
 ### A pia editor on an inflated surface
 
