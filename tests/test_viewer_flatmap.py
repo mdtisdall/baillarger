@@ -219,3 +219,58 @@ def test_flatten_packs_pieces_and_scales_to_area() -> None:
     T = out["T_v"][: len(v1)]
     G = np.einsum("nij,nik->njk", T, T)
     assert np.max(np.abs(G - np.eye(2))) < 1e-9
+
+
+def octahedron() -> tuple[Float, Int]:
+    """Vertices +x, -x, +y, -y, +z, -z (ids 0-5), faces oriented outward."""
+    v = np.r_[np.eye(3), -np.eye(3)][[0, 3, 1, 4, 2, 5]]
+    f = np.array(
+        [(0, 2, 4), (2, 1, 4), (1, 3, 4), (3, 0, 4)]
+        + [(2, 0, 5), (1, 2, 5), (3, 1, 5), (0, 3, 5)]
+    )
+    return v, f
+
+
+def test_slit_opens_a_closed_sphere_along_a_shortest_path() -> None:
+    # the far pair is +x and -x (2 sqrt 2 mm apart over the surface; the rest are
+    # sqrt 2 from +x), joined by a path of 2 edges through one of the four others:
+    # cut, the middle vertex has two copies and the boundary is a 4-loop
+    v, f = octahedron()
+    assert FM.topology(f) == dict(V=6, E=12, F=8, b=0, chi=2, genus=0)
+    f2, o = FM.slit(v, f)
+    assert FM.topology(f2) == dict(V=7, E=14, F=8, b=1, chi=1, genus=0)
+    (lp,) = FM.boundary_loops(f2)
+    ends, mids = o[lp[::2]], o[lp[1::2]]
+    if ends[0] not in (0, 1):
+        ends, mids = mids, ends
+    assert sorted(ends.tolist()) == [0, 1]
+    assert mids[0] == mids[1] and mids[0] in (2, 3, 4, 5)
+    assert np.array_equal(o[f2], f)
+
+
+def test_flatten_opens_a_closed_piece_next_to_an_open_one() -> None:
+    # a small closed WM island (no boundary, genus 0) next to an open sheet: LSCM has
+    # no boundary on the island, so flatten slits it open first; every vertex gets a
+    # map position, and the sheet still maps isometrically
+    vo, fo = octahedron()
+    p = np.array([(i, j) for i in range(4) for j in range(4)], float)
+    fg = grid(4, 4)
+    v = np.vstack([np.c_[p, np.zeros(len(p))], vo + 10])
+    f = np.vstack([fg, fo + len(p)])
+    out = FM.flatten(v, f)
+    sheet, island = out["pieces"]
+    assert (
+        sheet["before"] == sheet["after"] == dict(V=16, E=33, F=18, b=1, chi=1, genus=0)
+    )
+    assert not sheet["opened"]
+    assert island["before"] == dict(V=6, E=12, F=8, b=0, chi=2, genus=0)
+    assert island["after"] == dict(V=7, E=14, F=8, b=1, chi=1, genus=0)
+    assert island["opened"] and island["handles"] == 0
+    assert island["area_mm2"] == round(4 * 3**0.5, 2)
+    assert out["loops"] == []
+    assert np.all(np.isfinite(out["uv_v"])) and np.all(np.isfinite(out["T_v"]))
+    T = out["T_v"][: len(p)]
+    G = np.einsum("nij,nik->njk", T, T)
+    assert np.max(np.abs(G - np.eye(2))) < 1e-9
+    fk = out["piece"][out["f_cut"][:, 0]] == 1
+    assert np.abs(out["signed_area"][fk]).sum() == pytest.approx(4 * 3**0.5, rel=1e-9)

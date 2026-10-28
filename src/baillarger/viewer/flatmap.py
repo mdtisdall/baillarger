@@ -14,7 +14,9 @@ the map.
    vertices on the best loop so far, until it stops shortening. A thin handle (a
    white-matter bridge in the segmentation, say) gives its neck as the shortest loop;
    the cut turns it into two holes. Optionally (to_disk) the boundary loops are then
-   joined by shortest paths to give a disk.
+   joined by shortest paths to give a disk. A closed genus-0 piece (a small island of
+   the WM label) has no boundary for LSCM: it is cut open along the shortest path
+   between two far-apart vertices, so that its vertices keep a map position.
 3. Least-squares conformal map (LSCM; Levy et al. 2002, in the form of Desbrun et al.
    2002) of each genus-0 piece: minimise the conformal energy E_D - A (Dirichlet
    energy of the cotangent Laplacian minus the signed area from the boundary edges)
@@ -338,6 +340,20 @@ def join_boundaries(v: Float, f: Faces) -> tuple[Int, Int]:
         orig = orig[o2]
 
 
+def slit(v: Float, f: Faces) -> tuple[Int, Int]:
+    """Open one connected closed genus-0 mesh (a small island of the WM label, say)
+    to a disk: cut the shortest edge path from the vertex farthest from the centroid
+    to the vertex farthest from it over the surface. Returns new faces and orig."""
+    nv = int(f.max()) + 1
+    E, _ = edges_of(f)
+    w = np.maximum(np.linalg.norm(v[E[:, 0]] - v[E[:, 1]], axis=1), 1e-9)
+    G = csr_matrix((w, (E[:, 0], E[:, 1])), shape=(nv, nv))
+    p = int(np.argmax(np.linalg.norm(v - v.mean(0), axis=1)))
+    d, pred = dijkstra(G, directed=False, indices=p, return_predecessors=True)
+    path = _path(pred, int(np.argmax(np.where(np.isfinite(d), d, -1))))
+    return cut(f, np.c_[path[:-1], path[1:]])
+
+
 # ---------------------------------------------------------------- LSCM
 
 
@@ -437,7 +453,8 @@ def flatten(
     log: Log | None = None,
 ) -> dict[str, Any]:
     """Flat map of every connected piece of a manifold oriented mesh (v in mm).
-    Pieces of genus > 0 are cut along handle loops first. Each piece is scaled to its
+    Pieces of genus > 0 are cut along handle loops first, closed genus-0 pieces
+    along a slit (opened, in pieces). Each piece is scaled to its
     3D area, turned to its principal axes, and the pieces are packed, largest first,
     in rows under the largest one.
     Returns a dict: f_cut, orig (cut vertex -> input vertex), uv (per cut vertex),
@@ -467,6 +484,10 @@ def flatten(
             if t0["genus"] > 0
             else (fl, np.arange(vid.size), [])
         )
+        opened = not boundary_loops(fl2)
+        if opened:
+            fl2, o3 = slit(vl[o], fl2)
+            o = o[o3]
         if to_disk:
             fl2, o3 = join_boundaries(vl[o], fl2)
             o = o[o3]
@@ -486,6 +507,7 @@ def flatten(
                 before=t0,
                 after=topology(fl2),
                 handles=len(lp),
+                opened=opened,
                 area_mm2=round(float(A3), 2),
             )
         )
