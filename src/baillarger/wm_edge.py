@@ -37,11 +37,19 @@ it by the rest, under half a voxel.
    tried there. The thin-blade guard keeps every voxel deeper than half the
    local thickness (its distance to the background more than half the
    largest such distance within GUARD_R voxels), so a blade is thinned to at
-   most half and never cut. peel_blocks does the same in blocks with a halo
-   (HALO voxels, more than the trend, the gradient, the spline, the guard and
-   the rounds reach), so that the full grid fits in memory; edge_peel runs it
-   on the aseg's WM label and echo 2. The label never grows. Handle removal
-   follows on the peeled label (baillarger.white.wm_changes, removed=).
+   most half and never cut. That is the edge's wish; the label loses only
+   the wished voxels that are simple points on the Kuhn tetrahedralization
+   (simple_peel: one at a time, outer rounds first), so its topology is
+   kept: per-voxel decisions on noisy offsets would otherwise drill holes
+   through thin WM and cut strands (on the full grid, 31 k new handles and
+   4 k fragments). Wished voxels kept so are blocked: there the white
+   surface cannot move in without changing the WM's topology. peel_blocks
+   finds the wish in blocks with a halo (HALO voxels, more than the trend,
+   the gradient, the spline, the guard and the rounds reach), so that the
+   full grid fits in memory, and runs simple_peel once on the whole grid;
+   edge_peel runs it on the aseg's WM label and echo 2. The label never
+   grows. Handle removal follows on the peeled label
+   (baillarger.white.wm_changes, removed=), with only the aseg's handles.
 4. refine (step 4, the mesh): each vertex's target move is its offset minus
    margin_mm, with the edge's position smoothed along the mesh over sigma_mm
    (twicing; vertices with no edge in the window do not count): the smoothed
@@ -78,7 +86,8 @@ refined mesh). The command line:
         --name NAME --lo X Y Z --hi X Y Z
 
 peel writes wm_edge_peel.npz (EdgePeel), wm_edge_peel.json (counts) and
-wm_edge_peel_overlay.nii.gz (full grid: 1 removed, 2 flagged); white
+wm_edge_peel_overlay.nii.gz (full grid: 1 removed, 2 flagged, 3 blocked);
+white
 changes removes the handles of the peeled label; box writes write_box's
 files, wm_edge_<NAME>.*.
 """
@@ -96,12 +105,15 @@ import numpy as np
 import numpy.typing as npt
 from scipy import ndimage as ndi
 
+from baillarger._jit import njit
 from baillarger.data import ASEG_CORTEX, ASEG_WM, aseg_path, echo_path
+from baillarger.handles import KUHN_OFFSETS, SIMPLE, kuhn_betti
 from baillarger.mesh_smoothing import gauss_steps, smooth_normals, umbrella
 
 type Bool = npt.NDArray[np.bool_]
 type F64 = npt.NDArray[np.float64]
 type I32 = npt.NDArray[np.int32]
+type U8 = npt.NDArray[np.uint8]
 type I64 = npt.NDArray[np.int64]
 
 #: half-width of the search window along the normal (mm)
@@ -240,12 +252,64 @@ def edge_offsets(
 @dataclass(frozen=True)
 class Peel:
     """The label's inward correction: voxels removed, voxels flagged (no
-    edge within the window inside them; kept), the sign used, the rounds."""
+    edge within the window inside them; kept), voxels blocked (wanted by the
+    edge, kept because removing them would change the label's topology), the
+    sign used, the rounds."""
 
     removed: Bool
     flagged: Bool
+    blocked: Bool
     sign: float
     rounds: int
+
+
+@njit
+def _sweep(obj: Bool, cand: I64, offs: I64, simple: Bool) -> int:
+    """Remove the voxels cand (flat indices into the padded object) that are
+    simple, in order, sweeping again until none goes. Returns the number."""
+    n = 0
+    progress = True
+    while progress:
+        progress = False
+        for i in cand:
+            if not obj[i]:
+                continue
+            m = 0
+            for k in range(14):
+                if obj[i + offs[k]]:
+                    m |= 1 << k
+            if simple[m]:
+                obj[i] = False
+                n += 1
+                progress = True
+    return n
+
+
+def simple_peel(wm: Bool, want: npt.ArrayLike) -> tuple[Bool, Bool]:
+    """Remove the wanted voxels of wm that are simple points on the Kuhn
+    tetrahedralization (baillarger.handles), one at a time, so that no Betti
+    number of the label or of its background changes: no handle, cavity or
+    component is made or lost. want: bool, or the round in which each voxel
+    was wanted (0: not wanted); lower rounds are tried first, then lower
+    flat index, sweeping again until no wanted voxel goes. Outside the array
+    is background. Returns (removed, blocked): blocked are the wanted voxels
+    kept, none of which can go alone."""
+    wm = np.asarray(wm, bool)
+    key: npt.NDArray[Any] = np.asarray(want)
+    w = wm & (key > 0)
+    x = np.ascontiguousarray(np.pad(wm, 1))  # ravel must be a view
+    sh = x.shape
+    offs = (
+        KUHN_OFFSETS[:, 0] * sh[1] * sh[2]
+        + KUHN_OFFSETS[:, 1] * sh[2]
+        + KUHN_OFFSETS[:, 2]
+    ).astype(np.int64)
+    idx = np.argwhere(w)
+    flat: I64 = np.asarray(np.ravel_multi_index(tuple((idx + 1).T), sh), np.int64)
+    cand: I64 = flat[np.lexsort((flat, key[tuple(idx.T)]))]
+    _sweep(x.ravel(), cand, offs, SIMPLE)
+    removed = wm & ~x[1:-1, 1:-1, 1:-1]
+    return removed, w & ~removed
 
 
 def _ridge(wm: Bool, vox: F64) -> tuple[F64, F64]:
@@ -272,15 +336,16 @@ def _label_normals(wm: Bool) -> F64:
     return out
 
 
-def peel(
+def _wish(
     wm: Bool,
     img: npt.ArrayLike,
     vox: npt.ArrayLike,
-    margin_mm: float = MARGIN_MM,
-    window_mm: float = WINDOW_MM,
-    sign: float | None = None,
-) -> Peel:
-    """Step 2 on one array: img is the edge image (tissue_contrast)."""
+    margin_mm: float,
+    window_mm: float,
+    sign: float | None,
+) -> tuple[U8, Bool, float, int]:
+    """The edge's wish: the round (1, 2, ...) in which each voxel would go,
+    0 for those that stay; the flagged voxels, the sign, the rounds."""
     vx = np.asarray(vox, np.float64)
     wm = np.asarray(wm, bool)
     field = EdgeField(img, vx)
@@ -288,6 +353,7 @@ def peel(
     d, ridge = _ridge(wm, vx)
     may = wm & (d <= 0.5 * ridge)
     cur = wm.copy()
+    when = np.zeros(wm.shape, np.uint8)
     flagged = np.zeros_like(wm)
     rounds = math.ceil((window_mm + margin_mm) / float(vx.min())) + 1
     done = 0
@@ -306,7 +372,23 @@ def peel(
         if not go.any():
             break
         cur[tuple(cand[go].T)] = False
-    return Peel(wm & ~cur, flagged, 1.0 if sign is None else float(sign), done)
+        when[tuple(cand[go].T)] = k
+    return when, flagged, 1.0 if sign is None else float(sign), done
+
+
+def peel(
+    wm: Bool,
+    img: npt.ArrayLike,
+    vox: npt.ArrayLike,
+    margin_mm: float = MARGIN_MM,
+    window_mm: float = WINDOW_MM,
+    sign: float | None = None,
+) -> Peel:
+    """Step 2 on one array: img is the edge image (tissue_contrast)."""
+    wm = np.asarray(wm, bool)
+    when, flagged, sg, rounds = _wish(wm, img, vox, margin_mm, window_mm, sign)
+    removed, blocked = simple_peel(wm, when)
+    return Peel(removed, flagged, blocked, sg, rounds)
 
 
 def peel_blocks(
@@ -320,14 +402,16 @@ def peel_blocks(
     halo: int = HALO,
     log: Callable[[str], None] | None = None,
 ) -> Peel:
-    """Step 2 on a large grid: peel(wm, tissue_contrast(echo, wm), ...) in
-    blocks of block voxels with a halo; blocks without WM boundary are
-    skipped. sign must be given (contrast_sign), so every block uses the
-    same. log: called with a line per block done."""
+    """Step 2 on a large grid: peel(wm, tissue_contrast(echo, wm), ...).
+    The edge's wish is found in blocks of block voxels with a halo (blocks
+    without WM boundary are skipped), and simple_peel then runs once on the
+    whole grid, so that the topology is kept across the blocks' faces too.
+    sign must be given (contrast_sign), so every block uses the same. log:
+    called with a line per block done."""
     wm = np.asarray(wm, bool)
     ech = np.asarray(echo)
     shape = wm.shape
-    removed = np.zeros(shape, bool)
+    when = np.zeros(shape, np.uint8)
     flagged = np.zeros(shape, bool)
     rounds = 0
     for i in range(0, shape[0], block):
@@ -346,20 +430,27 @@ def peel_blocks(
                 )
                 w = wm[ext]
                 e = ech[ext]
-                p = peel(w, tissue_contrast(e, w), vox, margin_mm, window_mm, sign)
+                wh, fl, _, r = _wish(
+                    w, tissue_contrast(e, w), vox, margin_mm, window_mm, sign
+                )
                 inner = tuple(
                     slice(s.start - x.start, s.stop - x.start)
                     for s, x in zip(core, ext, strict=True)
                 )
-                removed[core] = p.removed[inner]
-                flagged[core] = p.flagged[inner]
-                rounds = max(rounds, p.rounds)
+                when[core] = wh[inner]
+                flagged[core] = fl[inner]
+                rounds = max(rounds, r)
                 if log is not None:
                     log(
-                        f"block {i} {j} {k}: removed {int(p.removed[inner].sum())}"
-                        f", flagged {int(p.flagged[inner].sum())}, rounds {p.rounds}"
+                        f"block {i} {j} {k}: wanted {int((wh[inner] > 0).sum())}"
+                        f", flagged {int(fl[inner].sum())}, rounds {r}"
                     )
-    return Peel(removed, flagged, float(sign), rounds)
+    removed, blocked = simple_peel(wm, when)
+    if log is not None:
+        log(
+            f"simple points: removed {int(removed.sum())}, blocked {int(blocked.sum())}"
+        )
+    return Peel(removed, flagged, blocked, float(sign), rounds)
 
 
 def contrast_sign(echo: npt.ArrayLike, wm: Bool, cortex: Bool) -> float:
@@ -371,11 +462,13 @@ def contrast_sign(echo: npt.ArrayLike, wm: Bool, cortex: Bool) -> float:
 
 @dataclass(frozen=True)
 class EdgePeel:
-    """Step 2 on the full grid: voxels removed from the aseg's WM label and
-    voxels flagged (full grid, 0-based), the sign and the margin used."""
+    """Step 2 on the full grid: voxels removed from the aseg's WM label,
+    voxels flagged and voxels blocked (full grid, 0-based; Peel), the sign
+    and the margin used."""
 
     removed: I32
     flagged: I32
+    blocked: I32
     sign: float
     margin_mm: float
 
@@ -384,6 +477,7 @@ class EdgePeel:
             path,
             removed=self.removed,
             flagged=self.flagged,
+            blocked=self.blocked,
             sign=self.sign,
             margin_mm=self.margin_mm,
         )
@@ -394,6 +488,7 @@ class EdgePeel:
         return cls(
             z["removed"].astype(np.int32),
             z["flagged"].astype(np.int32),
+            z["blocked"].astype(np.int32),
             float(z["sign"]),
             float(z["margin_mm"]),
         )
@@ -422,6 +517,7 @@ def edge_peel(
     return EdgePeel(
         np.argwhere(p.removed).astype(np.int32),
         np.argwhere(p.flagged).astype(np.int32),
+        np.argwhere(p.blocked).astype(np.int32),
         sign,
         margin_mm,
     )
@@ -740,17 +836,29 @@ def main(argv: list[str] | None = None) -> None:
     if not isinstance(img, nib.nifti1.Nifti1Image):
         raise ValueError("the aseg must be a NIfTI-1 image")
     vmm = float(np.prod(img.header.get_zooms()[:3]))
-    summary = dict(
+    summary: dict[str, Any] = dict(
         sign=p.sign,
         margin_mm=p.margin_mm,
         removed=len(p.removed),
         removed_mm3=round(len(p.removed) * vmm, 3),
         flagged=len(p.flagged),
+        blocked=len(p.blocked),
     )
+    lab = np.asarray(img.dataobj) == ASEG_WM
+    nz = [
+        np.flatnonzero(lab.any(axis=tuple(j for j in range(3) if j != i)))
+        for i in range(3)
+    ]
+    box = tuple(slice(max(int(t[0]) - 2, 0), int(t[-1]) + 3) for t in nz)
+    summary["betti_aseg"] = list(kuhn_betti(lab[box]))
+    lab[tuple(p.removed.T)] = False
+    summary["betti_peeled"] = list(kuhn_betti(lab[box]))
+    del lab
     (out / "wm_edge_peel.json").write_text(json.dumps(summary, indent=1))
     ov = np.zeros(img.shape[:3], np.uint8)
     ov[tuple(p.removed.T)] = 1
     ov[tuple(p.flagged.T)] = 2
+    ov[tuple(p.blocked.T)] = 3
     nib.save(
         nib.nifti1.Nifti1Image(ov, img.affine), out / "wm_edge_peel_overlay.nii.gz"
     )

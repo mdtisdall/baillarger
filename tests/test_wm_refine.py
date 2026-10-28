@@ -17,10 +17,11 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import numpy.typing as npt
+from scipy.ndimage import gaussian_filter as ndi_gauss
 from scipy.special import erf
 
 from baillarger import data, white
-from baillarger.handles import kuhn_betti
+from baillarger.handles import _set_simple, kuhn_betti
 from baillarger.mesh_intersect import intersecting_faces
 from baillarger.mesh_smoothing import smooth_normals
 from baillarger.white import white_mesh
@@ -31,6 +32,7 @@ from baillarger.wm_edge import (
     peel,
     peel_blocks,
     refine,
+    simple_peel,
     tissue_contrast,
 )
 
@@ -109,6 +111,110 @@ def test_peel_keeps_a_thin_blades_inner_half() -> None:
     assert not p.flagged.any()
 
 
+def _blocked_ok(wm: Bool, want: Bool, removed: Bool, blocked: Bool) -> None:
+    """simple_peel's contract: only wanted voxels go, the topology is kept,
+    blocked is the wanted voxels kept, and none of them could go alone (not
+    a simple point by handles._set_simple, which decides it from homology
+    rather than from the table: the background could not take it)."""
+    after = wm & ~removed
+    assert not (removed & ~want).any()
+    assert np.array_equal(blocked, want & wm & ~removed)
+    assert kuhn_betti(after) == kuhn_betti(wm)
+    state = np.where(np.pad(after, 2), 1, 2).astype(np.uint8)
+    for p in np.argwhere(blocked) + 2:
+        flat = np.array([np.ravel_multi_index(tuple(p), state.shape)])
+        assert not _set_simple(state, 2, flat)
+
+
+def test_simple_peel_never_cuts_a_ring() -> None:
+    """A square WM ring (one handle). The wish is a whole cross-section of
+    one arm, which would cut it: the outer voxels of the section go, a
+    bridge across it stays (blocked), and b1 stays 1."""
+    wm = np.zeros((40, 40, 12), bool)
+    wm[8:32, 8:32, 4:8] = True
+    wm[13:27, 13:27, :] = False
+    want = np.zeros_like(wm)
+    want[18:22, 8:13, 4:8] = True
+    removed, blocked = simple_peel(wm, want)
+    assert kuhn_betti(wm) == (1, 1, 0)
+    assert removed.any() and blocked.any()
+    _blocked_ok(wm, want, removed, blocked)
+
+
+def test_simple_peel_never_drills_a_plate() -> None:
+    """A plate 3 voxels thick; the wish is a 2 x 2 column through it, which
+    would make a tunnel: top and bottom in round 1, the middle in round 2.
+    Top and bottom go, the middle layer stays (blocked), and the plate keeps
+    b = (1, 0, 0). As a plain bool wish (index order), one face's layer is
+    the one that stays instead, and no column is drilled either way."""
+    wm = np.zeros((24, 24, 12), bool)
+    wm[2:22, 2:22, 4:7] = True
+    want = np.zeros(wm.shape, np.uint8)
+    want[11:13, 11:13, [4, 6]] = 1
+    want[11:13, 11:13, 5] = 2
+    removed, blocked = simple_peel(wm, want)
+    assert removed[11:13, 11:13, [4, 6]].all()
+    assert blocked[11:13, 11:13, 5].all()
+    _blocked_ok(wm, want > 0, removed, blocked)
+    removed, blocked = simple_peel(wm, want > 0)
+    assert (removed[11:13, 11:13, 4:7].sum(-1) < 3).all() and blocked.any()
+    _blocked_ok(wm, want > 0, removed, blocked)
+
+
+def test_simple_peel_on_a_strand() -> None:
+    """A strand one voxel wide: its middle voxel would split it (blocked),
+    its end voxel goes (simple)."""
+    wm = np.zeros((24, 12, 12), bool)
+    wm[4:20, 6, 6] = True
+    want = np.zeros_like(wm)
+    want[12, 6, 6] = want[19, 6, 6] = True
+    removed, blocked = simple_peel(wm, want)
+    assert np.argwhere(removed).tolist() == [[19, 6, 6]]
+    assert np.argwhere(blocked).tolist() == [[12, 6, 6]]
+
+
+def test_simple_peel_on_a_fortran_ordered_label() -> None:
+    """nibabel gives Fortran-ordered arrays: the result is the same as for
+    the C-ordered label (the sweep must work on the array, not a copy)."""
+    wm = np.zeros((24, 24, 12), bool)
+    wm[2:22, 2:22, 2:9] = True
+    want = np.zeros(wm.shape, np.uint8)
+    want[2:22, 2:22, 8] = 1
+    c = simple_peel(wm, want)
+    f = simple_peel(np.asfortranarray(wm), np.asfortranarray(want))
+    assert c[0][:, :, 8][2:22, 2:22].all()
+    assert np.array_equal(c[0], f[0]) and np.array_equal(c[1], f[1])
+
+
+def test_simple_peel_on_random_blobs() -> None:
+    """Random blobs with handles and a random wish of a third of their
+    voxels: the topology is kept and no blocked voxel could go alone."""
+    rng = np.random.default_rng(3)
+    for _ in range(6):
+        f = ndi_gauss(rng.standard_normal((18, 18, 18)), 1.5)
+        wm = f > 0.02
+        wm[[0, -1]], wm[:, [0, -1]], wm[:, :, [0, -1]] = False, False, False
+        want = wm & (rng.random(wm.shape) < 0.33)
+        removed, blocked = simple_peel(wm, want)
+        _blocked_ok(wm, want, removed, blocked)
+
+
+def test_peel_keeps_the_topology_under_noise() -> None:
+    """peel on a blob with handles under a noisy image whose edge lies
+    inside it: whatever the wish, the peeled label has the blob's Betti
+    numbers, and the blocked voxels are kept."""
+    rng = np.random.default_rng(5)
+    f = ndi_gauss(rng.standard_normal((40, 40, 40)), 2.5)
+    wm = f > 0.0
+    img = _img(f / np.abs(f).max() * 2.0 - 0.1, 0.24) + 0.3 * rng.standard_normal(
+        f.shape
+    )
+    p = peel(wm, img, VOX, margin_mm=M, sign=-1.0)
+    assert p.removed.any()
+    assert kuhn_betti(wm & ~p.removed) == kuhn_betti(wm)
+    assert not (p.blocked & p.removed).any() and not (p.blocked & ~wm).any()
+
+
 def test_peel_margin_zero_takes_only_centres_past_the_edge() -> None:
     """Margin 0: a voxel goes only if its centre lies outside
     the edge, which is where the mesh (half a voxel further out) lies more
@@ -147,6 +253,7 @@ def test_peel_in_blocks_equals_the_whole() -> None:
     blocks = peel_blocks(wm, echo, VOX, sign=1.0, margin_mm=M, block=24)
     assert np.array_equal(blocks.removed, whole.removed)
     assert np.array_equal(blocks.flagged, whole.flagged)
+    assert np.array_equal(blocks.blocked, whole.blocked)
 
 
 # ---------------------------------------------------------------- step 3
@@ -354,14 +461,15 @@ def test_all_steps_on_a_synthetic_subject(tmp_path: Path) -> None:
     p = edge_peel(tmp_path)
     X = np.indices((64, 64, 64)).transpose(1, 2, 3, 0)
     r = np.linalg.norm(X - 31.5, axis=-1)
-    assert p.sign == 1.0 and not len(p.flagged)
+    assert p.sign == 1.0 and not len(p.flagged) and not len(p.blocked)
     got = np.zeros(r.shape, bool)
     got[tuple(p.removed.T)] = True
     cut = 9.4 - M / V
     assert (r[got] > cut - 0.05).all()
     assert got[(r < 10) & (r > cut + 0.05)].all()
     ch = white.wm_changes(tmp_path, removed=p.removed)
-    assert ch.betti_after == (1, 0, 0) and (ch.kind == white.EDGE).all()
+    assert ch.betti_before == ch.betti_after == (1, 0, 0)
+    assert (ch.kind == white.EDGE).all()
     be = box_edges((4, 4, 4), (60, 60, 60), ch, tmp_path)
     ref = be.report["refined"]
     assert ref["after_inside_frac"] == 0.0
