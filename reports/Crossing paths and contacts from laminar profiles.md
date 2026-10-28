@@ -943,7 +943,7 @@ Each step stores R and its solve: free traces, seconds, number of pia changes, l
 
 ### A handle-free white surface
 
-The white mesh is made from the aseg's WM label (41), and every piece of it must have genus 0 for all later processing (flat map, inflation, editor). The label is corrected once, on the full grid, by `baillarger.handles.remove_handles`. Each box crops the corrected label (`wm_handles.fixed_wm`). No question is asked per handle.
+The white mesh is made from the aseg's WM label (41), and every piece of it must have genus 0 for all later processing (flat map, inflation, editor). The label is corrected once, on the full grid, by the package: `baillarger.white.wm_changes` (on `baillarger.handles.remove_handles`) returns the changed voxels, `WMChanges.save` stores them, and `baillarger.white.white_matter_box(lo, hi, changes)` gives the corrected label of any box. No question is asked per handle.
 
 **How it works.**
 - *Topology.* Marching tetrahedra contours on the Kuhn tetrahedralization, so the mesh's topology is that of the voxels with the 14-neighbour Kuhn adjacency, for object and background alike. The Betti numbers (b0, b1, b2) are computed on that complex. When b1 = 0, every surface piece cut out by any box has genus 0.
@@ -955,7 +955,7 @@ The white mesh is made from the aseg's WM label (41), and every piece of it must
 - *Blocked walls.* An object wall and a background wall can block each other, so that no single voxel is simple for either front. Then sets are claimed whole, smallest first: a wall, two touching walls, or a cluster of walls. The test is that the front's homology stays the same (Mayer–Vietoris on the set and its front neighbours).
 - *Left over.* Object voxels that still cannot be claimed are removed as 'stranded'. Each of them, put back alone, would make a handle.
 
-**Tests** (`tests/test_handles.py`, 13, exact answers):
+**Tests** (exact answers). `tests/test_white.py` (4): on a synthetic aseg with a drilled block and a ring closed by a rod, the plug and the cut voxel in full-grid coordinates, boxes that equal crops of the corrected label (genus-0 mesh), and save/load. `tests/test_handles.py` (13):
 - the tetrahedra and the link match the mesher, and χ(mesh) = 2·χ(voxels);
 - the Betti numbers of known solids;
 - the simple-point table against an independent link check, for all 2^14 cases;
