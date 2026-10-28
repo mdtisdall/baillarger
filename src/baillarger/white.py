@@ -19,7 +19,7 @@ The reports: changes_summary (the moves on the full grid), box_report (the
 white mesh of a box before and after, per piece, and the moves in it) and
 overlay (an ITK-SNAP label image of the moves). The command line:
 
-    python -m baillarger.white changes --out OUTDIR
+    python -m baillarger.white changes --out OUTDIR [--peel PEEL.npz]
     python -m baillarger.white box --changes OUTDIR/wm_changes.npz --out OUTDIR
         --name NAME --lo X Y Z --hi X Y Z
 
@@ -51,9 +51,11 @@ type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.int64]
 
 #: kinds of change: WM voxels removed (a cut), voxels added (a fill), WM voxels
-#: removed that no front could claim (stranded: each would make a handle)
-CUT, FILL, STRANDED = 1, 2, 3
-KINDS = {"cut": CUT, "fill": FILL, "stranded": STRANDED}
+#: removed that no front could claim (stranded: each would make a handle), WM
+#: voxels removed to put the surface inside the image's edge
+#: (baillarger.wm_edge, step 2)
+CUT, FILL, STRANDED, EDGE = 1, 2, 3, 4
+KINDS = {"cut": CUT, "fill": FILL, "stranded": STRANDED, "edge": EDGE}
 
 
 @dataclass(frozen=True)
@@ -62,7 +64,7 @@ class WMChanges:
 
     #: (n, 3) int32, voxels of the full grid
     voxels: npt.NDArray[np.int32]
-    #: (n,) int8, CUT, FILL or STRANDED
+    #: (n,) int8, CUT, FILL, STRANDED or EDGE
     kind: npt.NDArray[np.int8]
     #: (n,) int32, the move (one handle, or the stranded voxels) of each voxel
     move: npt.NDArray[np.int32]
@@ -100,11 +102,22 @@ def _aseg(directory: Path | None) -> nib.nifti1.Nifti1Image:
     return img
 
 
-def wm_changes(directory: Path | None = None) -> WMChanges:
+def wm_changes(
+    directory: Path | None = None, removed: npt.ArrayLike | None = None
+) -> WMChanges:
     """Remove the handles of the aseg's WM label, on its bounding box with a
-    margin of 2 voxels, and return the changes."""
+    margin of 2 voxels, and return the changes. removed: (n, 3) voxels of the
+    full grid taken out of the label first (baillarger.wm_edge.edge_peel),
+    listed as EDGE (one move); the Betti numbers before are then those of the
+    peeled label. A fill that puts back a removed voxel cancels it: that voxel
+    is in no list, because the aseg had it."""
     img = _aseg(directory)
     wm = np.asarray(img.dataobj) == ASEG_WM
+    shape = wm.shape
+    rem = np.zeros((0, 3), np.int64)
+    if removed is not None:
+        rem = np.asarray(removed, np.int64).reshape(-1, 3)
+        wm[tuple(rem.T)] = False
     nz = [
         np.flatnonzero(wm.any(axis=tuple(j for j in range(3) if j != i)))
         for i in range(3)
@@ -123,6 +136,14 @@ def wm_changes(directory: Path | None = None) -> WMChanges:
         voxels = np.zeros((0, 3), np.int64)
     kind = np.repeat([KINDS[m.kind] for m in r.moves], n)
     move = np.repeat(np.arange(len(r.moves)), n)
+    if len(rem):
+        flat = np.ravel_multi_index(tuple(voxels.T), shape)
+        rflat = np.ravel_multi_index(tuple(rem.T), shape)
+        back = (kind == FILL) & np.isin(flat, rflat)
+        keep_rem = ~np.isin(rflat, flat[back])
+        voxels = np.concatenate([voxels[~back], rem[keep_rem]])
+        kind = np.concatenate([kind[~back], np.full(keep_rem.sum(), EDGE)])
+        move = np.concatenate([move[~back], np.full(keep_rem.sum(), len(r.moves))])
     return WMChanges(
         voxels.astype(np.int32),
         kind.astype(np.int8),
@@ -341,6 +362,12 @@ def main(argv: list[str] | None = None) -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("changes", help="remove the handles of the WM label")
     c.add_argument("--out", required=True, type=Path)
+    c.add_argument(
+        "--peel",
+        type=Path,
+        help="wm_edge_peel.npz (python -m baillarger.wm_edge peel): its removed "
+        "voxels are taken out before the handles are removed",
+    )
     b = sub.add_parser("box", help="report one box before and after")
     b.add_argument("--changes", required=True, type=Path)
     b.add_argument("--out", required=True, type=Path)
@@ -349,7 +376,8 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--hi", required=True, type=int, nargs=3)
     a = ap.parse_args(argv)
     if a.cmd == "changes":
-        ch = wm_changes()
+        removed = None if a.peel is None else np.load(a.peel)["removed"]
+        ch = wm_changes(removed=removed)
         write_changes(ch, a.out)
         b0, b1 = ch.betti_before, ch.betti_after
         print(f"(b0, b1, b2) {b0} -> {b1}, {len(ch.voxels)} voxels")

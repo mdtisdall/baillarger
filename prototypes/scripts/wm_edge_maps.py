@@ -1,18 +1,13 @@
-"""Where the image's own GM/WM edge lies against the white mesh of a box (baillarger.wm_edge,
-step 1 of putting the white surface on the data's edge): per vertex, the offset along the
-outward normal to the steepest WM-to-GM change of echo 2 and of echo 3, mapped by mean
-curvature, by the cortex's coherence just outside, and by the column trace's outcome (open to
-fluid, or crossing to WM: fused or kissing cortex). Diagnostic views, not pass/fail.
+"""Figures for a box's white mesh against the image's own GM/WM edge. The numbers and files are
+the package's (baillarger.wm_edge.box_edges and write_box, as `python -m baillarger.wm_edge
+box`): the offsets of echoes 2 and 3 by curvature and coherence, and step 4 (refine) with the
+edge measured again. This driver adds the root's column-trace outcome (from a turn diagnostic
+of the same box and label) and draws. Diagnostic views, not pass/fail.
 
 Usage: wm_edge_maps.py <figures> <data> --name NAME --box X Y Z [--size N]
            --wm-changes WM_CHANGES.npz [--turns TURN_DIAG.npz]
-       Writes <data>/wm_edge_<NAME>.json (summary), <data>/wm_edge_<NAME>.npz (per vertex),
-       <data>/wm_edge_<NAME>.vtk (the mesh with the offsets, ITK-SNAP world coordinates),
-       <data>/wm_edge_<NAME>_overlay.nii.gz (box grid; at each vertex's voxel: 1 edge more
-       than half a voxel outside, 2 more than half a voxel inside, 3 no edge in the window),
-       <figures>/wm_edge_<NAME>_{maps,planes}.png.
-       --turns: a turn_diag npz of the same box and label; its per-root outcome is used when
-       its mesh is this one.
+       Writes write_box's files <data>/wm_edge_<NAME>.*, <data>/wm_edge_<NAME>_outcome.json
+       (with --turns, when its mesh is this one) and <figures>/wm_edge_<NAME>_{maps,planes}.png.
 """
 
 import argparse
@@ -24,20 +19,11 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import nibabel as nib
 import numpy as np
-from scipy import ndimage as ndi
 
-from baillarger import column_traces as CT
-from baillarger.frame import mesh_curvatures
-from baillarger.mesh import write_vtk
+from baillarger.column_traces import FACE_MM
 from baillarger.white import WMChanges
-from baillarger.wm_edge import edge_offsets, tissue_contrast
-
-CURV_MM = 0.48
-COH_AT = 1.5  # voxels outside the mesh, where the cortex's coherence is read
-H_BINS = [-np.inf, -1.5, -0.75, -0.25, 0.25, 0.75, 1.5, np.inf]
-COH_BINS = [0, 0.2, 0.4, 0.6, 0.8, 1.0001]
+from baillarger.wm_edge import COH_AT, CURV_MM, EdgeOffsets, box_edges, write_box
 
 
 def pct(x):
@@ -62,35 +48,40 @@ def main():
     a = ap.parse_args()
     fig_dir, out = Path(a.figures), Path(a.data)
     fig_dir.mkdir(parents=True, exist_ok=True)
-    out.mkdir(parents=True, exist_ok=True)
     lo = tuple(a.box)
     hi = tuple(x + a.size for x in lo)
     t0 = time.time()
-    t = CT.load_tissue(lo, hi, name=a.name, changes=WMChanges.load(Path(a.wm_changes)))
-    vox = t.vox
-    half = 0.5 * float(vox.min())
-    v, f, n = CT.white_mesh(t.wm)
-    roots = CT.root_vertices(v, n)
+    be = box_edges(lo, hi, WMChanges.load(Path(a.wm_changes)), name=a.name)
+    write_box(be, out, f"wm_edge_{a.name}")
+    A, rep = be.arrays, be.report
     print(
-        f"mesh V {len(v):,} F {len(f):,}, roots {len(roots):,} [{time.time() - t0:.0f}s]"
+        json.dumps({k: rep[k] for k in ("vertices", "roots")}),
+        f"[{time.time() - t0:.0f}s]",
     )
-
-    res = dict(
-        name=a.name, lo=list(lo), hi=list(hi), vox=vox.tolist(), half_voxel_mm=half
-    )
-    E = {}
-    for k, nm in ((1, "echo2"), (2, "echo3")):
-        img = tissue_contrast(t.patch.echoes[..., k], t.wm)
-        E[nm] = edge_offsets(img, v, n, vox)
-        print(f"{nm}: sign {E[nm].sign:+.0f} [{time.time() - t0:.0f}s]")
-    k1, k2 = mesh_curvatures(v * vox, f, n, CURV_MM)
-    H = 0.5 * (k1 + k2)
-    _, coh = CT.data_normal(CT.base_tensor(t), t.ctx)
-    coh_v = ndi.map_coordinates(coh, (v + COH_AT * n).T, order=1, mode="nearest")
-    vi = np.clip(np.round(v).astype(int), 0, np.array(t.wm.shape) - 1)
-    keep = t.dface[tuple(vi.T)] >= CT.FACE_MM
-
-    outcome = None
+    for nm in ("echo2", "echo3"):
+        print(
+            nm,
+            json.dumps(
+                {
+                    k: rep[nm][k]
+                    for k in (
+                        "at_end_frac",
+                        "all",
+                        "outside_gt_half_frac",
+                        "inside_gt_half_frac",
+                    )
+                }
+            ),
+        )
+    print("refined", json.dumps(rep["refined"]))
+    v, roots, keep = A["v"], A["roots"], A["keep"]
+    E = {
+        nm: EdgeOffsets(
+            A[f"{nm}_offset_mm"], A[f"{nm}_slope"], A[f"{nm}_at_end"], rep[nm]["sign"]
+        )
+        for nm in ("echo2", "echo3")
+    }
+    outcome, names = None, None
     if a.turns:
         z = np.load(a.turns)
         if (
@@ -102,122 +93,38 @@ def main():
             names = list(z["outcomes"])
             outcome = np.full(len(v), -1)
             outcome[roots] = z["out"]
-            res["outcome_names"] = names
-        else:
-            print("turns npz: not this mesh, outcome not used")
-
-    # ---- summary
-    for nm, e in E.items():
-        ok = keep & ~e.at_end
-        o = e.offset_mm
-        r = dict(
-            sign=e.sign,
-            at_end_frac=float(e.at_end[keep].mean()),
-            all=pct(o[ok]),
-            roots=pct(o[roots][ok[roots]]),
-            abs_gt_half_voxel_frac=float((np.abs(o[ok]) > half).mean()),
-            outside_gt_half_frac=float((o[ok] > half).mean()),
-            inside_gt_half_frac=float((o[ok] < -half).mean()),
-        )
-        r["by_H"] = {
-            f"{lo_:g}..{hi_:g}": pct(o[ok & (H >= lo_) & (H < hi_)])
-            for lo_, hi_ in zip(H_BINS[:-1], H_BINS[1:])
-        }
-        r["by_coherence"] = {
-            f"{lo_:g}..{hi_:g}": pct(o[ok & (coh_v >= lo_) & (coh_v < hi_)])
-            for lo_, hi_ in zip(COH_BINS[:-1], COH_BINS[1:])
-        }
-        r["at_end_by_coherence"] = {
-            f"{lo_:g}..{hi_:g}": float(
-                e.at_end[keep & (coh_v >= lo_) & (coh_v < hi_)].mean()
-            )
-            for lo_, hi_ in zip(COH_BINS[:-1], COH_BINS[1:])
-        }
-        if outcome is not None:
-            r["by_outcome"] = {
-                names[c]: pct(o[ok & (outcome == c)])
+            e = E["echo2"]
+            ok = keep & ~e.at_end
+            by = {
+                names[c]: pct(e.offset_mm[ok & (outcome == c)])
                 for c in np.unique(outcome[outcome >= 0])
             }
-        res[nm] = r
-    both = keep & ~E["echo2"].at_end & ~E["echo3"].at_end
-    d23 = E["echo3"].offset_mm[both] - E["echo2"].offset_mm[both]
-    res["echo3_minus_echo2"] = pct(d23)
-    res["echo2_echo3_corr"] = float(
-        np.corrcoef(E["echo2"].offset_mm[both], E["echo3"].offset_mm[both])[0, 1]
-    )
-    (out / f"wm_edge_{a.name}.json").write_text(json.dumps(res, indent=1))
-    np.savez_compressed(
-        out / f"wm_edge_{a.name}.npz",
-        lo=np.array(lo),
-        vox=vox,
-        v=v,
-        f=f,
-        n=n,
-        roots=roots,
-        H=H,
-        coh=coh_v,
-        keep=keep,
-        **{
-            f"{nm}_{k}": getattr(e, k)
-            for nm, e in E.items()
-            for k in ("offset_mm", "slope", "at_end")
-        },
-        **({} if outcome is None else dict(outcome=outcome)),
-    )
-    write_vtk(
-        str(out / f"wm_edge_{a.name}.vtk"),
-        t.patch.affine,
-        v,
-        f,
-        {
-            "offset_echo2_mm": np.where(
-                E["echo2"].at_end, np.nan, E["echo2"].offset_mm
-            ),
-            "offset_echo3_mm": np.where(
-                E["echo3"].at_end, np.nan, E["echo3"].offset_mm
-            ),
-            "H_per_mm": H,
-            "coherence": coh_v,
-        },
-    )
-    ov = np.zeros(t.wm.shape, np.uint8)
-    o2 = E["echo2"].offset_mm
-    for code, sel in ((1, o2 > half), (2, o2 < -half), (3, E["echo2"].at_end)):
-        ov[tuple(vi[sel].T)] = code
-    nib.save(
-        nib.Nifti1Image(ov, t.patch.affine), out / f"wm_edge_{a.name}_overlay.nii.gz"
-    )
-    print(
-        json.dumps(
-            {
-                nm: {
-                    k: res[nm][k]
-                    for k in ("at_end_frac", "all", "abs_gt_half_voxel_frac")
-                }
-                for nm in E
-            },
-            indent=1,
-        )
-    )
-    print(
-        "echo3 - echo2",
-        res["echo3_minus_echo2"],
-        "corr",
-        round(res["echo2_echo3_corr"], 3),
-    )
-
+            (out / f"wm_edge_{a.name}_outcome.json").write_text(
+                json.dumps(by, indent=1)
+            )
+        else:
+            print("turns npz: not this mesh, outcome not used")
+    half = rep["half_voxel_mm"]
     maps(
         fig_dir / f"wm_edge_{a.name}_maps.png",
         a.name,
         E,
-        H,
-        coh_v,
+        A["H"],
+        A["coh"],
         keep,
         half,
         outcome,
-        res.get("outcome_names"),
+        names,
     )
-    planes(fig_dir / f"wm_edge_{a.name}_planes.png", a.name, t, v, f, E["echo2"], half)
+    planes(
+        fig_dir / f"wm_edge_{a.name}_planes.png",
+        a.name,
+        be.tissue,
+        v,
+        A["refined_v"],
+        E["echo2"],
+        A["refined_move_mm"],
+    )
     print(f"done [{time.time() - t0:.0f}s]")
 
 
@@ -312,7 +219,7 @@ def maps(path, name, E, H, coh, keep, half, outcome, onames):
     else:
         ax.axis("off")
     fig.suptitle(
-        f"{name}: the image's GM/WM edge against the white mesh (vertices ≥ {CT.FACE_MM} mm from the box faces; "
+        f"{name}: the image's GM/WM edge against the white mesh (vertices ≥ {FACE_MM} mm from the box faces; "
         f"dotted: half a voxel)",
         fontsize=11,
     )
@@ -321,9 +228,10 @@ def maps(path, name, E, H, coh, keep, half, outcome, onames):
     plt.close(fig)
 
 
-def planes(path, name, t, v, f, e, half):
-    """Three orthogonal planes through the box centre: echo 2, the mesh's section, and the
-    vertices within half a voxel of the plane, coloured by offset."""
+def planes(path, name, t, v, v1, e, move):
+    """Three orthogonal planes through the box centre: echo 2, the label's outline, the mesh
+    vertices within half a voxel of the plane coloured by offset (before refinement), and the
+    vertices that step 4 moved, at their new places (black)."""
     sh = np.array(t.wm.shape)
     c = sh // 2
     fig, axs = plt.subplots(1, 3, figsize=(19, 7))
@@ -352,6 +260,8 @@ def planes(path, name, t, v, f, e, half):
         )
         se = (np.abs(v[:, ax_i] - c[ax_i]) < 0.5) & e.at_end
         ax.scatter(v[se, other[0]], v[se, other[1]], c="lime", s=4, marker="x")
+        sm = (np.abs(v1[:, ax_i] - c[ax_i]) < 0.5) & (move < 0)
+        ax.scatter(v1[sm, other[0]], v1[sm, other[1]], c="k", s=1)
         ax.set_title(f"axis {ax_i} = {c[ax_i]} (box)", fontsize=9)
     fig.colorbar(
         sc,
@@ -360,7 +270,8 @@ def planes(path, name, t, v, f, e, half):
         label="echo 2 edge offset (mm; red: edge outside the mesh)",
     )
     fig.suptitle(
-        f"{name}: echo 2; yellow: WM label; dots: mesh vertices by edge offset; green x: no edge in ±0.3 mm",
+        f"{name}: echo 2; yellow: WM label; dots: vertices by edge offset; green x: no edge in "
+        "±0.3 mm; black: moved vertices after step 4",
         fontsize=11,
     )
     fig.savefig(path, dpi=100)
