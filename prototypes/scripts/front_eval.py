@@ -142,10 +142,19 @@ def agreement(a, b, vox):
     return np.percentile(dev, [50, 90, 99]).round(3).tolist() if dev else None
 
 
+KEYS = ("vox", "P", "near_face", "cls", "outc", "pos", "ns", "nrm", "tv", "crest_at", "area", "vol", "turn_at")
+
+
+def load(path):
+    z = np.load(path)
+    return {k: z[k] for k in KEYS if k in z.files}
+
+
 def sites(A):
     res = {}
     for site, lo in SITES.items():
-        Z = {m: np.load(f"{A.dir}/column_volume_{site}_{m}.npz") for m in METHODS
+        # each array read once: an NpzFile decompresses an array on every access
+        Z = {m: load(f"{A.dir}/column_volume_{site}_{m}.npz") for m in METHODS
              if Path(f"{A.dir}/column_volume_{site}_{m}.npz").exists()}
         if "front" not in Z:
             continue
