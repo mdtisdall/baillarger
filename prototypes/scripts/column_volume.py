@@ -32,13 +32,14 @@ Writes <work>/column_volume_<name>.npz and .json, <figures>/column_volume_<name>
 Usage: column_volume.py <figures dir> <work dir> --name NAME (--patch P | --box I J K [--size N ...])
                         [--points FILE] [--tracer {current,fitted,fitted_blend}]
                         [--columns {crest,traverse,normal,one-pass}] [--wm-changes FILE] [--mesh FILE]
-                        [--label-changes FILE [--proposed]] [--figs-only]
+                        [--label-changes FILE [--reviewed-only]] [--figs-only]
 --wm-changes: the handle-free WM label (baillarger.white.wm_changes, saved with WMChanges.save)
 replaces the aseg's everywhere (mesh, field, stops, classes); without it, the aseg's.
 --mesh: a saved white mesh of the same box and WM label (python -m baillarger.white mesh, WhiteMesh)
 instead of making it; the run stops if its box or WM label differ.
 --label-changes: the pial-side label changes (baillarger.pial_labels, LabelChanges.save): the
-accepted relabels and brush edits; with --proposed, the unreviewed proposals too.
+detector's best guess (every cell not rejected) and the brush edits; with --reviewed-only, only the
+accepted cells and the brush edits.
 The npz also holds tracer_name, column_method, wm_label, pial_label, white_mesh (the --mesh file or "made here") and crest_at (crest and traverse: per
 column, the first sample where it meets another bank's field, T's crest; -1 if none; normal: where
 it passes another bank's front) and, with --columns normal, vol (the equivolume coordinate).
@@ -82,14 +83,15 @@ ap.add_argument("--columns", choices=CT.METHODS, default="crest")
 ap.add_argument("--wm-changes", help="the handle-free WM label's changes (baillarger.white, WMChanges.save); "
                 "default: the aseg's WM label")
 ap.add_argument("--label-changes", help="pial-side label changes (baillarger.pial_labels)")
-ap.add_argument("--proposed", action="store_true", help="with --label-changes: apply the proposals too")
+ap.add_argument("--reviewed-only", action="store_true",
+                help="with --label-changes: apply only the accepted cells and brush edits, not the queue")
 ap.add_argument("--mesh", help="a saved white mesh of this box and WM label (baillarger.white, WhiteMesh); "
                 "default: made here")
 ap.add_argument("--figs-only", action="store_true")
 A = ap.parse_args()
 FIG, WORK, SITE, FIGS_ONLY = A.fig, A.work, A.name, A.figs_only
 WM_LABEL = f"handle-free: {A.wm_changes}" if A.wm_changes else "aseg"
-PIAL_LABEL = (f"{A.label_changes}" + (" (with proposals)" if A.proposed else "")) if A.label_changes else "aseg"
+PIAL_LABEL = (f"{A.label_changes}" + (" (reviewed only)" if A.reviewed_only else "")) if A.label_changes else "aseg"
 SAME_MM, TPL_MM = CT.SAME_MM, 6.0
 N_PROFILE, TPL_MAX = 3000, 400
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
@@ -136,7 +138,7 @@ def main():
     changes = WMChanges.load(Path(A.wm_changes)) if A.wm_changes else None
     relabel = LabelChanges.load(Path(A.label_changes)) if A.label_changes else None
     t = CT.load_tissue(tuple(int(a) for a in lo), tuple(int(a) for a in hi), f"column_volume_{SITE}",
-                       changes=changes, pial_changes=relabel, proposed=A.proposed)
+                       changes=changes, pial_changes=relabel, reviewed_only=A.reviewed_only)
     vox = t.vox
     wm, ctx, labels = t.wm, t.ctx, t.labels
     feats = [t.det[1], t.det[2]]

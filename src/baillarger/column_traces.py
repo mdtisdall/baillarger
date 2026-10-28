@@ -165,7 +165,7 @@ def tissue(
     p: Patch,
     wm: Bool | None = None,
     pial_changes: "LabelChanges | None" = None,
-    proposed: bool = False,
+    reviewed_only: bool = False,
 ) -> Tissue:
     """Step 1 on a loaded box. wm: the WM label to use (default the aseg's,
     rim == 2). It replaces the aseg's in the rim labels before anything is
@@ -183,7 +183,7 @@ def tissue(
         rim[(rim == 2) & ~wm] = 3
         rim[wm] = 2
     if pial_changes is not None:
-        rim = pial_changes.apply(rim, p.lo, proposed)
+        rim = pial_changes.apply(rim, p.lo, reviewed_only)
     vox = np.array(p.voxel_mm)
     miss = missing_tissue(rim, p.flash, p.voxel_mm)
     ctx = (rim == 3) & ~miss
@@ -210,15 +210,15 @@ def load_tissue(
     directory: Path | None = None,
     changes: WMChanges | None = None,
     pial_changes: "LabelChanges | None" = None,
-    proposed: bool = False,
+    reviewed_only: bool = False,
 ) -> Tissue:
     """The box [lo, hi) of the full grid (0-based voxels): step 1. changes:
     the handle-free WM label's changes (baillarger.white.wm_changes); None
-    keeps the aseg's WM label. pial_changes, proposed: the pial-side label changes
+    keeps the aseg's WM label. pial_changes, reviewed_only: the pial-side label changes
     (baillarger.pial_labels.LabelChanges; see tissue)."""
     p = load_box(lo, hi, name=name, directory=directory)
     wm = None if changes is None else white_matter_box(lo, hi, changes, directory)
-    return tissue(p, wm, pial_changes, proposed)
+    return tissue(p, wm, pial_changes, reviewed_only)
 
 
 def base_tensor(t: Tissue) -> F64:

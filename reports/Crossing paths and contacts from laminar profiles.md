@@ -1022,7 +1022,7 @@ On an off-centre 2-voxel slot, T now rises in each bank up to the fluid, with no
 
 ### Pial-side label refinement
 
-A GM refinement step at the front of the pipeline, like the WM one: `baillarger.pial_labels` finds voxels that the aseg labels cortex but the image shows are fluid, writes a change file (`LabelChanges`, the counterpart of `baillarger.white.WMChanges`), and `column_traces.load_tissue(..., pial_changes=...)` applies it after the handle-free WM. Everything downstream (T, the crest, the columns, the viewer) reads the refined labels. Clear cases are accepted automatically; the rest wait in a ranked review queue (statuses in the change file; the review pane in `baillarger.viewer` is a separate step).
+A GM refinement step at the front of the pipeline, like the WM one: `baillarger.pial_labels` finds voxels that the aseg labels cortex but the image shows are fluid, writes a change file (`LabelChanges`, the counterpart of `baillarger.white.WMChanges`), and `column_traces.load_tissue(..., pial_changes=...)` applies it after the handle-free WM. Everything downstream (T, the crest, the columns, the viewer) reads the refined labels. The detector is trusted by default: its best guess, every cell it does not reject, is what the step writes and what `load_tissue` applies. Corrections go into the change file (statuses and brush edits), and the cells most worth a look are ranked first in a review queue; the review pane in `baillarger.viewer` is a separate step.
 
 **What the image shows.** At V1V2 the fluid is fomblin at the noise floor (45 in every echo, against 514 for cortex in echo 2). The aseg's cortex runs one to three voxels into it around most sulci, and fills the thin channels of sulci it fused, such as the user's marked "contact" at (270, 133, 139). The vessel the user identified at (324, 146, 139) is a one-voxel-wide dotted dark line, partial-volumed.
 
@@ -1044,12 +1044,16 @@ A GM refinement step at the front of the pipeline, like the WM one: `baillarger.
 5. **Status, per cell.**
    - Cells of "inside" components are rejected.
    - Cells of components that touch fluid are accepted at once when their relabel keeps the tissue's Betti numbers (Kuhn adjacency, as in `baillarger.handles`) in a box round the cell, given the cells accepted so far. This runs in passes, so the rim opens from the fluid inward.
-   - The rest are proposed, the review queue: hidden channels, and cells that would open a cavity, a tunnel or a split (as a channel between two banks does).
+   - The rest are proposed, the review queue: hidden channels, and cells that would open a cavity, a tunnel or a split (as a channel between two banks does). Proposed cells are part of the best guess; the status only says which cells to look at first.
 6. **Ranking.** By the columns of a column volume that pass through the cell, then the crest voxels within one voxel of it, then size. Descriptors per cell: shape (Westin: tube, sheet or blob), fluid fraction, contrast, and local Betti numbers before and after.
 
-**The step on its own:** `python -m baillarger.pial_labels propose --out DIR --name NAME --lo I J K --hi I J K --wm-changes FILE [--columns column_volume_<name>.npz]`, as the WM step runs with `python -m baillarger.white changes`. It writes `pial_labels_<NAME>.npz` (the change file), a `.json` summary with the cells in rank order, and an ITK-SNAP overlay on the box grid. A status can be changed and brush edits added with `LabelChanges.with_status` and `with_brush`.
+**The step on its own:** `python -m baillarger.pial_labels propose --out DIR --name NAME --lo I J K --hi I J K --wm-changes FILE [--columns column_volume_<name>.npz]`, as the WM step runs with `python -m baillarger.white changes`. It writes, on the box grid:
+- `pial_labels_<NAME>.npz`, the change file;
+- `_labels.nii.gz`, the refined rim labels, i.e. the WM changes and the best guess applied (0 other, 1 outside, 2 WM, 3 cortex);
+- a `.json` summary with the cells in rank order;
+- an ITK-SNAP overlay of the statuses.
 
-`column_volume.py --label-changes FILE [--proposed]` applies the file: the accepted cells and brush edits, and with `--proposed` the unreviewed queue too.
+A status can be changed and brush edits added with `LabelChanges.with_status` and `with_brush`. `load_tissue(..., pial_changes=FILE)` and `column_volume.py --label-changes FILE` apply the best guess (every cell not rejected) and the brush edits; with `reviewed_only` / `--reviewed-only`, only the accepted cells and brush edits.
 
 **Tests** (exact answers, synthetic boxes):
 - the noise from white noise and from a layered cube;
@@ -1076,14 +1080,18 @@ A GM refinement step at the front of the pipeline, like the WM one: `baillarger.
 | Cells accepted (voxels) | 1,992 (37,172) | 2,141 (23,562) |
 | Cells in the queue (voxels; reaching no fluid) | 494 (11,076; 176) | 578 (2,422; 527) |
 | Cells rejected, inside a bank (voxels) | 191 (1,624) | 438 (1,597) |
-| Tissue Betti numbers of the box, before → after the accepted cells | (1, 9, 6) → (1, 9, 6) | (1, 11, 5) → (1, 11, 5) |
+| Tissue Betti numbers of the box (components, tunnels, cavities), aseg | (1, 9, 6) | (1, 11, 5) |
+| … with the accepted cells | (1, 9, 6) | (1, 11, 5) |
+| … with the best guess (accepted and queue: the default) | (6, 314, 324) | (1, 63, 560) |
 
 **The user's three places at V1V2:**
 - The marked "contact" (270, 133, 139): an accepted cell one voxel away (a tube of 15 voxels, fluid fraction 0.71).
 - The dark pocket (289, 118, 139): the top of the queue (676 columns; it reaches no fluid).
 - The vessel (324, 146, 139): only fragments within 5 voxels (a 7-voxel queue cell). A vessel one voxel wide rarely reaches a majority-fluid voxel at this noise, so it is left to the brush.
 
-**Traverse re-measured** (all proposals applied, unreviewed: accepted and queue; roots 2 mm or more from a face; same inputs as *Traverse, and T's sign through tissue*):
+The best guess changes the tissue's topology a lot. The queue is, by definition, the cells whose relabel opens a cavity, a tunnel or a split: dark pockets with no mouth to the fluid in the box (hidden channels, or noise), and channels that cut the tissue at the box faces. The user chose to trust it by default and correct it in the review (2026-10-28).
+
+**Traverse re-measured** (the best guess, unreviewed: accepted and queue; roots 2 mm or more from a face; same inputs as *Traverse, and T's sign through tissue*):
 
 | | V1V2 crest | V1V2 crest, relabelled | V1V2 traverse | V1V2 traverse, relabelled | M1S1 crest | M1S1 crest, relabelled | M1S1 traverse | M1S1 traverse, relabelled |
 |---|---|---|---|---|---|---|---|---|
@@ -1100,7 +1108,8 @@ A GM refinement step at the front of the pipeline, like the WM one: `baillarger.
 - **The profile split at the points** is made on a random subsample of crossing columns. With relabelling, far fewer columns cross at the marked points (V1V2: 10–14 of 35 points), so its numbers are not comparable.
 
 **Not done:**
-- **The user's review** of the queue at both sites. The table applies the whole queue; the review can only take queue cells out, overturn an accepted or rejected cell, or add brush edits.
+- **The user's corrections** at both sites. The table applies the best guess; corrections can take queue cells out, overturn an accepted or rejected cell, or add brush edits.
+- **An automatic topology fix for the queue,** like `remove_handles` for the WM: open a mouth for a pocket, or leave it as cortex.
 - **A detector for thin vessels and channels:** a line / sheet-matched statistic (Hessian at one voxel) would raise the SNR of one-voxel-wide structures above the per-voxel test.
 - **The whole hemisphere at once,** as the WM refinement does; now per box.
 - **The crest test's false hits** in the cortex, the next cause of traverse's own-bank columns.
