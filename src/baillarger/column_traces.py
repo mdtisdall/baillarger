@@ -47,12 +47,13 @@ index coordinates of the box; vox the voxel size (mm); lengths in mm.
      it (cut_at_crest), as CONTACT. With bend_deg, a column whose direction
      changes by more than bend_deg within BEND_MM also ends, at the bend's
      kink (end_at_bend), for comparison.
-   - "traverse": as "crest", but a column that meets T's crest goes on
-     through it: from its first crest voxel it crosses the kink to the far
-     side (along the direction the kink test found there) and then descends
-     -grad T into the far bank (traverse). Every column is then a complete
-     ray, from its root to the fluid or to WM, through any contact; the
-     reading of the columns chooses where to cut it.
+   - "traverse": every column is a complete ray, through any contact, by
+     the crossing rule of baillarger.column_front (climb grad T; within the
+     stencil of T's crest voxels keep heading; on leaving it, if T falls
+     ahead, descend -grad T for good, into the far bank): the columns traced
+     independently (column_front.grow with no coupling). Nothing is cut; the
+     reading of the columns chooses where to cut. crest_at as "crest", and
+     turn_at the sample where the column began to descend.
    - "normal": no field: each root's column is the straight path of its
      point of the white surface moving along its (smoothed) normal at
      constant speed (streamlines.ray), so the fronts are offsets of the white
@@ -68,6 +69,12 @@ index coordinates of the box; vox the voxel size (mm); lengths in mm.
      baillarger.fronts), stopped at the pass's contact (a voxel whose root
      patch is SAME_MM or more along the white surface from the path's own).
      The method before the crest method, kept for comparison.
+   - "front": as "traverse", with the columns linked: the white mesh grown
+     outward as one surface (baillarger.column_front), the moving vertices'
+     directions smoothed along the mesh at MESH_SIGMA; each root's
+     trajectory is its column, and its dual area (area, mm^2) and the
+     volume it swept per unit root area (vol, mm: Bok's measure; vol /
+     vol[end] is an equivolume relative depth) are recorded per sample.
 5. Patches (mesh_patches): geodesic Voronoi cells PATCH_MM apart on the
    white mesh, and the distances between their centres along it
    (baillarger.mesh_graph). A trace's end patch is the patch of the vertex
@@ -91,6 +98,7 @@ import numpy.typing as npt
 from scipy import ndimage as ndi
 from scipy.sparse import coo_matrix, csr_matrix
 
+from baillarger import column_front as CF
 from baillarger import mesh_graph as G
 from baillarger import streamlines as S
 from baillarger.data import Patch, load_box
@@ -112,7 +120,7 @@ TRACERS = ("current", "fitted", "fitted_blend")
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
 CLASS = ("open", "crossing", "own bank", "to the contact", "failed")
 #: How a column ends where its trace cannot go on (module docstring, step 4).
-METHODS = ("crest", "traverse", "normal", "one-pass")
+METHODS = ("crest", "traverse", "normal", "one-pass", "front")
 #: The fitted field's band into the WM for the crest method (mm), and the
 #: window of its optional bend rule (mm).
 WM_BAND_MM, BEND_MM = 0.5, 0.3
@@ -490,11 +498,19 @@ class ColumnTraces:
     T: F64 | None
     #: the fitted field's solver info, if any
     notes: dict[str, Any]
-    #: method "normal": the equivolume coordinate per sample, the volume the
-    #: column has swept per unit area of its root (mm; A(s) = (1 + k1 s)
-    #: (1 + k2 s) from the root's principal curvatures), NaN past the end; a
-    #: relative equivolume depth is vol / vol at the end. None otherwise
+    #: per sample, the volume the column has swept per unit area of its root
+    #: (mm), NaN past the end; a relative equivolume depth is vol / vol at
+    #: the end. Method "normal": from the root's principal curvatures, A(s) =
+    #: (1 + k1 s)(1 + k2 s); "front": measured, the flux of the root vertex's
+    #: dual area vector over the steps over its dual area at the root. None
+    #: otherwise
     vol: F32 | None = None
+    #: method "front": per sample, the root vertex's dual area (mm^2); None
+    #: otherwise
+    area: F32 | None = None
+    #: methods "traverse" and "front": the sample where the column began to
+    #: descend T (-1 if never); None otherwise
+    turn_at: I64 | None = None
 
 
 def level_set_concavity(
@@ -572,89 +588,6 @@ def equivolume(
     out[:, 1:] = np.cumsum(0.5 * (A[:, 1:] + A[:, :-1]) * S.STEP_MM, axis=1)
     out[np.arange(NMAX)[None, :] >= ns[:, None]] = np.nan
     return out.astype(np.float32)
-
-
-def traverse(
-    pos: F32,
-    ns: I64,
-    out: I64,
-    crest_at: I64,
-    across: npt.NDArray[np.int8],
-    T: F64,
-    t: Tissue,
-) -> I64:
-    """The traverse method's continuation past the crest: each column with a
-    crest hit (crest_at >= 0) keeps its path up to that sample, crosses the
-    kink by one lattice step along the voxel's across direction (from
-    crest_kinks, signed to agree with the column's heading; the test itself
-    puts the neighbour that way past the kink, and the step keeps the
-    column's own offset within the voxel rather than snapping it to the
-    neighbour's centre), in a straight line sampled every STEP_MM (if that
-    line enters fluid, WM, missing or other tissue, the column ends there,
-    with that outcome), and then descends -grad T into the far bank
-    (streamlines.descend) until it stops: in the far bank's WM, in fluid, at
-    a minimum of T (RIDGE), or as trace does. Every column is then a
-    complete ray. pos, ns and out are updated in place; a column's samples
-    stay STEP_MM apart. Returns the columns continued."""
-    vox = t.vox
-    shape = np.array(T.shape)
-    went = np.flatnonzero(crest_at >= 0)
-    starts, heads = [], []
-    for i in went:
-        j = int(crest_at[i])
-        x = pos[i, j].astype(float)
-        q = np.clip(np.round(x).astype(int), 0, shape - 1)
-        e = across[tuple(q)].astype(float)
-        h = x - pos[i, max(j - 1, 0)].astype(float)
-        sgn = 1.0 if float(e @ h) >= 0 else -1.0
-        far = np.clip(x + sgn * e, 0, shape - 1)  # q + e, at the column's own offset
-        d = far - x
-        n = max(1, int(np.ceil(np.linalg.norm(d * vox) / S.STEP_MM)))
-        seg = x + d * (np.arange(1, n + 1) / n)[:, None]
-        starts.append(seg)
-        heads.append(j)
-    if not went.size:
-        return went
-    # the crossing line's samples: the first that is not cortex ends the column
-    stop = np.full(went.size, -1)
-    code = np.zeros(went.size, np.int64)
-    for a, sg in enumerate(starts):
-        q = np.clip(np.round(sg).astype(int), 0, shape - 1)
-        lab = t.labels[tuple(q.T)]
-        bad = np.flatnonzero(lab != 0)
-        if bad.size:
-            b = int(bad[0])
-            stop[a] = b
-            lb = int(lab[b])
-            code[a] = {1: S.FLUID, 2: S.WM, 3: S.MISSING}.get(lb, S.OTHER)
-    for b_ in np.flatnonzero(stop >= 0).tolist():
-        i, j, sg = went[b_], heads[b_], starts[b_]
-        path = np.concatenate([pos[i, : j + 1], sg[: stop[b_] + 1]])
-        m = min(len(path), NMAX)
-        pos[i] = np.nan
-        pos[i, :m] = path[:m]
-        ns[i] = m
-        out[i] = code[b_]
-    on = np.flatnonzero(stop < 0)
-    went_on = went[on]
-    starts = [starts[a] for a in on]
-    heads = [heads[a] for a in on]
-    if not went_on.size:
-        return went
-    x_far = np.stack([sg[-1] for sg in starts])
-    left = np.array(
-        [NMAX - (j + 1 + len(sg)) + 1 for j, sg in zip(heads, starts, strict=True)]
-    )
-    pd, nd, od = S.descend(T, t.labels, t.dface, x_far, vox, int(max(left.max(), 2)))
-    for a, i in enumerate(went_on):
-        j, sg = heads[a], starts[a]
-        path = np.concatenate([pos[i, : j + 1], sg[:-1], pd[a, : nd[a]]])
-        m = min(len(path), NMAX)
-        pos[i] = np.nan
-        pos[i, :m] = path[:m]
-        ns[i] = m
-        out[i] = od[a] if len(path) <= NMAX else S.LENGTH
-    return went
 
 
 def end_at_bend(pos: F32, ns: I64, out: I64, lag: int) -> I64:
@@ -794,6 +727,7 @@ def trace_columns(
     T: F64 | None = None
     notes: dict[str, Any] = {}
     vol: F32 | None = None
+    front: CF.Front | None = None
     if method == "normal":
         del base, nh
         pos, ns1, out1 = S.ray(t.labels, t.dface, x0, nrm[tv], t.vox, NMAX)
@@ -810,31 +744,37 @@ def trace_columns(
         last = np.where((ns > 1)[:, None], last, -nrm[tv])
         end_patch = P.of_vertex[G.crossing_vertex(v, nrm, endp, last, t.vox)]
         cls = classify(outc, P.D[root_patch, end_patch])
-    elif method in ("crest", "traverse"):
+    elif method in ("crest", "traverse", "front"):
+        if method != "crest" and tracer == "current":
+            raise ValueError(f"method {method!r} follows the fitted field")
         C = fitted_crest(t, base, v, f, nrm)
-        T, notes, crest, across = C.T, C.notes, C.crest, C.across
-        field = base if tracer == "current" else S.gradient_tensor(T, t.vox)
+        T, notes, crest = C.T, C.notes, C.crest
+        field: F64 | None = None
+        if method == "crest":
+            field = base if tracer == "current" else S.gradient_tensor(T, t.vox)
         del base, nh, C
-        pos, ns1, out1 = S.trace(
-            field, t.labels, t.dface, x0, nrm[tv], t.vox, NMAX, blend,
-            turn_deg=bend_deg, turn_mm=BEND_MM,
-        )  # fmt: skip
-        del field
+        if field is None:
+            sigma = MESH_SIGMA if method == "front" else 0.0
+            front = CF.grow(
+                T, t.labels, t.dface, v, f, nrm, tv, t.vox, NMAX, sigma, blend,
+                crest,
+            )  # fmt: skip
+            pos, ns1, out1 = front.pos, front.ns, front.out
+            if method == "front":
+                vol = front.vol / front.area[:, :1]
+        else:
+            pos, ns1, out1 = S.trace(
+                field, t.labels, t.dface, x0, nrm[tv], t.vox, NMAX, blend,
+                turn_deg=bend_deg, turn_mm=BEND_MM,
+            )  # fmt: skip
+            del field
         end1 = pos[np.arange(len(tv)), ns1 - 1].copy()
         ns, outc = ns1.copy(), out1.copy()
-        if method == "traverse":
-            crest_at = first_in(crest, pos, ns)
-            traverse(pos, ns, outc, crest_at, across, T, t)
-            k_ = np.flatnonzero(crest_at < 0)
-            sub_pos, sub_ns, sub_out = pos[k_], ns[k_], outc[k_]
-            cut_at_crest(sub_pos, sub_ns, sub_out, T, nrm[tv][k_])
-            pos[k_], ns[k_], outc[k_] = sub_pos, sub_ns, sub_out
-        else:
+        if method == "crest":
             cut_at_crest(pos, ns, outc, T, nrm[tv])
-            if bend_deg is not None:
-                end_at_bend(pos, ns, outc, max(1, int(round(BEND_MM / S.STEP_MM))))
-            crest_at = first_in(crest, pos, ns)
-        del across
+        if bend_deg is not None:
+            end_at_bend(pos, ns, outc, max(1, int(round(BEND_MM / S.STEP_MM))))
+        crest_at = first_in(crest, pos, ns)
         fallback = np.zeros(len(tv), np.int8)
         k = np.arange(len(tv))
         endp = pos[k, ns - 1].astype(float)
@@ -889,4 +829,6 @@ def trace_columns(
         T=T,
         notes=notes,
         vol=vol,
+        area=front.area if method == "front" and front is not None else None,
+        turn_at=None if front is None else front.turn_at,
     )
