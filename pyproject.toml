@@ -18,6 +18,7 @@ dev = [
   "matplotlib>=3.11.2",
   "mypy",
   "ortools>=9.15.6755",
+  "pyamg>=5.3.0",
   "pytest",
   "ruff",
   "scikit-image>=0.26.0",
@@ -54,8 +55,7 @@ module = ["numba", "numba.*", "llvmlite", "llvmlite.*", "skfmm", "skfmm.*",
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-# prototypes/scripts: not test_curv.py (a script, not pytest) or
-# test_fold_phantoms.py (column_tracers imports pyamg, not a dependency)
+# prototypes/scripts: not test_curv.py (a script, not pytest)
 testpaths = [
   "tests",
   "prototypes/scripts/test_crossing_lib.py",
@@ -63,6 +63,7 @@ testpaths = [
   "prototypes/scripts/test_edit_resolve.py",
   "prototypes/scripts/test_flat_map.py",
   "prototypes/scripts/test_flatten_volume.py",
+  "prototypes/scripts/test_fold_phantoms.py",
   "prototypes/scripts/test_inflate.py",
   "prototypes/scripts/test_joint_levels.py",
   "prototypes/scripts/test_levelset_fill.py",
