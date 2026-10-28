@@ -596,6 +596,7 @@ def test_equivolume_front_of_a_ball_and_a_cylinder_follows_equal_volume(
     assert R.area is not None and R.vol is not None and R.tau is not None
     x0 = R.v[R.tv]
     keep = np.ones(len(R.tv), bool) if power == 2 else np.abs(x0[:, 2] - 12) < 5
+    # the ball's tops need tau = 7.6 mm, under the cap (16 mm)
     assert np.all(R.outc[keep] == S.FLUID)
     r0 = dist(x0[keep]).mean() * VOX
     for i in (10, 20, 30, 40):  # the fluid is at 1.76 mm

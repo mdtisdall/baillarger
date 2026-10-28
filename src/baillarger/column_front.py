@@ -104,12 +104,20 @@ def dual_areas(x: F64, f: npt.NDArray[np.integer[Any]], vox: F64) -> tuple[F64, 
     p = x * vox
     c = np.cross(p[f[:, 1]] - p[f[:, 0]], p[f[:, 2]] - p[f[:, 0]])
     a = np.linalg.norm(c, axis=1) / 6.0
-    A = np.zeros(len(x))
-    N = np.zeros_like(x)
-    for k in range(3):
-        np.add.at(A, f[:, k], a)
-        np.add.at(N, f[:, k], c / 6.0)
-    return A, N
+    return face_sums(f, a, len(x)), face_sums(f, c / 6.0, len(x))
+
+
+def face_sums(f: npt.NDArray[np.integer[Any]], val: F64, nv: int) -> F64:
+    """Per vertex, the sum of val (per face, (nf,) or (nf, k)) over its
+    faces."""
+    idx = f.ravel()
+    if val.ndim == 1:
+        out: F64 = np.bincount(idx, np.repeat(val, 3), minlength=nv)
+        return out
+    rep = np.repeat(val, 3, axis=0)
+    return np.stack(
+        [np.bincount(idx, rep[:, j], minlength=nv) for j in range(val.shape[1])], 1
+    )
 
 
 def past_crest(g: F64, d: F64, ascending: Bool, coast: Bool) -> tuple[Bool, Bool]:
@@ -267,6 +275,10 @@ def grow(
 #: The equivolume front's speed cap, a multiple of the root's speed: one
 #: voxel per step_mm of the front's time (grow_equivolume, 3).
 SPEED_CAP = 4.0
+#: The front's time cap, as a multiple of the arc length cap (grow_equivolume,
+#: 4): at 2, a column on a cylinder-like crown of radius 0.32 mm (2 voxels,
+#: the tightest the white mesh keeps) reaches 2.9 mm of arc, 3.5 mm at 0.5 mm.
+TAU_CAP = 2.0
 
 
 def front_normals(
@@ -278,6 +290,7 @@ def front_normals(
     broken: Bool,
     iters: int = 10,
     cap: float = SPEED_CAP,
+    E: I64 | None = None,
 ) -> F64:
     """Unit vertex normals (mm, x in mm), area-weighted, with the vertices
     broken taking their heading instead, then smoothed along the edges
@@ -288,14 +301,13 @@ def front_normals(
     shrunk (toward a focus) its neighbours pull harder, and the steps are
     split so that none moves a normal more than half way to its neighbours'
     mean (at most cap * iters steps). On the root mesh it is
-    smooth_normals."""
+    smooth_normals. E: the mesh's edges (mesh_smoothing.edges), if known."""
     fn = np.cross(x[f[:, 1]] - x[f[:, 0]], x[f[:, 2]] - x[f[:, 0]])
-    n = np.zeros_like(x)
-    for k in range(3):
-        np.add.at(n, f[:, k], fn)
+    n = face_sums(f, fn, len(x))
     n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-12
     n[broken] = heading[broken]
-    E = edges(f)
+    if E is None:
+        E = edges(f)
     E = E[m[E[:, 0]] & m[E[:, 1]]]
     if not len(E):
         return n
@@ -329,6 +341,7 @@ def grow_equivolume(
     face_mm: float = 2.0,
     wm_after: float = 0.3,
     cap: float = SPEED_CAP,
+    tau_cap: float = TAU_CAP,
 ) -> Front:
     """Grow the white mesh (v, f; faces oriented out of the WM) with no data
     field, at equivolume speed, and return the columns of the vertices roots
@@ -366,9 +379,11 @@ def grow_equivolume(
        last sample at the stop; tau records each sample's coordinate.
        Columns stop as grow's (fluid, the WM after wm_after mm of arc,
        missing, other, a face within face_mm, the arc length cap
-       (nmax - 1) * step_mm), and at tau = cap * (nmax - 1) * step_mm
-       (LENGTH; a column at a crown that slow has swept that much volume per
-       root area). Fronts from different banks pass through each other.
+       (nmax - 1) * step_mm), and a cap on tau: the front stops growing at
+       tau = tau_cap * (nmax - 1) * step_mm (TAU_CAP), and a column still
+       running then (a crown column, slowed below the root's speed) ends
+       there as LENGTH, short of its arc cap. Fronts from different banks
+       pass through each other.
     5. No tangential relaxation: a column is a vertex's trajectory, and its
        dual area is the column's cross-section; moving vertices along the
        front would trade volume between columns and bend the trajectories
@@ -403,14 +418,15 @@ def grow_equivolume(
     taus[:, 0] = 0.0
     x0mm = x * vx
     A0 = Aall.copy()
-    d = front_normals(x0mm, f, act, x0mm, x0mm, np.zeros(nv, bool))
+    E = edges(f)
+    d = front_normals(x0mm, f, act, x0mm, x0mm, np.zeros(nv, bool), E=E)
     last = np.ones(nv)  # each vertex's last speed
-    tau, tau_max = 0.0, cap * (nmax - 1) * step_mm
+    tau, tau_max = 0.0, tau_cap * (nmax - 1) * step_mm
     arc_max = (nmax - 1) * step_mm
 
     def velocity(xv: F64, broken: Bool) -> tuple[F64, F64]:
         """Unit directions (mm) and speeds at the front xv (1-3 above)."""
-        n = front_normals(xv * vx, f, act, x0mm, d, broken, cap=cap)
+        n = front_normals(xv * vx, f, act, x0mm, d, broken, cap=cap, E=E)
         n = np.where(((n * d).sum(1) < 0)[:, None], -n, n)
         n[broken] = d[broken]
         A, _ = dual_areas(xv, f, vx)
