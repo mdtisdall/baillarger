@@ -49,14 +49,13 @@ A = ap.parse_args()
 UV_MM, NEAR_MM, JOIN_MM, MIN_TRACES = 0.16, 0.24, 1.0, 20
 WARN_MM = 0.3  # the anchor trace further than this from the point: the chart is not centred on it
 TISSUE = {0: "cortex", 1: "fluid", 2: "WM", 3: "missing tissue", 4: "other"}
-HOR = ["top", "far WM", "fallback contact", "one pass, equal", "one pass, field", "field prior", "profile, top"]
-# overlay labels: horizons 1-7, your points 8
+HOR = ["top", "far WM", "fallback contact", "profile, top"]
+# overlay labels: horizons 1-4, your points 5
 LABELS = [(1, (255, 255, 255), "top (open pia)"), (2, (48, 213, 255), "far WM (crossing traces)"),
-          (3, (255, 43, 214), "fallback's contact (5 mm rule; unreliable)"), (4, (235, 104, 52), "one pass, equal"),
-          (5, (255, 210, 63), "one pass, field"), (6, (227, 73, 72), "field prior (pairwise posterior on L)"),
-          (7, (42, 120, 214), "profile split, top-anchored (subsample)"), (8, (27, 175, 122), "your points")]
+          (3, (255, 43, 214), "contact (where a to-the-contact column ends)"),
+          (4, (42, 120, 214), "profile split, top-anchored (subsample)"), (5, (27, 175, 122), "your points")]
 CLASSES = [(1, (27, 175, 122), "open"), (2, (42, 120, 214), "crossing"), (3, (235, 104, 52), "own bank"),
-           (4, (199, 154, 0), "to the pass's contact"), (5, (227, 73, 72), "failed")]
+           (4, (199, 154, 0), "to the contact"), (5, (227, 73, 72), "failed")]
 
 
 def labels_file(path, rows):
@@ -180,7 +179,7 @@ def main():
                 qq = pos[tt, :m].astype(float) * vox
                 dp = np.linalg.norm(qq[:, None] - (P * vox)[None], axis=2)
                 if dp.size and dp.min() <= 0.3:
-                    ov[a, b, np.unravel_index(np.argmin(dp), dp.shape)[0]] = 8
+                    ov[a, b, np.unravel_index(np.argmin(dp), dp.shape)[0]] = len(HOR) + 1
         caff = np.diag([UV_MM, UV_MM, X.STEP_MM, 1.0])
         out = Path(A.data)
         nib.save(nib.Nifti1Image(e2, caff), out / f"{stem}_bank{bi + 1}_echo2.nii.gz")

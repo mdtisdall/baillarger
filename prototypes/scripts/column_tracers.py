@@ -40,6 +40,7 @@ column_diag.py.
 import numpy as np
 from scipy import ndimage as ndi
 from scipy import sparse
+from scipy.spatial import cKDTree
 
 import crossing_lib as X
 import flatten_fused2 as F
@@ -322,50 +323,44 @@ def orientation(B):
 
 
 class _Tissue:
-    """The fields of column_traces.Tissue that one_pass reads, from a curv_lib.load dict."""
+    """The fields of column_traces.Tissue that one_pass and finish read, from a curv_lib.load
+    dict."""
 
-    def __init__(self, B):
+    def __init__(self, B, labels=None):
         self.wm, self.ctx, self.vox = B["wm"], B["ctx"], np.asarray(B["vox"], float)
+        self.dface, self.labels = B["dface"], labels
 
 
 class Pass:
-    """column_traces.one_pass on the box (its root patches and their distances), for the fallback
-    and the classes."""
+    """column_traces' white mesh, its patches and the one pass on the box, for the fallback and
+    the classes."""
 
     def __init__(self, B, patch=6, ratio=3.0, limit_mm=8.0):
-        assert patch == PCT.PATCH and ratio == PCT.RATIO
-        op = PCT.one_pass(_Tissue(B), orientation(B), limit_mm)
-        self.op, self.s, self.f_eq, self.D, self.u = op, op.setup, op.fronts, op.D, op.u
+        assert patch == PCT.PATCH and ratio == PCT.RATIO and limit_mm == PCT.LIMIT_MM
+        self.v, self.f, self.nrm = PCT.white_mesh(B["wm"])
+        self.P = PCT.mesh_patches(self.v, self.f, np.asarray(B["vox"], float))
+        self.op = PCT.one_pass(_Tissue(B), orientation(B), self.v, self.nrm, self.P)
+        self.s, self.f_eq, self.D, self.u = self.op.setup, self.op.fronts, self.P.D, self.op.u
+        self.tree = cKDTree(self.v)
+
+    def vertex_of(self, x):
+        """The mesh vertex at each root (the roots are this mesh's vertices)."""
+        d, j = self.tree.query(np.asarray(x, float))
+        assert np.all(d < 1e-6), "roots must be vertices of column_traces.white_mesh"
+        return j
 
     def patch_at(self, x):
-        return self.op.patch_at(x)
+        return self.P.of_vertex[self.vertex_of(x)]
 
 
 def with_fallback(Pa, B, labels, x0, pos1, ns1, out1, nmax, same_mm=5.0):
-    """column_traces.trace_columns' fallback where the primary turned or ran to the cap, and its
+    """column_traces.finish: the fallback where the primary turned or ran to the cap, and the
     classes. Returns pos, ns, outc, tracer (0 primary, 1 fallback), cls, root_patch, end_patch."""
-    root_patch = Pa.patch_at(x0)
-    fb = np.flatnonzero((out1 == S.TURN) | (out1 == S.LENGTH))
-    lab_eq = Pa.f_eq.label
-
-    def far(i_paths, q):
-        lab = lab_eq[tuple(q.T)]
-        rp = root_patch[fb[i_paths]]
-        return (lab >= 0) & (Pa.D[rp, np.maximum(lab, 0)] > same_mm)
-
-    pos, ns = pos1, ns1.copy()
-    outc = out1.copy()
-    if fb.size:
-        pos2, ns2, out2 = S.ascend(Pa.u, labels, B["dface"], x0[fb], B["vox"], nmax, far)
-        pos[fb] = pos2
-        ns[fb] = ns2
-        outc[fb] = out2
-    tracer = np.zeros(len(x0), np.int8)
-    tracer[fb] = 1
-    endp = pos[np.arange(len(x0)), ns - 1].astype(float)
-    end_patch = Pa.patch_at(endp)
-    cls = PCT.classify(outc, Pa.D[root_patch, end_patch], same_mm)
-    return pos, ns, outc, tracer, cls, root_patch, end_patch
+    assert nmax == PCT.NMAX and same_mm == PCT.SAME_MM
+    tv = Pa.vertex_of(x0)
+    pos, ns, outc, tracer, end_patch, cls = PCT.finish(
+        _Tissue(B, labels), Pa.v, Pa.nrm, tv, Pa.P, Pa.op, pos1, ns1, out1)
+    return pos, ns, outc, tracer, cls, Pa.P.of_vertex[tv], end_patch
 
 
 # ---------------------------------------------------------------- the two marked sites

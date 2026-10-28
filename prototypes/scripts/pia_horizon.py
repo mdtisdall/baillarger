@@ -47,11 +47,10 @@ PAIR_MM, NDOT, H_SCALE, SMOOTH_MM = 0.25, 0.7, 0.8, 0.08
 G_BAND = (0.8, 1.2)
 BANDS = [(0.15, 0.25), (0.4, 0.6), (0.8, 1.2), (1.6, 2.4)]
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
-CNAME = {OPEN: "open", CROSS: "crossing", OWN: "own bank", TOCONTACT: "to the pass's contact", FAILED: "failed"}
+CNAME = {OPEN: "open", CROSS: "crossing", OWN: "own bank", TOCONTACT: "to the contact", FAILED: "failed"}
 CCOL = {OPEN: "#1baf7a", CROSS: "#2a78d6", OWN: "#eb6834", TOCONTACT: "#c79a00", FAILED: "#e34948"}
-HOR = ["top", "far WM", "one pass, field", "field prior", "profile, top"]
-HCOL = {"top": "#ffffff", "far WM": "#30d5ff", "one pass, field": "#ffd23f", "field prior": "#e34948",
-        "profile, top": "#2a78d6"}
+HOR = ["top", "far WM", "profile, top"]
+HCOL = {"top": "#ffffff", "far WM": "#30d5ff", "profile, top": "#2a78d6"}
 T0 = time.time()
 
 
@@ -199,7 +198,7 @@ def run():
             sc[f"first pia, stage {st} (crossing, to the contact, overridden open)"] = score(
                 cc, np.flatnonzero(keep & (np.isin(cls, [CROSS, TOCONTACT]) | moved)), Z)
             sc[f"first pia, stage {st} (every trace)"] = score(cc, np.flatnonzero(keep), Z)
-        for h in ["one pass, equal", "one pass, field", "field prior", "profile, top"]:
+        for h in ["profile, top"]:
             sc[h + " (crossing, to the contact)"] = score(Z["H_" + h].astype(float), ic, Z)
         summary["at the points (|horizon - point depth|, mm)"] = sc
     json.dump(summary, open(f"{WORK}/pia_{SITE}.json", "w"), indent=1)

@@ -3,7 +3,6 @@ traces of a synthetic box with known columns."""
 
 import numpy as np
 import pytest
-from scipy.sparse.csgraph import dijkstra
 
 from baillarger import column_traces as CT
 from baillarger import streamlines as S
@@ -81,29 +80,110 @@ def test_white_mesh_of_a_ball_lies_on_its_label_with_outward_normals() -> None:
     assert np.all(np.sum(nrm * (v - c), 1) / rad > 0.9)
 
 
-def test_root_patches_are_a_geodesic_voronoi_partition() -> None:
-    t = slab_tissue()
-    s = CT.setup(t.wm, t.ctx, patch=4)
-    assert s.seeds.sum() == 30 * 30 and np.all(s.seeds[5])  # one WM layer
-    d = dijkstra(s.graph, indices=s.rep)
-    # centres at least the spacing apart; each seed in its nearest centre's patch
-    off = d[:, s.rep][~np.eye(s.npatch, dtype=bool)]
-    assert off.min() >= 4.0 - 1e-9
-    comp = s.patch.ravel()[s.sflat]
-    assert np.allclose(d[comp, np.arange(len(comp))], d.min(0))
+def box_tissue(rim: np.ndarray) -> CT.Tissue:
+    """A Tissue from rim labels alone: flat echoes (no data normal, so T
+    follows the WM distance), no box faces nearby."""
+    shape = rim.shape
+    patch = Patch(
+        name="box",
+        lo=(0, 0, 0),
+        hi=(shape[0], shape[1], shape[2]),
+        echoes=np.ones((*shape, 3), np.float32),
+        echo_times_ms=(1.0, 2.0, 3.0),
+        aseg=np.zeros(shape, np.int16),
+        rim=rim.astype(np.int16),
+        affine=np.eye(4),
+        voxel_mm=(VOX, VOX, VOX),
+    )
+    t = CT.tissue(patch)
+    t.dface = np.full(shape, 99.0)
+    return t
 
 
+def test_end_at_bend_ends_a_column_at_its_kink() -> None:
+    """A path straight along x for 20 samples, then along y: TURN reported a
+    few steps after the corner; the column ends at the corner (CONTACT)."""
+    nmax = 40
+    pos = np.full((1, nmax, 3), np.nan, np.float32)
+    p = [(float(i), 0.0, 0.0) for i in range(21)] + [
+        (20.0, float(j), 0.0) for j in range(1, 6)
+    ]
+    pos[0, : len(p)] = p
+    ns = np.array([len(p)])
+    out = np.array([S.TURN])
+    CT.end_at_bend(pos, ns, out, 8)
+    assert out[0] == S.CONTACT
+    assert pos[0, ns[0] - 1].tolist() == [20.0, 0.0, 0.0]
+
+
+def test_crest_cut_ends_a_returning_column_at_t_maximum() -> None:
+    """cut_at_crest: a column that entered the WM heading against its root's
+    normal is cut at T's largest value along it (CONTACT); one that entered
+    heading on is left alone."""
+    shape = (40, 8, 8)
+    T = np.tile((20.0 - np.abs(np.arange(shape[0]) - 20.0))[:, None, None], (1, 8, 8))
+    nmax = 60
+    pos = np.full((2, nmax, 3), np.nan, np.float32)
+    up = np.arange(0.0, 30.0, 1.0)  # out past the crest at x = 20
+    back = np.r_[np.arange(0.0, 25.0, 1.0), np.arange(23.0, 0.0, -1.0)]  # out and back
+    pos[0, : len(up), 0] = up
+    pos[1, : len(back), 0] = back
+    pos[:, :, 1:] = 4.0
+    ns = np.array([len(up), len(back)])
+    out = np.array([S.WM, S.WM])
+    n0 = np.array([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    assert CT.cut_at_crest(pos, ns, out, T, n0).tolist() == [1]
+    assert out.tolist() == [S.WM, S.CONTACT]
+    assert ns[0] == len(up) and pos[1, ns[1] - 1, 0] == 20.0
+
+
+def test_crest_method_records_where_columns_meet_a_narrow_fused_fundus() -> None:
+    """A V of WM with cortex fused in it (x in [6, 30], half-width (x - 6) / 3
+    + 1.5 voxels about y = 15), fluid beyond x = 30. Columns from the walls
+    are traced through; where they meet the other wall's field they cross
+    T's crest on the bisector y = 15, which crest_at records."""
+    shape = (34, 30, 20)
+    x, y = np.indices(shape)[:2].astype(float)
+    rim = np.full(shape, 3)
+    rim[np.abs(y - 15) > (x - 6) / 3 + 1.5] = 2
+    rim[x < 6] = 2
+    rim[x >= 30] = 1
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", "crest")
+    met = np.flatnonzero((R.crest_at >= 0) & ~R.near_face)
+    assert met.size > 10
+    at = R.pos[met, R.crest_at[met]].astype(float)
+    assert np.median(np.abs(at[:, 1] - 15.0)) < 1.0
+    assert np.max(np.abs(at[:, 1] - 15.0)) < 2.0
+
+
+def test_crest_method_crosses_parallel_fused_banks() -> None:
+    """Two parallel WM slabs with fused cortex between: columns cross to the
+    far bank (crossing), and meet the crest at the midline x = 17.5."""
+    rim = np.full((36, 30, 24), 3)
+    rim[:6] = 2
+    rim[30:] = 2
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", "crest")
+    x0 = R.v[R.tv]
+    mid = (R.nrm[R.tv, 0] > 0.9) & np.all(np.abs(x0[:, 1:] - [15, 12]) < 4, 1)
+    assert mid.sum() > 5 and np.all(R.cls[mid] == CT.CROSS)
+    i = np.flatnonzero(mid)
+    assert np.all(R.crest_at[i] >= 0)
+    assert np.all(np.abs(R.pos[i, R.crest_at[i], 0] - 17.5) <= 1.0)
+
+
+@pytest.mark.parametrize("method", CT.METHODS)
 @pytest.mark.parametrize("tracer", CT.TRACERS)
-def test_traces_of_a_slab_are_straight_open_columns(tracer: str) -> None:
+def test_traces_of_a_slab_are_straight_open_columns(tracer: str, method: str) -> None:
     """Layers parallel to a flat white surface: every trace away from the
     side faces goes straight up (along x) to the fluid, OPEN, in one cortex
-    thickness."""
+    thickness, by either method."""
     t = slab_tissue()
-    R = CT.trace_columns(t, tracer)
+    R = CT.trace_columns(t, tracer, method)
     x0 = R.v[R.tv]
     up = (R.nrm[R.tv, 0] > 0.9) & np.all((x0[:, 1:] > 9) & (x0[:, 1:] < 20), 1)
     assert up.sum() > 50
     assert np.all(R.cls[up] == CT.OPEN) and np.all(R.fallback[up] == 0)
+    assert np.all(R.crest_at[up] == -1)
     end = R.pos[np.flatnonzero(up), R.ns[up] - 1]
     assert np.all(np.round(end[:, 0]) == 26)
     assert np.max(np.abs(end[:, 1:] - x0[up, 1:])) < 0.05
