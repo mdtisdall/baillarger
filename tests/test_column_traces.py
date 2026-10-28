@@ -698,3 +698,64 @@ def test_equivolume_front_caps_its_speed_at_a_focus() -> None:
     last = R.ns[k] - 1
     lag = R.vol[k, last] / tau[np.arange(len(k)), last]
     assert np.median(lag) < 1.0
+
+
+# ---------------------------------------------------------------- equivolume rays
+
+
+@pytest.mark.parametrize("axes, power", [((0, 1, 2), 2), ((0, 1), 1)])
+def test_equivolume_rays_of_a_ball_and_a_cylinder_follow_equal_volume(
+    axes: tuple[int, ...], power: int
+) -> None:
+    """Equivolume rays from a WM ball (cylinder) are radial and straight, and
+    vol, measured on the offset mesh, is the swept volume per unit root area:
+    at radius r, (r^3 - r0^3) / (3 r0^2) ((r^2 - r0^2) / (2 r0)), r0 the label
+    surface's radius, as the equivolume front's test; the median column at
+    0.4 to 1.6 mm within 2 %."""
+    shape = (44, 44, 44) if power == 2 else (44, 44, 24)
+    t, c, dist = shell_tissue(axes, shape)
+    R = CT.trace_columns(t, "fitted_blend", "equivolume")
+    assert R.vol is not None
+    x0 = R.v[R.tv]
+    keep = np.ones(len(R.tv), bool) if power == 2 else np.abs(x0[:, 2] - 12) < 5
+    assert np.all(R.outc[keep] == S.FLUID)
+    r0 = dist(x0[keep]).mean() * VOX
+    for i in (10, 20, 30, 40):
+        ok = keep & (R.ns > i)
+        r = np.median(dist(R.pos[ok, i].astype(float))) * VOX
+        exact = (r ** (power + 1) - r0 ** (power + 1)) / ((power + 1) * r0**power)
+        assert abs(np.median(R.vol[ok, i]) / exact - 1) < 0.02
+
+
+def test_equivolume_rays_of_a_slab_count_arc_length() -> None:
+    """A flat white surface: vol is the arc length."""
+    R = CT.trace_columns(slab_tissue(), "fitted_blend", "equivolume")
+    assert R.vol is not None
+    x0 = R.v[R.tv]
+    up = (R.nrm[R.tv, 0] > 0.9) & np.all((x0[:, 1:] > 9) & (x0[:, 1:] < 20), 1)
+    assert np.allclose(R.vol[up, 30], 30 * S.STEP_MM, rtol=1e-3)
+
+
+def test_equivolume_rays_in_a_tube_of_cortex_shrink_as_r_over_r0() -> None:
+    """The inside of a WM tube (as the front's test): vol = (r0^2 - r^2) /
+    (2 r0) at radius r, the median column within 2 %."""
+    shape = (44, 44, 24)
+    c = np.array([21.7, 22.2])
+    x, y = np.indices(shape)[:2].astype(float)
+    rr = np.hypot(x - c[0], y - c[1])
+    rim = np.full(shape, 2)
+    rim[rr < 15] = 3
+    rim[rr < 5] = 1
+    R = CT.trace_columns(box_tissue(rim), "fitted_blend", "equivolume")
+    assert R.vol is not None
+    x0 = R.v[R.tv]
+    r0v = np.hypot(x0[:, 0] - c[0], x0[:, 1] - c[1])
+    keep = (np.abs(x0[:, 2] - 12) < 5) & (r0v < 16)
+    assert np.mean(R.outc[keep] == S.FLUID) > 0.99
+    r0 = r0v[keep].mean() * VOX
+    for i in (10, 20, 30, 35):
+        ok = keep & (R.ns > i)
+        p = R.pos[ok, i].astype(float)
+        r = np.median(np.hypot(p[:, 0] - c[0], p[:, 1] - c[1])) * VOX
+        exact = (r0**2 - r**2) / (2 * r0)
+        assert abs(np.median(R.vol[ok, i]) / exact - 1) < 0.02
