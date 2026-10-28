@@ -54,3 +54,18 @@ def test_decide_and_brush_are_saved(tmp_path: Path) -> None:
     assert orig.status.tolist() == [PL.PROPOSED, PL.PROPOSED]
     ov = nib.Nifti1Image.from_bytes(gzip.decompress(rv.overlay_bytes())).get_fdata()
     assert ov[1, 1, 1] == 2 and ov[2, 2, 2] == 1 and ov[3, 3, 3] == PL.OV_BRUSH_CORTEX
+
+
+def test_standalone_review_needs_no_column_volume(tmp_path: Path) -> None:
+    """Labels only: the box from the change file, the grid and image from echo 2 of the
+    full grid; the echo is cropped to the box, its affine moved to the box corner."""
+    rv0 = review(tmp_path)
+    full = np.arange(40 * 40 * 40, dtype=np.float32).reshape(40, 40, 40)
+    aff = np.diag([0.16, 0.16, 0.16, 1.0])
+    nib.save(nib.Nifti1Image(full, aff), tmp_path / "echo2.nii.gz")
+    rv = LabelReview.standalone(rv0.path, tmp_path / "echo2.nii.gz")
+    assert rv.shape == (8, 8, 8) and rv.meta()["labels_only"]
+    img = nib.Nifti1Image.from_bytes(gzip.decompress(rv.echo_bytes(2)))
+    assert np.array_equal(img.get_fdata(), full[10:18, 20:28, 30:38])
+    assert np.allclose(img.affine[:3, 3], [1.6, 3.2, 4.8])
+    assert rv.rows()["rows"][0]["world_mm"] == [1.92, 3.52, 5.12]

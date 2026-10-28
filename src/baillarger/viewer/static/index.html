@@ -73,7 +73,8 @@
       <label><input type="checkbox" id="vfrom" checked> from</label><label><input type="checkbox" id="vto" checked> to</label>
       <label><input type="checkbox" id="vover"> all traces (every 4th)</label>
       <label><input type="checkbox" id="vpts" checked> points</label>
-      <span id="vlab" style="display:none"><label>labels <input type="range" id="vlabop" min="0" max="1" step="0.05" value="0.6" style="width:60px"></label>
+      <span id="vlab" style="display:none"><label>echo <select id="vecho"><option>1</option><option selected>2</option><option>3</option></select></label>
+        <label>labels <input type="range" id="vlabop" min="0" max="1" step="0.05" value="0.6" style="width:60px"></label>
         <label>brush <select id="brush"><option value="">off</option><option value="fluid">to fluid</option><option value="cortex">to cortex</option></select></label>
         <label>radius <select id="bradius"><option>0</option><option selected>1</option><option>2</option><option>3</option></select></label></span>
     </div>
@@ -136,7 +137,7 @@ const $ = id => document.getElementById(id);
 const ME = Math.random().toString(36).slice(2);
 let META = null, VALS = null, CUR = null, SEC = null, FRAME = null, SELN = null, CROSS = null;
 const q = new URLSearchParams(location.search);
-const PANES = (q.get("panes") || "volume,surface,map,sections").split(",");
+let PANES = (q.get("panes") || "volume,surface,map,sections").split(",");
 const MAGMA = [[0,0,4],[40,11,84],[101,21,110],[159,42,99],[212,72,66],[245,125,21],[250,193,39],[252,253,191]];
 const RDBU = [[5,48,97],[67,147,195],[209,229,240],[247,247,247],[253,219,199],[214,96,77],[103,0,31]];
 const CLSCOL = [[27, 175, 122], [42, 120, 214], [235, 104, 52], [199, 154, 0], [227, 73, 72]];
@@ -394,7 +395,8 @@ async function initVolume() {
   NV.nv = nv; await nv.attachTo("nv");
   const t0 = performance.now();
   await nv.loadVolumes([{ url: "/echo2.nii.gz", colormap: "gray" }]);
-  await nv.loadMeshes([{ url: "/white.gii", rgba255: [210, 210, 214, 255] }, { url: "/gm.gii", rgba255: [140, 200, 255, 255], opacity: 0.25 }]);
+  if (!META.labels_only)
+    await nv.loadMeshes([{ url: "/white.gii", rgba255: [210, 210, 214, 255] }, { url: "/gm.gii", rgba255: [140, 200, 255, 255], opacity: 0.25 }]);
   await nv.setVolumeRenderIllumination(-1);   // the 3D tile shows the three slices, so the meshes inside stay visible
   setView();
   nv.onLocationChange = d => {
@@ -612,6 +614,12 @@ async function brushAt(mm) {
 $("lacc").onclick = () => decide("accepted"); $("lrej").onclick = () => decide("rejected"); $("lund").onclick = () => decide("proposed");
 $("lnext").onclick = () => step(1); $("lprev").onclick = () => step(-1);
 $("lfilter").onchange = drawLabels;
+$("vecho").onchange = async () => {   // the background: echo 1, 2 or 3, under the overlay
+  const nv = NV.nv, old = nv.volumes[0], k = $("vecho").value;
+  await nv.addVolumeFromUrl({ url: `/labels/echo${k}.nii.gz`, name: `echo${k}.nii.gz`, colormap: "gray" });
+  nv.setVolume(nv.volumes[nv.volumes.length - 1], 0); nv.removeVolume(old); nv.updateGLVolume();
+  log(`volume pane: echo ${k}`);
+};
 $("vlabop").oninput = () => { if (LAB.vol) { LAB.vol.opacity = +$("vlabop").value; NV.nv.updateGLVolume(); } };
 document.addEventListener("keydown", e => {
   if (!LAB.on || e.target.tagName === "SELECT" || e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey) return;
@@ -624,13 +632,19 @@ window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections
 (async () => {
   layout();
   META = await get("/meta");
+  if (META.labels_only) {   // no column volume: echo 2, the overlay, the list and the brush
+    PANES = ["volume", "labels"]; layout();
+    for (const id of ["vwhite", "vgm", "vfrom", "vto", "vover", "vpts", "layer", "half", "dmax", "radius", "panesel"])
+      $(id).closest("label").style.display = "none";
+    $("newwin").style.display = "none";
+  }
   $("title").textContent = `Column viewer — ${META.site}`; document.title = `Column viewer ${META.site}`;
   for (const n of META.layers) { const o = document.createElement("option"); o.textContent = n; $("layer").appendChild(o); }
   META.levels.forEach((n, k) => { const o = document.createElement("option"); o.value = k; o.textContent = n; $("level").appendChild(o); });
   if (META.layers.includes("combined")) $("layer").value = "combined";
   if (has("surface")) { initGL(); const lv = Math.min(2, META.levels.length - 1); $("level").value = lv; await loadMesh(lv, true); }
   if (has("map")) fitMap();
-  await loadLayer();
+  if (META.layers.length) await loadLayer();
   if (has("volume")) await initVolume();
   try { await get("/labels/list"); LAB.on = true; } catch (e) { LAB.on = false; }
   if (LAB.on) { $("vlab").style.display = ""; await loadLabels(); }

@@ -1055,7 +1055,8 @@ A GM refinement step at the front of the pipeline, like the WM one: `baillarger.
 
 A status can be changed and brush edits added with `LabelChanges.with_status` and `with_brush`. `load_tissue(..., pial_changes=FILE)` and `column_volume.py --label-changes FILE` apply the best guess (every cell not rejected) and the brush edits; with `reviewed_only` / `--reviewed-only`, only the accepted cells and brush edits.
 
-**Review in the viewer:** `python -m baillarger.viewer <column volume> --cache DIR --labels pial_labels_<site>.npz`, panes "volume + labels".
+**Review in the viewer, before any column is traced:** `python -m baillarger.viewer --labels pial_labels_<site>.npz`, with no column volume (labels only: the volume and labels panes). With a column volume (`python -m baillarger.viewer <column volume> --cache DIR --labels ...`, panes "volume + labels") the traces and surfaces are there too.
+- The volume pane shows echo 1, 2 or 3 (a drop-down): the echoes the detector reads.
 - The labels pane lists the cells ranked, with status, kind, columns, crest hits, fluid fraction and topology. A row moves the crosshair to the cell, in every window.
 - Keys: j / k for next / previous; a, r, u for accept, reject, back to proposed.
 - The volume pane shows the overlay (proposed red, accepted green, rejected yellow, brush blue / magenta). A brush (to fluid or back to cortex, radius 0–3 voxels) paints a voxel ball at a clicked point.

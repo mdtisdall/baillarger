@@ -14,4 +14,5 @@ in step by the server.
 
 Run: python -m baillarger.viewer <column_volume_<name>.npz> --cache DIR [--joint ...]
      [--labels pial_labels_<name>.npz]
+     python -m baillarger.viewer --labels pial_labels_<name>.npz   (labels only, no columns)
 """
