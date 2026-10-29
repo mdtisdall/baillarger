@@ -154,8 +154,10 @@ directory, not the `.surf.gii`'s, so FreeSurfer and AFNI tools are run in
 the files' directory (nibabel and MATLAB resolve it next to the file).
 NiiVue does not read external data; our browser panes read a block's byte
 ranges of the `.dat` directly (HTTP Range requests), using the block index.
-nibabel cannot write this encoding, so `baillarger.white` writes the XML
-itself, and a test reads it back with nibabel.
+nibabel cannot write this encoding (its writer raises
+`NotImplementedError`; no issue or PR asks for it), so `baillarger.gifti`
+writes the XML itself, and the tests read it back with nibabel. A feature
+PR to nibabel could add the writer; ours stays until a release has it.
 
 Size: uncompressed, about 0.6 GB for this hemisphere (12.7 M vertices,
 25.3 M faces, with the normals), about 17 GB for a whole brain at 50 µm.
@@ -182,9 +184,10 @@ cell, about 40 GB for the hemisphere's 5.85 M surface cells.
   same bits for a shared vertex; one `np.unique` over the keys joins them.
   The result does not depend on the block size (tests: blocks of 1, 3, 7
   and 16 cells give the one-shot mesh exactly).
-- To do for the mesh file: return the vertices and faces in block order
-  (faces by block; vertices by the first block that makes them, then by
-  edge key) with the block index, in place of whole-grid key order.
+- Block order (`marching_tetrahedra_blocks`): faces by block, vertices by
+  the first block that makes them, then by edge key, with the block index
+  (`MeshBlocks`). Done; tests check the ranges and that the surface is the
+  same for every block size.
 - Next: the per-block work in PyTorch, tested on MPS against numpy (exact
   keys and faces; vertices within float32 tolerance).
 
@@ -193,8 +196,9 @@ cell, about 40 GB for the hemisphere's 5.85 M surface cells.
 - From `baillarger.white`: `WMChanges`, `wm_changes` and the `changes`
   subcommand (replaced by `dseg`); `white_matter_box`; the `box` subcommand,
   `box_report`, `write_box` and `overlay`; `box_mesh`, the box fields of
-  `WhiteMesh` and its `.npz`; the mesh command's `--patch`, `--lo`, `--hi`;
-  the `.vtk` output (`mesh.write_vtk` stays for other tools).
+  `WhiteMesh` and its `.npz`. (Done: the box `mesh` subcommand, with its
+  `--patch`, `--lo`, `--hi`, `.npz` and `.vtk` output, gave way to the new
+  `mesh`; `mesh.write_vtk` stays for other tools.)
 - The box stages that took the WM changes (`column_traces.load_tissue`,
   `changes=`; `pial_labels`, `--wm-changes`) read their box's labels from the
   corrected segmentation instead, as they read the aseg now. Their `mesh=` /
@@ -230,15 +234,14 @@ Measured so far (right hemisphere, grid 700 × 384 × 1148, mask box
 |---|---|---|---|
 | `dseg` (whole command) | 3.4 min | 21.6 GB | Betti (1, 111, 182) → (1, 0, 0); 6,307 cavity voxels, 34 fills (570 voxels), 52 cuts (589 voxels: 529 to cortex, 60 to background) |
 | Blocked marching tetrahedra of its mask | 31 s | 4.3 GB (3.2 GB of it the mask) | 12.7 M vertices, 25.3 M faces; one closed genus-0 surface, no non-manifold edges |
-| `mesh.topology` of that mesh | 64 s | 8.2 GB | (`np.unique(axis=0)`: a candidate for 1-D keys) |
-| Relax, smoothing, normals (V1V2 box) | 25 s | < 0.2 GB more | 0.91 M vertices, 1.8 M faces |
+| `mesh` (whole command: Betti check, marching, relax, smoothing, normals, pieces, files) | 4.1 min | 12.4 GB | one closed genus-0 piece, 72,074 mm²; 12.7 M vertices, 25.3 M faces in 506 blocks of 64 cells; 0.61 GB of files |
 
 For comparison, label 41 alone has Betti (1, 243, 31), and 14 % of the
 surface of its outer voxels faces something other than cortex (8 % with the
 filled labels, mostly the medial cut face against the Fomblin).
 
-Expected for the rest of `mesh` on the hemisphere: relax, smoothing and
-normals about 6 min; the mesh files about 0.6 GB.
+Not yet checked on the hemisphere: self-intersections of the smoothed
+mesh (`mesh_intersect`), as the box reports did.
 
 Left until a measurement asks for it: faster smoothing (one shared
 adjacency, 1-D edge keys instead of `np.unique(axis=0)`, `bincount` instead

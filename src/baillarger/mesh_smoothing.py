@@ -33,7 +33,10 @@ type Faces = npt.NDArray[np.integer[Any]]
 def edges(f: Faces) -> Int:
     """The undirected edges (k, 2), each once, smaller index first, sorted."""
     e = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), 1)
-    out: Int = np.unique(e, axis=0).astype(np.int64)
+    n = int(e.max()) + 1 if len(e) else 1
+    # one int64 key per edge: much faster than np.unique(axis=0), same order
+    key = np.unique(e[:, 0].astype(np.int64) * n + e[:, 1])
+    out: Int = np.stack([key // n, key % n], 1)
     return out
 
 

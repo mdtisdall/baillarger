@@ -18,6 +18,7 @@ field values.
 
 import itertools
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -55,17 +56,45 @@ def marching_tetrahedra(
 ) -> tuple[Float, Int]:
     """Level set {F = level} of the piecewise-linear interpolant of F (3D
     array) on the Kuhn tetrahedralization. Returns vertices (voxel coordinates)
-    and faces.
+    and faces, in block order (marching_tetrahedra_blocks)."""
+    v, f, _ = marching_tetrahedra_blocks(F, level, block)
+    return v, f
+
+
+@dataclass(frozen=True)
+class MeshBlocks:
+    """The block index of a mesh in block order: per block that the level
+    crosses, its first cell and its vertex and face ranges [start, stop)."""
+
+    #: block size, cells a side
+    cells: int
+    #: (k, 3) first cell of each block, voxel coordinates of the grid
+    origin: Int
+    vertex_start: Int
+    vertex_stop: Int
+    face_start: Int
+    face_stop: Int
+
+
+def marching_tetrahedra_blocks(
+    F: npt.ArrayLike, level: float, block: int = BLOCK
+) -> tuple[Float, Int, MeshBlocks]:
+    """marching_tetrahedra and its block index.
 
     The cells are taken in blocks of block cells a side, so that the work
     arrays scale with one block's surface, not the whole grid's; a block
     whose grid points are all on one side of the level is skipped. A vertex
     is keyed by its grid edge in the whole grid and computed from the edge's
-    ends in a fixed order, so the blocks join exactly: the result does not
-    depend on block. Vertices are sorted by their edge key."""
+    ends in a fixed order, so the blocks join exactly: the surface does not
+    depend on block, only the order of its vertices and faces does.
+
+    Order: blocks in C order of their first cell; the faces block by block
+    (each face comes from one cell); the vertices by the first block that
+    makes them (their owner), then by edge key. A block's faces use its own
+    vertices and some of earlier neighbouring blocks."""
     Fa = np.asarray(F)
     shape = Fa.shape
-    vkeys, verts, faces = [], [], []
+    vkeys, verts, faces, origins = [], [], [], []
     n_verts = 0
     for o in itertools.product(*(range(0, max(n - 1, 0), block) for n in shape)):
         sl = tuple(
@@ -77,17 +106,41 @@ def marching_tetrahedra(
         if pos.all() or not pos.any():
             continue
         k, v, f = _march_block(G, pos, np.array(o), shape)
+        if not len(f):
+            continue
         vkeys.append(k)
         verts.append(v)
         faces.append(f + n_verts)
+        origins.append(o)
         n_verts += len(k)
+    z = np.zeros(0, np.int64)
     if not faces:
-        return np.zeros((0, 3)), np.zeros((0, 3), np.int64)
+        return (
+            np.zeros((0, 3)),
+            np.zeros((0, 3), np.int64),
+            MeshBlocks(block, np.zeros((0, 3), np.int64), z, z, z, z),
+        )
     keys = np.concatenate(vkeys)
     _, first, inv = np.unique(keys, return_index=True, return_inverse=True)
-    out_v: Float = np.concatenate(verts)[first]
-    out_f: Int = inv[np.concatenate(faces)].astype(np.int64)
-    return out_v, out_f
+    # order the vertices by their first occurrence: owner block, then key
+    order = np.argsort(first, kind="stable")
+    new = np.empty(len(first), np.int64)
+    new[order] = np.arange(len(first))
+    out_v: Float = np.concatenate(verts)[first[order]]
+    out_f: Int = new[inv[np.concatenate(faces)]]
+    owner = np.repeat(np.arange(len(vkeys)), [len(k) for k in vkeys])[first[order]]
+    nv = np.bincount(owner, minlength=len(vkeys))
+    nf = np.array([len(f) for f in faces])
+    vstop, fstop = np.cumsum(nv), np.cumsum(nf)
+    blocks = MeshBlocks(
+        block,
+        np.array(origins, np.int64).reshape(-1, 3),
+        vstop - nv,
+        vstop,
+        fstop - nf,
+        fstop,
+    )
+    return out_v, out_f, blocks
 
 
 def _march_block(
@@ -229,7 +282,9 @@ def topology(faces: npt.NDArray[np.integer[Any]], nv: int) -> dict[str, Any]:
     e = np.sort(
         np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), 1
     )
-    eu, cnt = np.unique(e, axis=0, return_counts=True)
+    n = max(nv, 1)
+    key, cnt = np.unique(e[:, 0].astype(np.int64) * n + e[:, 1], return_counts=True)
+    eu = np.stack([key // n, key % n], 1)
     used = np.unique(faces)
     A = sparse.coo_matrix((np.ones(len(eu)), (eu[:, 0], eu[:, 1])), shape=(nv, nv))
     _, lab = connected_components(A, directed=False)

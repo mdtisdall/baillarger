@@ -91,7 +91,11 @@ def doc_keys(doc: Path, version: str) -> set[tuple[str, str, bool]]:
 
 @pytest.mark.parametrize(
     ("doc", "spec"),
-    [("wm-dseg.md", white.DSEG_SPEC), ("wm-dseg.md", white.FIXES_SPEC)],
+    [
+        ("wm-dseg.md", white.DSEG_SPEC),
+        ("wm-dseg.md", white.FIXES_SPEC),
+        ("white-surf.md", white.SURF_SPEC),
+    ],
 )
 def test_spec_documents_list_the_code_keys(doc: str, spec: SidecarSpec) -> None:
     want = {(k.name, k.type, k.required) for k in spec.keys}

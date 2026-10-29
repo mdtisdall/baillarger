@@ -44,7 +44,6 @@ for viewing); without --changes, the mesh is that of the aseg's WM label.
 """
 
 import argparse
-import datetime
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -54,9 +53,9 @@ from typing import Any
 import nibabel as nib
 import numpy as np
 import numpy.typing as npt
+from nibabel.gifti.gifti import GiftiImage
 from scipy import ndimage as ndi
 
-from baillarger import __version__
 from baillarger import mesh_smoothing as S
 from baillarger.bids import (
     COMMON_KEYS,
@@ -66,15 +65,22 @@ from baillarger.bids import (
     derivative_path,
     entities,
     file_sha256,
-    git_state,
     provenance,
+    read_sidecar,
     sidecar_path,
     sources,
     write_sidecar,
 )
-from baillarger.data import ASEG_WM, PATCHES, Box, aseg_path, crop_affine
+from baillarger.data import ASEG_WM, Box, aseg_path, crop_affine
+from baillarger.gifti import DataArray, write_external
 from baillarger.handles import kuhn_betti, kuhn_structure, remove_handles
-from baillarger.mesh import marching_tetrahedra, topology, write_vtk
+from baillarger.mesh import (
+    BLOCK,
+    MeshBlocks,
+    marching_tetrahedra,
+    marching_tetrahedra_blocks,
+    topology,
+)
 
 type Bool = npt.NDArray[np.bool_]
 type Betti = tuple[int, int, int]
@@ -589,6 +595,221 @@ def mesh_pieces(
     return sorted(out, key=lambda t: -t["V"])
 
 
+# ------------------------------------------------- the whole-hemisphere surface
+
+#: docs/formats/white-surf.md
+SURF_SPEC = SidecarSpec(
+    "white-surf/1",
+    COMMON_KEYS
+    + (
+        Key("Hemisphere", "string", True, "R or L"),
+        Key("FilledLabels", "array of integers", True, "labels of the WM mask"),
+        Key("Sigma", "number", True, "smoothing (voxels)"),
+        Key("BlockCells", "integer", True, "block size (cells a side)"),
+        Key("VoxelToRAS", "array of numbers", True, "4 x 4 affine, row-major"),
+        Key("Vertices", "integer", True, "number of vertices"),
+        Key("Faces", "integer", True, "number of faces"),
+        Key("Blocks", "integer", True, "rows of the block index"),
+        Key("Pieces", "array of objects", True, "per connected piece"),
+        Key("NormalsFile", "string", True, "the normals' GIfTI (name)"),
+        Key("BlocksFile", "string", True, "the block index (name)"),
+        Key("DataSHA256", "object", True, "SHA-256 of each .dat, by name"),
+    ),
+)
+
+#: columns of the block index
+BLOCK_COLUMNS = (
+    "block_i",
+    "block_j",
+    "block_k",
+    "vertex_start",
+    "vertex_stop",
+    "face_start",
+    "face_stop",
+    "min_i",
+    "min_j",
+    "min_k",
+    "max_i",
+    "max_j",
+    "max_k",
+)
+
+_STRUCTURE = {"R": "CortexRight", "L": "CortexLeft"}
+
+
+def surface_paths(out: Path, ents: dict[str, str], hemi: str) -> dict[str, Path]:
+    """The files of a white surface in the derivatives root out."""
+    return dict(
+        surf=derivative_path(out, ents, "white", ".surf.gii", hemi=hemi),
+        normals=derivative_path(
+            out, ents, "white", ".func.gii", hemi=hemi, desc="normals"
+        ),
+        blocks=derivative_path(out, ents, "white", ".tsv", hemi=hemi, desc="blocks"),
+        sidecar=derivative_path(out, ents, "white", ".json", hemi=hemi),
+    )
+
+
+def block_bounds(v: Float, f: Int, blocks: MeshBlocks) -> Float:
+    """(k, 6): per block, the bounding box (min, max) of the vertices its
+    faces use."""
+    out = np.zeros((len(blocks.origin), 6))
+    if not len(f):
+        return out
+    p = v[f]  # (m, 3, 3)
+    lo, hi = p.min(1), p.max(1)
+    out[:, :3] = np.minimum.reduceat(lo, blocks.face_start, axis=0)
+    out[:, 3:] = np.maximum.reduceat(hi, blocks.face_start, axis=0)
+    return out
+
+
+def write_white_surface(
+    dseg: Path, out: Path, sigma: float = 2.0, block: int = BLOCK
+) -> dict[str, Path]:
+    """The mesh command: the white mesh of the WM mask of a corrected
+    segmentation (write_wm_topo), as GIfTI with external binary data, the
+    normals, the block index and the sidecar (docs/formats/white-surf.md).
+    Raises ValueError if the mask has a handle or a cavity. Returns the
+    paths written, by role."""
+    side = read_sidecar(sidecar_path(dseg), DSEG_SPEC)
+    hemi, filled = side["Hemisphere"], tuple(side["FilledLabels"])
+    img = nib.load(dseg)
+    if not isinstance(img, nib.nifti1.Nifti1Image):
+        raise ValueError(f"{dseg.name}: not a NIfTI-1 image")
+    vox = tuple(float(z) for z in img.header.get_zooms()[:3])
+    mask = np.isin(np.asarray(img.dataobj), filled)
+    nz = [
+        np.flatnonzero(mask.any(axis=tuple(j for j in range(3) if j != i)))
+        for i in range(3)
+    ]
+    if not all(len(t) for t in nz):
+        raise ValueError(f"{dseg.name}: the WM mask is empty")
+    crop = tuple(slice(int(t[0]), int(t[-1]) + 1) for t in nz)
+    b = kuhn_betti(mask[crop])
+    if b[1] or b[2]:
+        raise ValueError(
+            f"{dseg.name}: the WM mask has Betti numbers {b}, not (b0, 0, 0)"
+        )
+    v0, f, blocks = marching_tetrahedra_blocks(mask.view(np.uint8), 0.5, block)
+    del mask
+    f = f[:, [0, 2, 1]].copy()  # marching_tetrahedra points into the WM
+    v = S.twice(S.relax(v0, f), f, sigma)
+    del v0
+    n = S.smooth_normals(v, f)
+    aff = np.asarray(img.affine, np.float64)
+    v_mm = (v @ aff[:3, :3].T + aff[:3, 3]).astype("<f4")
+    paths = surface_paths(out, entities(dseg), hemi)
+    dataset_description(out)
+    surf_meta = dict(
+        AnatomicalStructurePrimary=_STRUCTURE[hemi],
+        AnatomicalStructureSecondary="GrayWhite",
+        GeometricType="Anatomical",
+    )
+    dat = write_external(
+        paths["surf"],
+        [
+            DataArray(v_mm, "NIFTI_INTENT_POINTSET", surf_meta, np.eye(4)),
+            DataArray(f.astype("<i4"), "NIFTI_INTENT_TRIANGLE"),
+        ],
+        dict(AnatomicalStructurePrimary=_STRUCTURE[hemi]),
+    )
+    ndat = write_external(
+        paths["normals"],
+        [DataArray(n.astype("<f4"), "NIFTI_INTENT_VECTOR", dict(Name="normals"))],
+        dict(AnatomicalStructurePrimary=_STRUCTURE[hemi]),
+    )
+    bb = block_bounds(v, f, blocks)
+    rows = np.c_[
+        blocks.origin // block,
+        blocks.vertex_start,
+        blocks.vertex_stop,
+        blocks.face_start,
+        blocks.face_stop,
+    ]
+    with paths["blocks"].open("w") as fh:
+        fh.write("\t".join(BLOCK_COLUMNS) + "\n")
+        for r, q in zip(rows, bb, strict=True):
+            ints = "\t".join(str(int(x)) for x in r)
+            fh.write(ints + "\t" + "\t".join(f"{x:.3f}" for x in q) + "\n")
+    write_sidecar(
+        paths["sidecar"],
+        SURF_SPEC,
+        dict(
+            SpecVersion=SURF_SPEC.version,
+            Description="The white (WM) surface of the corrected segmentation's "
+            "WM mask (FilledLabels), smoothed.",
+            **sources(dseg),
+            Provenance=provenance("baillarger.white.write_white_surface"),
+            Hemisphere=hemi,
+            FilledLabels=list(filled),
+            Sigma=float(sigma),
+            BlockCells=int(block),
+            VoxelToRAS=aff.ravel().tolist(),
+            Vertices=len(v),
+            Faces=len(f),
+            Blocks=len(rows),
+            Pieces=mesh_pieces(v, f, (vox[0], vox[1], vox[2])),
+            NormalsFile=paths["normals"].name,
+            BlocksFile=paths["blocks"].name,
+            DataSHA256={d.name: file_sha256(d) for d in (dat, ndat)},
+        ),
+    )
+    return dict(paths, dat=dat, normals_dat=ndat)
+
+
+@dataclass(frozen=True)
+class WhiteSurface:
+    """A white surface read from its files (write_white_surface), whole or
+    one block: vertices in voxel coordinates of the segmentation's grid,
+    faces into them, normals (out of the WM), and vertex_ids, the vertices'
+    indices in the whole mesh (for one block: the vertices its faces use)."""
+
+    v: Float
+    f: Int
+    normals: Float
+    vertex_ids: Int
+    affine: Float
+    sidecar: dict[str, Any]
+
+    @classmethod
+    def load(
+        cls, surf: Path, block: tuple[int, int, int] | None = None
+    ) -> "WhiteSurface":
+        """Read the .surf.gii at surf (and its sidecar, normals and block
+        index), memory-mapped; block: (i, j, k) of one block (a block the
+        surface does not cross gives an empty mesh)."""
+        side = read_sidecar(sidecar_path(surf), SURF_SPEC)
+        aff = np.asarray(side["VoxelToRAS"], np.float64).reshape(4, 4)
+        g = GiftiImage.from_filename(str(surf), mmap=True)
+        pts, tri = g.agg_data(("pointset", "triangle"))
+        ng = GiftiImage.from_filename(
+            str(surf.with_name(side["NormalsFile"])), mmap=True
+        )
+        nrm = ng.darrays[0].data
+        if block is None:
+            f = np.asarray(tri, np.int64)
+            ids = np.arange(len(pts))
+        else:
+            idx = np.loadtxt(surf.with_name(side["BlocksFile"]), skiprows=1, ndmin=2)
+            hit = np.flatnonzero(np.all(idx[:, :3] == np.asarray(block), axis=1))
+            if not len(hit):
+                f = np.zeros((0, 3), np.int64)
+            else:
+                fs, fe = int(idx[hit[0], 5]), int(idx[hit[0], 6])
+                f = np.asarray(tri[fs:fe], np.int64)
+            ids, f = np.unique(f, return_inverse=True)
+            f = f.reshape(-1, 3)
+        inv = np.linalg.inv(aff)
+        mm = np.asarray(pts[ids], np.float64)
+        v = mm @ inv[:3, :3].T + inv[:3, 3]
+        return cls(v, f, np.asarray(nrm[ids], np.float64), ids, aff, side)
+
+    def check(self, dseg: Path) -> None:
+        """Raises ValueError unless dseg is the segmentation the surface was
+        made from (its SHA-256)."""
+        if file_sha256(dseg) not in self.sidecar["SourcesSHA256"].values():
+            raise ValueError(f"{dseg.name} is not the surface's segmentation")
+
+
 # ---------------------------------------------------------------- reports
 
 _NAMES = {v: k for k, v in KINDS.items()}
@@ -734,60 +955,6 @@ def write_box(
     return rep
 
 
-def write_mesh(
-    lo: Box,
-    hi: Box,
-    changes_path: Path | None,
-    out: Path,
-    stem: str,
-    sigma: float = 2.0,
-) -> WhiteMesh:
-    """<stem>.npz (the WhiteMesh), <stem>.json (the box, mesh_pieces and the
-    provenance) and <stem>.vtk (RAS mm) in out, for the WM label of the box
-    [lo, hi): the handle-free label of the changes at changes_path, or the
-    aseg's without. Returns the mesh."""
-    img = _aseg(None)
-    if changes_path is None:
-        if not all(0 <= a < b <= n for a, b, n in zip(lo, hi, img.shape, strict=True)):
-            raise ValueError(f"box {lo}-{hi} is not inside the grid {img.shape}")
-        sl = tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))
-        wm: Bool = np.asarray(img.dataobj[sl]) == ASEG_WM
-    else:
-        wm = white_matter_box(lo, hi, WMChanges.load(changes_path))
-    prov: dict[str, Any] = dict(
-        created=datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-        wm_label="aseg" if changes_path is None else "handle-free",
-        aseg=dict(path=str(aseg_path().resolve()), sha256=file_sha256(aseg_path())),
-        changes=None
-        if changes_path is None
-        else dict(path=str(changes_path.resolve()), sha256=file_sha256(changes_path)),
-        process="baillarger.white.white_mesh_normals",
-        baillarger_version=__version__,
-        **git_state(),
-    )
-    m = box_mesh(wm, lo, hi, crop_affine(img.affine, lo), sigma, prov)
-    out.mkdir(parents=True, exist_ok=True)
-    m.save(out / f"{stem}.npz")
-    vox = img.header.get_zooms()[:3]
-    rep = dict(
-        lo=list(lo),
-        hi=list(hi),
-        sigma=m.sigma,
-        vertices=len(m.v),
-        faces=len(m.f),
-        wm_sha256=m.wm_sha256,
-        npz_sha256=file_sha256(out / f"{stem}.npz"),
-        pieces=mesh_pieces(m.v, m.f, (float(vox[0]), float(vox[1]), float(vox[2]))),
-        provenance=prov,
-    )
-    (out / f"{stem}.json").write_text(json.dumps(rep, indent=1))
-    _, flab = S.pieces(m.f, len(m.v))
-    piece = np.full(len(m.v), -1.0)
-    piece[m.f.ravel()] = np.repeat(flab, 3)
-    write_vtk(str(out / f"{stem}.vtk"), m.affine, m.v, m.f, {"piece": piece})
-    return m
-
-
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -804,27 +971,20 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--name", required=True)
     b.add_argument("--lo", required=True, type=int, nargs=3)
     b.add_argument("--hi", required=True, type=int, nargs=3)
-    m = sub.add_parser("mesh", help="save the white mesh of one box")
-    m.add_argument("--changes", type=Path, help="default: the aseg's WM label")
-    m.add_argument("--out", required=True, type=Path)
-    m.add_argument("--name", required=True)
-    m.add_argument("--patch", choices=sorted(PATCHES))
-    m.add_argument("--lo", type=int, nargs=3)
-    m.add_argument("--hi", type=int, nargs=3)
-    m.add_argument("--sigma", type=float, default=2.0)
+    m = sub.add_parser("mesh", help="the white surface of a corrected segmentation")
+    m.add_argument("dseg", type=Path, help="a desc-wmtopo_dseg (the dseg command)")
+    m.add_argument("--out", required=True, type=Path, help="BIDS derivatives root")
+    m.add_argument("--sigma", type=float, default=2.0, help="smoothing (voxels)")
+    m.add_argument("--block-cells", type=int, default=BLOCK, help="block size")
     a = ap.parse_args(argv)
     if a.cmd == "dseg":
         for role, path in write_wm_topo(a.aseg, a.out).items():
             print(f"{role}: {path}")
     elif a.cmd == "mesh":
-        if a.patch is not None and a.lo is None and a.hi is None:
-            lo, hi = PATCHES[a.patch]
-        elif a.patch is None and a.lo is not None and a.hi is not None:
-            lo, hi = (a.lo[0], a.lo[1], a.lo[2]), (a.hi[0], a.hi[1], a.hi[2])
-        else:
-            ap.error("mesh: give --patch, or --lo and --hi")
-        wmesh = write_mesh(lo, hi, a.changes, a.out, f"wm_mesh_{a.name}", a.sigma)
-        print(f"{a.name}: {len(wmesh.v)} vertices, {len(wmesh.f)} faces")
+        for role, path in write_white_surface(
+            a.dseg, a.out, a.sigma, a.block_cells
+        ).items():
+            print(f"{role}: {path}")
     elif a.cmd == "changes":
         ch = wm_changes()
         write_changes(ch, a.out)

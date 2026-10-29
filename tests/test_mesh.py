@@ -7,7 +7,13 @@ import numpy as np
 import numpy.typing as npt
 
 from baillarger import mesh_intersect as mi
-from baillarger.mesh import marching_tetrahedra, pl_sample, topology, write_vtk
+from baillarger.mesh import (
+    marching_tetrahedra,
+    marching_tetrahedra_blocks,
+    pl_sample,
+    topology,
+    write_vtk,
+)
 
 type Float = npt.NDArray[np.float64]
 
@@ -121,17 +127,22 @@ def test_write_vtk_puts_the_points_in_ras(tmp_path: Path) -> None:
     assert np.abs(data["depth"][5:] - depth[5:]).max() <= 5e-5
 
 
-def canonical_faces(T: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
-    """Each triangle rotated to start at its smallest index (orientation
-    kept), rows sorted."""
-    r = np.argmin(T, axis=1)
-    idx = (r[:, None] + np.arange(3)[None]) % 3
-    R = np.take_along_axis(T, idx, 1)
-    out: npt.NDArray[np.int64] = R[np.lexsort(R.T[::-1])]
-    return out
+def canonical(
+    V: Float, T: npt.NDArray[np.int64]
+) -> tuple[Float, npt.NDArray[np.int64]]:
+    """The mesh with its vertices sorted by coordinates and each triangle
+    rotated to start at its smallest index (orientation kept), rows sorted:
+    the same for any order of the vertices and faces."""
+    o = np.lexsort(V.T[::-1])
+    rank = np.empty(len(V), np.int64)
+    rank[o] = np.arange(len(V))
+    R = rank[T]
+    r = np.argmin(R, axis=1)
+    R = np.take_along_axis(R, (r[:, None] + np.arange(3)[None]) % 3, 1)
+    return V[o], R[np.lexsort(R.T[::-1])]
 
 
-def test_blocks_give_the_one_shot_mesh_exactly() -> None:
+def test_blocks_give_the_one_shot_surface_exactly() -> None:
     rng = np.random.default_rng(2)
     F, _ = sphere_field(30, (14.3, 15.1, 14.7))
     rough = F + 0.8 * rng.standard_normal(F.shape)
@@ -140,18 +151,47 @@ def test_blocks_give_the_one_shot_mesh_exactly() -> None:
     torus = np.hypot(np.hypot(X - 17.7, Y - 18.2) - 9, Z - 9.6)
     binary = (rough < 9.0).astype(np.uint8)  # integer input, points on the level
     for G, lv in ((rough, 9.0), (torus, 4.0), (binary, 0.5), (np.round(F), 9.0)):
-        V0, T0 = marching_tetrahedra(G, lv, block=1000)
+        V0, T0 = canonical(*marching_tetrahedra(G, lv, block=1000))
         assert len(T0)
         for b in (1, 3, 7, 16):
-            V, T = marching_tetrahedra(G, lv, block=b)
+            V, T = canonical(*marching_tetrahedra(G, lv, block=b))
             assert np.array_equal(V, V0)
-            assert np.array_equal(canonical_faces(T), canonical_faces(T0))
+            assert np.array_equal(T, T0)
+
+
+def test_the_block_index() -> None:
+    rng = np.random.default_rng(3)
+    F, _ = sphere_field(30, (14.3, 15.1, 14.7))
+    F = F + 0.8 * rng.standard_normal(F.shape)
+    b = 7
+    V, T, B = marching_tetrahedra_blocks(F, 9.0, block=b)
+    k = len(B.origin)
+    assert B.cells == b and k > 8
+    # blocks in C order, the ranges contiguous and covering the mesh
+    assert np.all(np.diff(np.ravel_multi_index(B.origin.T // b, (5, 5, 5))) > 0)
+    assert B.vertex_start[0] == 0 and B.vertex_stop[-1] == len(V)
+    assert B.face_start[0] == 0 and B.face_stop[-1] == len(T)
+    assert np.array_equal(B.vertex_start[1:], B.vertex_stop[:-1])
+    assert np.array_equal(B.face_start[1:], B.face_stop[:-1])
+    owner = np.repeat(np.arange(k), B.vertex_stop - B.vertex_start)
+    for i in range(k):
+        f = T[B.face_start[i] : B.face_stop[i]]
+        # the faces lie in the block's cells
+        c = np.floor(V[f].mean(1)).astype(int)
+        assert np.all((c >= B.origin[i]) & (c < B.origin[i] + b))
+        # they use the block's own vertices or earlier blocks'
+        assert owner[f].max() == i or B.vertex_stop[i] == B.vertex_start[i]
+        assert owner[f].max() <= i
+        # every vertex a block owns is used by its faces
+        own = np.arange(B.vertex_start[i], B.vertex_stop[i])
+        assert np.isin(own, f).all()
 
 
 def test_blocks_away_from_the_level_are_skipped() -> None:
     F, _ = sphere_field(40, (8.3, 8.1, 8.7))  # surface in one corner
-    V0, T0 = marching_tetrahedra(F, 5.0, block=1000)
-    V, T = marching_tetrahedra(F, 5.0, block=8)
-    assert np.array_equal(V, V0)
-    assert np.array_equal(canonical_faces(T), canonical_faces(T0))
-    assert topology(T, len(V))["genus"] == 0 and V.max() < 16
+    V0, T0 = canonical(*marching_tetrahedra(F, 5.0, block=1000))
+    V, T, B = marching_tetrahedra_blocks(F, 5.0, block=8)
+    assert np.all(B.origin < 16)
+    V, T = canonical(V, T)
+    assert np.array_equal(V, V0) and np.array_equal(T, T0)
+    assert topology(T, len(V))["genus"] == 0
