@@ -31,7 +31,7 @@ jobs:
       docs: ${{ steps.select.outputs.docs }}
     steps:
       # The PR merge commit and its first parent, the base branch.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2
       # The runner's python3 (3.12 on ubuntu-24.04). No project dependencies.
@@ -47,7 +47,7 @@ jobs:
     # minutes cost 10 times more.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2
       - uses: cachix/install-nix-action@v31
@@ -60,12 +60,30 @@ jobs:
           save: ${{ github.event_name == 'push' }}
           gc-max-store-size-linux: 2G
           gc-max-store-size-macos: 2G
+      # uv's cache (the downloaded wheels), in the GitHub Actions cache, so
+      # that uv sync does not download them again on each run. Only main
+      # saves it, as for the Nix store. The key changes when uv.lock changes;
+      # a run then restores the newest older cache and downloads only the
+      # changed packages. uv in the devShell reads UV_CACHE_DIR; the cache
+      # steps use the same path.
+      - run: echo "UV_CACHE_DIR=$RUNNER_TEMP/uv-cache" >> "$GITHUB_ENV"
+      - id: uv-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.UV_CACHE_DIR }}
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: uv-${{ runner.os }}-
       - name: scripts/check (the affected tests)
         if: github.event_name == 'pull_request'
         run: nix develop --command scripts/check --changed-since HEAD^1
       - name: scripts/check (all tests)
         if: github.event_name == 'push'
         run: nix develop --command scripts/check
+      - if: github.event_name == 'push' && steps.uv-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.UV_CACHE_DIR }}
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
   report-main:
     needs: check
