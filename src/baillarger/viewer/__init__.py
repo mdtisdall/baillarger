@@ -8,7 +8,9 @@ in step by the server.
 - sections: plane-and-mesh sections through a trace.
 - streamlines: the traces from and to a point of the white surface, the mesh and a
   label's boundary in a box around it, and the TCK track format.
-- data: a site's files, read for viewing (Site).
+- surface: the white surface for viewing (Surface): coordinates, graph, flat map,
+  inflation, picking.
+- data: a site's files, read for viewing (Site, which holds a Surface).
 - labels: the review of pial-side label proposals (baillarger.pial_labels).
 - server: the local web server, its shared state and the page (static/index.html).
 
