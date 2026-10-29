@@ -46,9 +46,6 @@ jobs:
     # For bash 3.2 and BSD tools, add a matrix with macos-latest. macOS
     # minutes cost 10 times more.
     runs-on: ubuntu-latest
-    env:
-      # uv in the devShell reads this; the cache steps below use the same path.
-      UV_CACHE_DIR: ${{ github.workspace }}/../uv-cache
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,7 +64,9 @@ jobs:
       # that uv sync does not download them again on each run. Only main
       # saves it, as for the Nix store. The key changes when uv.lock changes;
       # a run then restores the newest older cache and downloads only the
-      # changed packages.
+      # changed packages. uv in the devShell reads UV_CACHE_DIR; the cache
+      # steps use the same path.
+      - run: echo "UV_CACHE_DIR=$RUNNER_TEMP/uv-cache" >> "$GITHUB_ENV"
       - id: uv-cache
         uses: actions/cache/restore@v4
         with:
