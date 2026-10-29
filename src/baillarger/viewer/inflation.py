@@ -7,8 +7,16 @@ where to click and which way is which.
    x <- (I + lam L)^-1 x, with the boundary loops (the box faces' cuts) pinned: the
    free-boundary version collapses an open sheet onto its boundary (tested), so the
    surface relaxes instead towards the membrane spanned by its cut loops, and area is
-   not kept (reported per level). Levels are saved by their cumulative lam (a
-   diffusion length of about sqrt(2 lam) edges): sulci open as the level rises.
+   not kept (reported per level). A closed piece (no boundary loop: the whole white
+   surface, or an island of a box's mesh) has nothing to pin and would shrink to
+   its centroid; restoring its area alone is not enough, since the slowest mode
+   is left and the piece goes to a needle (tested). So after each step it is
+   mapped back, about its vertex centroid (which the steps keep), to its own
+   second-moment matrix by the symmetric T = C0^1/2 C^-1/2; as lam grows it goes
+   to its embedding by its three lowest Laplacian modes, at its own size and
+   orientation (a round surface for a ball-like piece). Levels are saved by their
+   cumulative lam (a diffusion length of about sqrt(2 lam) edges): sulci open as
+   the level rises.
 2. Sulcal depth: the signed distance from the inflated vertex to its original
    position, along the inflated normal (positive: the original lies outward of the
    inflated surface, i.e. a crown), for shading.
@@ -36,6 +44,8 @@ type Int = npt.NDArray[np.integer[Any]]
 type Faces = npt.NDArray[np.integer[Any]]
 
 LEVELS = (100.0, 400.0, 1600.0)
+#: bumped when the inflation changes, so that cached inflations are remade
+VERSION = 2
 
 
 def umbrella(f: Faces, nv: int) -> csr_matrix:
@@ -65,7 +75,8 @@ def inflate(
     log: Log | None = None,
 ) -> list[Float]:
     """Inflated copies of v (mm) at cumulative lam = levels, the boundary loops
-    pinned. Returns a list of (n, 3)."""
+    pinned and each closed piece mapped back to its second moments after each
+    step. Returns a list of (n, 3)."""
     nv = len(v)
     L = umbrella(f, nv)
     bl = FM.boundary_loops(f)
@@ -76,6 +87,11 @@ def inflate(
     used[f.ravel()] = True
     fr = np.flatnonzero(used & ~onb)
     x = v.astype(float).copy()
+    lab_v, lab_f = FM.pieces(f, nv)
+    open_piece = np.zeros(int(lab_v.max()) + 1, bool)
+    open_piece[lab_v[onb & used]] = True
+    closed = np.flatnonzero(~open_piece)
+    m0 = _moments(x, lab_v, closed, len(open_piece))
     out: list[Float] = []
     done = 0.0
     for lv in levels:
@@ -90,11 +106,54 @@ def inflate(
                 )
                 assert info == 0, info
                 x[fr, k] = y
+            _keep_moments(x, lab_v, closed, m0)
         done = lv
         out.append(x.copy())
         if log:
             log(f"inflated to lam {lv:g}")
     return out
+
+
+def _moments(
+    x: Float, lab_v: Int, closed: Int, n: int
+) -> tuple[npt.NDArray[np.bool_], Int, Float, Float]:
+    """For the vertices of the closed pieces: their mask, piece label, and per
+    piece the vertex centroid (n, 3) and second-moment matrix (n, 3, 3)."""
+    is_closed = np.zeros(n, bool)
+    is_closed[closed] = True
+    m = (lab_v >= 0) & is_closed[np.maximum(lab_v, 0)]
+    lab = lab_v[m]
+    cnt = np.maximum(np.bincount(lab, minlength=n), 1)
+    c = np.stack([np.bincount(lab, x[m, k], minlength=n) for k in range(3)], 1)
+    c = c / cnt[:, None]
+    d = x[m] - c[lab]
+    C = np.zeros((n, 3, 3))
+    for i in range(3):
+        for j in range(3):
+            C[:, i, j] = np.bincount(lab, d[:, i] * d[:, j], minlength=n) / cnt
+    return m, lab, c, C
+
+
+def _keep_moments(
+    x: Float,
+    lab_v: Int,
+    closed: Int,
+    m0: tuple[npt.NDArray[np.bool_], Int, Float, Float],
+) -> None:
+    """Map each closed piece of x in place, about its centroid, to its first
+    second-moment matrix C0 by T = C0^1/2 C^-1/2; other vertices are not
+    touched."""
+    if not closed.size:
+        return
+    m, lab, _, C0 = m0
+    _, _, c, C = _moments(x, lab_v, closed, len(C0))
+    T = np.tile(np.eye(3), (len(C0), 1, 1))
+    for p in closed:
+        w0, U0 = np.linalg.eigh(C0[p])
+        w, U = np.linalg.eigh(C[p])
+        if w.min() > 1e-12 * w.max() and w0.min() > 0:
+            T[p] = (U0 * np.sqrt(w0)) @ U0.T @ (U / np.sqrt(w)) @ U.T
+    x[m] = c[lab] + np.einsum("nij,nj->ni", T[lab], x[m] - c[lab])
 
 
 def sulcal_depth(v: Float, x: Float, f: Faces) -> Float:
