@@ -25,7 +25,7 @@ the map.
    distortion s1 / s2.
 
 site_flat_map runs flatten on a mesh and returns the arrays and the summary that the
-viewer keeps (baillarger.viewer.data caches them).
+viewer keeps (baillarger.viewer.surface caches them).
 """
 
 from collections.abc import Callable

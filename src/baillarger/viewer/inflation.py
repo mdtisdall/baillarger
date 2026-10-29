@@ -26,7 +26,7 @@ where to click and which way is which.
    the faces.
 
 site_inflation runs the inflation on a mesh and returns the levels and the per-level
-area summary that the viewer keeps (baillarger.viewer.data caches them).
+area summary that the viewer keeps (baillarger.viewer.surface caches them).
 """
 
 from typing import Any

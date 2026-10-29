@@ -16,16 +16,14 @@ Inputs (only the column volume is needed):
 - echo 2 of the full grid (baillarger.data.echo_path(2) by default): cropped to the box
   for the volume views, and its affine for world mm.
 
-The flat map (baillarger.viewer.flatmap) and the inflation (baillarger.viewer.inflation)
-are computed on first use and cached in the cache directory, keyed by a hash of the
-mesh, so that a rebuilt column volume gets new ones. World mm: the box's crop of the
+The white surface (baillarger.viewer.surface.Surface) holds the mesh's coordinates,
+graph, flat map and inflation (cached, keyed by a hash of the mesh, so that a rebuilt
+column volume gets new ones); Site adds the traces. World mm: the box's crop of the
 echo-2 affine; box mm: voxel index times the voxel size (the sections and the 3D
 surface use box mm, the volume views world mm).
 """
 
 import gzip
-import hashlib
-import json
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -34,19 +32,16 @@ from typing import Any
 import nibabel as nib
 import numpy as np
 import numpy.typing as npt
-from nibabel.gifti.gifti import GiftiDataArray, GiftiImage
-from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.csgraph import dijkstra
 from scipy.spatial import cKDTree
 
 from baillarger.data import crop_affine, echo_path
-from baillarger.mesh_smoothing import edges
 from baillarger.streamlines import STEP_MM
 from baillarger.viewer import filters as VF
-from baillarger.viewer import flatmap as FM
 from baillarger.viewer import inflation as IN
 from baillarger.viewer import sections as PS
 from baillarger.viewer import streamlines as SV
+from baillarger.viewer.surface import Surface, gifti_bytes
 
 type Float = npt.NDArray[np.float64]
 type Arr = npt.NDArray[Any]
@@ -56,61 +51,11 @@ NEAREST_MM = 0.5  # a vertex shows the nearest subsampled trace rooted within th
 LOCATE_MM = 1.0  # a WM selection takes the nearest shown root within this
 
 
-def mesh_graph(v_mm: Float, f: Arr) -> csr_matrix:
-    E = edges(f)
-    w = np.linalg.norm(v_mm[E[:, 0]] - v_mm[E[:, 1]], axis=1)
-    G = coo_matrix((w, (E[:, 0], E[:, 1])), shape=(len(v_mm),) * 2).tocsr()
-    return G.maximum(G.T).tocsr()
-
-
-def mesh_key(v: Arr, f: Arr) -> str:
-    h = hashlib.sha1(np.ascontiguousarray(v, np.float32).tobytes())
-    h.update(np.ascontiguousarray(f, np.int64).tobytes())
-    return h.hexdigest()[:16]
-
-
-def cached(path: Path, key: str, make: Callable[[], dict[str, Any]]) -> dict[str, Any]:
-    """The arrays in path if its key matches, else make() saved there with the key."""
-    if path.exists():
-        with np.load(path, allow_pickle=False) as Q:
-            if str(Q["key"]) == key:
-                return {k: Q[k] for k in Q.files if k != "key"}
-    out = make()
-    arrays = {k: v for k, v in out.items() if isinstance(v, np.ndarray)}
-    result = dict(arrays)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    arrays["key"] = np.array(key)
-    np.savez_compressed(path, **arrays)  # type: ignore[arg-type]
-    summ = {k: v for k, v in out.items() if not isinstance(v, np.ndarray)}
-    path.with_suffix(".json").write_text(json.dumps(summ, indent=1, default=float))
-    return result
-
-
 def nifti(path: Path) -> nib.nifti1.Nifti1Image:
     img = nib.load(path)
     if not isinstance(img, nib.nifti1.Nifti1Image):
         raise ValueError(f"{path}: not a NIfTI-1 image")
     return img
-
-
-def gifti_bytes(v_world: Float, f: Arr) -> bytes:
-    g = GiftiImage()
-    g.add_gifti_data_array(
-        GiftiDataArray(
-            np.asarray(v_world, np.float32),
-            intent="NIFTI_INTENT_POINTSET",
-            datatype="NIFTI_TYPE_FLOAT32",
-        )
-    )
-    g.add_gifti_data_array(
-        GiftiDataArray(
-            np.asarray(f, np.int32),
-            intent="NIFTI_INTENT_TRIANGLE",
-            datatype="NIFTI_TYPE_INT32",
-        )
-    )
-    out: bytes = g.to_bytes()
-    return out
 
 
 class Site:
@@ -133,11 +78,21 @@ class Site:
         self.name = stem.removeprefix("column_volume_")
         self.log = log
         Z = np.load(column_volume)
-        self.vox: Float = Z["vox"].astype(float)
         self.lo: Arr = Z["lo"]
-        self.v_vox: Float = Z["v"].astype(float)
-        self.vmm: Float = self.v_vox * self.vox
-        self.f: Arr = Z["f"].astype(np.int64)
+        # world mm
+        self.echo_path = Path(echo) if echo is not None else echo_path(2)
+        self.surf = Surface(
+            Z["v"].astype(float),
+            Z["f"],
+            Z["vox"].astype(float),
+            crop_affine(nifti(self.echo_path).affine, self.lo),
+            self.cache,
+            self.name,
+            log=log,
+        )
+        self.vox, self.affine = self.surf.vox, self.surf.affine
+        self.v_vox, self.vmm, self.f = self.surf.v_vox, self.surf.vmm, self.surf.f
+        self.G = self.surf.G
         self.vnrm: Float = Z["nrm"].astype(float)
         self.tv_all: Arr = Z["tv"]
         self.pos_all: Arr = Z["pos"]
@@ -153,7 +108,6 @@ class Site:
             str(Z["tracer_name"]) if "tracer_name" in Z.files else "not saved"
         )
         self.wm_label = str(Z["wm_label"]) if "wm_label" in Z.files else "not saved"
-        self.G = mesh_graph(self.vmm, self.f)
         # the traces shown: the joint result's subsample, or all
         self.joint = None if joint is None else dict(np.load(joint))
         if self.joint is not None:
@@ -189,31 +143,12 @@ class Site:
             self.partner.setdefault(int(b), int(a))
         self.priority_path = priority
         self.load_priority()
-        # world mm
-        self.echo_path = Path(echo) if echo is not None else echo_path(2)
-        self.affine: Float = crop_affine(nifti(self.echo_path).affine, self.lo)
-        # flat map and inflation, cached by mesh
-        key = mesh_key(self.v_vox, self.f)
-        F = cached(
-            self.cache / f"flat_map_{self.name}.npz",
-            key,
-            lambda: FM.site_flat_map(self.vmm, self.f, log=log),
-        )
-        self.uv: Float = F["uv_v"][self.rv]
-        self.T: Float = F["T_v"][self.rv]
+        self.uv: Float = self.surf.uv_v[self.rv]
+        self.T: Float = self.surf.T_v[self.rv]
         g = np.einsum("nij,nik->njk", self.T, self.T)
         self.log2_area: Float = -0.5 * np.log2(np.linalg.det(g))
-        Ip = cached(
-            self.cache / f"inflate_{self.name}.npz",
-            f"{key}-v{IN.VERSION}",
-            lambda: IN.site_inflation(self.vmm, self.f, log=log),
-        )
-        self.infl: list[Float] = [self.vmm] + [x.astype(float) for x in Ip["x"]]
-        self.infl_names = ["true surface"] + [
-            f"inflated, lam {lv:g}" for lv in Ip["levels"]
-        ]
-        self.vf = IN.vertex_faces(self.f, len(self.vmm))
-        self.sulc = IN.sulcal_depth(self.vmm, self.infl[-1], self.f)
+        self.infl, self.infl_names = self.surf.infl, self.surf.infl_names
+        self.vf = self.surf.vf
         d, _, src = dijkstra(
             self.G,
             indices=self.rv,
@@ -225,12 +160,11 @@ class Site:
             np.isfinite(d), self.roots_of[np.maximum(src, 0)], -1
         ).astype(np.int32)
         self.root_tree = cKDTree(self.world(self.v_vox[self.rv]))
-        self.vertex_tree = cKDTree(self.world(self.v_vox))
         self.hits = self.point_hits()
         self._bytes: dict[str, bytes] = {}
         # filters (baillarger.viewer.filters): none shown until one is chosen
         self.jobs = VF.FilterJobs(
-            self.column_volume, self.cache, self.name, key, log=log
+            self.column_volume, self.cache, self.name, self.surf.key, log=log
         )
         self.filter: VF.Result | None = None
         self.frow = -np.ones(self.n, np.int64)
@@ -243,9 +177,7 @@ class Site:
 
     # ------------------------------------------------------------ coordinates
     def world(self, p_vox: npt.ArrayLike) -> Float:
-        p = np.atleast_2d(np.asarray(p_vox, float))
-        out: Float = (np.c_[p, np.ones(len(p))] @ self.affine.T)[:, :3]
-        return out
+        return self.surf.world(p_vox)
 
     def locate(self, mm: npt.ArrayLike) -> int | None:
         """The shown trace whose root is nearest world point mm, within LOCATE_MM."""
@@ -279,8 +211,7 @@ class Site:
 
     def snap(self, mm: npt.ArrayLike) -> dict[str, Any]:
         """The WM selection at the white-mesh vertex nearest world point mm."""
-        _, k = self.vertex_tree.query(np.asarray(mm, float))
-        return self.vertex(int(k))
+        return self.vertex(self.surf.nearest(mm))
 
     # ------------------------------------------------------------ layers
     def load_priority(self) -> None:
@@ -553,33 +484,10 @@ class Site:
 
     # ------------------------------------------------------------ 3D surface
     def mesh_payload(self, level: int, faces: bool) -> bytes:
-        """uint32 header length, JSON header padded to 4 bytes, then float32 positions
-        (box mm), normals, sulcal depth (inflated level `level`), and with faces:
-        int32 nearest shown trace per vertex and uint32 faces."""
-        x = self.infl[int(level)]
-        parts: list[Arr] = [
-            x.astype(np.float32),
-            IN.vertex_normals(x, self.f).astype(np.float32),
-            self.sulc.astype(np.float32),
-        ]
-        if faces:
-            parts += [self.vtrace, self.f.astype(np.uint32)]
-        c = x.mean(0)
-        hdr = dict(
-            nv=len(x),
-            nf=len(self.f),
-            level=int(level),
-            faces=bool(faces),
-            centre=c.tolist(),
-            radius=float(np.linalg.norm(x - c, axis=1).max()),
-        )
-        h = json.dumps(hdr).encode()
-        h += b" " * (-len(h) % 4)
-        return (
-            np.uint32(len(h)).tobytes()
-            + h
-            + b"".join(np.ascontiguousarray(p).tobytes() for p in parts)
-        )
+        """The 3D surface pane's mesh at inflated level `level`
+        (Surface.mesh_payload), with faces: with the nearest shown trace per
+        vertex."""
+        return self.surf.mesh_payload(level, self.vtrace if faces else None)
 
     # ------------------------------------------------------------ volume views
     def volume_bytes(self) -> bytes:
@@ -595,9 +503,7 @@ class Site:
         return self._bytes["echo2"]
 
     def white_bytes(self) -> bytes:
-        if "white" not in self._bytes:
-            self._bytes["white"] = gifti_bytes(self.world(self.v_vox), self.f)
-        return self._bytes["white"]
+        return self.surf.white_bytes()
 
     def gm_bytes(self, sigma: float = 1.0) -> bytes:
         """The cortex label's boundary over the whole box (display only)."""
