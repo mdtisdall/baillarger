@@ -126,25 +126,44 @@ from the WM below it.
    out of the WM.
 3. Tangential relaxation, twicing Gaussian smoothing (sigma in voxels,
    default 2) and smoothed normals (`mesh_smoothing`), as now.
-4. Write:
-   - `sub-<sub>_ses-<ses>_hemi-<R|L>_white.surf.gii`: vertices (float32,
-     scanner RAS mm, `NIFTI_INTENT_POINTSET`, coordinate system
-     `NIFTI_XFORM_SCANNER_ANAT`) and triangles (int32,
-     `NIFTI_INTENT_TRIANGLE`); GZipBase64Binary; metadata
-     `AnatomicalStructurePrimary` (`CortexRight` / `CortexLeft`) and
-     `GeometricType` (`Anatomical`).
-   - The smoothed unit normals (float32, out of the WM), as a vector array in
-     a GIfTI of their own, so that the `.surf.gii` holds only what every
-     surface reader expects. Its name is settled in the spec.
-   - `..._white.json`: `Sources` (the corrected segmentation) and its
-     SHA-256, the filled labels, sigma, the voxel-to-RAS affine of the grid
-     (so a reader gets voxel coordinates without the segmentation), and the
-     summary: vertices, faces and per piece its genus, boundary loops and
-     area.
+4. Write the mesh as GIfTI with its data outside the XML
+   (`Encoding="ExternalFileBinary"`), so the arrays are raw binary at known
+   offsets: one copy of the mesh, in a standard format, readable by block.
 
-The reader (`WhiteSurface.load`) returns vertices in voxel coordinates of the
-grid, faces, normals and the affine; `check(dseg_path)` compares the file's
-SHA-256 with the sidecar's.
+| File (in `sub-<sub>/ses-<ses>/anat/`) | Content |
+|---|---|
+| `sub-<sub>_ses-<ses>_hemi-<R\|L>_white.surf.gii` | GIfTI XML (small): a vertex array (float32, scanner RAS mm, `NIFTI_INTENT_POINTSET`, coordinate system `NIFTI_XFORM_SCANNER_ANAT`) and a triangle array (int32, `NIFTI_INTENT_TRIANGLE`), each `ExternalFileBinary` into the `.dat` with its offset; metadata `AnatomicalStructurePrimary` (`CortexRight` / `CortexLeft`) and `GeometricType` (`Anatomical`) |
+| `sub-<sub>_ses-<ses>_hemi-<R\|L>_white.dat` | The vertices (n × 3) then the triangles (m × 3), little-endian, row-major |
+| `sub-<sub>_ses-<ses>_hemi-<R\|L>_desc-normals_white.func.gii` and `.dat` | The smoothed unit normals (float32, out of the WM, `NIFTI_INTENT_VECTOR`), in the same way, in a file of their own so that the `.surf.gii` holds only what every surface reader expects |
+| `sub-<sub>_ses-<ses>_hemi-<R\|L>_desc-blocks_white.tsv` | The block index: one row per grid block, its position (`i`, `j`, `k`), its vertex and face ranges (`vertex_start`, `vertex_stop`, `face_start`, `face_stop`) and its vertices' bounding box in voxels |
+| `sub-<sub>_ses-<ses>_hemi-<R\|L>_white.json` | Sidecar: `Sources` (the corrected segmentation) and its SHA-256, the SHA-256 of each `.dat`, the filled labels, sigma, `BlockCells`, the voxel-to-RAS affine of the grid (so a reader gets voxel coordinates without the segmentation), and the summary: vertices, faces and per piece its genus, boundary loops and area |
+
+Order: the faces block by block (each face comes from the cells of one
+block); the vertices by the first block that makes them, then by edge key.
+A block's faces use its own vertices and some boundary vertices of
+neighbouring blocks, so one block is read as its face range, then the
+vertices those faces name. Smoothing keeps the order. `ExternalFileName` is
+the `.dat`'s name only (relative), so the files can be moved together.
+
+Who reads it (checked in their source): nibabel (memory-mapped; nilearn
+through it), Connectome Workbench, gifticlib and so FreeSurfer
+(`freeview`, `mris_convert`) and AFNI/SUMA, the MATLAB `gifti` toolbox
+(SPM) and R's `gifti`. They read the arrays whole; reading by block is our
+reader's. gifticlib opens a relative `ExternalFileName` from the working
+directory, not the `.surf.gii`'s, so FreeSurfer and AFNI tools are run in
+the files' directory (nibabel and MATLAB resolve it next to the file).
+NiiVue does not read external data; our browser panes read a block's byte
+ranges of the `.dat` directly (HTTP Range requests), using the block index.
+nibabel cannot write this encoding, so `baillarger.white` writes the XML
+itself, and a test reads it back with nibabel.
+
+Size: uncompressed, about 0.6 GB for this hemisphere (12.7 M vertices,
+25.3 M faces, with the normals), about 17 GB for a whole brain at 50 µm.
+
+The reader (`WhiteSurface.load(path, block=None)`) memory-maps the `.dat`
+files and returns, for the whole mesh or one block, vertices in voxel
+coordinates of the grid, faces, normals and the affine; `check(dseg_path)`
+compares the segmentation's SHA-256 with the sidecar's.
 
 No per-vertex cortex label: every vertex is a column root. Columns run out
 from the WM until they reach background (label 0) or a maximum length, and
@@ -163,6 +182,9 @@ cell, about 40 GB for the hemisphere's 5.85 M surface cells.
   same bits for a shared vertex; one `np.unique` over the keys joins them.
   The result does not depend on the block size (tests: blocks of 1, 3, 7
   and 16 cells give the one-shot mesh exactly).
+- To do for the mesh file: return the vertices and faces in block order
+  (faces by block; vertices by the first block that makes them, then by
+  edge key) with the block index, in place of whole-grid key order.
 - Next: the per-block work in PyTorch, tested on MPS against numpy (exact
   keys and faces; vertices within float32 tolerance).
 
@@ -216,7 +238,7 @@ surface of its outer voxels faces something other than cortex (8 % with the
 filled labels, mostly the medial cut face against the Fomblin).
 
 Expected for the rest of `mesh` on the hemisphere: relax, smoothing and
-normals about 6 min; the `.surf.gii` about 0.4 GB.
+normals about 6 min; the mesh files about 0.6 GB.
 
 Left until a measurement asks for it: faster smoothing (one shared
 adjacency, 1-D edge keys instead of `np.unique(axis=0)`, `bincount` instead
@@ -226,14 +248,6 @@ stage).
 
 ## Open
 
-- The mesh readable by block (asked for by the viewer work, before
-  `white-surf.md` gets a version): faces stored by the grid block whose
-  cells made them, vertices by the first block that makes them, then by
-  edge key; a block index (each block's grid position, vertex and face
-  ranges, and its vertices' bounding box) in a chunked companion file read
-  by our own reader, in the same order as the `.surf.gii`. The companion's
-  storage (Zarr, or memory-mapped `.npy`) is to be chosen.
-- The normals' file name and intent, settled when writing `white-surf.md`.
 - Whole brains: the corpus callosum joins the two hemispheres' filled masks,
   so a whole brain needs a midline cut (FreeSurfer's cutting planes) before
   step 1. Not needed for the example hemisphere.
