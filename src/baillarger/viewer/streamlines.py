@@ -128,9 +128,11 @@ def at_depth(
 
 
 def tck(lines: list[Float]) -> bytes:
-    """MRtrix .tck bytes (float32 little-endian) of polylines in mm: each line's points,
-    then a row of nan; an inf row ends the file."""
-    body = []
+    """MRtrix .tck bytes (float32 little-endian) of polylines in mm: a row of nan, then
+    each line's points and a row of nan; an inf row ends the file. NiiVue (0.69) takes
+    each nan row as the end of a line and the first offset as 0 only after a nan row:
+    without the leading one it draws every line but the first (none of one line)."""
+    body = [np.full((1, 3), np.nan, np.float32)]
     for p in lines:
         body.append(np.asarray(p, np.float32).reshape(-1, 3))
         body.append(np.full((1, 3), np.nan, np.float32))
@@ -142,10 +144,13 @@ def tck(lines: list[Float]) -> bytes:
 
 
 def read_tck(data: bytes) -> list[Float]:
-    """The polylines of .tck bytes as tck writes them."""
+    """The polylines of .tck bytes as tck writes them (a leading nan row starts no
+    line)."""
     head = data[: data.index(b"END\n")].decode()
     off = int(next(x for x in head.splitlines() if x.startswith("file:")).split()[-1])
     a = np.frombuffer(data[off:], "<f4").reshape(-1, 3).astype(float)
+    if len(a) and np.isnan(a[0]).any():
+        a = a[1:]
     out: list[Float] = []
     cur: list[Float] = []
     for row in a:

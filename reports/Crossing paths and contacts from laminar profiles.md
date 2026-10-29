@@ -1245,8 +1245,73 @@ The paths of normal are straight, so they are further from the phantoms' curved 
 - **The capped rays.** They start along the WM distance's gradient (cos 0.99, as crossing rays do), and 99.7 % or more pass another bank's front, at 2.4–2.7 mm. After that they run along the far bank's sheet, not into it: the median |cos| between the ray and the far WM distance's gradient is 0.3–0.4, against about 0.9 for crossing rays. They come within about 0.9 mm of WM and 0.5–0.7 mm of fluid, but reach neither in 8 mm. A straight ray crosses into a far bank that is not parallel to its own and grazes it. By the user's decision, normal rays stay straight; the capped rays are kept as rays that end in cortex (outcome "length").
 
 **Not done:**
-- The comparison with the equivolume-front method (its session), which reads these builds.
 - The crossing rays' cut: like traverse, normal's crossings depend on a cortex label without fluid channels and vessels; it is measured again after the pial-side label refinement.
+
+### Equivolume columns against the normal columns
+
+**Code.**
+- `baillarger.column_traces`:
+  - `--columns equivolume`: normal's straight rays and stops, with `vol` measured on the rays (`offset_equivolume`);
+  - `--columns front-equivolume`: the white mesh grown with no field at equivolume speed (`column_front.grow_equivolume`); `ColumnTraces.tau`;
+  - `meet_at`: where a column meets another bank's columns, for both.
+- `baillarger.column_front`: `grow_equivolume`, `front_normals`, `face_sums`; `SPEED_CAP`, `TAU_CAP`.
+- `prototypes/scripts/equivolume_compare.py`: the three methods at the marked points.
+- Tests (exact answers), for both methods:
+  - ball and cylinder of WM: columns radial, and the coordinate is (r³ − r0³)/(3r0²) and (r² − r0²)/(2r0), the median column within 2 % at 0.4–1.6 mm;
+  - slab: straight, the coordinate is the arc length;
+  - the inside of a WM tube (the concave model of a fundus; area falling as r/r0): (r0² − r²)/(2r0), within 2 %;
+  - the front's speed cap at a focus (a tube down to 3 voxels): the cap holds, the median column's flux lags tau, and at least 99 % of the columns reach the fluid.
+  - r0 in these tests is the label surface's mean radius. The mesh's sub-voxel bumps (sd about 0.17 voxel in a root's radius) are carried out as an offset, so a column's own r0 is not its reference.
+  - A fold with closed-form equivolume layers other than the tube is not cheap: at a V's corner the layers are singular (all the corner's volume is on one line).
+
+**The two methods.** Both use the white mesh's own geometry and no image, and both measure a column's cross-section A(s) from its neighbours rather than modelling it from the root's curvatures as normal does.
+- **equivolume (straight rays).** A column is normal's ray. Its cross-section at s is its root vertex's dual area on the white mesh with every vertex moved s along its own normal, projected on the root's normal and clipped at 0 past a focus. vol = ∫ A/A0 ds. The layers are the levels of vol across neighbouring rays, and the rays are not kept normal to them.
+- **front-equivolume (bent columns).** The whole mesh grows as one front. Each step, a vertex moves along the front's own normal (area-weighted, smoothed as `smooth_normals` smooths the root mesh, at the same reach in mm however much the front has shrunk) at speed A0/A. Every column then sweeps equal volume per unit root area per step: the fronts are the levels of tau, the equivolume layers, and the columns bend to stay normal to them.
+  - Midpoint (RK2) steps; a forward Euler step biased tau by about 2 % on the cylinder.
+  - At a focus (a fundus seen from the WM) A → 0. The speed is capped at 4 times the root's, one voxel per 0.04 mm of tau, and each step advances tau so that no vertex moves more than 0.04 mm. Where the cap binds, the swept volume per root area (`vol`, the measured flux) falls below tau.
+  - The front tangles where it shrinks: each concave bump of the mesh has its own focus, and vertices cross there. Where the front has an edge (a stopped neighbour) or a fold (a face whose normal points against its vertices' headings), a vertex has no normal and goes straight at its last speed. Without these two rules, 5 % of the tube's columns turned back into their own WM about 3 voxels from the axis.
+  - No tangential relaxation: a column is a vertex's trajectory and its dual area is its cross-section, so moving vertices along the front would trade volume between columns and bend the paths off the normal.
+  - Samples stay 0.04 mm of arc apart, as for every method; `tau` (npz) records each sample's coordinate, and `vol` and `area` are as front's.
+  - At a crown the column slows (A grows). The front's time is capped at 16 mm, twice the 8 mm arc cap (`TAU_CAP`): a column on a cylinder-like crown of radius 0.32 mm (the tightest the mesh keeps) then reaches 2.9 mm of arc, 3.5 mm at 0.5 mm; on a point-like crown 1.4–2.7 mm. A column still running then ends as "length".
+- **What "equivolume" means here** (both methods, and normal's `vol`): equal swept volume per unit root area. It is Bok's layer only if every column holds the same volume per unit root area from the WM to the pia; a relative depth between two cuts is then (vol(s) − vol(s0)) / (vol(s1) − vol(s0)).
+- **Cost.** equivolume: about 2 minutes per site, as normal. front-equivolume: 16 minutes at V1V2 and 18 at M1S1 (peak 3.0 GB). The front does whole-mesh work every step until its slowest column stops: 400 or more steps of tau, two evaluations each, about 30 smoothing passes per evaluation.
+
+**At the sites** (handle-free WM, roots 2 mm or more from a box face; `scratch/equivolume-front/`, normal's builds from `scratch/normal-columns/`; the same white mesh and roots):
+
+| | V1V2: normal | V1V2: equivolume | V1V2: front-equivolume | M1S1: normal | M1S1: equivolume | M1S1: front-equivolume |
+|---|---|---|---|---|---|---|
+| Open | 38,625 | 38,625 | 34,425 | 31,863 | 31,863 | 29,566 |
+| Crossing | 4,946 | 4,946 | 3,380 | 13,658 | 13,658 | 7,012 |
+| Own bank | 386 | 386 | 219 | 26 | 26 | 229 |
+| Failed | 20,158 | 20,158 | 26,091 | 26,803 | 26,803 | 35,543 |
+| …box face / length | 14,507 / 2,673 | 14,507 / 2,673 | 15,198 / 7,697 | 23,039 / 3,764 | 23,039 / 3,764 | 24,240 / 11,303 |
+| Open columns meeting another bank | 12 % | 20 % | 9 % | 6 % | 23 % | 6 % |
+| Profile split at the marked points (median, p90 mm; points) | 0.075, 0.183 (24) | 0.075, 0.183 (24) | 0.061, 0.158 (16) | 0.169, 0.597 (20) | 0.169, 0.597 (20) | 0.553, 0.731 (20) |
+
+The meeting is measured differently: normal by the WM distance through tissue (where it stops rising), equivolume and front-equivolume by the first column to reach a voxel at a smaller coordinate (`meet_at`).
+
+**At the marked points** (every point is passed within 0.3 mm by columns of all three methods; per point, the median over its columns; then p50, p90 over the points):
+
+| | V1V2 (35 points) | M1S1 (23 points) |
+|---|---|---|
+| Coordinate at the point (mm): normal / equivolume / front-equivolume | 2.28 / 2.34 / 2.25 | 1.94 / 2.06 / 1.88 |
+| \|coordinate − normal's\|: equivolume | 0.23, 0.73 | 0.16, 1.51 |
+| \|coordinate − normal's\|: front-equivolume | 0.10, 1.26 | 0.06, 0.20 |
+| Relative depth on open columns: normal / equivolume / front-equivolume | 0.26 / 0.29 / 0.20 | (no open columns of normal's at the points) |
+| \|relative depth − normal's\|: equivolume; front-equivolume | 0.05, 0.33; 0.10, 0.46 | — |
+| Path difference from normal, largest over the common arc: front-equivolume | 1.17, 1.61 mm | 1.21, 1.81 mm |
+| Path difference from normal at the point: front-equivolume | 0.31, 0.64 mm | 0.25, 0.55 mm |
+
+**What this says.**
+- **The bending is real, and large.** By the point, a front-equivolume column is a quarter to a third of a mm (2 voxels) off its straight ray, and over its length 1.2 mm at the median. The layers do tilt across neighbouring rays enough that keeping the columns normal to them moves the paths by more than a voxel.
+- **It costs the classes.** The front's columns reach the time cap far more often (7,697 and 11,303 against 2,673 and 3,764), so open and crossing columns turn into failures: it crosses fused banks about half as often at M1S1 (7,012 against 13,658). Its profile split is slightly better at V1V2, on fewer points (16 against 24), and much worse at M1S1 (0.55 against 0.17 mm).
+- **The coordinate at the points is close for the front, not for the measured rays.** On the same paths as normal, equivolume's measured coordinate differs from normal's modelled one by 0.16–0.23 mm at the median point but by 0.7–1.5 mm at p90. The front's coordinate is within 0.06–0.10 mm of normal's at the median point. The cause of equivolume's tail is not diagnosed (normal smooths the curvatures over 0.5 mm; the measured area sees the mesh at its own scale).
+- **So:** the straight rays (normal or equivolume) keep the classes and are 8–9 times cheaper; the front changes the paths by more than a voxel and loses columns at crowns and fundi. Which paths are right is not settled here: the phantoms' true columns are the test for that.
+
+**Not done:**
+- front-equivolume on the fold phantoms (`methods_phantoms.py`), for path errors against the true columns.
+- Equivolume's tail against normal's coordinate: where the measured and modelled areas part, and at what scale.
+- A faster front: work only on the part of the mesh that still moves (most columns stop within a few mm, but every step costs the whole mesh), and set the smoothing passes per region.
 
 ### A pia editor on an inflated surface
 

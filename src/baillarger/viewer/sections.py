@@ -3,19 +3,21 @@ reports/Crossing paths and contacts from laminar profiles.md, *A pia editor on a
 inflated surface*).
 
 The flat map (baillarger.viewer.flatmap) only says which way is which: at the
-crosshair's root its differential T_v gives the 3D tangent t_u of the map's
-horizontal axis; on the inflated surface (baillarger.viewer.inflation) the screen's
-right and up, carried to the true mesh, do the same. The u-section is the normal
-plane through the root that holds t_u and the surface normal n; the v-section holds
-t_v = n x t_u (orthogonal on the true surface by construction; the angle to the
-carried vertical is reported). Each section: the plane's intersection with the true
-mesh, a polyline (a plane meets a manifold mesh in curves that never branch),
-followed both ways from the root; distances are arc lengths along it, signed
-(positive along t_u, or t_v). The traces shown are the subsampled ones rooted within
-a band of the plane and of that curve. Ordering a band of vertices along its longest
-geodesic instead (as volume_views.section_traces does) mixes two branches where the
-band forks, measured on M1S1. The map's or the inflation's area distortion never
-changes what a section shows: only the direction comes from them.
+crosshair's root its differential T_v gives the 3D tangent t_u of the map's horizontal
+axis; on the inflated surface (baillarger.viewer.inflation) the screen's right and up,
+carried to the true mesh, do the same. The u-section is the normal plane through the
+root that holds t_u and the surface normal n; the v-section holds t_v = n x t_u
+(orthogonal on the true surface by construction; the angle to the carried vertical is
+reported). The pair can be turned together about n by an angle (rotate), for example to
+bring one axis into a slice plane of the volume pane (snap): the frame that they come
+from stays as it was. Each section: the plane's intersection with the true mesh, a
+polyline (a plane meets a manifold mesh in curves that never branch), followed both ways
+from the root; distances are arc lengths along it, signed (positive along t_u, or t_v).
+The traces shown are the subsampled ones rooted within a band of the plane and of that
+curve. Ordering a band of vertices along its longest geodesic instead (as
+volume_views.section_traces does) mixes two branches where the band forks, measured on
+M1S1. The map's or the inflation's area distortion never changes what a section shows:
+only the direction comes from them.
 """
 
 from typing import Any
@@ -45,6 +47,35 @@ def directions(T: Float, n: Any) -> tuple[Float, Float, float]:
     return tu, tv, ang
 
 
+def rotate(tu: Float, tv: Float, deg: float) -> tuple[Float, Float]:
+    """The pair (t_u, t_v) turned by `deg` degrees in its own plane, from t_u toward
+    t_v (about n when t_v = n x t_u): 90 gives (t_v, -t_u)."""
+    a = np.radians(deg)
+    c, s = np.cos(a), np.sin(a)
+    return c * tu + s * tv, -s * tu + c * tv
+
+
+def snap(
+    tu: Float, tv: Float, n: Float, g: Float, deg: float
+) -> tuple[float, str, float] | None:
+    """The rotation (degrees, in (-180, 180]) nearest `deg` that puts one axis of the
+    pair (t_u, t_v), turned by it (rotate), in a plane with normal g: the axis then
+    lies in that plane and the section through it is the normal plane nearest to it.
+    Returns (rotation, the axis "u" or "v", the tilt left between the section plane
+    and that plane: asin |n . g|, degrees); None when g is along n (the tangent
+    plane is that plane: every axis lies in it)."""
+    g = np.asarray(g, float) / np.linalg.norm(g)
+    a, b = float(tu @ g), float(tv @ g)
+    if np.hypot(a, b) < 1e-9:
+        return None
+    th = np.degrees(np.arctan2(-a, b))  # t_u(th) . g = cos th a + sin th b = 0
+    k = int(np.round((deg - th) / 90.0))
+    r = th + 90.0 * k
+    r = float(r - 360.0 * np.ceil((r - 180.0) / 360.0))  # into (-180, 180]
+    tilt = float(np.degrees(np.arcsin(min(1.0, abs(float(n @ g)) / np.linalg.norm(n)))))
+    return r, ("u" if k % 2 == 0 else "v"), tilt
+
+
 def section(
     vmm: Float,
     G: csr_matrix,
@@ -67,8 +98,28 @@ def section(
     vmm: mesh vertices (mm); G: the mesh graph (mm); f: faces (needed); root: the
     mesh vertex at x0; roots_of: per mesh vertex the trace rooted there (-1: none).
     Returns (traces, signed distances, positive along t), ordered."""
+    tr, arc, _ = section_curve(vmm, G, root, x0, n, t, roots_of, half, band, f)
+    return tr, arc
+
+
+def section_curve(
+    vmm: Float,
+    G: csr_matrix,
+    root: int,
+    x0: Float,
+    n: Float,
+    t: Float,
+    roots_of: Int,
+    half: float = 8.0,
+    band: float = 0.12,
+    f: Int | None = None,
+) -> tuple[Int, Float, Float]:
+    """section, and the curve it follows: its points (mm, in order along t) within
+    `half` of the start, the crossing nearest x0 (empty when the plane misses).
+    Returns (traces, signed distances, curve points)."""
     from scipy.spatial import cKDTree
 
+    none = np.zeros(0, int), np.zeros(0), np.zeros((0, 3))
     m = np.cross(n, t)
     m /= np.linalg.norm(m)
     d = dijkstra(G, indices=root, limit=1.5 * half + 1.0)
@@ -83,7 +134,7 @@ def section(
     b = np.c_[fk[:, 1], fk[:, 2], fk[:, 0]].ravel()
     cr = sd[a] * sd[b] < 0
     if not cr.any():
-        return np.zeros(0, int), np.zeros(0)
+        return none
     lo_, hi_ = np.minimum(a, b), np.maximum(a, b)
     key = lo_ * len(vmm) + hi_
     ukey, eid = np.unique(key[cr], return_inverse=True)
@@ -115,16 +166,19 @@ def section(
 
     ends = nb[start][:2]
     if not ends:
-        return np.zeros(0, int), np.zeros(0)
+        return none
     pa, aa = walk(ends[0])
     pb, ab = walk(ends[1]) if len(ends) > 1 else ([start], [0.0])
     sgn = 1.0 if (pts[pa[min(1, len(pa) - 1)]] - pts[start]) @ t >= 0 else -1.0
     cpath = np.r_[pb[::-1], pa[1:]]
     carc = np.r_[-sgn * np.array(ab[::-1]), sgn * np.array(aa[1:])]
+    o = np.argsort(carc, kind="stable")
+    on = np.abs(carc[o]) <= half
+    curve = pts[cpath[o][on]]
     # the start point is not at x0 exactly: shift arc so that x0's projection is 0
     cand = np.flatnonzero(near & (roots_of >= 0) & (np.abs(sd) <= band))
     if not cand.size:
-        return np.zeros(0, int), np.zeros(0)
+        return np.zeros(0, int), np.zeros(0), curve
     tree = cKDTree(pts[cpath])
     dist, k_ = tree.query(vmm[cand])
     k: Int = np.asarray(k_)
@@ -135,7 +189,7 @@ def section(
         arc = arc - arc[tr == roots_of[root]][0]
     keep = np.abs(arc) <= half
     o = np.argsort(arc[keep], kind="stable")
-    return tr[keep][o], arc[keep][o]
+    return tr[keep][o], arc[keep][o], curve
 
 
 def marked_hits(

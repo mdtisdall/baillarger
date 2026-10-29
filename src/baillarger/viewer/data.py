@@ -392,9 +392,9 @@ class Site:
         ]
         return PS.directions(T, self.nrm[i])
 
-    def cut(self, i: int, t: Float, half: float) -> tuple[Arr, Float]:
+    def cut(self, i: int, t: Float, half: float) -> tuple[Arr, Float, Float]:
         r = int(self.rv[i])
-        return PS.section(
+        return PS.section_curve(
             self.vmm,
             self.G,
             r,
@@ -407,6 +407,15 @@ class Site:
             f=self.f,
         )
 
+    def viewer_planes(self) -> dict[str, Float]:
+        """The normals (box mm) of the volume pane's slice planes: NiiVue shows voxel
+        planes, each named for the world axis its voxel axis is nearest."""
+        A = self.affine[:3, :3] / np.linalg.norm(self.affine[:3, :3], axis=0)
+        out: dict[str, Float] = {}
+        for name, w in (("sagittal", 0), ("coronal", 1), ("axial", 2)):
+            out[name] = np.eye(3)[int(np.argmax(np.abs(A[w])))]
+        return out
+
     def section_at(
         self,
         i: int,
@@ -414,10 +423,15 @@ class Site:
         right: npt.ArrayLike | None = None,
         up: npt.ArrayLike | None = None,
         level: int = 0,
+        rot: float = 0.0,
     ) -> dict[str, Any]:
         """The two sections at shown trace i: along the flat map's axes, or along the
-        screen's right and up on inflated level `level` carried to the true mesh; at a
-        contact, the facing trace's sections through the same planes."""
+        screen's right and up on inflated level `level` carried to the true mesh,
+        both turned by `rot` degrees about the normal (from u toward v); at a
+        contact, the facing trace's sections through the same planes. curves: the
+        curves on the white mesh that the u and v sections follow (world mm); snap:
+        per volume-pane plane, the rotation nearest `rot` that puts one axis in it
+        (sections.snap)."""
         i = int(i)
         if right is None or up is None:
             tu, tv, ang = PS.directions(self.T[i], self.nrm[i])
@@ -425,18 +439,36 @@ class Site:
         else:
             tu, tv, ang = self.screen_directions(i, right, up, level)
             frame = f"screen axes on the {self.infl_names[int(level)]}"
+        snaps: dict[str, Any] = {}
+        for name, g in self.viewer_planes().items():
+            sn = PS.snap(tu, tv, self.nrm[i], g, rot)
+            snaps[name] = (
+                None
+                if sn is None
+                else dict(rot=round(sn[0], 2), axis=sn[1], tilt_deg=round(sn[2], 2))
+            )
+        tu, tv = PS.rotate(tu, tv, rot)
         out: dict[str, Any] = dict(
-            trace=i, angle_error_deg=round(ang, 2), frame=frame, info=self.info(i)
+            trace=i,
+            angle_error_deg=round(ang, 2),
+            frame=frame,
+            rot=float(rot),
+            snap=snaps,
+            info=self.info(i),
         )
-        out["u"] = self.pack(*self.cut(i, tu, half))
-        out["v"] = self.pack(*self.cut(i, tv, half))
+        curves: dict[str, Any] = {}
+        for name, t in (("u", tu), ("v", tv)):
+            tr, dist, c = self.cut(i, t, half)
+            out[name] = self.pack(tr, dist)
+            curves[name] = np.round(self.world(c / self.vox), 4).tolist()
+        out["curves"] = curves
         j, via = self.facing(i, out)
         if j is not None:
             nj = self.nrm[j]
             fc: dict[str, Any] = dict(trace=j, via=via, info=self.info(j))
             for name, t in (("u", tu), ("v", tv)):
                 tj = t - (t @ nj) * nj
-                fc[name] = self.pack(*self.cut(j, tj / np.linalg.norm(tj), half))
+                fc[name] = self.pack(*self.cut(j, tj / np.linalg.norm(tj), half)[:2])
             out["facing"] = fc
         return out
 

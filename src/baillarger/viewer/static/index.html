@@ -55,6 +55,11 @@
   <b id="title">Column viewer</b>
   <label>Layer <select id="layer"></select></label>
   <label>section half width <select id="half"><option>4</option><option selected>8</option><option>12</option></select> mm</label>
+  <span id="rotbar" title="turn both section axes about the normal at the WM selection (keys [ and ]: 5°, with shift 1°)">
+    <label>axes turned <input type="range" id="rot" min="-180" max="180" step="1" value="0" style="width:90px">
+      <input type="number" id="rotn" min="-180" max="180" step="any" value="0" style="width:62px">°</label>
+    <label>snap to <select id="snapto"><option value="">…</option><option value="nearest">nearest plane</option>
+      <option value="axial">axial</option><option value="coronal">coronal</option><option value="sagittal">sagittal</option></select></label></span>
   <label>depth <select id="dmax"><option>3</option><option selected>5</option><option>8</option></select> mm</label>
   <label>streamlines within <select id="radius"><option>0.5</option><option selected>1</option><option>2</option></select> mm</label>
   <label>panes <select id="panesel" title="this window's panes; open more windows with other panes, they stay in step">
@@ -89,6 +94,7 @@
       <label><input type="checkbox" id="vfrom" checked> from</label><label><input type="checkbox" id="vto" checked> to</label>
       <label><input type="checkbox" id="vover"> all traces (every 4th)</label>
       <label><input type="checkbox" id="vpts" checked> points</label>
+      <label title="the curves on the white surface that the u (cyan) and v (yellow) sections follow"><input type="checkbox" id="vaxes" checked> section axes</label>
       <span id="vlab" style="display:none"><label>echo <select id="vecho"><option>1</option><option selected>2</option><option>3</option></select></label>
         <label>labels <input type="range" id="vlabop" min="0" max="1" step="0.05" value="0.6" style="width:60px"></label>
         <label>brush <select id="brush"><option value="">off</option><option value="fluid">to fluid</option><option value="cortex">to cortex</option></select></label>
@@ -151,7 +157,7 @@
 import { Niivue, SLICE_TYPE, SHOW_RENDER } from "https://cdn.jsdelivr.net/npm/@niivue/niivue@0.69.0/+esm";
 const $ = id => document.getElementById(id);
 const ME = Math.random().toString(36).slice(2);
-let META = null, VALS = null, CUR = null, SEC = null, FRAME = null, SELN = null, CROSS = null;
+let META = null, VALS = null, CUR = null, SEC = null, FRAME = null, SELN = null, CROSS = null, ROT = 0;
 const q = new URLSearchParams(location.search);
 let PANES = (q.get("panes") || "volume,surface,map,sections").split(",");
 const MAGMA = [[0,0,4],[40,11,84],[101,21,110],[159,42,99],[212,72,66],[245,125,21],[250,193,39],[252,253,191]];
@@ -188,7 +194,9 @@ async function apply(st) {
   try {
     if ("layer" in st && st.layer && st.layer !== $("layer").value) { $("layer").value = st.layer; await loadLayer(); }
     if ("crosshair" in st && st.crosshair) { CROSS = st.crosshair; moveVolumeCrosshair(st.crosshair); }
+    if ("rotation" in st) { ROT = +st.rotation || 0; showRot(); }
     if ("selection" in st) await setSelection(st.selection, st.frame || null);
+    else if ("rotation" in st && CUR !== null) await showTrace(CUR);
     if ("labels_seq" in st && LAB.on && st.labels_seq !== LAB.seq) await loadLabels();
     if ("filter" in st && !META.labels_only && st.filter !== FIL.key) await refreshFilters(true);
   } finally { applying = false; }
@@ -463,7 +471,7 @@ function initGL() {
 $("level").onchange = async () => { await loadMesh(+$("level").value, false); draw3d(); };
 
 // ---------------------------------------------------------------- volume pane (NiiVue, world mm)
-const NV = { nv: null, tracts: [], points: null, pia: null, over: [] };
+const NV = { nv: null, tracts: [], points: null, pia: null, over: [], axes: [] };
 async function initVolume() {
   const nv = new Niivue({ backColor: [0.05, 0.055, 0.065, 1], show3Dcrosshair: true, crosshairColor: [1, 0.2, 0.8, 1],
                           isColorbar: false, multiplanarShowRender: SHOW_RENDER.ALWAYS, multiplanarLayout: 2 /* grid */,
@@ -494,13 +502,13 @@ $("vview").onchange = setView;
 $("vwhite").onchange = () => NV.nv.setMeshProperty(NV.nv.meshes[0].id, "visible", $("vwhite").checked);
 $("vgm").oninput = () => NV.nv.setMeshProperty(NV.nv.meshes[1].id, "opacity", +$("vgm").value);
 for (const id of ["vfrom", "vto"]) $(id).onchange = () => { for (const m of NV.tracts) NV.nv.setMeshProperty(m.mesh.id, "visible", $(m.kind === "from" ? "vfrom" : "vto").checked); };
+$("vaxes").onchange = () => { for (const m of NV.axes) NV.nv.setMeshProperty(m.id, "visible", $("vaxes").checked); };
 $("vpts").onchange = () => { for (const m of [NV.points, NV.pia]) if (m) NV.nv.setMeshProperty(m.id, "visible", $("vpts").checked); };
 $("vover").onchange = async () => {
-  const nv = NV.nv; for (const m of NV.over) nv.removeMesh(m); NV.over = [];
+  const nv = NV.nv; dropMeshes(NV.over); NV.over = [];
   if (!$("vover").checked) return;
   for (let c = 0; c < CLSCOL.length; c++) {
-    await nv.loadMeshes([{ url: `/overview/${c}/4.tck`, rgba255: [...CLSCOL[c], 255] }]);
-    const m = nv.meshes[nv.meshes.length - 1]; nv.setMeshProperty(m.id, "fiberColor", "Fixed"); nv.setMeshProperty(m.id, "fiberRadius", 0); NV.over.push(m);
+    const m = await nv.addMeshFromUrl({ url: `/overview/${c}/4.tck`, rgba255: [...CLSCOL[c], 255] }); nv.setMeshProperty(m.id, "fiberColor", "Fixed"); nv.setMeshProperty(m.id, "fiberRadius", 0); NV.over.push(m);
   }
 };
 function moveVolumeCrosshair(mm) {
@@ -533,15 +541,14 @@ async function loadPoints() {
 }
 async function loadStreamlines(t) {
   const nv = NV.nv; if (!nv) return;
-  for (const m of NV.tracts) nv.removeMesh(m.mesh); NV.tracts = [];
+  dropMeshes(NV.tracts.map(m => m.mesh)); NV.tracts = [];
   if (NV.pia) { dropMesh(NV.pia); NV.pia = null; }
   const r = $("radius").value, S = await get(`/streamlines?i=${t}&radius=${r}`);
   if (CUR !== t) return;
   for (const [g, n] of Object.entries(S.groups)) {
     if (!n) continue; const [kind, c] = g.split("_"); let col = CLSCOL[+c];
     if (kind === "to") col = col.map(x => Math.round(x + 0.45 * (255 - x)));
-    await nv.loadMeshes([{ url: `/tracts/${t}/${r}/${g}.tck`, rgba255: [...col, 255] }]);
-    const m = nv.meshes[nv.meshes.length - 1]; nv.setMeshProperty(m.id, "fiberColor", "Fixed"); nv.setMeshProperty(m.id, "fiberRadius", 0.03);
+    const m = await nv.addMeshFromUrl({ url: `/tracts/${t}/${r}/${g}.tck`, rgba255: [...col, 255] }); nv.setMeshProperty(m.id, "fiberColor", "Fixed"); nv.setMeshProperty(m.id, "fiberRadius", 0.03);
     nv.setMeshProperty(m.id, "visible", $(kind === "from" ? "vfrom" : "vto").checked); NV.tracts.push({ mesh: m, kind });
   }
   if (S.pia_world.length) { try { NV.pia = addNodes(nodes("pia", S.pia_world, 0, 0.05)); } catch (e) { log("pia points: " + e.message); } }
@@ -549,6 +556,20 @@ async function loadStreamlines(t) {
   $("vkey").innerHTML = META.classes.map((n, c) => `<span><i class="sw" style="background:rgb(${CLSCOL[c]})"></i>${n} (${(S.groups["from_" + c] || 0) + (S.groups["to_" + c] || 0)})</span>`).join("") + "<span>paler: to</span>";
 }
 $("radius").onchange = () => CUR !== null && loadStreamlines(CUR);
+// the curves on the white surface that the u and v sections follow (cyan, yellow: as on the map)
+// (addMeshFromUrl gives each load its own mesh: loads that overlap never take each other's)
+function dropMeshes(ms) { for (const m of ms) if (NV.nv.meshes.includes(m)) NV.nv.removeMesh(m); }   // removeMesh of a gone mesh drops the last one
+async function loadAxes(sec) {
+  const nv = NV.nv; if (!nv) return;
+  const ms = [];
+  for (const [a, col] of [["u", [48, 213, 255]], ["v", [255, 210, 63]]]) {
+    if (sec.axes.points[a] < 2) continue;
+    const m = await nv.addMeshFromUrl({ url: `/axes/${sec.axes.id}/${a}.tck`, rgba255: [...col, 255] }); ms.push(m);
+    nv.setMeshProperty(m.id, "fiberColor", "Fixed"); nv.setMeshProperty(m.id, "fiberRadius", 0.08); nv.setMeshProperty(m.id, "visible", $("vaxes").checked);
+  }
+  if (SEC !== sec) { dropMeshes(ms); return; }   // a newer section came while these loaded
+  dropMeshes(NV.axes); NV.axes = ms;
+}
 
 // ---------------------------------------------------------------- sections
 async function showTrace(i) {
@@ -556,15 +577,16 @@ async function showTrace(i) {
   const half = $("half").value;
   let u = `/section?i=${i}&half=${half}`;
   if (FRAME) u += `&right=${FRAME.right.join(",")}&up=${FRAME.up.join(",")}&level=${FRAME.level}`;
-  SEC = await get(u);
-  if (CUR !== i) return;
+  const rot = ROT, sec = await get(u + `&rot=${rot}`);
+  if (CUR !== i || ROT !== rot) return;
+  const moved = !SEC || SEC.trace !== i; SEC = sec;
   showInfo(); drawMap(); draw3d(); if (has("sections")) drawSections();
-  if (NV.nv) loadStreamlines(i);
+  if (NV.nv) { loadAxes(sec); if (moved) loadStreamlines(i); }
 }
 function clearSections() {
   for (const id of ["cu", "cv", "cfu", "cfv"]) { const c = $(id); c.getContext("2d").clearRect(0, 0, c.width, c.height); }
   $("facing").style.display = "none";
-  if (NV.nv) { for (const m of NV.tracts) NV.nv.removeMesh(m.mesh); NV.tracts = []; if (NV.pia) { dropMesh(NV.pia); NV.pia = null; } }
+  if (NV.nv) { dropMeshes(NV.tracts.map(m => m.mesh)); NV.tracts = []; if (NV.pia) { dropMesh(NV.pia); NV.pia = null; } dropMeshes(NV.axes); NV.axes = []; }
   $("info").textContent = SELN ? `WM selection: vertex ${SELN.vertex} at (${SELN.world_mm}) mm; no shown trace within 1 mm` : "";
 }
 function showInfo() {
@@ -573,7 +595,8 @@ function showInfo() {
     (SELN ? `WM selection: vertex ${SELN.vertex} at (${SELN.world_mm}) mm; its trace's root is ${SELN.root_mm} mm away\n` : "") +
     `trace ${f.trace} (${f.cls}${f.fallback ? ", fallback tracer" : ""})  root ITK-SNAP voxel (${f.root_itksnap})  full grid (${f.root_full_grid0})  world (${f.world_mm}) mm\n` +
     (f.pia_mm !== null ? `pia ${f.pia_mm} mm  ${f.certified ? "certified" : "NOT certified"}` : "no levels (no joint result loaded)") +
-    (f.tie !== null ? `  tie -> ${f.tie}` : "") + `\nsections along the ${SEC.frame}, orthogonal on the true surface; the carried v-axis is off by ${SEC.angle_error_deg}°` +
+    (f.tie !== null ? `  tie -> ${f.tie}` : "") + `\nsections along the ${SEC.frame}${SEC.rot ? `, turned by ${SEC.rot}° (u toward v)` : ""}, orthogonal on the true surface; the carried v-axis is off by ${SEC.angle_error_deg}°` +
+    `\nsnap: ` + Object.entries(SEC.snap).map(([p, x]) => x ? `${p} ${x.rot}° (${x.axis} in it, the planes ${x.tilt_deg}° apart)` : `${p}: the surface lies in it`).join(" · ") +
     (SEC.facing ? `\nfacing trace ${SEC.facing.trace} (${SEC.facing.via})` : "");
 }
 function drawSections() {
@@ -623,6 +646,29 @@ function drawSection(c, S, title, h) {
   for (let d = -L.half; d <= L.half; d += 2) g.fillText(d, L.x(d) + 2, L.H - 6);
 }
 $("half").onchange = () => CUR !== null && showTrace(CUR);
+// the turn of both section axes about the normal: shared, on top of the frame (which stays as it was)
+function showRot() { $("rot").value = ROT; $("rotn").value = ROT; }
+async function setRot(deg) {
+  deg = Math.round(100 * (((+deg % 360) + 540) % 360 - 180 || 0)) / 100; if (deg === -180) deg = 180;   // into (-180, 180]
+  if (deg === ROT) return; ROT = deg; showRot(); share({ rotation: deg });
+  if (CUR !== null) await showTrace(CUR);
+}
+$("rot").oninput = () => { $("rotn").value = $("rot").value; };
+$("rot").onchange = () => setRot($("rot").value);
+$("rotn").onchange = () => setRot($("rotn").value);
+$("snapto").onchange = () => {
+  const p = $("snapto").value; $("snapto").value = ""; if (!SEC || !p) return;
+  let best = p === "nearest" ? null : p;
+  if (p === "nearest") for (const [k, x] of Object.entries(SEC.snap)) if (x && (best === null || x.tilt_deg < SEC.snap[best].tilt_deg)) best = k;
+  const x = best && SEC.snap[best]; if (!x) { log(`snap: the surface lies in the ${p} plane here: every axis is in it`); return; }
+  log(`snap: ${x.axis} in the ${best} plane at ${x.rot}° (the section plane is ${x.tilt_deg}° from it)`);
+  setRot(x.rot);
+};
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey || META?.labels_only) return;
+  const d = { "[": -5, "]": 5, "{": -1, "}": 1 }[e.key]; if (d === undefined) return;
+  e.preventDefault(); setRot(ROT + d);
+});
 $("dmax").onchange = () => SEC && drawSections();
 
 // ---------------------------------------------------------------- pial labels (baillarger.viewer.labels)
@@ -711,9 +757,10 @@ window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections
   META = await get("/meta");
   if (META.labels_only) {   // no column volume: echo 2, the overlay, the list and the brush
     PANES = ["volume", "labels"]; layout();
-    for (const id of ["vwhite", "vgm", "vfrom", "vto", "vover", "vpts", "layer", "half", "dmax", "radius", "panesel"])
+    for (const id of ["vwhite", "vgm", "vfrom", "vto", "vover", "vpts", "vaxes", "layer", "half", "dmax", "radius", "panesel"])
       $(id).closest("label").style.display = "none";
     $("fbar").style.display = "none";
+    $("rotbar").style.display = "none";
     $("newwin").style.display = "none";
   }
   $("title").textContent = `Column viewer — ${META.site}`; document.title = `Column viewer ${META.site}`;

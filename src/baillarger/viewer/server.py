@@ -3,18 +3,21 @@
 Any number of pages (windows, tabs, browsers) can be open at once; each shows the panes
 named in its address (static/index.html, ?panes=...). They share one state, kept here:
 two points, the crosshair (a world point: the slices of the volume pane) and the WM
-selection (a vertex of the true white surface with the shown trace there: the
-sections, the streamlines and the markers), the frame of the sections, and the colour
-layer. A page sends its changes (POST /state) and every page receives every change as
-it happens from the event stream (GET /events, Server-Sent Events), so a click in one
-window moves the point in all of them. In each pane a click moves that pane's own
-point (the slices: the crosshair; the surface and the map: the WM selection) and a
-shift-click moves the other one.
+selection (a vertex of the true white surface with the shown trace there: the sections,
+the streamlines and the markers), the frame of the sections and their rotation about the
+normal (degrees, on top of the frame), and the colour layer. A page sends its changes
+(POST /state) and every page receives every change as it happens from the event stream
+(GET /events, Server-Sent Events), so a click in one window moves the point in all of
+them. In each pane a click moves that pane's own point (the slices: the crosshair; the
+surface and the map: the WM selection) and a shift-click moves the other one.
 
 Requests:
 - GET / (the page), /static/<file>; /meta; /state; /events;
-  /layer?name=...; /section?i=&half=[&right=&up=&level=] (right, up: 3 numbers each,
-  comma-separated: the screen's axes on inflated level `level`);
+  /layer?name=...; /section?i=&half=[&right=&up=&level=][&rot=] (right, up: 3
+  numbers each, comma-separated: the screen's axes on inflated level `level`; rot:
+  the turn of both axes about the normal, degrees, the shared state's `rotation`);
+  /axes/<k>/<u|v>.tck (the curve that the u or v section of /section answer k
+  follows, world mm: its `axes.id`);
   /mesh?level=k[&faces=1] (the white surface for the 3D pane, Site.mesh_payload);
   /locate?mm=x,y,z (the shown trace rooted nearest a world point);
   /snap?mm=x,y,z (the WM selection at the white-mesh vertex nearest a world point);
@@ -51,6 +54,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 from baillarger.viewer import filters as VF
+from baillarger.viewer import streamlines as SV
 from baillarger.viewer.data import Site
 from baillarger.viewer.labels import LabelReview
 
@@ -68,7 +72,7 @@ class Shared:
 
     def __init__(self) -> None:
         self.state: dict[str, Any] = dict(
-            crosshair=None, selection=None, frame=None, layer=None
+            crosshair=None, selection=None, frame=None, rotation=0.0, layer=None
         )
         self.seq = 0
         self.lock = threading.Lock()
@@ -114,6 +118,7 @@ class Handler(BaseHTTPRequestHandler):
     labels: LabelReview | None = None
     lock = threading.Lock()  # one site computation at a time
     groups: dict[tuple[int, float], dict[str, list[int]]] = {}
+    axes: dict[int, dict[str, list[list[float]]]] = {}
 
     def log_message(self, format: str, *args: Any) -> None:
         pass
@@ -165,6 +170,22 @@ class Handler(BaseHTTPRequestHandler):
     def streamline_summary(self, i: int, radius: float) -> dict[str, Any]:
         out = cast(Site, self.site).streamlines(i, radius)
         self.groups[(i, radius)] = out.pop("_groups")
+        return out
+
+    def section(self, q: dict[str, str]) -> dict[str, Any]:
+        out = cast(Site, self.site).section_at(
+            int(q["i"]),
+            float(q.get("half", 8.0)),
+            floats(q.get("right")),
+            floats(q.get("up")),
+            int(q.get("level", 0)),
+            float(q.get("rot", 0.0)),
+        )
+        k = max(self.axes, default=-1) + 1
+        if len(self.axes) > 64:
+            self.axes.clear()
+        self.axes[k] = out.pop("curves")
+        out["axes"] = dict(id=k, points={a: len(c) for a, c in self.axes[k].items()})
         return out
 
     def events(self) -> None:
@@ -238,15 +259,11 @@ class Handler(BaseHTTPRequestHandler):
                 lambda: dict(name=q["name"], values=round3(s.layers()[q["name"]]))
             )
         elif u.path == "/section":
-            self.json(
-                lambda: s.section_at(
-                    int(q["i"]),
-                    float(q.get("half", 8.0)),
-                    floats(q.get("right")),
-                    floats(q.get("up")),
-                    int(q.get("level", 0)),
-                )
-            )
+            self.json(lambda: self.section(q))
+        elif u.path.startswith("/axes/") and u.path.endswith(".tck"):
+            _, _, k_, a_ = u.path.split("/")
+            k, a = int(k_), a_.removesuffix(".tck")
+            self.binary(lambda: SV.tck([np.asarray(self.axes[k][a], float)]))
         elif u.path == "/mesh":
             self.binary(
                 lambda: s.mesh_payload(int(q.get("level", 0)), q.get("faces") == "1")
@@ -355,6 +372,7 @@ def serve(
     Handler.site = site
     Handler.shared = Shared()
     Handler.groups = {}
+    Handler.axes = {}
     Handler.labels = labels
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     srv.daemon_threads = True
