@@ -46,6 +46,7 @@ for viewing); without --changes, the mesh is that of the aseg's WM label.
 import argparse
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,8 @@ import numpy as np
 import numpy.typing as npt
 from nibabel.gifti.gifti import GiftiImage
 from scipy import ndimage as ndi
+from scipy import sparse
+from scipy.sparse.csgraph import connected_components
 
 from baillarger import mesh_smoothing as S
 from baillarger.bids import (
@@ -614,6 +617,7 @@ SURF_SPEC = SidecarSpec(
         Key("NormalsFile", "string", True, "the normals' GIfTI (name)"),
         Key("BlocksFile", "string", True, "the block index (name)"),
         Key("DataSHA256", "object", True, "SHA-256 of each .dat, by name"),
+        Key("SelfIntersections", "object", True, "summary of untangle"),
     ),
 )
 
@@ -649,10 +653,95 @@ def surface_paths(out: Path, ents: dict[str, str], hemi: str) -> dict[str, Path]
     )
 
 
+#: untangle: rings of neighbours round the intersecting faces that are
+#: blended back first, and the blend at which a vertex goes all the way back
+UNTANGLE_RINGS = 4
+UNTANGLE_MIN_BLEND = 0.125
+
+
+def untangle(
+    v0: Float,
+    v: Float,
+    f: Int,
+    rings: int = UNTANGLE_RINGS,
+    as_written: Callable[[Float], Float] | None = None,
+) -> tuple[Float, dict[str, Any], list[dict[str, Any]]]:
+    """Remove the self-intersections that smoothing made: v0 is the mesh
+    before smoothing (marching tetrahedra: no self-intersections), v after.
+    Each vertex has a blend t (1 at first) and lies at v0 + t (v - v0). While
+    faces intersect (baillarger.mesh_intersect), the vertices within rings
+    rings of them halve their t, or go to 0 once t is at most
+    UNTANGLE_MIN_BLEND; if all of those are already at 0, rings doubles.
+    as_written maps vertices to what the file will hold (mm, rounded to
+    float32), so that the test is of the written mesh: rounding can make two
+    sheets that blending left just apart cross. This ends: at worst a whole
+    piece is back at v0. Returns the vertices;
+    the summary for the sidecar (the intersecting faces before, the vertices
+    moved back, the smallest blend); and the places, for a person to look at
+    (per connected cluster of the first intersecting faces: its faces and
+    centre, voxels)."""
+    from baillarger import mesh_intersect as mi
+
+    def test(x: Float) -> tuple[Bool, int]:
+        out = mi.intersecting_faces(x if as_written is None else as_written(x), f)
+        return out[0], out[-1]
+
+    A, _ = S.umbrella(v, f)
+    t = np.ones(len(v), v.dtype)
+    x = v
+    bad, n0 = test(x)
+    faces_before = int(bad.sum())
+    places = []
+    if n0:
+        fb = f[bad]
+        e = np.r_[fb[:, [0, 1]], fb[:, [1, 2]]]
+        C = sparse.coo_matrix(
+            (np.ones(len(e), np.int8), (e[:, 0], e[:, 1])), (len(v),) * 2
+        )
+        _, lab = connected_components(C, directed=False)
+        fl = lab[fb[:, 0]]
+        for k in np.unique(fl):
+            c = v[fb[fl == k]].reshape(-1, 3).mean(0)
+            places.append(
+                dict(Faces=int((fl == k).sum()), Centre=np.round(c, 1).tolist())
+            )
+    n = n0
+    while n:
+        seed = np.zeros(len(v), bool)
+        seed[f[bad].ravel()] = True
+        while True:
+            near = seed.copy()
+            for _ in range(rings):
+                near |= (A @ near.astype(A.dtype)) > 0
+            if np.any(t[near] > 0):
+                break
+            rings *= 2
+        t[near] = np.where(t[near] > UNTANGLE_MIN_BLEND, t[near] / 2, 0.0)
+        x = v0 + t[:, None] * (v - v0)
+        bad, n = test(x)
+    summary = dict(
+        FacesBefore=faces_before,
+        VerticesMovedBack=int((t < 1).sum()),
+        SmallestBlend=float(t.min()) if len(t) else 1.0,
+    )
+    return x, summary, places
+
+
+def mm_to_voxel(mm: npt.ArrayLike, affine: npt.ArrayLike) -> Float:
+    """Points in scanner mm to voxel coordinates of the grid (float32), as
+    WhiteSurface.load computes them: the inverse affine in float64, then
+    rounded."""
+    inv = np.linalg.inv(np.asarray(affine, np.float64))
+    out: Float = (np.asarray(mm, np.float64) @ inv[:3, :3].T + inv[:3, 3]).astype(
+        np.float32
+    )
+    return out
+
+
 def block_bounds(v: Float, f: Int, blocks: MeshBlocks) -> Float:
     """(k, 6): per block, the bounding box (min, max) of the vertices its
     faces use."""
-    out = np.zeros((len(blocks.origin), 6))
+    out = np.zeros((len(blocks.origin), 6), np.float64)
     if not len(f):
         return out
     p = v[f]  # (m, 3, 3)
@@ -664,12 +753,13 @@ def block_bounds(v: Float, f: Int, blocks: MeshBlocks) -> Float:
 
 def write_white_surface(
     dseg: Path, out: Path, sigma: float = 2.0, block: int = BLOCK
-) -> dict[str, Path]:
+) -> "SurfaceFiles":
     """The mesh command: the white mesh of the WM mask of a corrected
     segmentation (write_wm_topo), as GIfTI with external binary data, the
     normals, the block index and the sidecar (docs/formats/white-surf.md).
     Raises ValueError if the mask has a handle or a cavity. Returns the
-    paths written, by role."""
+    paths written and the places where smoothing made self-intersections
+    (untangle)."""
     side = read_sidecar(sidecar_path(dseg), DSEG_SPEC)
     hemi, filled = side["Hemisphere"], tuple(side["FilledLabels"])
     img = nib.load(dseg)
@@ -689,14 +779,24 @@ def write_white_surface(
         raise ValueError(
             f"{dseg.name}: the WM mask has Betti numbers {b}, not (b0, 0, 0)"
         )
-    v0, f, blocks = marching_tetrahedra_blocks(mask.view(np.uint8), 0.5, block)
+    # float32 throughout, as on a GPU (baillarger.mesh_smoothing keeps it)
+    v0, f, blocks = marching_tetrahedra_blocks(
+        mask.view(np.uint8), 0.5, block, np.float32
+    )
     del mask
     f = f[:, [0, 2, 1]].copy()  # marching_tetrahedra points into the WM
-    v = S.twice(S.relax(v0, f), f, sigma)
+    aff = np.asarray(img.affine, np.float64)
+
+    def as_written(x: Float) -> Float:
+        out: Float = (x @ aff[:3, :3].T + aff[:3, 3]).astype("<f4").astype(np.float64)
+        return out
+
+    v, untangled, places = untangle(
+        v0, S.twice(S.relax(v0, f), f, sigma), f, as_written=as_written
+    )
     del v0
     n = S.smooth_normals(v, f)
-    aff = np.asarray(img.affine, np.float64)
-    v_mm = (v @ aff[:3, :3].T + aff[:3, 3]).astype("<f4")
+    v_mm = as_written(v).astype("<f4")
     paths = surface_paths(out, entities(dseg), hemi)
     dataset_description(out)
     surf_meta = dict(
@@ -717,7 +817,10 @@ def write_white_surface(
         [DataArray(n.astype("<f4"), "NIFTI_INTENT_VECTOR", dict(Name="normals"))],
         dict(AnatomicalStructurePrimary=_STRUCTURE[hemi]),
     )
-    bb = block_bounds(v, f, blocks)
+    # the boxes hold the vertices as a reader gets them back from the file
+    bb = block_bounds(mm_to_voxel(v_mm, aff), f, blocks)
+    bb[:, :3] = np.floor(bb[:, :3].astype(np.float64) * 1000) / 1000
+    bb[:, 3:] = np.ceil(bb[:, 3:].astype(np.float64) * 1000) / 1000
     rows = np.c_[
         blocks.origin // block,
         blocks.vertex_start,
@@ -751,17 +854,28 @@ def write_white_surface(
             NormalsFile=paths["normals"].name,
             BlocksFile=paths["blocks"].name,
             DataSHA256={d.name: file_sha256(d) for d in (dat, ndat)},
+            SelfIntersections=untangled,
         ),
     )
-    return dict(paths, dat=dat, normals_dat=ndat)
+    return SurfaceFiles(dict(paths, dat=dat, normals_dat=ndat), places)
+
+
+@dataclass(frozen=True)
+class SurfaceFiles:
+    """What write_white_surface wrote: the paths, by role, and the places
+    where smoothing made self-intersections that untangle removed."""
+
+    paths: dict[str, Path]
+    places: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
 class WhiteSurface:
     """A white surface read from its files (write_white_surface), whole or
-    one block: vertices in voxel coordinates of the segmentation's grid,
-    faces into them, normals (out of the WM), and vertex_ids, the vertices'
-    indices in the whole mesh (for one block: the vertices its faces use)."""
+    one block: vertices (float32) in voxel coordinates of the
+    segmentation's grid, faces into them, normals (float32, out of the WM),
+    and vertex_ids, the vertices' indices in the whole mesh (for one block:
+    the vertices its faces use)."""
 
     v: Float
     f: Int
@@ -798,10 +912,8 @@ class WhiteSurface:
                 f = np.asarray(tri[fs:fe], np.int64)
             ids, f = np.unique(f, return_inverse=True)
             f = f.reshape(-1, 3)
-        inv = np.linalg.inv(aff)
-        mm = np.asarray(pts[ids], np.float64)
-        v = mm @ inv[:3, :3].T + inv[:3, 3]
-        return cls(v, f, np.asarray(nrm[ids], np.float64), ids, aff, side)
+        v = mm_to_voxel(pts[ids], aff)
+        return cls(v, f, np.asarray(nrm[ids], np.float32), ids, aff, side)
 
     def check(self, dseg: Path) -> None:
         """Raises ValueError unless dseg is the segmentation the surface was
@@ -981,10 +1093,12 @@ def main(argv: list[str] | None = None) -> None:
         for role, path in write_wm_topo(a.aseg, a.out).items():
             print(f"{role}: {path}")
     elif a.cmd == "mesh":
-        for role, path in write_white_surface(
-            a.dseg, a.out, a.sigma, a.block_cells
-        ).items():
+        w = write_white_surface(a.dseg, a.out, a.sigma, a.block_cells)
+        for role, path in w.paths.items():
             print(f"{role}: {path}")
+        for pl in w.places:
+            at = [round(x) + 1 for x in pl["Centre"]]
+            print(f"self-intersection removed: {pl['Faces']} faces at {at} (1-based)")
     elif a.cmd == "changes":
         ch = wm_changes()
         write_changes(ch, a.out)

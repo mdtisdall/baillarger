@@ -150,13 +150,70 @@ def test_blocks_give_the_one_shot_surface_exactly() -> None:
     X, Y, Z = np.meshgrid(x, x, x[:20], indexing="ij")
     torus = np.hypot(np.hypot(X - 17.7, Y - 18.2) - 9, Z - 9.6)
     binary = (rough < 9.0).astype(np.uint8)  # integer input, points on the level
-    for G, lv in ((rough, 9.0), (torus, 4.0), (binary, 0.5), (np.round(F), 9.0)):
-        V0, T0 = canonical(*marching_tetrahedra(G, lv, block=1000))
+    cases = ((rough, 9.0), (torus, 4.0), (binary, 0.5), (np.round(F), 9.0))
+    for G, lv in cases:
+        V0, T0 = canonical(*marching_tetrahedra(G, lv, 1000))
         assert len(T0)
         for b in (1, 3, 7, 16):
-            V, T = canonical(*marching_tetrahedra(G, lv, block=b))
+            V, T = canonical(*marching_tetrahedra(G, lv, b))
             assert np.array_equal(V, V0)
             assert np.array_equal(T, T0)
+            # float32: the same triangles, block by block (vertices that
+            # round together make the canonical order ambiguous, so compare
+            # with float64 at the same block size)
+            V64, T64 = marching_tetrahedra(G, lv, b, np.float64)
+            V32, T32 = marching_tetrahedra(G, lv, b, np.float32)
+            assert V32.dtype == np.float32 and np.array_equal(T32, T64)
+            assert np.abs(V32 - V64).max() < 1e-5
+
+
+def test_the_orientation_table_holds_for_any_values() -> None:
+    """_FLIP depends only on the tetrahedron and the corners' signs: the
+    geometric orientation agrees with it for random values."""
+    from baillarger.mesh import _CASES, _FLIP, _TETS
+
+    rng = np.random.default_rng(4)
+    for ty in range(6):
+        P = _TETS[ty].astype(float)
+        for pat in range(1, 15):
+            sgn = np.array([(pat >> i) & 1 for i in range(4)], bool)
+            for _ in range(20):
+                mag = rng.uniform(1e-3, 10, 4)
+                val = np.where(sgn, mag, -mag)
+                order = np.argsort(~sgn, kind="stable")
+                o_pos, o_val = P[order], val[order]
+                g = np.linalg.solve(P[1:] - P[:1], val[1:] - val[:1])
+                pairs_list = dict(_CASES)[int(sgn.sum())]
+                for k, pairs in enumerate(pairs_list):
+                    q = [
+                        o_pos[a]
+                        + o_val[a] / (o_val[a] - o_val[b]) * (o_pos[b] - o_pos[a])
+                        for a, b in pairs
+                    ]
+                    nrm = np.cross(q[1] - q[0], q[2] - q[0])
+                    assert (float(nrm @ g) < 0) == _FLIP[ty, pat, k]
+
+
+def test_float32_keeps_grid_points_on_the_level() -> None:
+    """Grid points exactly on the level: in float32 the crossings next to
+    them round onto the grid point, but the surface stays closed."""
+    F, _ = sphere_field(30, (14.3, 15.1, 14.7))
+    V, T = marching_tetrahedra(np.round(F), 9.0, 8, np.float32)
+    top = topology(T, len(V))
+    assert top["components"] == 1 and top["genus"] == 0
+    assert top["boundary_loops"] == 0 and top["nonmanifold_edges"] == 0
+    assert len(np.unique(V, axis=0)) < len(V)  # some vertices did round together
+
+
+def test_float32_marching_matches_float64() -> None:
+    """The arithmetic in float32 (as on a GPU) against the float64
+    reference, on a smooth field: the same triangles, vertices within
+    float32 rounding."""
+    F, _ = sphere_field(40, (19.3, 20.1, 19.7))
+    V64, T64 = marching_tetrahedra(F, 12.0, 8, np.float64)
+    V32, T32 = marching_tetrahedra(F, 12.0, 8, np.float32)
+    assert np.array_equal(T32, T64)
+    assert np.abs(V32 - V64).max() < 1e-5
 
 
 def test_the_block_index() -> None:

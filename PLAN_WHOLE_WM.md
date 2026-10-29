@@ -234,18 +234,45 @@ Measured so far (right hemisphere, grid 700 × 384 × 1148, mask box
 |---|---|---|---|
 | `dseg` (whole command) | 3.4 min | 21.6 GB | Betti (1, 111, 182) → (1, 0, 0); 6,307 cavity voxels, 34 fills (570 voxels), 52 cuts (589 voxels: 529 to cortex, 60 to background) |
 | Blocked marching tetrahedra of its mask | 31 s | 4.3 GB (3.2 GB of it the mask) | 12.7 M vertices, 25.3 M faces; one closed genus-0 surface, no non-manifold edges |
-| `mesh` (whole command: Betti check, marching, relax, smoothing, normals, pieces, files) | 4.1 min | 12.4 GB | one closed genus-0 piece, 72,074 mm²; 12.7 M vertices, 25.3 M faces in 506 blocks of 64 cells; 0.61 GB of files |
+| `mesh` (whole command, float32: Betti check, marching, relax, smoothing, untangle, normals, pieces, files) | 5.7 min, about 1.1 cores | 17.1 GB | one closed genus-0 piece, 72,074 mm²; 12.7 M vertices, 25.3 M faces in 506 blocks of 64 cells; 0.61 GB of files |
+| Self-intersections | 16–20 s per check | 11–12 GB | smoothing made 13 intersecting faces at two places (a thin fold at voxel (147, 153, 656), and two faces at (276, 216, 139) that crossed only once rounded to float32); untangle moved 165 vertices back to half their smoothing; the written file has none |
 
 For comparison, label 41 alone has Betti (1, 243, 31), and 14 % of the
 surface of its outer voxels faces something other than cortex (8 % with the
 filled labels, mostly the medial cut face against the Fomblin).
 
-Not yet checked on the hemisphere: self-intersections of the smoothed
-mesh (`mesh_intersect`), as the box reports did.
+Self-intersections: the mesh before smoothing has none (it is the level set
+of one piecewise-linear function), smoothing can make some, so `mesh`
+untangles: it blends the vertices round intersecting faces back toward
+their positions before smoothing until the mesh as written (mm, float32)
+has none, records a summary in the sidecar and prints the places. The
+check is whole-mesh (12 GB here); at whole-brain scale it runs in blocks
+with a halo, since intersections are local.
 
-Left until a measurement asks for it: faster smoothing (one shared
-adjacency, 1-D edge keys instead of `np.unique(axis=0)`, `bincount` instead
-of `np.add.at`); handle removal in blocks round each handle (whole-brain
+Precision: the white mesh steps run in float32, as they will on a GPU (MPS
+has no float64). `mesh_smoothing` keeps the vertices' dtype, and
+`marching_tetrahedra` does its arithmetic in the dtype asked for. Its
+triangles and their orientation follow from the corners' signs alone (a
+table, `_FLIP`), and no triangle is dropped for zero area, so they are the
+same in either precision: in float32 a field with grid points exactly on
+the level had come apart (the 1e-12 nudge rounds away, the crossings land
+on the grid point) until orientation and dropping stopped depending on
+geometry. Against the float64 reference: the same triangles; vertices
+within 2e-5 voxel, normals within 6e-6; on the hemisphere the same
+self-intersections and area. Float64 stays where it buys exactness or a
+reference: the affine to mm, area sums, `mesh_intersect`'s pair tests.
+The sparse graphs that only give connectivity use int8.
+
+Block bounding boxes are of the vertices as a reader gets them from the
+file (mm back through the inverse affine), rounded outward: on the
+hemisphere none of the 506 misses a vertex.
+
+Parallelism: only `mesh_intersect` uses all cores (numba). Marching's
+blocks are independent and the smoothing is sparse products; both go
+parallel with the PyTorch backend (multi-threaded on the CPU, batched on a
+GPU), the next piece of work.
+
+Left until a measurement asks for it: handle removal in blocks round each handle (whole-brain
 scale would be about 43 GB); decimating the mesh (a question for the column
 stage).
 

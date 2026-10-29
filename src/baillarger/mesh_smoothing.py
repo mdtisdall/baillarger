@@ -2,7 +2,8 @@
 smoothing without shrinkage, and smoothed vertex normals; and the mesh's
 edges, boundary vertices and connected pieces.
 
-All smoothing uses the umbrella operator (each vertex's neighbours' centroid
+Every function keeps the dtype of the vertices (float32 or float64). All
+smoothing uses the umbrella operator (each vertex's neighbours' centroid
 minus the vertex) and keeps boundary vertices (box-face cuts) fixed.
 
 - relax: tangential relaxation. Vertices move toward their neighbours'
@@ -63,12 +64,14 @@ def vertex_normals(v: Float, f: Faces) -> Float:
 
 
 def umbrella(v: Float, f: Faces) -> tuple[sparse.csr_matrix, Float]:
-    """The vertex adjacency matrix and each vertex's degree (at least 1)."""
+    """The vertex adjacency matrix and each vertex's degree (at least 1), in
+    the dtype of v (float32 or float64), so that smoothing keeps it."""
     E = edges(f)
     nv = len(v)
-    C = sparse.coo_matrix((np.ones(len(E)), (E[:, 0], E[:, 1])), shape=(nv, nv))
+    dt = v.dtype if np.issubdtype(v.dtype, np.floating) else np.dtype(np.float64)
+    C = sparse.coo_matrix((np.ones(len(E), dt), (E[:, 0], E[:, 1])), shape=(nv, nv))
     A = (C + C.T).tocsr()
-    deg = np.maximum(np.asarray(A.sum(1)).ravel(), 1).astype(np.float64)
+    deg = np.maximum(np.asarray(A.sum(1)).ravel(), 1).astype(dt)
     return A, deg
 
 
@@ -130,7 +133,9 @@ def pieces(f: Faces, nv: int) -> tuple[Int, Int]:
     """Connected pieces: a label per vertex (-1 for vertices in no face) and
     per face, numbered in order of their lowest vertex."""
     E = edges(f)
-    G = sparse.coo_matrix((np.ones(len(E)), (E[:, 0], E[:, 1])), shape=(nv, nv))
+    G = sparse.coo_matrix(
+        (np.ones(len(E), np.int8), (E[:, 0], E[:, 1])), shape=(nv, nv)
+    )
     _, lab = connected_components(G, directed=False)
     used = np.zeros(nv, bool)
     used[f.ravel()] = True

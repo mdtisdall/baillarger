@@ -33,8 +33,14 @@ tetrahedralization of the grid, so the mesh has the mask's topology; the
 command refuses a mask whose Betti numbers are not (b0, 0, 0), so each piece
 is a closed genus-0 surface. Then tangential relaxation and Gaussian
 smoothing of `Sigma` voxels without shrinkage (`baillarger.mesh_smoothing`),
-which move the vertices and keep the faces. Triangles are oriented so their
-normals point out of the WM. The normals are the smoothed unit vertex
+which move the vertices and keep the faces. The mesh before smoothing has no
+self-intersections (it is the level set of one piecewise-linear function);
+smoothing can push close sheets (thin WM blades, tight folds) through each
+other, so `untangle` then blends the vertices round any intersecting faces
+back toward their positions before smoothing (halving their blend, to 0 at
+1/8, widening the region if needed) until no faces intersect: the written
+mesh has no self-intersections (`baillarger.mesh_intersect`, exact).
+Triangles are oriented so their normals point out of the WM. The normals are the smoothed unit vertex
 normals, out of the WM.
 
 ## The GIfTI files
@@ -82,7 +88,7 @@ crosses (other blocks have no faces):
 | `block_i`, `block_j`, `block_k` | integer | The block's index |
 | `vertex_start`, `vertex_stop` | integer | The vertices it owns: [start, stop) |
 | `face_start`, `face_stop` | integer | Its faces: [start, stop) |
-| `min_i`, `min_j`, `min_k`, `max_i`, `max_j`, `max_k` | number | The bounding box of the vertices its faces use, in voxels of the grid |
+| `min_i`, `min_j`, `min_k`, `max_i`, `max_j`, `max_k` | number | The bounding box of the vertices its faces use, in voxels of the grid, as a reader gets them from the file (mm through the inverse of `VoxelToRAS` in float64, rounded to float32); 3 decimals, minima rounded down and maxima up, so the box contains them |
 
 To read one block: its faces are rows `face_start` to `face_stop` of the
 triangle array (bytes from the triangle array's offset plus
@@ -111,3 +117,4 @@ and cover the arrays.
 | `NormalsFile` | string | yes | Name of the normals' `.func.gii` |
 | `BlocksFile` | string | yes | Name of the block index |
 | `DataSHA256` | object | yes | SHA-256 of each `.dat`, by name |
+| `SelfIntersections` | object | yes | Summary of `untangle`: `FacesBefore` (intersecting faces after smoothing), `VerticesMovedBack` (vertices left short of their smoothed position), `SmallestBlend` (0: some vertices are at their position before smoothing). The places are printed by the command, not stored |
