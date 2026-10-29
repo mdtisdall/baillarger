@@ -205,7 +205,7 @@ class Site:
         self.log2_area: Float = -0.5 * np.log2(np.linalg.det(g))
         Ip = cached(
             self.cache / f"inflate_{self.name}.npz",
-            key,
+            f"{key}-v{IN.VERSION}",
             lambda: IN.site_inflation(self.vmm, self.f, log=log),
         )
         self.infl: list[Float] = [self.vmm] + [x.astype(float) for x in Ip["x"]]
