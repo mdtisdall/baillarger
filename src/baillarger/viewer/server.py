@@ -26,12 +26,17 @@ Requests:
   /tracts/<i>/<radius>/<kind>_<class>.tck (the traces of one group, as .tck);
   /overview/<class>/<every>.tck (every k-th shown trace of a class);
   /echo2.nii.gz, /white.gii, /gm.gii (world mm, for the volume pane);
+  /filters (the filter job's status and log, the cached results, the one shown, the
+  choices: baillarger.viewer.filters);
   with --labels (baillarger.viewer.labels): /labels/list, /labels.nii.gz,
   /labels/echo<k>.nii.gz (k = 1, 2, 3: the echoes the detector reads).
 - Labels only (no column volume; --labels): /meta and /echo2.nii.gz come from the
   review, and only the page, /events, /state and the label routes are served.
 - POST /state {from, patch}: merge patch into the state; every page gets
   {from, seq, patch}.
+- POST /filters/run {from, params}: start a filter (one at a time, in a thread) or
+  find it cached; /filters/use {from, key}: show a finished result (key null: the raw
+  echo 2) in the sections and its layers; every page gets {filter: key}.
 - POST /labels/decide {from, id, status}, /labels/brush {from, mm, radius, label}:
   change the pial-label review and save it; every page gets the new labels_seq.
 """
@@ -48,6 +53,7 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from baillarger.viewer import filters as VF
 from baillarger.viewer import streamlines as SV
 from baillarger.viewer.data import Site
 from baillarger.viewer.labels import LabelReview
@@ -138,6 +144,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send(json.dumps(out, default=float).encode(), "application/json")
 
+    def send_json(self, fn: Any) -> None:
+        """As json, without the site lock: for calls that only start or read a job."""
+        try:
+            out = fn()
+        except Exception as exc:
+            err = json.dumps(dict(error=f"{type(exc).__name__}: {exc}")).encode()
+            self.send(err, "application/json", 400)
+            return
+        self.send(json.dumps(out, default=float).encode(), "application/json")
+
     def binary(self, fn: Any, ctype: str = "application/octet-stream") -> None:
         with self.lock:
             body = fn()
@@ -225,6 +241,19 @@ class Handler(BaseHTTPRequestHandler):
             self.json(lambda: dict(seq=self.shared.seq, state=self.shared.state))
         elif u.path == "/meta":
             self.json(s.meta)
+        elif u.path == "/filters":
+            self.json(
+                lambda: dict(
+                    status=s.jobs.status(),
+                    cached=s.jobs.cached(),
+                    active=s.filter_meta(),
+                    choices=dict(
+                        echo=list(VF.ECHOES),
+                        flatten=list(VF.FLATTEN),
+                        defaults=VF.Params().as_dict(),
+                    ),
+                )
+            )
         elif u.path == "/layer":
             self.json(
                 lambda: dict(name=q["name"], values=round3(s.layers()[q["name"]]))
@@ -311,6 +340,21 @@ class Handler(BaseHTTPRequestHandler):
                     sender,
                 )
             )
+            return
+        if self.path == "/filters/run":
+            self.send_json(lambda: cast(Site, self.site).jobs.run(req["params"]))
+            return
+        if self.path == "/filters/use":
+            key = req.get("key")
+
+            def use() -> dict[str, Any]:
+                out = cast(Site, self.site).use_filter(
+                    None if key is None else str(key)
+                )
+                self.shared.update(sender, dict(filter=key))
+                return out
+
+            self.json(use)
             return
         if self.path != "/state":
             self.send_error(404)

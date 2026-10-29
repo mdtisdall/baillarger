@@ -76,7 +76,13 @@ def test_fill_recovers_a_known_warp_and_ignores_the_far_stack():
     not z_v(tau) itself, is what the data fix.)"""
     import flatten_lib as FL
     from scipy.spatial import cKDTree
-    from test_flatten_volume import pattern
+
+    def pattern(t):
+        """A laminar pattern in relative depth (mm), as tests/test_flatten.py."""
+        t = np.asarray(t, float)
+        c = [(0.3, 1.0, 0.10), (0.8, -1.2, 0.12), (1.3, 0.8, 0.10), (1.8, -0.9, 0.14), (2.4, 0.7, 0.12),
+             (3.0, -0.8, 0.12), (3.6, 0.9, 0.13), (4.3, -0.7, 0.12)]
+        return sum(a * np.exp(-0.5 * ((t - m) / s) ** 2) for m, a, s in c)
 
     nx, ny, step, m = 14, 10, 0.04, 200
     xs, ys = np.meshgrid(np.linspace(-1, 1, nx), np.linspace(-1, 1, ny), indexing="ij")

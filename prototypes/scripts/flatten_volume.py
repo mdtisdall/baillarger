@@ -5,12 +5,14 @@ profiles.md, *Flattening in the volume*). Reads <work>/column_volume_<site>.npz 
    samples up to where it stopped). Features: echo 2 and echo 3 (trend removed), each divided by its
    SD over the traces' samples.
 2. Pairs: roots within 0.25 mm whose white-mesh normals agree (dot > 0.7).
-3. Shifts per pair (flatten_lib.shifts) and weights; the fit (flatten_lib.fit_warp).
-4. Saves <work>/flatten_<site>.npz (horizons z, tau, residuals, folds) and .json; views in <figures>:
+3. Shifts per pair (flatten_lib.shifts, or flatten_lib.dynamic_shifts with --shifts dyn) and
+   weights; the fit (flatten_lib.fit_warp).
+4. Saves <work>/flatten_<tag>.npz (tag: the site, plus _dyn for dynamic
+   shifts and _s<smax> for a bound other than 0.3 mm) (horizons z, tau, residuals, folds) and .json; views in <figures>:
    sections raw beside flattened, stacked profiles and the darkest band's depth, the residual and
    the Wheeler slice on the roots.
 
-Usage: flatten_volume.py <figures> <work> <site> [--eps E] [--figs-only]
+Usage: flatten_volume.py <figures> <work> <site> [--eps E] [--shifts lk|dyn] [--smax MM] [--figs-only]
 """
 
 import argparse
@@ -36,9 +38,12 @@ ap.add_argument("fig")
 ap.add_argument("work")
 ap.add_argument("site")
 ap.add_argument("--eps", type=float, default=0.2)
+ap.add_argument("--shifts", choices=["lk", "dyn"], default="lk")
+ap.add_argument("--smax", type=float, default=0.3, help="largest shift between neighbours (mm)")
 ap.add_argument("--figs-only", action="store_true")
 A = ap.parse_args()
 FIG, WORK, SITE = A.fig, A.work, A.site
+TAG = SITE + ("_dyn" if A.shifts == "dyn" else "") + (f"_s{A.smax:g}" if A.smax != 0.3 else "")
 STEP, DTAU, TAU_MAX, PAIR_MM, NDOT, CHUNK = X.STEP_MM, 0.08, 6.0, 0.25, 0.7, 20000
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
 CCOL = {OPEN: "#1baf7a", CROSS: "#2a78d6", OWN: "#eb6834", TOCONTACT: "#c79a00", FAILED: "#e34948"}
@@ -75,7 +80,8 @@ def fit():
     VA = np.zeros((P_, n), bool)
     for a in range(0, P_, CHUNK):
         p = pairs[a:a + CHUNK]
-        s, ncc, en, va = FL.shifts(F[:, p[:, 0]], F[:, p[:, 1]], M[p[:, 0]], M[p[:, 1]], STEP)
+        est = FL.dynamic_shifts if A.shifts == "dyn" else FL.shifts
+        s, ncc, en, va = est(F[:, p[:, 0]], F[:, p[:, 1]], M[p[:, 0]], M[p[:, 1]], STEP, smax=A.smax)
         S[a:a + CHUNK], NC[a:a + CHUNK], EN[a:a + CHUNK], VA[a:a + CHUNK] = s, ncc, en, va
     eref = float(np.median(EN[VA]))
     W = FL.pair_weights(NC, EN, VA, eref).astype(np.float32)
@@ -94,10 +100,11 @@ def fit():
     res = np.sqrt(num / np.maximum(den, 1e-9))
     res[den < 0.05] = np.nan
     fold = np.diff(z, axis=1) <= 0
-    np.savez_compressed(f"{WORK}/flatten_{SITE}.npz", keep=keep, tau=tau, z=z.astype(np.float32),
-                        res=res.astype(np.float32), wsum=den.astype(np.float32), fold=fold, pairs=pairs, eps=A.eps)
-    json.dump(dict(site=SITE, traces=int(N), pairs=int(P_), eps=A.eps, energy_ref=eref, outer=info),
-              open(f"{WORK}/flatten_{SITE}_fit.json", "w"), indent=1)
+    np.savez_compressed(f"{WORK}/flatten_{TAG}.npz", keep=keep, tau=tau, z=z.astype(np.float32),
+                        res=res.astype(np.float32), wsum=den.astype(np.float32), fold=fold, pairs=pairs, eps=A.eps, S=S, W=W)
+    json.dump(dict(site=SITE, shifts=A.shifts, smax=A.smax, traces=int(N), pairs=int(P_), eps=A.eps,
+                   energy_ref=eref, outer=info),
+              open(f"{WORK}/flatten_{TAG}_fit.json", "w"), indent=1)
     say("saved")
 
 
@@ -106,7 +113,7 @@ def fit():
 
 def figures():
     Z = np.load(f"{WORK}/column_volume_{SITE}.npz")
-    Fz = np.load(f"{WORK}/flatten_{SITE}.npz")
+    Fz = np.load(f"{WORK}/flatten_{TAG}.npz")
     keep, tau, z, res, fold = Fz["keep"], Fz["tau"], Fz["z"].astype(float), Fz["res"], Fz["fold"]
     tv, ns, fv, cls, pos, P, vox = Z["tv"], Z["ns"], Z["fv"], Z["cls"], Z["pos"], Z["P"], Z["vox"]
     H = {h: Z["H_" + h] for h in HOR}
@@ -119,8 +126,8 @@ def figures():
     E2 = fv[0, keep].astype(float)
     G2 = FL.resample(E2[None], ns[keep], zf, STEP)[0]
     vmax = np.nanpercentile(np.abs(E2), 97)
-    summary = dict(site=SITE, traces=int(N), eps=float(Fz["eps"]))
-    summary["fit"] = json.load(open(f"{WORK}/flatten_{SITE}_fit.json"))["outer"]
+    summary = dict(site=SITE, shifts=A.shifts, smax=A.smax, traces=int(N), eps=float(Fz["eps"]))
+    summary["fit"] = json.load(open(f"{WORK}/flatten_{TAG}_fit.json"))["outer"]
     summary["fold fraction (levels with dz/dtau <= 0, below each trace's end)"] = float(
         np.mean(fold[z[:, 1:] < (ns[keep, None] - 1) * STEP]))
     rr = res[np.isfinite(res)]
@@ -169,7 +176,7 @@ def figures():
     a.set_title("darkest point in 0.5-1.5 mm on each open or crossing trace")
     a.legend()
     fig.tight_layout()
-    fig.savefig(f"{FIG}/flatten_{SITE}_profiles.png", dpi=72)
+    fig.savefig(f"{FIG}/flatten_{TAG}_profiles.png", dpi=72)
     plt.close(fig)
 
     # ---- sections, raw beside flattened
@@ -220,7 +227,7 @@ def figures():
                 if ri == 0 and ci == 0:
                     a.legend(fontsize=7, loc="lower right", ncol=4)
         fig.tight_layout()
-        fig.savefig(f"{FIG}/flatten_{SITE}_sections.png", dpi=60)
+        fig.savefig(f"{FIG}/flatten_{TAG}_sections.png", dpi=60)
         plt.close(fig)
     else:
         ax, planes = 2, [Z["disp"].shape[2] // 4, Z["disp"].shape[2] // 2, 3 * Z["disp"].shape[2] // 4]
@@ -250,9 +257,9 @@ def figures():
             plt.colorbar(sc, ax=a, fraction=0.04)
             a.set_title(f"plane {'ijk'[ax]} = {k}: roots, {lab}", fontsize=10)
     fig.tight_layout()
-    fig.savefig(f"{FIG}/flatten_{SITE}_roots.png", dpi=60)
+    fig.savefig(f"{FIG}/flatten_{TAG}_roots.png", dpi=60)
     plt.close(fig)
-    json.dump(summary, open(f"{WORK}/flatten_{SITE}.json", "w"), indent=1)
+    json.dump(summary, open(f"{WORK}/flatten_{TAG}.json", "w"), indent=1)
     print(json.dumps(summary, indent=1))
 
 

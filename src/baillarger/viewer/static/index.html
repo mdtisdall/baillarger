@@ -9,6 +9,10 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.35 system-ui, sans-serif; display: flex; flex-direction: column; }
+  #fbar { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; padding: 4px 10px;
+          background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
+  #fbar label { color: var(--mute); }
+  #fstat { font-size: 11px; color: var(--mute); }
   #bar { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; padding: 6px 10px;
          background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
   #bar label, .pbar label { color: var(--mute); }
@@ -66,6 +70,18 @@
     <option value="volume,labels">volume + labels</option><option value="labels">labels</option></select></label>
   <button id="newwin" title="open another window with these panes">new window</button>
   <span id="sync">connecting…</span>
+</div>
+<div id="fbar" title="filters of the column data (baillarger.viewer.filters): run one, or pick a result; every window shows it">
+  <b>Filter</b>
+  <label>echo <select id="fecho"><option value="2">2</option><option value="3">3</option><option value="2+3">2 + 3</option></select></label>
+  <label>smooth along the column <select id="fsmooth"><option value="0">off</option><option>0.08</option><option>0.16</option><option>0.32</option></select> mm</label>
+  <label>flatten <select id="fflat"><option value="off">off</option><option value="lk">gradient shifts</option><option value="dyn">dynamic warping</option></select></label>
+  <label>shift bound <select id="fsmax"><option>0.3</option><option>0.45</option><option>0.6</option></select> mm</label>
+  <label>ε <select id="feps"><option>0.1</option><option selected>0.2</option><option>0.5</option><option>1</option></select></label>
+  <label>stack across columns <select id="fstack"><option value="0">off</option><option>0.25</option><option>0.5</option><option>1</option></select> mm</label>
+  <button id="frun" title="compute this filter (minutes when flattening), or load it if it was run before">run</button>
+  <label>show <select id="fshow"></select></label>
+  <span id="fstat"></span>
 </div>
 <div id="main">
   <div class="pane" id="p-volume">
@@ -182,6 +198,7 @@ async function apply(st) {
     if ("selection" in st) await setSelection(st.selection, st.frame || null);
     else if ("rotation" in st && CUR !== null) await showTrace(CUR);
     if ("labels_seq" in st && LAB.on && st.labels_seq !== LAB.seq) await loadLabels();
+    if ("filter" in st && !META.labels_only && st.filter !== FIL.key) await refreshFilters(true);
   } finally { applying = false; }
 }
 function connect() {
@@ -204,6 +221,64 @@ function crossHere(mm) { CROSS = mm; moveVolumeCrosshair(mm); share({ crosshair:
 const selectVertex = async (v, frame) => selectHere(await get(`/vertex?v=${v}`), frame);
 const crossVertex = async v => crossHere((await get(`/vertex?v=${v}`)).world_mm);
 
+// ---------------------------------------------------------------- filters (baillarger.viewer.filters)
+const FIL = { key: null, frame: "depth", polling: false };
+function filterParams() {
+  return { echo: $("fecho").value, smooth_mm: +$("fsmooth").value, flatten: $("fflat").value,
+           smax: +$("fsmax").value, eps: +$("feps").value, stack_mm: +$("fstack").value };
+}
+function setFilterInputs(p) {
+  $("fecho").value = p.echo; $("fsmooth").value = p.smooth_mm ? String(p.smooth_mm) : "0"; $("fflat").value = p.flatten;
+  $("fsmax").value = String(p.smax); $("feps").value = String(p.eps); $("fstack").value = p.stack_mm ? String(p.stack_mm) : "0";
+}
+async function post(u, body) {
+  const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from: ME, ...body }) });
+  const j = await r.json(); if (j.error) { log("error: " + j.error); throw new Error(j.error); } return j;
+}
+// the list of results, the one shown, the job's state; redraw = the shown one changed
+async function refreshFilters(redraw) {
+  const F = await get("/filters"), A = F.active;
+  const sel = $("fshow"); sel.innerHTML = "";
+  const raw = document.createElement("option"); raw.value = ""; raw.textContent = "raw echo 2"; sel.appendChild(raw);
+  for (const c of F.cached) { const o = document.createElement("option"); o.value = c.key; o.textContent = c.label; sel.appendChild(o); }
+  sel.value = A.key || "";
+  const st = F.status;
+  $("fstat").textContent = st.status === "running" ? `running: ${st.label} — ${st.log.length ? st.log[st.log.length - 1] : ""}`
+    : st.status === "error" ? `failed: ${st.error}` : `showing ${A.label}` + (A.key ? ` (${A.shown} traces, depth axis ${A.frame === "tau" ? "τ" : "mm from the root"})` : "");
+  const changed = FIL.key !== A.key;
+  FIL.key = A.key; FIL.frame = A.frame;
+  // the controls follow the shown result only when it changes, not on every poll
+  if (changed && A.key) { const c = F.cached.find(x => x.key === A.key); if (c) setFilterInputs(c.params); }
+  if (redraw || changed) {
+    const cur = $("layer").value; $("layer").innerHTML = "";
+    for (const n of A.layers) { const o = document.createElement("option"); o.textContent = n; $("layer").appendChild(o); }
+    $("layer").value = A.layers.includes(cur) ? cur : A.layers[0];
+    await loadLayer();
+    if (CUR !== null) await showTrace(CUR);
+  }
+  return F;
+}
+async function useFilter(key) { await post("/filters/use", { key: key || null }); await refreshFilters(true); }
+async function pollJob(key) {
+  if (FIL.polling) return; FIL.polling = true;
+  try {
+    let seen = 0;
+    for (;;) {
+      const F = await refreshFilters(false), st = F.status;
+      for (const m of st.log.slice(seen)) log("filter: " + m); seen = st.log.length;
+      if (st.status === "done") { if (st.key === key) await useFilter(key); return; }
+      if (st.status === "error") { log("filter failed: " + st.error); return; }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  } finally { FIL.polling = false; }
+}
+$("frun").onclick = async () => {
+  const out = await post("/filters/run", { params: filterParams() });
+  log(`filter ${out.label}: ${out.status === "done" ? "ready" : "started"}`);
+  if (out.status === "done") await useFilter(out.key); else pollJob(out.key);
+};
+$("fshow").onchange = () => useFilter($("fshow").value);
+
 // ---------------------------------------------------------------- layer
 let lo = 0, hi = 1, diverging = false;
 async function loadLayer() {
@@ -212,6 +287,7 @@ async function loadLayer() {
   const f = VALS.filter(v => v !== null && isFinite(v)).sort((a, b) => a - b);
   const qq = p => f.length ? f[Math.min(f.length - 1, Math.floor(p * f.length))] : 0;
   diverging = /change|- single|log2/.test(name);
+  if (name.startsWith("filter: ") && /fraction/.test(name)) diverging = false;
   if (diverging) { const m = Math.max(Math.abs(qq(0.02)), Math.abs(qq(0.98)), 1e-6); lo = -m; hi = m; }
   else if (name.startsWith("rank_") || name === "combined") { lo = 0; hi = 1; }
   else if (name === "class at the root") { lo = 0; hi = 4; }
@@ -535,7 +611,8 @@ function drawSections() {
 function lay(c) { const W = c.clientWidth, H = c.clientHeight, half = +$("half").value, dmax = +$("dmax").value;
   return { W, H, x: d => (d + half) / (2 * half) * W, y: z => z / dmax * H, dmax, half, z: py => py / H * dmax }; }
 function drawSection(c, S, title, h) {
-  h.textContent = title + ` — ${S.traces.length} traces`;
+  const tau = S.frame === "tau";
+  h.textContent = title + ` — ${S.traces.length} traces` + (tau ? " — flattened: depth axis τ (mm)" : "");
   const dpr = window.devicePixelRatio || 1, L = lay(c); c.width = L.W * dpr; c.height = L.H * dpr;
   const g = c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.fillStyle = "#000"; g.fillRect(0, 0, L.W, L.H);
   const n = S.traces.length; if (!n) return;
@@ -565,7 +642,7 @@ function drawSection(c, S, title, h) {
   for (const p of S.points) { g.fillText("★", xs[p.k], L.y(p.depth)); g.font = "10px system-ui"; g.fillText(p.point, xs[p.k] + 9, L.y(p.depth) - 8); g.font = "13px system-ui"; }
   g.strokeStyle = "#ffffff80"; g.lineWidth = 1; g.beginPath(); g.moveTo(L.x(0), 0); g.lineTo(L.x(0), L.H); g.stroke();
   g.fillStyle = "#9aa0a8"; g.font = "10px system-ui"; g.textAlign = "left";
-  for (let z = 1; z < L.dmax; z++) g.fillText(z + " mm", 2, L.y(z));
+  for (let z = 1; z < L.dmax; z++) g.fillText(z + (tau ? " τ" : " mm"), 2, L.y(z));
   for (let d = -L.half; d <= L.half; d += 2) g.fillText(d, L.x(d) + 2, L.H - 6);
 }
 $("half").onchange = () => CUR !== null && showTrace(CUR);
@@ -682,6 +759,7 @@ window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections
     PANES = ["volume", "labels"]; layout();
     for (const id of ["vwhite", "vgm", "vfrom", "vto", "vover", "vpts", "vaxes", "layer", "half", "dmax", "radius", "panesel"])
       $(id).closest("label").style.display = "none";
+    $("fbar").style.display = "none";
     $("rotbar").style.display = "none";
     $("newwin").style.display = "none";
   }
@@ -692,6 +770,10 @@ window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections
   if (has("surface")) { initGL(); const lv = Math.min(2, META.levels.length - 1); $("level").value = lv; await loadMesh(lv, true); }
   if (has("map")) fitMap();
   if (META.layers.length) await loadLayer();
+  if (!META.labels_only) {
+    const F = await refreshFilters(false);
+    if (F.status.status === "running") pollJob(F.status.key);
+  }
   if (has("volume")) await initVolume();
   try { await get("/labels/list"); LAB.on = true; } catch (e) { LAB.on = false; }
   if (LAB.on) { $("vlab").style.display = ""; await loadLabels(); }

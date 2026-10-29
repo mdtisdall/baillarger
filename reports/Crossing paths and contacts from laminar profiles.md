@@ -249,6 +249,7 @@ A local 3D chart of the volume around a point, written as NIfTI cubes for ITK-SN
 **Data term: shifts between neighbouring traces.**
 - Neighbours: traces whose roots are within 0.3 mm of each other and whose white-mesh normals agree (dot product over 0.7), so the two sides of a thin WM blade are not joined. Roots within 2 mm of a box face are left out, as everywhere.
 - For each pair (v, w) and each depth z on v, the shift s_vw(z) that best maps w onto v near z: f_w(z + s) ≈ f_v(z). It is estimated by iterated gradient matching (Lucas–Kanade along the trace), for echoes 2 and 3 together, with derivative scale 0.16 mm and a Gaussian window of 0.32 mm, the scales of the structure tensor.
+- *Alternative estimator: dynamic warping* (`baillarger.flatten.dynamic_shifts`, `--shifts dyn`; Hale 2013). Squared alignment errors over lags in ±smax at 0.01 mm, smoothed along the trace at 0.32 mm; the exact minimum-cost lag path on depths every 0.16 mm with |ds/dz| ≤ 0.2; the path smoothed at 0.32 mm; then the gradient iterations as a polish. The smoothing is needed because the gradient iterations only fix the shift's average over their window, so ripples shorter than it (the path's kinks every 0.16 mm) would stay: unsmoothed, the polished shift was off by 0.001 mm (median) on a smooth shift where the gradient estimator is within 0.0001 mm (`test_dynamic_matches_gradient_on_a_smooth_small_shift`). Global along the trace, so not limited by the gradient estimator's capture range. Results: *Flattening by dynamic warping* below.
 - Weight: the window's gradient energy (normalized) times the local correlation after the shift (0 if negative). Samples past a trace's end have no weight.
 
 **Fit.** Weighted least squares, all levels and traces at once:
@@ -263,7 +264,7 @@ Solved by conjugate gradients on the normal equations.
 - the residual per trace and level (the fit's misfit): where a continuous warp disagrees with the data. By the no-faults rule a large jump between neighbours points at an upstream error;
 - folds: levels where ∂z/∂τ ≤ 0, reported, not enforced (the first version).
 
-**Tests (exact answers, `test_flatten_volume.py`):**
+**Tests (exact answers, `tests/test_flatten.py`):**
 - the shift estimator recovers a known constant shift and a shift that varies with depth;
 - the fit recovers a known warp on a grid of synthetic traces: a thickness that varies sideways and a band that rises in the middle, with traces of different lengths.
 
@@ -493,7 +494,7 @@ Offset from the user's point along the path (|offset| median, 90th in brackets, 
 
 ### Flattening in the volume: first run at both faces
 
-**Code.** `flatten_lib.py` (shifts, fit, resampling) and `test_flatten_volume.py` (7 tests, all pass: `nix develop --command uv run pytest -q prototypes/scripts/test_flatten_volume.py`). Driver: `flatten_volume.py <figures> <work> <site> [--eps E] [--figs-only]`, after `column_volume.py`; it needs `uv run --with matplotlib`. Outputs: `prototypes/scripts/flatten_<site>.npz` and `.json`, and `prototypes/figures/flatten_<site>_{sections,profiles,roots}.png`.
+**Code.** `baillarger.flatten` (shifts, fit, resampling; `prototypes/scripts/flatten_lib.py` re-exports it for the scripts) and `tests/test_flatten.py`. Driver: `flatten_volume.py <figures> <work> <site> [--eps E] [--figs-only]`, after `column_volume.py`; it needs `uv run --with matplotlib`. Outputs: `prototypes/scripts/flatten_<site>.npz` and `.json`, and `prototypes/figures/flatten_<site>_{sections,profiles,roots}.png`.
 
 **Synthetic.** On a grid of traces with a thickness that varies sideways by ±20 % and a band that rises in the middle, the fit recovers the horizons to a median of 0.001 mm (p95 0.007), against 0.19 mm unflattened. With noise at 0.2 of the band amplitude: a median of 0.013 mm. ε = 1 instead of 0.2 doubles the error without noise and leaves it unchanged with noise. The shift estimator recovers a constant shift of 0.10 mm within 0.005 mm, and a depth-varying one within 0.015 mm.
 
@@ -528,6 +529,43 @@ The darkest-point measure first counted minima on the window's edge (a pile-up a
 - echo weights: both echoes are scaled to unit SD; echo 3 carries more stria contrast;
 - per-bank or per-area gauges in place of one τ for the box;
 - the τ coordinate as the chart's depth axis (`chart.py`), and a re-trace along the flattened layer normal.
+
+### Flattening by dynamic warping: V1V2 banks
+
+**Code.** `baillarger.flatten.dp_lags` (the accumulation and backtrack) and `baillarger.flatten.dynamic_shifts`; `flatten_volume.py --shifts lk|dyn --smax MM` (outputs tagged `_dyn`, `_s<smax>`; the npz now also holds the shifts S and weights W); `flatten_compare.py <work> <site> <tags…>`.
+
+**Tests** (`tests/test_flatten.py`):
+- `dp_lags` against enumeration of every path, strain 0–2 lags;
+- a constant shift of 0.6 mm: the gradient estimator, its bound opened to 0.8 mm, slides to the wrong band; dynamic warping is within 0.005 mm;
+- s(z) = 0.1 z + 0.2 (up to 0.6 mm): median 0.005, max 0.015 mm;
+- the strain and lag bounds hold exactly without the polish; at 0.10 mm the two estimators agree within 0.003 mm;
+- a partner trace that ends early: right shift and no valid samples past its end. Near the partner's end both estimators are biased by the gradient window (0.007 mm at 0.7 mm from it, 0.01 at 0.5 mm, 0.06 at 0.2 mm);
+- the fit recovers a warp whose neighbour shifts reach 0.36 mm (median under 0.01 mm).
+- **The gradient estimator's capture range on this pattern is about 0.5 mm**, not the 0.3 mm of its bound: it holds to 0.45 mm (all samples), starts failing at 0.5 mm (8 % off), and fails everywhere at 0.6 mm. In the real runs its ±0.3 mm bound is what limits it.
+
+**Runs** (same traces and pairs as the first run; ε = 0.2; dynamic warping without the smoothed start, so its shifts carry a ripple of up to about 0.005 mm, under one sample):
+
+| V1V2 banks | Gradient (rerun) | Dynamic, ±0.3 mm | Dynamic, ±0.6 mm |
+|---|---|---|---|
+| Time, peak memory | 6.3 min, 5.8 GB | 11.5 min, 5.8 GB | 15.3 min, 5.8 GB |
+| Weighted RMS misfit, first → last outer | 0.037 → 0.033 mm | 0.038 → 0.034 mm | 0.051 → 0.046 mm |
+| Residual p50 / p90 / p99 | 0.022 / 0.108 / 0.300 mm | 0.022 / 0.109 / 0.300 mm | 0.024 / 0.154 / 0.543 mm |
+| Folds | 2.3 % | 2.3 % | 3.4 % |
+| Darkest point in 0.5–1.5 mm, IQR raw → τ | 0.24 → 0.18 mm | 0.24 → 0.20 mm | 0.24 → 0.24 mm |
+| Shift against the gradient fit, p50 / p90 / p99 (weighted samples) | — | 0.002 / 0.011 / 0.062 mm | 0.003 / 0.017 / 0.300 mm |
+| … samples differing by more than one sample (0.04 mm) | — | 1.6 % | 5.5 % |
+| Horizons against the gradient fit, p50 / p90 / p99 | — | 0.016 / 0.069 / 0.193 mm | 0.050 / 0.217 / 0.535 mm |
+| Weighted samples (W > 0.3) at the ±0.3 mm bound | 3.0 % | 3.4 % | (1.0 % at ±0.6; 3.0 % between 0.3 and 0.6) |
+
+**What it shows** [readings by Claude]:
+- **Between neighbours, dynamic warping adds nothing at ±0.3 mm.** It reproduces the gradient shifts on 98.4 % of weighted samples within one sample, at 1.8× the time, with a slightly wider darkest band in τ. Neighbours are at most 0.25 mm apart, so their shifts are within the gradient estimator's reach.
+- **About 3 % of weighted samples sit at the ±0.3 mm bound in the gradient fit** (not known before). The clipped value goes into the fit with its weight. Opened to ±0.6 mm, these become shifts of 0.3–0.6 mm with fair correlation (mean weight 0.51, against 0.61 for shifts under 0.2 mm), and the fit gets worse on every measure. Over 0.25 mm between roots, a 0.3–0.6 mm shift is a layer slope of 50° or more against the trace.
+- **They gather on traces that end at a contact, stay in their own bank, or fail** (in the ±0.6 mm run, 45 % of the shifts at 0.3 mm or more, against 27 % of weighted samples; 42 % of the samples at the bound in the gradient fit), less on crossing traces (6 % against 15 %), and somewhat near a trace's end (27 % within 0.5 mm, against 20 %). By the no-faults rule they point at traces that diverge from their neighbours, an upstream error, rather than at tissue. A trace error, not a reason for a wider bound.
+- **Where dynamic warping should matter:** long-range pairs, where shifts are large and a local estimator can't get there: profiles matched to templates, across an evidence-free gap, or between areas (simultaneous correlation of many profiles).
+
+**Open (for the user):**
+- whether samples at the bound should get zero weight (a pair with no match there) instead of entering the fit at the bound's value;
+- whether to use `dynamic_shifts` for long-range matching (templates, simultaneous correlation) rather than for neighbours.
 
 ### The joint warp: the level solver
 
@@ -1446,6 +1484,26 @@ The volume pane names the tracer and the WM label that made the column volume (`
 **Open.**
 - Placing new points from the volume pane: NiiVue has drawing tools, not yet wired to a points file.
 - The camera is not shared between windows. Each 3D view keeps its own.
+
+### Filters in the viewer
+
+**Goal.** Re-process the column-sampled data from the viewer: choose a filter, run it, and see the sections and surface layers with it, in every window.
+
+**Code.** `baillarger.viewer.filters` (`Params`, `compute`, `Result`, `FilterJobs`); the viewer's filter bar; `GET /filters`, `POST /filters/run`, `POST /filters/use` (`baillarger.viewer.server`). Tests: `tests/test_viewer_filters.py`.
+
+**Filters, in order** (on every trace not within 2 mm of a box face):
+- *Echo:* 2, 3, or their mean, each divided by its SD over the traces' samples (the column volume's echoes are already trend-removed).
+- *Smoothing along the column:* normalized Gaussian over each trace's own samples.
+- *Flattening:* as *Flattening in the volume*, on both echoes whichever is shown, with the gradient estimator or dynamic warping, the shift bound and ε chosen. The profile is then resampled at constant τ, and the sections' depth axis is τ: open tops, levels, the single-surface horizon, QPBO intervals and the user's points are mapped through each trace's warp.
+- *Stacking across columns:* each profile averaged with its neighbours' (roots within the radius, normals agreeing), weighted by distance and by the positive correlation of the two profiles, as `tau_bands.py`, in the flattened frame when flattened.
+
+**Layers** (`filter: …`): with flattening, each trace's residual rms over levels, fold fraction, and fraction of its weighted shift samples at the bound; with stacking, its sum of neighbour weights.
+
+**Running.** One job at a time in a thread of the viewer (a flattening of a 141³ box: 5.6 min at the V1V2 banks, peak about 6 GB above the viewer; start the viewer under `scripts/memguard`). Each result is saved in the cache directory, keyed by the parameters and the mesh, so asking again loads it; the bar lists every saved result. Choosing one shows it in every window.
+
+**Checked at the V1V2 banks:** echo 2 + 3, smoothed 0.16 mm, flattened with gradient shifts (±0.3 mm, ε 0.2), stacked 0.5 mm: weighted RMS misfit 0.0326 mm, the same as `flatten_volume.py`; without flattening the same filter takes 14 s.
+
+**Later:** the layer maps (isopach, pinch-out, facies; PR #56) as filters on the shown warp; slope-based shifts as a third estimator.
 
 ### A handle-free white surface
 
