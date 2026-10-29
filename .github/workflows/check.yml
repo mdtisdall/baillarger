@@ -80,7 +80,7 @@ jobs:
       - name: scripts/check (all tests)
         if: github.event_name == 'push'
         run: nix develop --command scripts/check
-      - if: github.event_name == 'push' && steps.uv-cache.outputs.cache-hit != 'true'
+      - if: steps.uv-cache.outputs.cache-hit != 'true'  # TEMP: save on the PR too, to measure a warm run
         uses: actions/cache/save@v4
         with:
           path: ${{ env.UV_CACHE_DIR }}
