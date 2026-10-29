@@ -47,7 +47,6 @@ import argparse
 import datetime
 import hashlib
 import json
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -55,11 +54,26 @@ from typing import Any
 import nibabel as nib
 import numpy as np
 import numpy.typing as npt
+from scipy import ndimage as ndi
 
 from baillarger import __version__
 from baillarger import mesh_smoothing as S
+from baillarger.bids import (
+    COMMON_KEYS,
+    Key,
+    SidecarSpec,
+    dataset_description,
+    derivative_path,
+    entities,
+    file_sha256,
+    git_state,
+    provenance,
+    sidecar_path,
+    sources,
+    write_sidecar,
+)
 from baillarger.data import ASEG_WM, PATCHES, Box, aseg_path, crop_affine
-from baillarger.handles import kuhn_betti, remove_handles
+from baillarger.handles import kuhn_betti, kuhn_structure, remove_handles
 from baillarger.mesh import marching_tetrahedra, topology, write_vtk
 
 type Bool = npt.NDArray[np.bool_]
@@ -165,6 +179,270 @@ def white_matter_box(
     wm[tuple(p[k == FILL].T)] = True
     wm[tuple(p[k != FILL].T)] = False
     return wm
+
+
+# ------------------------------------------------- the corrected segmentation
+
+#: the labels filled into the WM mask, by hemisphere (FreeSurfer LUT): WM,
+#: lateral ventricle, thalamus, caudate, putamen, pallidum, corpus callosum.
+#: The hippocampus is not filled: its laminar axis does not run out from the
+#: WM below it.
+FILLED_LABELS = {"R": (41, 43, 49, 50, 51, 52, 192), "L": (2, 4, 10, 11, 12, 13, 192)}
+WM_LABEL = {"R": 41, "L": 2}
+
+#: FreeSurfer LUT names of the labels the corrected segmentation's .tsv lists
+LUT_NAMES = {
+    0: "Unknown",
+    2: "Left-Cerebral-White-Matter",
+    3: "Left-Cerebral-Cortex",
+    4: "Left-Lateral-Ventricle",
+    10: "Left-Thalamus",
+    11: "Left-Caudate",
+    12: "Left-Putamen",
+    13: "Left-Pallidum",
+    17: "Left-Hippocampus",
+    18: "Left-Amygdala",
+    41: "Right-Cerebral-White-Matter",
+    42: "Right-Cerebral-Cortex",
+    43: "Right-Lateral-Ventricle",
+    49: "Right-Thalamus",
+    50: "Right-Caudate",
+    51: "Right-Putamen",
+    52: "Right-Pallidum",
+    53: "Right-Hippocampus",
+    54: "Right-Amygdala",
+    192: "Corpus_Callosum",
+}
+
+#: values of the fixes image: a handle cut, a handle fill, a cavity fill
+FIXES = {1: "handle_cut", 2: "handle_fill", 3: "cavity_fill"}
+
+#: docs/formats/wm-dseg.md
+DSEG_SPEC = SidecarSpec(
+    "wm-dseg/1",
+    COMMON_KEYS
+    + (
+        Key("Hemisphere", "string", True, "R or L"),
+        Key("FilledLabels", "array of integers", True, "labels of the WM mask"),
+        Key("WMLabel", "integer", True, "label given to cavity and handle fills"),
+        Key("BettiBefore", "array of integers", True, "b0, b1, b2 of the mask"),
+        Key("BettiAfter", "array of integers", True, "b0, b1, b2 after"),
+        Key("CavityVoxels", "integer", True, "voxels set to WM: cavities"),
+        Key("HandleFillVoxels", "integer", True, "voxels set to WM: handle fills"),
+        Key("HandleCutVoxels", "integer", True, "voxels cut from the mask"),
+        Key("CutLabels", "object", True, "new label of the cut voxels: count"),
+        Key("Moves", "array of objects", True, "each handle move"),
+    ),
+)
+#: docs/formats/wm-dseg.md
+FIXES_SPEC = SidecarSpec("wm-dseg-fixes/1", COMMON_KEYS)
+
+
+def hemisphere(labels: npt.ArrayLike) -> str:
+    """R or L: the hemisphere whose WM label is in the segmentation. Raises
+    ValueError for both (a whole brain needs a midline cut first) or
+    neither."""
+    present = [h for h, w in WM_LABEL.items() if np.any(np.asarray(labels) == w)]
+    if len(present) != 1:
+        raise ValueError(
+            f"WM labels present for hemispheres {present}: need exactly one"
+        )
+    return present[0]
+
+
+def cavities(obj: Bool) -> Bool:
+    """The background voxels that do not reach the array's border (Kuhn
+    adjacency, as baillarger.handles.kuhn_betti counts cavities)."""
+    lab, _ = ndi.label(np.pad(~obj, 1, constant_values=True), kuhn_structure())
+    out: Bool = (lab[1:-1, 1:-1, 1:-1] != lab[0, 0, 0]) & ~obj
+    return out
+
+
+def relabel_cuts(
+    labels: npt.NDArray[np.integer[Any]],
+    cut: Bool,
+    donor: Bool,
+    voxel_mm: npt.ArrayLike,
+    margin: int = 4,
+) -> None:
+    """Give each cut voxel the label of the nearest donor voxel (Euclidean, in
+    mm), in place. Each connected piece of the cut is done in its bounding
+    box plus margin voxels, widened until the nearest donor found is nearer
+    than the box's edge."""
+    vox = np.asarray(voxel_mm, np.float64)
+    lab, _ = ndi.label(cut, np.ones((3, 3, 3), bool))
+    for k, sl in enumerate(ndi.find_objects(lab), 1):
+        if sl is None:
+            continue
+        m = margin
+        while True:
+            box = tuple(
+                slice(max(t.start - m, 0), min(t.stop + m, n))
+                for t, n in zip(sl, labels.shape, strict=True)
+            )
+            d = donor[box]
+            whole = all(
+                b.start == 0 and b.stop == n
+                for b, n in zip(box, labels.shape, strict=True)
+            )
+            if d.any():
+                dist, idx = ndi.distance_transform_edt(
+                    ~d, sampling=vox, return_indices=True
+                )
+                sel = lab[box] == k
+                if whole or dist[sel].max() <= m * vox.min():
+                    break
+            elif whole:
+                raise ValueError("no donor voxel for a cut")
+            m *= 2
+        src = tuple(i[sel] for i in idx)
+        sub = labels[box]
+        sub[sel] = sub[src]
+
+
+@dataclass(frozen=True)
+class WMTopo:
+    """The corrected segmentation and what was changed."""
+
+    #: the segmentation with the WM mask made cavity- and handle-free
+    dseg: npt.NDArray[np.integer[Any]]
+    #: FIXES values at the changed voxels, 0 elsewhere
+    fixes: npt.NDArray[np.uint8]
+    hemi: str
+    betti_before: Betti
+    betti_after: Betti
+    #: label: count, for the cut voxels
+    cut_labels: dict[int, int]
+    #: per handle move: Kind, Voxels, Centre (0-based voxel of the grid)
+    moves: list[dict[str, Any]]
+
+
+def wm_topo(aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike) -> WMTopo:
+    """The corrected segmentation of an aseg: the mask of its FILLED_LABELS,
+    with its cavities filled and its handles removed
+    (baillarger.handles.remove_handles). Cavity and handle fills become the
+    WM label; each handle cut takes the label of the nearest voxel that is
+    outside the corrected mask and not a cut. The corrected segmentation's
+    voxels with a filled label are exactly the corrected mask."""
+    a0 = np.asarray(aseg)
+    hemi = hemisphere(a0)
+    filled, wm_label = FILLED_LABELS[hemi], WM_LABEL[hemi]
+    m = np.isin(a0, filled)
+    nz = [
+        np.flatnonzero(m.any(axis=tuple(j for j in range(3) if j != i)))
+        for i in range(3)
+    ]
+    lo = np.array([max(int(t[0]) - 2, 0) for t in nz])
+    hi = np.array([min(int(t[-1]) + 3, s) for t, s in zip(nz, m.shape, strict=True)])
+    box = tuple(slice(int(p), int(q)) for p, q in zip(lo, hi, strict=True))
+    x = np.ascontiguousarray(m[box])
+    del m
+    before = kuhn_betti(x)
+    cav = cavities(x)
+    x |= cav
+    r = remove_handles(x)
+    obj = r.obj
+    cut, fill = x & ~obj, obj & ~x
+    a = a0[box]
+    labels = a.copy()
+    labels[cav | fill] = wm_label
+    relabel_cuts(labels, cut, ~obj & ~cut, voxel_mm)
+    if not np.array_equal(np.isin(labels, filled), obj):
+        raise AssertionError("the corrected labels do not give the corrected mask")
+    after = kuhn_betti(obj)
+    dseg = a0.copy()
+    dseg[box] = labels
+    fixes = np.zeros(a0.shape, np.uint8)
+    fx = fixes[box]
+    fx[cut] = 1
+    fx[fill] = 2
+    fx[cav] = 3
+    new, cnt = np.unique(labels[cut], return_counts=True)
+    moves = [
+        dict(
+            Kind=mv.kind,
+            Voxels=len(mv.voxels),
+            Centre=np.round(mv.voxels.mean(0) + lo).astype(int).tolist(),
+        )
+        for mv in r.moves
+    ]
+    return WMTopo(
+        dseg,
+        fixes,
+        hemi,
+        before,
+        after,
+        {int(k): int(c) for k, c in zip(new, cnt, strict=True)},
+        moves,
+    )
+
+
+def _write_tsv(path: Path, names: dict[int, str]) -> None:
+    rows = "".join(f"{k}\t{v}\n" for k, v in sorted(names.items()))
+    path.write_text("index\tname\n" + rows)
+
+
+def write_wm_topo(aseg: Path, out: Path) -> dict[str, Path]:
+    """The dseg command: wm_topo of the aseg at aseg, written to the BIDS
+    derivatives root out (docs/formats/wm-dseg.md). Returns the paths
+    written, by role."""
+    img = nib.load(aseg)
+    if not isinstance(img, nib.nifti1.Nifti1Image):
+        raise ValueError(f"{aseg.name}: not a NIfTI-1 image")
+    ents = entities(aseg)
+    vox = tuple(float(z) for z in img.header.get_zooms()[:3])
+    t = wm_topo(np.asarray(img.dataobj), vox)
+    dataset_description(out)
+    p = dict(
+        dseg=derivative_path(out, ents, "dseg", ".nii.gz", desc="wmtopo"),
+        fixes=derivative_path(out, ents, "dseg", ".nii.gz", desc="wmtopofixes"),
+    )
+    p["dseg"].parent.mkdir(parents=True, exist_ok=True)
+    hdr = img.header.copy()
+    hdr.set_data_dtype(t.dseg.dtype)
+    nib.save(nib.nifti1.Nifti1Image(t.dseg, img.affine, hdr), p["dseg"])
+    nib.save(nib.nifti1.Nifti1Image(t.fixes, img.affine), p["fixes"])
+    present = np.unique(t.dseg).tolist()
+    _write_tsv(
+        p["dseg"].with_name(p["dseg"].name.replace(".nii.gz", ".tsv")),
+        {k: LUT_NAMES.get(k, f"label-{k}") for k in present},
+    )
+    _write_tsv(p["fixes"].with_name(p["fixes"].name.replace(".nii.gz", ".tsv")), FIXES)
+    src = sources(aseg)
+    prov = provenance("baillarger.white.write_wm_topo")
+    write_sidecar(
+        sidecar_path(p["dseg"]),
+        DSEG_SPEC,
+        dict(
+            SpecVersion=DSEG_SPEC.version,
+            Description="The segmentation with its WM mask (FilledLabels) made "
+            "cavity- and handle-free.",
+            **src,
+            Provenance=prov,
+            Hemisphere=t.hemi,
+            FilledLabels=list(FILLED_LABELS[t.hemi]),
+            WMLabel=WM_LABEL[t.hemi],
+            BettiBefore=list(t.betti_before),
+            BettiAfter=list(t.betti_after),
+            CavityVoxels=int((t.fixes == 3).sum()),
+            HandleFillVoxels=int((t.fixes == 2).sum()),
+            HandleCutVoxels=int((t.fixes == 1).sum()),
+            CutLabels={str(k): v for k, v in t.cut_labels.items()},
+            Moves=t.moves,
+        ),
+    )
+    write_sidecar(
+        sidecar_path(p["fixes"]),
+        FIXES_SPEC,
+        dict(
+            SpecVersion=FIXES_SPEC.version,
+            Description="The voxels that the WM topology correction changed: "
+            "1 handle cut, 2 handle fill, 3 cavity fill.",
+            **src,
+            Provenance=prov,
+        ),
+    )
+    return p
 
 
 # ---------------------------------------------------------------- the mesh
@@ -456,32 +734,6 @@ def write_box(
     return rep
 
 
-def _file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _git_state() -> dict[str, Any]:
-    """The commit of the checkout this module is in, and whether tracked files
-    differ from it; None for both outside a git checkout."""
-    repo = Path(__file__).resolve().parent
-
-    def git(*args: str) -> str | None:
-        r = subprocess.run(
-            ["git", "-C", str(repo), *args], capture_output=True, text=True
-        )
-        return r.stdout.strip() if r.returncode == 0 else None
-
-    status = git("status", "--porcelain", "--untracked-files=no")
-    return dict(
-        commit=git("rev-parse", "HEAD"),
-        dirty=None if status is None else bool(status),
-    )
-
-
 def write_mesh(
     lo: Box,
     hi: Box,
@@ -505,13 +757,13 @@ def write_mesh(
     prov: dict[str, Any] = dict(
         created=datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
         wm_label="aseg" if changes_path is None else "handle-free",
-        aseg=dict(path=str(aseg_path().resolve()), sha256=_file_sha256(aseg_path())),
+        aseg=dict(path=str(aseg_path().resolve()), sha256=file_sha256(aseg_path())),
         changes=None
         if changes_path is None
-        else dict(path=str(changes_path.resolve()), sha256=_file_sha256(changes_path)),
+        else dict(path=str(changes_path.resolve()), sha256=file_sha256(changes_path)),
         process="baillarger.white.white_mesh_normals",
         baillarger_version=__version__,
-        **_git_state(),
+        **git_state(),
     )
     m = box_mesh(wm, lo, hi, crop_affine(img.affine, lo), sigma, prov)
     out.mkdir(parents=True, exist_ok=True)
@@ -524,7 +776,7 @@ def write_mesh(
         vertices=len(m.v),
         faces=len(m.f),
         wm_sha256=m.wm_sha256,
-        npz_sha256=_file_sha256(out / f"{stem}.npz"),
+        npz_sha256=file_sha256(out / f"{stem}.npz"),
         pieces=mesh_pieces(m.v, m.f, (float(vox[0]), float(vox[1]), float(vox[2]))),
         provenance=prov,
     )
@@ -539,6 +791,11 @@ def write_mesh(
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    d = sub.add_parser(
+        "dseg", help="the segmentation with a cavity- and handle-free WM mask"
+    )
+    d.add_argument("aseg", type=Path, help="a BIDS-named segmentation (NIfTI)")
+    d.add_argument("--out", required=True, type=Path, help="BIDS derivatives root")
     c = sub.add_parser("changes", help="remove the handles of the WM label")
     c.add_argument("--out", required=True, type=Path)
     b = sub.add_parser("box", help="report one box before and after")
@@ -556,7 +813,10 @@ def main(argv: list[str] | None = None) -> None:
     m.add_argument("--hi", type=int, nargs=3)
     m.add_argument("--sigma", type=float, default=2.0)
     a = ap.parse_args(argv)
-    if a.cmd == "mesh":
+    if a.cmd == "dseg":
+        for role, path in write_wm_topo(a.aseg, a.out).items():
+            print(f"{role}: {path}")
+    elif a.cmd == "mesh":
         if a.patch is not None and a.lo is None and a.hi is None:
             lo, hi = PATCHES[a.patch]
         elif a.patch is None and a.lo is not None and a.hi is not None:

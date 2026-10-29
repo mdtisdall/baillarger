@@ -46,14 +46,64 @@ def _kuhn_tets() -> npt.NDArray[np.int_]:
 _TETS = _kuhn_tets()
 
 
-def marching_tetrahedra(F: npt.ArrayLike, level: float) -> tuple[Float, Int]:
+#: cells per side of a block in marching_tetrahedra
+BLOCK = 64
+
+
+def marching_tetrahedra(
+    F: npt.ArrayLike, level: float, block: int = BLOCK
+) -> tuple[Float, Int]:
     """Level set {F = level} of the piecewise-linear interpolant of F (3D
     array) on the Kuhn tetrahedralization. Returns vertices (voxel coordinates)
-    and faces."""
-    G = np.asarray(F, np.float64) - level
-    G[G == 0] = 1e-12  # no grid point exactly on the level
+    and faces.
+
+    The cells are taken in blocks of block cells a side, so that the work
+    arrays scale with one block's surface, not the whole grid's; a block
+    whose grid points are all on one side of the level is skipped. A vertex
+    is keyed by its grid edge in the whole grid and computed from the edge's
+    ends in a fixed order, so the blocks join exactly: the result does not
+    depend on block. Vertices are sorted by their edge key."""
+    Fa = np.asarray(F)
+    shape = Fa.shape
+    vkeys, verts, faces = [], [], []
+    n_verts = 0
+    for o in itertools.product(*(range(0, max(n - 1, 0), block) for n in shape)):
+        sl = tuple(
+            slice(a, min(a + block + 1, n)) for a, n in zip(o, shape, strict=True)
+        )
+        G = np.asarray(Fa[sl], np.float64) - level
+        G[G == 0] = 1e-12  # no grid point exactly on the level
+        pos = G > 0
+        if pos.all() or not pos.any():
+            continue
+        k, v, f = _march_block(G, pos, np.array(o), shape)
+        vkeys.append(k)
+        verts.append(v)
+        faces.append(f + n_verts)
+        n_verts += len(k)
+    if not faces:
+        return np.zeros((0, 3)), np.zeros((0, 3), np.int64)
+    keys = np.concatenate(vkeys)
+    _, first, inv = np.unique(keys, return_index=True, return_inverse=True)
+    out_v: Float = np.concatenate(verts)[first]
+    out_f: Int = inv[np.concatenate(faces)].astype(np.int64)
+    return out_v, out_f
+
+
+def _march_block(
+    G: Float,
+    pos: npt.NDArray[np.bool_],
+    origin: npt.NDArray[np.int_],
+    shape: tuple[int, ...],
+) -> tuple[npt.NDArray[np.int64], Float, Int]:
+    """One block of marching_tetrahedra: G is F - level on the block's grid
+    points (one more than its cells a side), pos = G > 0, origin the block's
+    first grid point. Returns the block's vertex keys (grid-edge keys of the
+    whole grid, unique), vertices (whole-grid voxel coordinates) and faces
+    (indices into them)."""
     nx, ny, nz = G.shape
-    pos = G > 0
+    _, NY, NZ = shape
+    size = int(np.prod(shape))
     # cells whose 8 corners do not all have the same sign
     c = [
         pos[i : nx - 1 + i, j : ny - 1 + j, k : nz - 1 + k]
@@ -63,13 +113,14 @@ def marching_tetrahedra(F: npt.ArrayLike, level: float) -> tuple[Float, Int]:
     ]
     anyp = np.logical_or.reduce(c)
     allp = np.logical_and.reduce(c)
-    cells = np.argwhere(anyp & ~allp)  # (M, 3)
-    if not len(cells):
-        return np.zeros((0, 3)), np.zeros((0, 3), int)
+    cells = np.argwhere(anyp & ~allp)  # (M, 3), block coordinates
     corners = cells[:, None, None, :] + _TETS[None]  # (M, 6, 4, 3)
     corners = corners.reshape(-1, 4, 3)
-    lin = (corners[..., 0] * ny + corners[..., 1]) * nz + corners[..., 2]
-    val = G.ravel()[lin]  # (T, 4)
+    val = G[corners[..., 0], corners[..., 1], corners[..., 2]]  # (T, 4)
+    corners = corners + origin  # whole-grid coordinates
+    lin = (corners[..., 0].astype(np.int64) * NY + corners[..., 1]) * NZ + corners[
+        ..., 2
+    ]
     sgn = val > 0
     npos = sgn.sum(1)
     keep = (npos > 0) & (npos < 4)
@@ -86,15 +137,19 @@ def marching_tetrahedra(F: npt.ArrayLike, level: float) -> tuple[Float, Int]:
 
     def edge(
         a: int, b: int, rows: npt.NDArray[np.intp]
-    ) -> tuple[npt.NDArray[Any], Float]:
+    ) -> tuple[npt.NDArray[np.int64], Float]:
         """Edge keys and points between corners a and b (indices into the
-        sorted corners)."""
+        sorted corners), each point computed from the edge's lower-key end,
+        so that every tetrahedron and block gives the same bits."""
         la, lb = o_lin[rows, a], o_lin[rows, b]
-        key = np.minimum(la, lb) * G.size + np.maximum(la, lb)
-        va, vb = o_val[rows, a], o_val[rows, b]
+        sw = la > lb
+        va = np.where(sw, o_val[rows, b], o_val[rows, a])
+        vb = np.where(sw, o_val[rows, a], o_val[rows, b])
+        pa = np.where(sw[:, None], o_pos[rows, b], o_pos[rows, a]).astype(np.float64)
+        pb = np.where(sw[:, None], o_pos[rows, a], o_pos[rows, b]).astype(np.float64)
+        key = np.minimum(la, lb) * size + np.maximum(la, lb)
         t = (va / (va - vb))[:, None]
-        pt = o_pos[rows, a] + t * (o_pos[rows, b] - o_pos[rows, a])
-        return key, pt
+        return key, pa + t * (pb - pa)
 
     tri_keys, tri_pts, tri_rows = [], [], []
     for n_pos, pairs_list in (
@@ -113,26 +168,24 @@ def marching_tetrahedra(F: npt.ArrayLike, level: float) -> tuple[Float, Int]:
     keys = np.concatenate(tri_keys)  # (nT, 3)
     pts = np.concatenate(tri_pts)  # (nT, 3, 3)
     rows = np.concatenate(tri_rows)
-    uk, inv = np.unique(keys.ravel(), return_inverse=True)
-    faces = inv.reshape(-1, 3)
-    verts = np.zeros((len(uk), 3))
-    verts[inv] = pts.reshape(-1, 3)
     # orientation: normals toward increasing F (the gradient of the
     # tetrahedron's linear field)
     P = corners[rows].astype(np.float64)
     V = val[rows]
     M = P[:, 1:] - P[:, :1]
     g = np.linalg.solve(M, (V[:, 1:] - V[:, :1])[..., None])[..., 0]
-    nrm = np.cross(
-        verts[faces[:, 1]] - verts[faces[:, 0]], verts[faces[:, 2]] - verts[faces[:, 0]]
-    )
+    nrm = np.cross(pts[:, 1] - pts[:, 0], pts[:, 2] - pts[:, 0])
     flip = np.sum(nrm * g, 1) < 0
-    faces[flip] = faces[flip][:, [0, 2, 1]]
+    keys[flip] = keys[flip][:, [0, 2, 1]]
+    pts[flip] = pts[flip][:, [0, 2, 1]]
     # drop triangles that collapsed to a line (two vertices on the same edge
     # cannot happen; zero area only when the level passes within rounding of a
     # grid point)
-    area = np.linalg.norm(nrm, axis=1)
-    return verts, faces[area > 0]
+    ok = np.linalg.norm(nrm, axis=1) > 0
+    keys, pts = keys[ok], pts[ok]
+    uk, first, inv = np.unique(keys.ravel(), return_index=True, return_inverse=True)
+    verts: Float = pts.reshape(-1, 3)[first]
+    return uk, verts, inv.reshape(-1, 3).astype(np.int64)
 
 
 def pl_sample(F: npt.ArrayLike, pts: npt.ArrayLike) -> Float:

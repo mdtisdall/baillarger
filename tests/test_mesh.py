@@ -119,3 +119,39 @@ def test_write_vtk_puts_the_points_in_ras(tmp_path: Path) -> None:
     assert np.array_equal(T2, T)
     assert np.all(data["depth"][:5] == -1)
     assert np.abs(data["depth"][5:] - depth[5:]).max() <= 5e-5
+
+
+def canonical_faces(T: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
+    """Each triangle rotated to start at its smallest index (orientation
+    kept), rows sorted."""
+    r = np.argmin(T, axis=1)
+    idx = (r[:, None] + np.arange(3)[None]) % 3
+    R = np.take_along_axis(T, idx, 1)
+    out: npt.NDArray[np.int64] = R[np.lexsort(R.T[::-1])]
+    return out
+
+
+def test_blocks_give_the_one_shot_mesh_exactly() -> None:
+    rng = np.random.default_rng(2)
+    F, _ = sphere_field(30, (14.3, 15.1, 14.7))
+    rough = F + 0.8 * rng.standard_normal(F.shape)
+    x = np.arange(36, dtype=float)
+    X, Y, Z = np.meshgrid(x, x, x[:20], indexing="ij")
+    torus = np.hypot(np.hypot(X - 17.7, Y - 18.2) - 9, Z - 9.6)
+    binary = (rough < 9.0).astype(np.uint8)  # integer input, points on the level
+    for G, lv in ((rough, 9.0), (torus, 4.0), (binary, 0.5), (np.round(F), 9.0)):
+        V0, T0 = marching_tetrahedra(G, lv, block=1000)
+        assert len(T0)
+        for b in (1, 3, 7, 16):
+            V, T = marching_tetrahedra(G, lv, block=b)
+            assert np.array_equal(V, V0)
+            assert np.array_equal(canonical_faces(T), canonical_faces(T0))
+
+
+def test_blocks_away_from_the_level_are_skipped() -> None:
+    F, _ = sphere_field(40, (8.3, 8.1, 8.7))  # surface in one corner
+    V0, T0 = marching_tetrahedra(F, 5.0, block=1000)
+    V, T = marching_tetrahedra(F, 5.0, block=8)
+    assert np.array_equal(V, V0)
+    assert np.array_equal(canonical_faces(T), canonical_faces(T0))
+    assert topology(T, len(V))["genus"] == 0 and V.max() < 16

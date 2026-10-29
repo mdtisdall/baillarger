@@ -6,6 +6,37 @@ scaled when we get to it, and only the computational problems that we meet
 are fixed. When this stage is done, the lasting content goes into the module
 docstrings and the format specs (`docs/formats/`), and this file is deleted.
 
+## Scaling principles
+
+The target beyond this hemisphere is whole brains at 50 µm: about 65 times
+the voxels (about 20 billion) and on the order of 350 M vertices. That runs
+on a larger machine with CUDA GPUs; the laptop (64 GB, Apple GPU) is where
+the scalable code is built and tested. Each step that this work touches
+follows these rules; steps not yet touched keep their current form.
+
+- Blocks with a halo: no whole-volume float arrays. Whole-volume steps work
+  on blocks that fit in memory (and in GPU memory), and join exactly
+  (marching tetrahedra: by global edge keys).
+- A backend per step: numpy is the reference; PyTorch is the GPU backend
+  (CUDA on large machines, MPS on the laptop), chosen at run time, CPU
+  when no GPU is there. Tests on the laptop compare the PyTorch backend on
+  MPS with numpy: integer and boolean results (vertex keys, labels,
+  topology) exactly, floating-point results within a stated tolerance
+  (GPUs work in float32).
+- Global algorithms get a local form when their step is scaled: connected
+  components in blocks; the Euler characteristic as a sum over blocks;
+  handle removal as a global search for the handles, then local fixes in a
+  box round each.
+- Chunked storage when the data needs it: readers take a block, not the
+  whole array, so that OME-Zarr (accepted by BIDS for microscopy) or
+  memory-mapped uncompressed NIfTI can replace `.nii.gz`. Not needed for
+  the example hemisphere.
+
+For this stage: marching tetrahedra in blocks (done) gets a PyTorch backend
+first; the smoothing (sparse matrix-vector products) next. Handle removal
+stays sequential on the CPU for one hemisphere (3 min, 21 GB); its local
+form is the first need at whole-brain scale.
+
 ## The two commands
 
 ```
@@ -46,10 +77,12 @@ a box: they work on the whole grid.
 Each output has a written, versioned spec in `docs/formats/`
 (`wm-dseg.md`, `white-surf.md`): every file, array and sidecar key, with
 type, units, required or not, and meaning. One writer and one reader per
-format, in `baillarger.white`, enforce it: the writer cannot leave out a
-required key, and the reader refuses a missing key or an unknown
-`SpecVersion`. A JSON Schema for each sidecar lets a test check it. A field
-changes only through a PR that edits the spec and bumps the version.
+format enforce it through a `bids.SidecarSpec` (each key's type and whether
+it is required): the writer and the reader refuse a missing key, a key not
+in the spec, a value of the wrong type or another `SpecVersion`.
+`tests/test_bids.py` checks that each spec document's key table matches its
+`SidecarSpec`. A field changes only through a PR that edits the spec and
+bumps the version. (`wm-dseg.md`: done.)
 
 ## Step 1: `dseg`
 
@@ -118,19 +151,20 @@ from the WM until they reach background (label 0) or a maximum length, and
 what they pass through (cortex, hippocampus, water mislabelled as cortex) is
 left to later stages.
 
-## Blocked marching tetrahedra
+## Blocked marching tetrahedra (done)
 
-Needed: in one piece, `marching_tetrahedra` keeps about 6.5 kB of arrays per
-surface cell, about 40 GB for the hemisphere's 5.85 M surface cells.
+In one piece, `marching_tetrahedra` kept about 6.5 kB of arrays per surface
+cell, about 40 GB for the hemisphere's 5.85 M surface cells.
 
-- Cells are taken in blocks (for example 64³ cells). A block whose voxels are
-  all inside or all outside is skipped: no whole-grid float copy and no
-  whole-grid passes.
-- Each block's vertices are keyed by their grid edge in the full grid, so the
-  blocks are joined by one `np.unique` over the keys at the end. Each
-  tetrahedron belongs to one cell, so the result is exactly the mesh of the
-  whole grid at once.
-- Peak: a few GB.
+- Cells are taken in blocks (default 64³ cells). A block whose grid points
+  are all on one side of the level is skipped: no whole-grid float copy.
+- Each block's vertices are keyed by their grid edge in the whole grid and
+  computed from the edge's ends in a fixed order, so every block gives the
+  same bits for a shared vertex; one `np.unique` over the keys joins them.
+  The result does not depend on the block size (tests: blocks of 1, 3, 7
+  and 16 cells give the one-shot mesh exactly).
+- Next: the per-block work in PyTorch, tested on MPS against numpy (exact
+  keys and faces; vertices within float32 tolerance).
 
 ## What goes
 
@@ -172,18 +206,17 @@ Measured so far (right hemisphere, grid 700 × 384 × 1148, mask box
 
 | Step | Time | Peak | Result |
 |---|---|---|---|
-| Filled mask, cavities filled | 8 s | 3.6 GB | Betti (1, 77, 0) |
-| Handle removal | 3 min | 21.4 GB | 79 moves: 580 voxels cut, 556 filled; (1, 0, 0) |
-| Marching tetrahedra, one shot (V1V2 box) | 2.8 s | 2 GB | 0.91 M vertices, 1.8 M faces |
-| Relax, smoothing, normals (V1V2 box) | 25 s | < 0.2 GB more | |
+| `dseg` (whole command) | 3.4 min | 21.6 GB | Betti (1, 111, 182) → (1, 0, 0); 6,307 cavity voxels, 34 fills (570 voxels), 52 cuts (589 voxels: 529 to cortex, 60 to background) |
+| Blocked marching tetrahedra of its mask | 31 s | 4.3 GB (3.2 GB of it the mask) | 12.7 M vertices, 25.3 M faces; one closed genus-0 surface, no non-manifold edges |
+| `mesh.topology` of that mesh | 64 s | 8.2 GB | (`np.unique(axis=0)`: a candidate for 1-D keys) |
+| Relax, smoothing, normals (V1V2 box) | 25 s | < 0.2 GB more | 0.91 M vertices, 1.8 M faces |
 
 For comparison, label 41 alone has Betti (1, 243, 31), and 14 % of the
 surface of its outer voxels faces something other than cortex (8 % with the
 filled labels, mostly the medial cut face against the Fomblin).
 
-Expected for the hemisphere: about 17 M vertices and 35 M faces; about
-15–20 min in all; peak about 21 GB (handle removal); the `.surf.gii` about
-0.5 GB.
+Expected for the rest of `mesh` on the hemisphere: relax, smoothing and
+normals about 6 min; the `.surf.gii` about 0.4 GB.
 
 Left until a measurement asks for it: faster smoothing (one shared
 adjacency, 1-D edge keys instead of `np.unique(axis=0)`, `bincount` instead
@@ -193,6 +226,13 @@ stage).
 
 ## Open
 
+- The mesh readable by block (asked for by the viewer work, before
+  `white-surf.md` gets a version): faces stored by the grid block whose
+  cells made them, vertices by the first block that makes them, then by
+  edge key; a block index (each block's grid position, vertex and face
+  ranges, and its vertices' bounding box) in a chunked companion file read
+  by our own reader, in the same order as the `.surf.gii`. The companion's
+  storage (Zarr, or memory-mapped `.npy`) is to be chosen.
 - The normals' file name and intent, settled when writing `white-surf.md`.
 - Whole brains: the corpus callosum joins the two hemispheres' filled masks,
   so a whole brain needs a midline cut (FreeSurfer's cutting planes) before
