@@ -12,6 +12,7 @@ dependencies = [
     "scikit-fmm>=2025.6.23",
     "scipy>=1.18.1",
     "thinqpbo>=0.1.5",
+    "torch>=2.15",
 ]
 
 [dependency-groups]
@@ -40,7 +41,7 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.mypy]
 strict = true
-exclude = ["^\\.worktrees/"]
+exclude = ["^\\.worktrees/", "^tests/reference/"]
 # scikit-image and nibabel ship py.typed but leave some functions unannotated
 # (nibabel: Nifti1Header.get_zooms); numba internals (numba.core.cgutils) are
 # unannotated too.

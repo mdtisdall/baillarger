@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
+import pytest
 
 from baillarger import mesh_intersect as mi
 from baillarger.mesh import (
@@ -224,8 +225,10 @@ def test_the_block_index() -> None:
     V, T, B = marching_tetrahedra_blocks(F, 9.0, block=b)
     k = len(B.origin)
     assert B.cells == b and k > 8
-    # blocks in C order, the ranges contiguous and covering the mesh
-    assert np.all(np.diff(np.ravel_multi_index(B.origin.T // b, (5, 5, 5))) > 0)
+    # blocks in Morton order, the ranges contiguous and covering the mesh
+    from baillarger.blocks import morton
+
+    assert np.all(np.diff(morton(B.origin // b)) > 0)
     assert B.vertex_start[0] == 0 and B.vertex_stop[-1] == len(V)
     assert B.face_start[0] == 0 and B.face_stop[-1] == len(T)
     assert np.array_equal(B.vertex_start[1:], B.vertex_stop[:-1])
@@ -252,3 +255,116 @@ def test_blocks_away_from_the_level_are_skipped() -> None:
     V, T = canonical(V, T)
     assert np.array_equal(V, V0) and np.array_equal(T, T0)
     assert topology(T, len(V))["genus"] == 0
+
+
+def test_vertex_keys_name_their_grid_edge() -> None:
+    from baillarger.mesh import edge_points
+
+    rng = np.random.default_rng(6)
+    F, _ = sphere_field(30, (14.3, 15.1, 14.7))
+    F = F + 0.8 * rng.standard_normal(F.shape)
+    V, T, B = marching_tetrahedra_blocks(F, 9.0, 7)
+    k = B.vertex_key
+    assert len(k) == len(V) and len(np.unique(k)) == len(k)
+    a, b = edge_points(k, F.shape)
+    # the two ends are one Kuhn edge apart, and the vertex lies between them
+    d = b - a
+    assert np.all(np.isin(d, [-1, 0, 1])) and np.all(np.abs(d).sum(1) >= 1)
+    t = np.einsum("ij,ij->i", V - a, d) / np.einsum("ij,ij->i", d, d)
+    assert np.allclose(a + t[:, None] * d, V) and np.all((t > 0) & (t < 1))
+    # the same key for the same vertex whatever the block size
+    V2, _, B2 = marching_tetrahedra_blocks(F, 9.0, 16)
+    o, o2 = np.argsort(k), np.argsort(B2.vertex_key)
+    assert np.array_equal(k[o], B2.vertex_key[o2])
+    assert np.array_equal(V[o], V2[o2])
+
+
+def test_vertex_keys_survive_a_local_edit() -> None:
+    """Remeshing after a change in one corner renumbers vertices, but every
+    vertex away from the change keeps its key and position."""
+    x = np.indices((40, 40, 40)).astype(float)
+    ball = (np.sqrt(((x - 19.6) ** 2).sum(0)) < 14).astype(np.uint8)
+    edited = ball.copy()
+    edited[28:34, 28:34, 16:22] = 1  # a bump on one side
+    V0, _, B0 = marching_tetrahedra_blocks(ball, 0.5, 8)
+    V1, _, B1 = marching_tetrahedra_blocks(edited, 0.5, 8)
+    far = np.all((V0 < 26) | (V0 > 36), axis=1) | (V0[:, 2] < 14) | (V0[:, 2] > 24)
+    pos = dict(zip(B1.vertex_key.tolist(), map(tuple, V1), strict=True))
+    for key, p in zip(B0.vertex_key[far].tolist(), V0[far], strict=True):
+        assert pos[key] == tuple(p)
+
+
+def test_morton_order_keeps_aligned_cubes_together() -> None:
+    from baillarger.blocks import morton
+
+    ijk = np.array(list(np.ndindex(8, 8, 8)))
+    code = morton(ijk)
+    assert len(np.unique(code)) == len(ijk) and code.max() == len(ijk) - 1
+    # within a 2 x 2 x 2 group: C order (i's bit highest)
+    assert morton([1, 0, 0]) == 4 and morton([0, 1, 0]) == 2 and morton([0, 0, 1]) == 1
+    order = ijk[np.argsort(code)]
+    # every aligned cube of 2 or 4 blocks a side is a run of consecutive blocks
+    for m in (2, 4):
+        cube = order // m
+        runs = np.flatnonzero(np.any(np.diff(cube, axis=0) != 0, axis=1))
+        assert len(runs) == (8 // m) ** 3 - 1
+
+
+class SparseBall:
+    """A grid of shape (more points than int64 could key by the indices of
+    an edge's two ends: above 3.04e9) that is all zero but for a ball near
+    its far corner; a baillarger.blocks.Source."""
+
+    def __init__(self, shape: tuple[int, int, int], lo: tuple[int, int, int]) -> None:
+        self._shape = shape
+        x = np.indices((16, 16, 16)).astype(float)
+        self.lo = np.array(lo)
+        self.ball = (np.sqrt(((x - 7.6) ** 2).sum(0)) < 5.3).astype(np.uint8)
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self._shape
+
+    @property
+    def dtype(self) -> np.dtype[np.uint8]:
+        return np.dtype(np.uint8)
+
+    def read(self, box: tuple[slice, ...]) -> npt.NDArray[np.uint8]:
+        out = np.zeros(tuple(s.stop - s.start for s in box), np.uint8)
+        src, dst = [], []
+        for s, lo, n in zip(box, self.lo, self.ball.shape, strict=True):
+            a, b = max(s.start, lo), min(s.stop, lo + n)
+            if a >= b:
+                return out
+            src.append(slice(a - lo, b - lo))
+            dst.append(slice(a - s.start, b - s.start))
+        out[tuple(dst)] = self.ball[tuple(src)]
+        return out
+
+
+@pytest.mark.parametrize("device", ["numpy", "cpu"])
+def test_vertex_keys_on_a_grid_past_3e9_points(device: str) -> None:
+    from baillarger import backend
+    from baillarger.mesh import edge_key, edge_points
+
+    shape = (2100, 2000, 1024)  # 4.3e9 points
+    assert np.prod(shape, dtype=np.float64) > 3.04e9
+    src = SparseBall(shape, (2080, 1980, 1004))
+    V, T, B = marching_tetrahedra_blocks(
+        src, 0.5, 256, np.float32, backend.device(device)
+    )
+    # the ball alone, meshed in its own small grid and moved into place
+    v1, t1, b1 = marching_tetrahedra_blocks(src.ball, 0.5, 8, np.float32)
+    big, small = canonical(V, T), canonical(v1 + src.lo.astype(np.float32), t1)
+    assert np.array_equal(big[0], small[0]) and np.array_equal(big[1], small[1])
+    # keys: unique, decoded to the grid edge each vertex lies on, and equal
+    # to the small grid's keys moved into the big grid
+    k = B.vertex_key
+    assert len(np.unique(k)) == len(k) and k.max() > 2.9e10
+    a, b = edge_points(k, shape)
+    d = (b - a).astype(float)
+    t = np.einsum("ij,ij->i", V - a, d) / np.einsum("ij,ij->i", d, d)
+    assert np.allclose(a + t[:, None] * d, V, atol=1e-3)
+    a1, b1_ = edge_points(b1.vertex_key, src.ball.shape)
+    low = np.ravel_multi_index(tuple((a1 + src.lo).T), shape)
+    assert np.array_equal(np.sort(edge_key(low, b1_ - a1)), np.sort(k))

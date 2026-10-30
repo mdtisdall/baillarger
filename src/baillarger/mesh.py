@@ -19,12 +19,16 @@ field values.
 import itertools
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
 from scipy import sparse
 from scipy.sparse.csgraph import connected_components
+
+if TYPE_CHECKING:
+    from baillarger.backend import Device
+    from baillarger.blocks import Source
 
 type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.int64]
@@ -95,15 +99,16 @@ BLOCK = 64
 
 
 def marching_tetrahedra(
-    F: npt.ArrayLike,
+    F: "npt.ArrayLike | Source",
     level: float,
     block: int = BLOCK,
     dtype: npt.DTypeLike = np.float64,
+    device: "Device | None" = None,
 ) -> tuple[Float, Int]:
     """Level set {F = level} of the piecewise-linear interpolant of F (3D
     array) on the Kuhn tetrahedralization. Returns vertices (voxel coordinates)
     and faces, in block order (marching_tetrahedra_blocks)."""
-    v, f, _ = marching_tetrahedra_blocks(F, level, block, dtype)
+    v, f, _ = marching_tetrahedra_blocks(F, level, block, dtype, device)
     return v, f
 
 
@@ -120,13 +125,42 @@ class MeshBlocks:
     vertex_stop: Int
     face_start: Int
     face_stop: Int
+    #: (n,) each vertex's grid edge (edge_key); the same vertex keeps its key
+    #: when the mesh is made again, wherever the surface did not change
+    vertex_key: Int
+
+
+def edge_key(low: npt.ArrayLike, step: npt.ArrayLike) -> Int:
+    """The key of the Kuhn edges from grid points with linear index low (C
+    order) to low + step, step (n, 3) one of the 7 nonzero vectors of
+    {0, 1}^3 (every Kuhn edge, from its lower end): low * 7 + d with
+    d = 4 step_i + 2 step_j + step_k - 1. Its largest value is about 7 times
+    the number of grid points, so int64 holds it for any grid (a key of the
+    two ends' indices, about the square of that, would not past 3e9
+    points); and keys sort as by (low, high end)."""
+    st = np.asarray(step, np.int64)
+    d = 4 * st[..., 0] + 2 * st[..., 1] + st[..., 2] - 1
+    out: Int = np.asarray(low, np.int64) * 7 + d
+    return out
+
+
+def edge_points(key: npt.ArrayLike, shape: tuple[int, ...]) -> tuple[Int, Int]:
+    """The two grid points (n, 3), lower then upper, of each vertex key
+    (edge_key) on a grid of shape."""
+    k = np.asarray(key, np.int64)
+    low, d = np.divmod(k, 7)
+    d = d + 1
+    a = np.stack(np.unravel_index(low, shape), 1).astype(np.int64)
+    step = np.stack([(d >> 2) & 1, (d >> 1) & 1, d & 1], 1)
+    return a, a + step
 
 
 def marching_tetrahedra_blocks(
-    F: npt.ArrayLike,
+    F: "npt.ArrayLike | Source",
     level: float,
     block: int = BLOCK,
     dtype: npt.DTypeLike = np.float64,
+    device: "Device | None" = None,
 ) -> tuple[Float, Int, MeshBlocks]:
     """marching_tetrahedra and its block index.
 
@@ -137,7 +171,8 @@ def marching_tetrahedra_blocks(
     ends in a fixed order, so the blocks join exactly: the surface does not
     depend on block, only the order of its vertices and faces does.
 
-    Order: blocks in C order of their first cell; the faces block by block
+    Order: blocks in Morton (Z) order of their indices (first cell / block,
+    baillarger.blocks.morton); the faces block by block
     (each face comes from one cell); the vertices by the first block that
     makes them (their owner), then by edge key. A block's faces use its own
     vertices and some of earlier neighbouring blocks.
@@ -147,35 +182,59 @@ def marching_tetrahedra_blocks(
     points. The triangles and their orientation follow from the corners'
     signs alone (_FLIP), so they are the same in either precision; a shared
     vertex is computed the same way in every block, so the blocks join
-    exactly in either."""
+    exactly in either.
+
+    F is an array, or a baillarger.blocks.Source, read block by block.
+
+    device (baillarger.backend): numpy (None, the default) or a PyTorch
+    device, which works in float32 (baillarger.mesh_torch.march_block):
+    the same triangles, vertices within float32 rounding of numpy's.
+    """
     dt = np.dtype(dtype)
-    Fa = np.asarray(F)
-    shape = Fa.shape
+    tdev = None if device is None or device.is_numpy else device.torch
+    if tdev is not None and dt != np.float32:
+        raise ValueError("a PyTorch device works in float32")
+    import torch
+
+    from baillarger.blocks import ArraySource, BlockReader, Source
+    from baillarger.mesh_torch import march_block
+
+    # a block's cells need the grid points up to one past them
+    src: Source = F if hasattr(F, "read") else ArraySource(F)  # type: ignore[assignment]
+    reader = BlockReader(src, block, 0, 1, device)
+    shape = reader.shape
     vkeys, verts, faces, origins = [], [], [], []
     n_verts = 0
-    for o in itertools.product(*(range(0, max(n - 1, 0), block) for n in shape)):
-        sl = tuple(
-            slice(a, min(a + block + 1, n)) for a, n in zip(o, shape, strict=True)
-        )
-        G = np.asarray(Fa[sl], dt) - np.asarray(level, dt)
-        G[G == 0] = 1e-12  # no grid point exactly on the level
-        pos = G > 0
-        if pos.all() or not pos.any():
-            continue
-        k, v, f = _march_block(G, pos, np.array(o), shape)
+    for ijk in reader.indices():
+        blk, o = reader.read(ijk)
+        v: npt.NDArray[np.floating[Any]]
+        if isinstance(blk, torch.Tensor):
+            Gt = blk.to(torch.float32) - float(level)
+            Gt[Gt == 0] = 1e-12  # no grid point exactly on the level
+            post = Gt > 0
+            if bool(post.all()) or not bool(post.any()):
+                continue
+            k, v, f = march_block(Gt, o, shape)
+        else:
+            G = np.asarray(blk, dt) - np.asarray(level, dt)
+            G[G == 0] = 1e-12  # no grid point exactly on the level
+            pos = G > 0
+            if pos.all() or not pos.any():
+                continue
+            k, v, f = _march_block(G, pos, o, shape)
         if not len(f):
             continue
         vkeys.append(k)
         verts.append(v)
         faces.append(f + n_verts)
-        origins.append(o)
+        origins.append(tuple(int(x) for x in o))
         n_verts += len(k)
     z = np.zeros(0, np.int64)
     if not faces:
         return (
             np.zeros((0, 3), dt),
             np.zeros((0, 3), np.int64),
-            MeshBlocks(block, np.zeros((0, 3), np.int64), z, z, z, z),
+            MeshBlocks(block, np.zeros((0, 3), np.int64), z, z, z, z, z),
         )
     keys = np.concatenate(vkeys)
     _, first, inv = np.unique(keys, return_index=True, return_inverse=True)
@@ -183,7 +242,7 @@ def marching_tetrahedra_blocks(
     order = np.argsort(first, kind="stable")
     new = np.empty(len(first), np.int64)
     new[order] = np.arange(len(first))
-    out_v: Float = np.concatenate(verts)[first[order]]
+    out_v: Float = np.concatenate(verts)[first[order]].astype(dt, copy=False)
     out_f: Int = new[inv[np.concatenate(faces)]]
     owner = np.repeat(np.arange(len(vkeys)), [len(k) for k in vkeys])[first[order]]
     nv = np.bincount(owner, minlength=len(vkeys))
@@ -196,6 +255,7 @@ def marching_tetrahedra_blocks(
         vstop,
         fstop - nf,
         fstop,
+        keys[first[order]],
     )
     return out_v, out_f, blocks
 
@@ -213,7 +273,6 @@ def _march_block(
     (indices into them)."""
     nx, ny, nz = G.shape
     _, NY, NZ = shape
-    size = int(np.prod(shape))
     # cells whose 8 corners do not all have the same sign
     c = [
         pos[i : nx - 1 + i, j : ny - 1 + j, k : nz - 1 + k]
@@ -258,9 +317,10 @@ def _march_block(
         sw = la > lb
         va = np.where(sw, o_val[rows, b], o_val[rows, a])
         vb = np.where(sw, o_val[rows, a], o_val[rows, b])
-        pa = np.where(sw[:, None], o_pos[rows, b], o_pos[rows, a]).astype(G.dtype)
-        pb = np.where(sw[:, None], o_pos[rows, a], o_pos[rows, b]).astype(G.dtype)
-        key = np.minimum(la, lb) * size + np.maximum(la, lb)
+        ia = np.where(sw[:, None], o_pos[rows, b], o_pos[rows, a])
+        ib = np.where(sw[:, None], o_pos[rows, a], o_pos[rows, b])
+        key = edge_key(np.minimum(la, lb), ib - ia)
+        pa, pb = ia.astype(G.dtype), ib.astype(G.dtype)
         t = (va / (va - vb))[:, None]
         return key, pa + t * (pb - pa)
 

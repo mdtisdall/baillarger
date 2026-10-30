@@ -47,6 +47,16 @@ Guarantee: the corrected segmentation's voxels with a filled label are the
 corrected mask exactly, and its Betti numbers (Kuhn adjacency) are
 (b0, 0, 0). Voxels outside the mask's bounding box are unchanged.
 
+## Planned: manual edits
+
+Not in `wm-dseg/1`. An editor's changes will be kept in a sparse edits
+file (per voxel: the old and new label, and when), which `dseg` takes as a
+second source, listed in `Sources` with its SHA-256, and applies with the
+automatic corrections, recorded as moves of kind `manual`; this spec will
+change to allow it. Until then `Sources` holds the input segmentation only.
+The derivative stays written whole by the command, so an edit costs a
+`dseg` run, not a rewrite by hand.
+
 ## Sidecar keys: wm-dseg/1
 
 | Key | Type | Required | Meaning |

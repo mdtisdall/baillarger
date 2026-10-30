@@ -18,7 +18,7 @@ minus the vertex) and keeps boundary vertices (box-face cuts) fixed.
   amplified, and the shrinkage of the low frequencies is second order.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -26,6 +26,8 @@ from scipy import sparse
 from scipy.sparse.csgraph import connected_components
 
 type Float = npt.NDArray[np.float64]
+#: vertices: float32 or float64, kept by every function
+type V[T: np.floating[Any]] = npt.NDArray[T]
 type Int = npt.NDArray[np.int64]
 type Bool = npt.NDArray[np.bool_]
 type Faces = npt.NDArray[np.integer[Any]]
@@ -52,18 +54,19 @@ def boundary_vertices(f: Faces, nv: int) -> Bool:
     return b
 
 
-def vertex_normals(v: Float, f: Faces) -> Float:
+def vertex_normals[T: np.floating[Any]](v: V[T], f: Faces) -> V[T]:
     """Area-weighted unit vertex normals, on the side the faces' orientation
     gives."""
     fn = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
     vn = np.zeros_like(v)
     for k in range(3):
         np.add.at(vn, f[:, k], fn)
-    out: Float = vn / (np.linalg.norm(vn, axis=1, keepdims=True) + 1e-12)
+    # the stubs type the division as float64; it keeps v's dtype
+    out = cast(V[T], vn / (np.linalg.norm(vn, axis=1, keepdims=True) + 1e-12))
     return out
 
 
-def umbrella(v: Float, f: Faces) -> tuple[sparse.csr_matrix, Float]:
+def umbrella[T: np.floating[Any]](v: V[T], f: Faces) -> tuple[sparse.csr_matrix, V[T]]:
     """The vertex adjacency matrix and each vertex's degree (at least 1), in
     the dtype of v (float32 or float64), so that smoothing keeps it."""
     E = edges(f)
@@ -75,7 +78,9 @@ def umbrella(v: Float, f: Faces) -> tuple[sparse.csr_matrix, Float]:
     return A, deg
 
 
-def relax(v: Float, f: Faces, iters: int = 5, step: float = 0.5) -> Float:
+def relax[T: np.floating[Any]](
+    v: V[T], f: Faces, iters: int = 5, step: float = 0.5
+) -> V[T]:
     """Tangential relaxation toward the neighbours' centroid."""
     A, deg = umbrella(v, f)
     fixed = boundary_vertices(f, len(v))
@@ -89,7 +94,9 @@ def relax(v: Float, f: Faces, iters: int = 5, step: float = 0.5) -> Float:
     return x
 
 
-def gauss_steps(v: Float, f: Faces, sigma: float, lam: float = 0.5) -> int:
+def gauss_steps(
+    v: npt.NDArray[np.floating[Any]], f: Faces, sigma: float, lam: float = 0.5
+) -> int:
     """Umbrella steps of size lam for a Gaussian of sigma (the units of v): on
     a regular mesh of edge e, one step multiplies a plane wave of wavenumber w
     by about 1 - lam w^2 e^2 / 4, so n steps give exp(-w^2 sigma^2 / 2) with
@@ -99,14 +106,16 @@ def gauss_steps(v: Float, f: Faces, sigma: float, lam: float = 0.5) -> int:
     return max(1, int(round(2 * sigma**2 / (lam * e2))))
 
 
-def twice(v: Float, f: Faces, sigma: float, lam: float = 0.5) -> Float:
+def twice[T: np.floating[Any]](
+    v: V[T], f: Faces, sigma: float, lam: float = 0.5
+) -> V[T]:
     """Gaussian smoothing of sigma along the mesh, shrinkage removed by
     twicing: 2 G v - G G v."""
     A, deg = umbrella(v, f)
     fixed = boundary_vertices(f, len(v))
     n = gauss_steps(v, f, sigma, lam)
 
-    def G(x: Float) -> Float:
+    def G(x: V[T]) -> V[T]:
         for _ in range(n):
             d = (A @ x) / deg[:, None] - x
             d[fixed] = 0
@@ -114,11 +123,11 @@ def twice(v: Float, f: Faces, sigma: float, lam: float = 0.5) -> Float:
         return x
 
     g = G(v.copy())
-    out: Float = 2 * g - G(g)
+    out: V[T] = 2 * g - G(g)
     return out
 
 
-def smooth_normals(v: Float, f: Faces, iters: int = 10) -> Float:
+def smooth_normals[T: np.floating[Any]](v: V[T], f: Faces, iters: int = 10) -> V[T]:
     """Area-weighted vertex normals, then iters steps of Laplacian smoothing
     along the edges (as baillarger.frame.white_mesh)."""
     n = vertex_normals(v, f)

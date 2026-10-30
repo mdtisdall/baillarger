@@ -1,0 +1,15 @@
+[project]
+name = "baillarger-reference"
+version = "0.1.0"
+description = "Reference solvers for baillarger's tests, in their own environment"
+requires-python = ">=3.12"
+dependencies = [
+    "cvxpy>=1.9.3",
+    "clarabel>=0.11.1",
+    "numpy>=2.5.4",
+    "scipy>=1.18.1",
+]
+
+[tool.uv]
+# a set of scripts, not a package
+package = false
