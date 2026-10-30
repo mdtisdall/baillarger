@@ -12,6 +12,7 @@ in step by the server.
   inflation, picking.
 - overview: the overview that the mesh command writes with a white surface, and a
   Surface on it.
+- white_view: a white surface from the mesh command viewed alone (--white).
 - data: a site's files, read for viewing (Site, which holds a Surface).
 - labels: the review of pial-side label proposals (baillarger.pial_labels).
 - server: the local web server, its shared state and the page (static/index.html).
@@ -19,4 +20,5 @@ in step by the server.
 Run: python -m baillarger.viewer <column_volume_<name>.npz> --cache DIR [--joint ...]
      [--labels pial_labels_<name>.npz]
      python -m baillarger.viewer --labels pial_labels_<name>.npz  (labels only)
+     python -m baillarger.viewer --white <..._white.surf.gii> --cache DIR
 """
