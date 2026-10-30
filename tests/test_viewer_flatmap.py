@@ -219,3 +219,102 @@ def test_flatten_packs_pieces_and_scales_to_area() -> None:
     T = out["T_v"][: len(v1)]
     G = np.einsum("nij,nik->njk", T, T)
     assert np.max(np.abs(G - np.eye(2))) < 1e-9
+
+
+# ------------------------------------------------------------- a patch round a vertex
+
+
+def grid_edge_distance(di: Int, dj: Int) -> Float:
+    """Edge-path distance on grid() with unit spacing: its diagonals run (+1, +1)."""
+    same = np.sign(di) * np.sign(dj) >= 0
+    a, b = np.abs(di), np.abs(dj)
+    out: Float = np.where(
+        same, np.sqrt(2) * np.minimum(a, b) + np.abs(a - b), a + b
+    ).astype(float)
+    return out
+
+
+def test_ball_on_a_flat_grid_has_the_expected_faces_and_distances() -> None:
+    nx = ny = 21
+    f = grid(nx, ny)
+    ij = np.c_[np.repeat(np.arange(nx), ny), np.tile(np.arange(ny), nx)]
+    v = np.c_[ij, np.zeros(nx * ny)].astype(float)
+    i0, j0, R = 10, 9, 4.3  # no vertex at distance exactly R
+    v0 = i0 * ny + j0
+    d = grid_edge_distance(ij[:, 0] - i0, ij[:, 1] - j0)
+    want_f = f[(d[f] <= R).all(1)]
+    fp, orig, dist = FM.geodesic_patch(*FM.mesh_graph(v, f), f, v0, R)
+    assert orig[0] == v0 and np.unique(orig).size == orig.size
+    assert np.array_equal(np.sort(orig), np.unique(want_f))
+    assert np.allclose(dist, d[orig], atol=1e-12)
+    got = {tuple(np.roll(t, -np.argmin(t))) for t in orig[fp].tolist()}
+    assert got == {tuple(np.roll(t, -np.argmin(t))) for t in want_f.tolist()}
+
+
+def test_ball_keeps_only_v0s_piece() -> None:
+    # a triangle hung on one grid vertex (shares the vertex, no edge) is in the ball
+    # but not in v0's piece: it is left out, and the shared vertex has one copy
+    nx = ny = 9
+    f = grid(nx, ny)
+    v = np.c_[
+        np.repeat(np.arange(nx), ny), np.tile(np.arange(ny), nx), np.zeros(nx * ny)
+    ].astype(float)
+    p = 4 * ny + 6
+    v = np.vstack([v, v[p] + [0.3, 0.0, 1.0], v[p] + [0.0, 0.3, 1.0]])
+    f = np.vstack([f, [p, nx * ny, nx * ny + 1]])
+    fp, orig, _ = FM.geodesic_patch(*FM.mesh_graph(v, f), f, 4 * ny + 4, 3.0)
+    assert p in orig and nx * ny not in orig and np.unique(orig).size == orig.size
+    assert FM.topology(fp)["b"] == 1
+
+
+def plane_mesh(seed: int, hole: bool = False) -> tuple[Float, Int, Float, int]:
+    rng = np.random.default_rng(seed)
+    p = rng.uniform(-5, 5, (900, 2))
+    p[0] = 0
+    f = Delaunay(p).simplices.astype(np.int64)
+    if hole:  # remove the faces round a vertex near (2, 0): a second boundary loop
+        h = int(np.argmin(np.linalg.norm(p - [2, 0], axis=1)))
+        f = f[~(f == h).any(1)]
+    det = cross2(p[f[:, 1]] - p[f[:, 0]], p[f[:, 2]] - p[f[:, 0]])
+    f = np.where((det < 0)[:, None], f[:, ::-1], f)
+    v = np.c_[p, np.zeros(len(p))] @ rotation(rng).T + rng.normal(size=3)
+    return v, f, p, 0
+
+
+@pytest.mark.parametrize("method", ["lscm", "exp"])
+@pytest.mark.parametrize("hole", [False, True])
+def test_plane_patch_maps_isometrically(method: str, hole: bool) -> None:
+    v, f, p, v0 = plane_mesh(3, hole)
+    out = FM.patch_flat_map(v, f, FM.mesh_graph(v, f), v0, 3.5, method)
+    assert out["boundary_loops"] == (2 if hole else 1)
+    uv, q = out["uv"], p[out["orig"]]
+    assert np.allclose(uv[0], 0, atol=1e-12)
+    # an isometry: all pairwise distances kept (and no reflection: no folded face)
+    D2 = np.linalg.norm(uv[:, None] - uv[None], axis=2)
+    D3 = np.linalg.norm(q[:, None] - q[None], axis=2)
+    assert np.max(np.abs(D2 - D3)) < 1e-9
+    assert np.all(out["signed_area"] > 0)
+    assert np.max(np.abs(out["s1"] - 1)) < 1e-9 and np.max(np.abs(out["s2"] - 1)) < 1e-9
+    G = np.einsum("nij,nik->njk", out["T_v"], out["T_v"])
+    assert np.max(np.abs(G - np.eye(2))) < 1e-9
+
+
+def test_pinched_vertex_in_the_ball_gets_one_copy_per_fan() -> None:
+    # two faces of one grid vertex that share no edge are removed: the vertex has two
+    # fans. The patch has two copies of it, and still flattens isometrically.
+    nx = ny = 11
+    f = grid(nx, ny)
+    v = np.c_[
+        np.repeat(np.arange(nx), ny), np.tile(np.arange(ny), nx), np.zeros(nx * ny)
+    ].astype(float)
+    p = 5 * ny + 7
+    star = np.flatnonzero((f == p).any(1))
+    k1, k2 = next(
+        (a, b) for a in star for b in star if np.intersect1d(f[a], f[b]).size == 1
+    )
+    f = np.delete(f, [k1, k2], axis=0)
+    v0 = 5 * ny + 5
+    out = FM.patch_flat_map(v, f, FM.mesh_graph(v, f), v0, 3.5)
+    assert np.sum(out["orig"] == p) == 2
+    assert np.max(np.abs(out["s1"] - 1)) < 1e-9 and np.max(np.abs(out["s2"] - 1)) < 1e-9
+    assert np.all(out["signed_area"] > 0)
