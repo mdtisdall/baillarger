@@ -355,3 +355,92 @@ def test_the_repaired_result_is_the_result_with_its_pins() -> None:
             np.testing.assert_array_equal(x, y)
     reused = [s["reused"] for s in out.passes]
     assert sum(reused) > 0
+
+
+def test_closest_points_barycentrics() -> None:
+    """The barycentrics of the closest point: non-negative, summing to 1, and
+    rebuilding the point at the distance found, which is triangle_distances'
+    and the scalar point_triangle_distance's (to rounding)."""
+    rng = np.random.default_rng(5)
+    k = 20000
+    p, a, b, c = (rng.normal(size=(k, 3)) * 3 for _ in range(4))
+    thin = rng.random(k) < 0.2
+    c[thin] = (
+        a[thin] + 0.5 * (b[thin] - a[thin]) + 1e-3 * rng.normal(size=(thin.sum(), 3))
+    )
+    d, b0, b1, b2 = D.closest_points(p, a, b, c)
+    np.testing.assert_array_equal(d, D.triangle_distances(p, a, b, c))
+    assert min(b0.min(), b1.min(), b2.min()) >= -1e-12
+    np.testing.assert_allclose(b0 + b1 + b2, 1, atol=1e-12)
+    q = b0[:, None] * a + b1[:, None] * b + b2[:, None] * c
+    np.testing.assert_allclose(np.linalg.norm(p - q, axis=1), d, atol=1e-9)
+    for i in range(0, k, 997):
+        s = D.point_triangle_distance(
+            tuple(p[i]), tuple(a[i]), tuple(b[i]), tuple(c[i])
+        )
+        assert s == pytest.approx(d[i], abs=1e-12)
+
+
+def test_reorder_keeps_each_face_with_its_carried_vertices() -> None:
+    v, f = torus()
+    out = D.decimate(v, f, eps=0.3, block=8.0, workers=1, log=lambda s: None)
+    o = np.random.default_rng(2).permutation(len(out.faces))
+    r = D.reorder(out, o)
+    np.testing.assert_array_equal(r.faces, out.faces[o])
+    for new, old in ((0, o[0]), (7, o[7]), (len(o) - 1, o[-1])):
+        a = r.cids[r.cptr[new] : r.cptr[new + 1]]
+        b = out.cids[out.cptr[old] : out.cptr[old + 1]]
+        np.testing.assert_array_equal(a, np.sort(b))
+    assert np.all(
+        np.diff(r.cids)[np.diff(np.repeat(np.arange(len(o)), np.diff(r.cptr))) == 0] > 0
+    )
+
+
+def carried_geometry(v: Float, out: D.Decimated) -> tuple[Int, Float, Float, Float]:
+    """Per carried vertex: its face (into out.faces), the face's normal, the
+    distance and the rebuilt closest point."""
+    face = np.repeat(np.arange(len(out.faces)), np.diff(out.cptr))
+    t = out.vertex_ids[out.faces[face]]
+    a, b, c = (v[t[:, k]] for k in range(3))
+    d, b0, b1, b2 = D.closest_points(v[out.cids], a, b, c)
+    q = b0[:, None] * a + b1[:, None] * b + b2[:, None] * c
+    return face, np.cross(b - a, c - a), d, q
+
+
+def test_on_a_plane_the_carried_points_are_on_their_faces() -> None:
+    n = 30
+    i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    v = np.c_[i.ravel() * 0.25, j.ravel() * 0.25, np.zeros(n * n)]
+    F = []
+    for x in range(n - 1):
+        for y in range(n - 1):
+            p, q, r, s = x * n + y, (x + 1) * n + y, (x + 1) * n + y + 1, x * n + y + 1
+            F += [(p, q, r), (p, r, s)]
+    f = np.array(F, np.int64)
+    out = D.decimate(v, f, eps=1e-9, block=100.0, workers=1, log=lambda s: None)
+    assert len(out.faces) < 0.2 * len(f)
+    _, _, d, rebuilt = carried_geometry(v, out)
+    assert len(d) == n * n - len(out.vertex_ids)
+    assert d.max() <= 1e-12
+    np.testing.assert_allclose(rebuilt, v[out.cids], atol=1e-12)
+
+
+def test_on_a_thin_blade_each_vertex_is_carried_on_its_own_side() -> None:
+    """A blade 2 voxels (0.32 mm) thick, decimated within 0.1 mm: each carried
+    vertex's face has a normal on the same side as the vertex's own, and in
+    the blade's middle the face lies on the vertex's sheet."""
+    from baillarger.mesh_smoothing import vertex_normals
+
+    wm = np.zeros((40, 40, 20), bool)
+    wm[19:21, 4:30, :] = True
+    v, f = marching_tetrahedra(wm.astype(float), 0.5)
+    v = v * 0.16
+    out = D.decimate(v, f, eps=0.1, block=2.0, workers=1, log=lambda s: None)
+    assert len(out.faces) < 0.5 * len(f)
+    face, fn, d, _ = carried_geometry(v, out)
+    vn = vertex_normals(v, f)[out.cids]
+    assert np.all(np.sum(fn * vn, axis=1) > 0)
+    mid = (v[out.cids, 1] > 8 * 0.16) & (v[out.cids, 1] < 26 * 0.16)
+    centre = v[out.vertex_ids[out.faces[face]]].mean(1)
+    side = v[out.cids, 0] < 19.5 * 0.16
+    assert np.array_equal(side[mid], centre[mid, 0] < 19.5 * 0.16)

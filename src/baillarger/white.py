@@ -66,7 +66,7 @@ from baillarger.bids import (
     write_sidecar,
 )
 from baillarger.blocks import EmbeddedSource, open_volume
-from baillarger.decimate import decimate
+from baillarger.decimate import closest_points, csr_take, decimate, reorder
 from baillarger.gifti import DataArray, write_external
 from baillarger.handles import kuhn_betti, kuhn_structure, remove_handles
 from baillarger.mesh import (
@@ -765,6 +765,9 @@ OVERVIEW_SPEC = SidecarSpec(
         Key("Pieces", "array of objects", True, "per connected piece"),
         Key("IdsFile", "string", True, "the true vertex ids' GIfTI (name)"),
         Key("Repairs", "array of objects", True, "per repair round"),
+        Key("CarryFile", "string", True, "the carried vertices' GIfTI (name)"),
+        Key("Carried", "integer", True, "true vertices carried by faces"),
+        Key("DataSHA256", "object", True, "SHA-256 of the carry .dat, by name"),
         Key("Passes", "array of objects", True, "per decimation pass"),
     ),
 )
@@ -776,6 +779,7 @@ def overview_paths(surf: Path) -> dict[str, Path]:
     return dict(
         overview=surf.with_name(f"{stem}_desc-overview_white.surf.gii"),
         ids=surf.with_name(f"{stem}_desc-overviewids_white.func.gii"),
+        carry=surf.with_name(f"{stem}_desc-overviewcarry_white.func.gii"),
         sidecar=surf.with_name(f"{stem}_desc-overview_white.json"),
     )
 
@@ -799,8 +803,11 @@ def write_white_overview(
     surface decimated (baillarger.decimate) so that it keeps its topology,
     every true vertex is within eps_mm of it and its vertices are true
     vertices; written next to surf as an ordinary GIfTI with embedded data,
-    with the true vertex of each overview vertex and a sidecar
-    (docs/formats/white-overview.md). Returns the paths written."""
+    with the true vertex of each overview vertex, the true vertices each face
+    carries (external binary data) and a sidecar
+    (docs/formats/white-overview.md). The faces are sorted by their true
+    vertex ids, smallest first, so that faces near each other are near each
+    other in the files. Returns the paths written."""
     lap = Laps()
     side = read_sidecar(sidecar_path(surf), SURF_SPEC)
     hemi = side["Hemisphere"]
@@ -811,6 +818,8 @@ def write_white_overview(
     f = np.asarray(tri, np.int64)
     lap("read the surface")
     D = decimate(v, f, eps=eps_mm, block=block_mm, workers=workers, log=log.info)
+    fs = np.sort(D.faces, 1)  # vertex order = true id order
+    D = reorder(D, np.lexsort((fs[:, 2], fs[:, 1], fs[:, 0])))
     lap("decimate")
     paths = overview_paths(surf)
     _embedded(
@@ -822,6 +831,22 @@ def write_white_overview(
     ).to_filename(str(paths["overview"]))
     _embedded([(D.vertex_ids.astype("<i4"), "NIFTI_INTENT_NONE")], hemi).to_filename(
         str(paths["ids"])
+    )
+    cdat = write_external(
+        paths["carry"],
+        [
+            DataArray(
+                D.cptr.astype("<i4")[:, None],
+                "NIFTI_INTENT_NONE",
+                dict(Name="per face, where its carried true vertices start"),
+            ),
+            DataArray(
+                D.cids.astype("<i4")[:, None],
+                "NIFTI_INTENT_NONE",
+                dict(Name="carried true vertices, by face"),
+            ),
+        ],
+        dict(AnatomicalStructurePrimary=_STRUCTURE[hemi]),
     )
     vox = np.linalg.norm(aff[:3, :3], axis=0)
     pieces = mesh_pieces(
@@ -849,11 +874,23 @@ def write_white_overview(
             Pieces=pieces,
             IdsFile=paths["ids"].name,
             Repairs=D.repairs,
+            CarryFile=paths["carry"].name,
+            Carried=len(D.cids),
+            DataSHA256={cdat.name: file_sha256(cdat)},
             Passes=D.passes,
         ),
     )
     lap("write")
-    return SurfaceFiles(paths)
+    return SurfaceFiles(dict(paths, carry_dat=cdat))
+
+
+def surface_points(surf: Path) -> npt.NDArray[np.float32]:
+    """The white surface's vertices as its file holds them (scanner mm,
+    float32), memory-mapped."""
+    pts: npt.NDArray[np.float32] = GiftiImage.from_filename(
+        str(surf), mmap=True
+    ).agg_data("pointset")
+    return pts
 
 
 @dataclass(frozen=True)
@@ -861,13 +898,16 @@ class WhiteOverview:
     """A white surface's overview read from its files (write_white_overview):
     vertices (float32) in voxel coordinates of the grid, as WhiteSurface.load
     gives the same vertices; faces into them; vertex_ids, the true vertex of
-    each."""
+    each; and per face the true vertices it carries: they start at ptr[k]
+    in carried (memory-mapped)."""
 
     v: Float
     f: Int
     vertex_ids: Int
     affine: Float
     sidecar: dict[str, Any]
+    ptr: Int
+    carried_ids: npt.NDArray[np.int32]
 
     @classmethod
     def load(cls, path: Path) -> "WhiteOverview":
@@ -877,13 +917,38 @@ class WhiteOverview:
             ("pointset", "triangle")
         )
         ids = GiftiImage.from_filename(str(path.with_name(side["IdsFile"])))
+        cg = GiftiImage.from_filename(str(path.with_name(side["CarryFile"])), mmap=True)
         return cls(
             mm_to_voxel(pts, aff),
             np.asarray(tri, np.int64),
             np.asarray(ids.darrays[0].data, np.int64),
             aff,
             side,
+            np.asarray(cg.darrays[0].data, np.int64).ravel(),
+            cg.darrays[1].data.reshape(-1),
         )
+
+    def carried(self, faces: npt.ArrayLike) -> tuple[Int, Int]:
+        """The true vertices that the overview faces `faces` carry, and the face
+        (of `faces`) that carries each; only their part of the file is read."""
+        fa = np.asarray(faces, np.int64).ravel()
+        cptr, ids = csr_take(self.ptr, self.carried_ids, fa)
+        return ids.astype(np.int64), np.repeat(fa, np.diff(cptr))
+
+    def carry(
+        self, faces: npt.ArrayLike, pts: npt.NDArray[np.floating[Any]]
+    ) -> tuple[Int, Int, Float, Float, Float, Float]:
+        """For the true vertices that `faces` carry: their ids, carrying faces,
+        the barycentric coordinates (b0, b1, b2) of their closest point on that
+        face and the distance to it (mm). pts: the white surface's vertices as
+        its file holds them (mm, float32, surface_points), the coordinates the
+        decimation used, so the distances are its own."""
+        ids, fc = self.carried(faces)
+        t = self.vertex_ids[self.f[fc]]
+        x = np.asarray(pts[ids], np.float64)
+        a, b, c = (np.asarray(pts[t[:, k]], np.float64) for k in range(3))
+        d, b0, b1, b2 = closest_points(x, a, b, c)
+        return ids, fc, b0, b1, b2, d
 
     def check(self, surf: WhiteSurface) -> None:
         """Raises ValueError unless the overview was made from surf's data (its

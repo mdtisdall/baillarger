@@ -22,19 +22,27 @@ Next to the white surface, in `DERIV/sub-<sub>/ses-<ses>/anat/`, hemisphere
 |---|---|
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-overview_white.surf.gii` | GIfTI: the vertices and the triangles, embedded |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-overviewids_white.func.gii` | GIfTI: the true vertex of each overview vertex, embedded |
+| `sub-<sub>_ses-<ses>_hemi-<h>_desc-overviewcarry_white.func.gii` | GIfTI XML: the true vertices that each face carries, as external binary data |
+| `sub-<sub>_ses-<ses>_hemi-<h>_desc-overviewcarry_white.dat` | Their data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-overview_white.json` | Sidecar, `white-overview/1` |
 
-Both GIfTI files are ordinary ones (`Encoding` `GZipBase64Binary`, no external
-data), so any surface reader opens them (nibabel, Connectome Workbench,
-FreeSurfer, NiiVue). They are small: the overview's size is set by the surface's
-shape and `EpsMM`, not by the voxel size (about 200 k vertices for a hemisphere
-at 0.1 mm).
+The overview and ids files are ordinary GIfTI (`Encoding` `GZipBase64Binary`,
+no external data), so any surface reader opens them (nibabel, Connectome
+Workbench, FreeSurfer, NiiVue). They are small: the overview's size is set by
+the surface's shape and `EpsMM`, not by the voxel size (about 100 k vertices
+for a hemisphere at 0.1 mm). The carry file has one entry per true vertex
+(about 50 MB for a hemisphere), so its data is external and raw, like the
+white surface's (`white-surf.md`, *The GIfTI files*), and a reader takes only
+the faces it needs; its arrays are not per-vertex values, so surface viewers
+do not show it.
 
 | File | Data array | Type | Shape | Intent |
 |---|---|---|---|---|
 | `_desc-overview_white.surf.gii` | 1: vertices, scanner RAS mm | float32 | n × 3 | `NIFTI_INTENT_POINTSET` |
 | `_desc-overview_white.surf.gii` | 2: triangles, indices into the vertices | int32 | m × 3 | `NIFTI_INTENT_TRIANGLE` |
 | `_desc-overviewids_white.func.gii` | 1: the true vertex (an index into the white surface's vertices) | int32 | n | `NIFTI_INTENT_NONE` |
+| `_desc-overviewcarry_white.func.gii` | 1: pointers: face k's carried vertices are entries `ptr[k]` to `ptr[k + 1]` of array 2 | int32 | (m + 1) × 1 | `NIFTI_INTENT_NONE` |
+| `_desc-overviewcarry_white.func.gii` | 2: the carried true vertices (indices into the white surface's vertices), face by face | int32 | c × 1 | `NIFTI_INTENT_NONE` |
 
 Each file's metadata has `AnatomicalStructurePrimary` (`CortexRight` or
 `CortexLeft`).
@@ -61,6 +69,40 @@ passes on grids shifted by half a block). Its guarantees:
   k is true vertex `ids[k]`, and its coordinates are that vertex's float32
   coordinates in the white surface's file, bit for bit. The vertices are in
   increasing order of their true vertex.
+
+## Order
+
+- Vertices: in increasing order of their true vertex.
+- Faces: by their three true vertices, smallest first, then the middle one,
+  then the largest (each face keeps its own corner order, so its orientation).
+  True vertices are numbered in the white surface's Morton block order, so
+  faces that are near each other are near each other in the files, and so
+  are their carried vertices.
+- Carried vertices: face by face in that order; within a face, in increasing
+  order.
+
+## Carried vertices
+
+Each true vertex that is not an overview vertex is carried by exactly one
+overview face: the face that stands for it in the decimation (each vertex
+removed by a collapse goes to the nearest of the faces that the collapse
+makes, which lie round it on the surface, so a vertex is not carried by a face
+across a sheet the way a nearest-face search in space could do). Overview
+vertices are carried by none; `desc-overviewids` gives them. `Carried` is
+`TrueVertices` − `Vertices`.
+
+A carried vertex's place on its face is not stored: it is the closest point of
+the face to the vertex, computed on reading from the white surface's vertices
+as its file holds them (float32 scanner mm, as the decimation used them), with
+its barycentric coordinates and distance (`WhiteOverview.carry`;
+`baillarger.decimate.closest_points`). The largest of those distances is
+`MaxDistanceMM`, exactly.
+
+To read a patch: its faces' entries of the pointers (array 1, small, read
+whole) give the ranges of array 2 to read (byte `offset + 4 × ptr[k]` of the
+`.dat`, `ExternalFileOffset` in the XML).
+
+## Identity
 
 The ids are indices into the white surface it was made from, which
 `SourcesSHA256` records (the `.surf.gii` and its `.dat`). The overview is
@@ -89,4 +131,7 @@ surface's `desc-edgekeys` at `ids`.
 | `Pieces` | array of objects | yes | Per connected piece, largest first: `V`, `F`, `boundary_loops`, `chi`, `genus`, `area_mm2` |
 | `IdsFile` | string | yes | The name of the `desc-overviewids` file |
 | `Repairs` | array of objects | yes | Per repair round: `round`, `intersecting_faces`, `pairs`, `pinned` (true vertices kept so far); the last has no intersecting faces |
+| `CarryFile` | string | yes | The name of the `desc-overviewcarry` file |
+| `Carried` | integer | yes | True vertices carried by faces (`TrueVertices` − `Vertices`) |
+| `DataSHA256` | object | yes | SHA-256 of the carry file's `.dat`, by name |
 | `Passes` | array of objects | yes | Per decimation pass: `blocks`, `faces_before`, `faces_after`, `collapses`, `locked`, `seconds` |

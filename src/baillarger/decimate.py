@@ -909,7 +909,9 @@ class _Laps:
             self.t = now
 
 
-def _csr_take(ptr: Int, data: Int, rows: Int) -> tuple[Int, Int]:
+def csr_take[T: np.generic](
+    ptr: Int, data: npt.NDArray[T], rows: Int
+) -> tuple[Int, npt.NDArray[T]]:
     """The rows `rows` of a CSR list (ptr, data), as a new CSR list."""
     lens = ptr[rows + 1] - ptr[rows]
     out_ptr = np.r_[0, np.cumsum(lens)].astype(np.int64)
@@ -986,7 +988,7 @@ def decimate_pass(
             if locked[gids].all():
                 kept.append(idx)
                 continue
-            cptr, cids = _csr_take(M.cptr, M.cids, idx)
+            cptr, cids = csr_take(M.cptr, M.cids, idx)
             yield (
                 gids,
                 Block(
@@ -1059,7 +1061,7 @@ def decimate_pass(
     keep = np.sort(np.concatenate(kept))
     f_new = np.concatenate([f[keep]] + [g[r.F] for g, r in results])
     cptr, cids = _csr_concat(
-        [_csr_take(M.cptr, M.cids, keep)] + [(r.cptr, r.cids) for _, r in results]
+        [csr_take(M.cptr, M.cids, keep)] + [(r.cptr, r.cids) for _, r in results]
     )
     lap("join")
     summary = dict(
@@ -1106,9 +1108,13 @@ def carried_distances(v: Float, f: Int, cptr: Int, cids: Int) -> Float:
     return out
 
 
-def triangle_distances(p: Float, a: Float, b: Float, c: Float) -> Float:
-    """Row-wise distance from points p to triangles abc (all (k, 3)): the
-    vectorised form of point_triangle_distance."""
+def closest_points(
+    p: Float, a: Float, b: Float, c: Float
+) -> tuple[Float, Float, Float, Float]:
+    """Row-wise, the closest point to p on triangle abc (all (k, 3)): its
+    distance and its barycentric coordinates (b0, b1, b2), by the Voronoi
+    regions of point_triangle_distance: 1 on a corner, (1 - t, t) along an
+    edge, (1 - v - w, v, w) inside."""
 
     def dot(x: Float, y: Float) -> Float:
         out: Float = np.einsum("ij,ij->i", x, y)
@@ -1129,22 +1135,61 @@ def triangle_distances(p: Float, a: Float, b: Float, c: Float) -> Float:
         t_ac = d2 / (d2 - d6)
         t_bc = (d4 - d3) / ((d4 - d3) + (d5 - d6))
         s = 1.0 / (va + vb + vc)
-    q = a + (vb * s)[:, None] * ab + (vc * s)[:, None] * ac
+    v, w = vb * s, vc * s
+    q = a + v[:, None] * ab + w[:, None] * ac
+    bary = np.c_[1 - v - w, v, w]
+    one, zero = np.ones(len(p)), np.zeros(len(p))
     regions = [
-        ((d1 <= 0) & (d2 <= 0), a),
-        ((d3 >= 0) & (d4 <= d3), b),
-        ((d6 >= 0) & (d5 <= d6), c),
-        ((vc <= 0) & (d1 >= 0) & (d3 <= 0), a + t_ab[:, None] * ab),
-        ((vb <= 0) & (d2 >= 0) & (d6 <= 0), a + t_ac[:, None] * ac),
-        ((va <= 0) & (d4 - d3 >= 0) & (d5 - d6 >= 0), b + t_bc[:, None] * (c - b)),
+        ((d1 <= 0) & (d2 <= 0), a, (one, zero, zero)),
+        ((d3 >= 0) & (d4 <= d3), b, (zero, one, zero)),
+        ((d6 >= 0) & (d5 <= d6), c, (zero, zero, one)),
+        (
+            (vc <= 0) & (d1 >= 0) & (d3 <= 0),
+            a + t_ab[:, None] * ab,
+            (1 - t_ab, t_ab, zero),
+        ),
+        (
+            (vb <= 0) & (d2 >= 0) & (d6 <= 0),
+            a + t_ac[:, None] * ac,
+            (1 - t_ac, zero, t_ac),
+        ),
+        (
+            (va <= 0) & (d4 - d3 >= 0) & (d5 - d6 >= 0),
+            b + t_bc[:, None] * (c - b),
+            (zero, 1 - t_bc, t_bc),
+        ),
     ]
     done = np.zeros(len(p), bool)
-    for m, x in regions:
+    for m, x, w3 in regions:
         m = m & ~done
         q[m] = x[m]
+        bary[m] = np.c_[w3][m]
         done |= m
-    out: Float = np.linalg.norm(p - q, axis=1)
-    return out
+    dist: Float = np.linalg.norm(p - q, axis=1)
+    return dist, bary[:, 0], bary[:, 1], bary[:, 2]
+
+
+def triangle_distances(p: Float, a: Float, b: Float, c: Float) -> Float:
+    """Row-wise distance from points p to triangles abc (all (k, 3)): the
+    vectorised form of point_triangle_distance (closest_points)."""
+    return closest_points(p, a, b, c)[0]
+
+
+def reorder(D: Decimated, order: npt.ArrayLike) -> Decimated:
+    """D with its faces in the order `order` (a permutation of the faces), each
+    face keeping its carried vertices, sorted within each face."""
+    o = np.asarray(order, np.int64)
+    cptr, cids = csr_take(D.cptr, D.cids, o)
+    face = np.repeat(np.arange(len(o)), np.diff(cptr))
+    cids = cids[np.lexsort((cids, face))]
+    return Decimated(
+        vertex_ids=D.vertex_ids,
+        faces=D.faces[o],
+        cptr=cptr,
+        cids=cids,
+        max_distance=D.max_distance,
+        passes=D.passes,
+    )
 
 
 def decimate(
@@ -1234,7 +1279,7 @@ def decimate(
         # times as many vertices on the hemisphere, for two rounds fewer)
         rows = np.flatnonzero(hit)
         pin[M.f[rows].ravel()] = True
-        pin[_csr_take(M.cptr, M.cids, rows)[1]] = True
+        pin[csr_take(M.cptr, M.cids, rows)[1]] = True
     else:
         raise RuntimeError(
             f"decimate: faces still intersect after {max_rounds} repair rounds"
