@@ -24,13 +24,17 @@ The command line:
 
     python -m baillarger.white dseg ASEG --out DERIVATIVES
     python -m baillarger.white mesh DSEG --out DERIVATIVES [--block-cells N]
-        [--device DEVICE]
+        [--device DEVICE] [--overview-eps MM] [--workers N]
+    python -m baillarger.white overview SURF [--eps MM] [--workers N]
 
 dseg writes the corrected segmentation (desc-wmtopo_dseg) and the changed
 voxels (desc-wmtopofixes_dseg), with their .tsv and .json sidecars
 (docs/formats/wm-dseg.md). mesh writes the white surface of a corrected
 segmentation as GIfTI, with its normals, edge keys and block index
-(docs/formats/white-surf.md).
+(docs/formats/white-surf.md), then its overview (write_white_overview): the
+surface decimated for viewing, as an ordinary GIfTI with embedded data
+(docs/formats/white-overview.md). overview writes the overview of a surface
+that mesh wrote.
 """
 
 import argparse
@@ -41,7 +45,7 @@ from typing import Any
 import nibabel as nib
 import numpy as np
 import numpy.typing as npt
-from nibabel.gifti.gifti import GiftiImage
+from nibabel.gifti.gifti import GiftiDataArray, GiftiImage, GiftiMetaData
 from scipy import ndimage as ndi
 
 from baillarger import antialias as AA
@@ -62,6 +66,7 @@ from baillarger.bids import (
     write_sidecar,
 )
 from baillarger.blocks import EmbeddedSource, open_volume
+from baillarger.decimate import decimate
 from baillarger.gifti import DataArray, write_external
 from baillarger.handles import kuhn_betti, kuhn_structure, remove_handles
 from baillarger.mesh import (
@@ -737,6 +742,159 @@ class WhiteSurface:
             raise ValueError(f"{dseg.name} is not the surface's segmentation")
 
 
+# ------------------------------------------------- the surface's overview
+
+#: the overview's default distance bound (mm) and decimation block (mm)
+OVERVIEW_EPS_MM = 0.1
+OVERVIEW_BLOCK_MM = 10.0
+
+#: docs/formats/white-overview.md
+OVERVIEW_SPEC = SidecarSpec(
+    "white-overview/1",
+    COMMON_KEYS
+    + (
+        Key("Hemisphere", "string", True, "R or L"),
+        Key("VoxelToRAS", "array of numbers", True, "4 x 4 affine, row-major"),
+        Key("EpsMM", "number", True, "the distance bound (mm)"),
+        Key("BlockMM", "number", True, "the decimation's block side (mm)"),
+        Key("MaxDistanceMM", "number", True, "largest distance measured (mm)"),
+        Key("Vertices", "integer", True, "number of vertices"),
+        Key("Faces", "integer", True, "number of faces"),
+        Key("TrueVertices", "integer", True, "the white surface's vertices"),
+        Key("TrueFaces", "integer", True, "the white surface's faces"),
+        Key("Pieces", "array of objects", True, "per connected piece"),
+        Key("IdsFile", "string", True, "the true vertex ids' GIfTI (name)"),
+        Key("Passes", "array of objects", True, "per decimation pass"),
+    ),
+)
+
+
+def overview_paths(surf: Path) -> dict[str, Path]:
+    """The overview's files next to a white surface's .surf.gii."""
+    stem = surf.name.removesuffix("_white.surf.gii")
+    return dict(
+        overview=surf.with_name(f"{stem}_desc-overview_white.surf.gii"),
+        ids=surf.with_name(f"{stem}_desc-overviewids_white.func.gii"),
+        sidecar=surf.with_name(f"{stem}_desc-overview_white.json"),
+    )
+
+
+def _embedded(arrays: list[tuple[npt.NDArray[Any], str]], hemi: str) -> GiftiImage:
+    g = GiftiImage(meta=GiftiMetaData(AnatomicalStructurePrimary=_STRUCTURE[hemi]))
+    for a, intent in arrays:
+        g.add_gifti_data_array(
+            GiftiDataArray(a, intent=intent, encoding="GIFTI_ENCODING_B64GZ")
+        )
+    return g
+
+
+def write_white_overview(
+    surf: Path,
+    eps_mm: float = OVERVIEW_EPS_MM,
+    block_mm: float = OVERVIEW_BLOCK_MM,
+    workers: int | None = None,
+) -> SurfaceFiles:
+    """The overview of the white surface at surf (write_white_surface): the
+    surface decimated (baillarger.decimate) so that it keeps its topology,
+    every true vertex is within eps_mm of it and its vertices are true
+    vertices; written next to surf as an ordinary GIfTI with embedded data,
+    with the true vertex of each overview vertex and a sidecar
+    (docs/formats/white-overview.md). Returns the paths written."""
+    lap = Laps()
+    side = read_sidecar(sidecar_path(surf), SURF_SPEC)
+    hemi = side["Hemisphere"]
+    aff = np.asarray(side["VoxelToRAS"], np.float64).reshape(4, 4)
+    g = GiftiImage.from_filename(str(surf), mmap=True)
+    pts, tri = g.agg_data(("pointset", "triangle"))
+    v = np.asarray(pts, np.float64)
+    f = np.asarray(tri, np.int64)
+    lap("read the surface")
+    D = decimate(v, f, eps=eps_mm, block=block_mm, workers=workers, log=log.info)
+    lap("decimate")
+    paths = overview_paths(surf)
+    _embedded(
+        [
+            (np.asarray(pts[D.vertex_ids], "<f4"), "NIFTI_INTENT_POINTSET"),
+            (D.faces.astype("<i4"), "NIFTI_INTENT_TRIANGLE"),
+        ],
+        hemi,
+    ).to_filename(str(paths["overview"]))
+    _embedded([(D.vertex_ids.astype("<i4"), "NIFTI_INTENT_NONE")], hemi).to_filename(
+        str(paths["ids"])
+    )
+    vox = np.linalg.norm(aff[:3, :3], axis=0)
+    pieces = mesh_pieces(
+        mm_to_voxel(pts[D.vertex_ids], aff), D.faces, (vox[0], vox[1], vox[2])
+    )
+    dat = surf.with_name(surf.name.removesuffix(".surf.gii") + ".dat")
+    write_sidecar(
+        paths["sidecar"],
+        OVERVIEW_SPEC,
+        dict(
+            SpecVersion=OVERVIEW_SPEC.version,
+            Description="The white surface decimated for viewing: its topology, "
+            "every true vertex within EpsMM of it, its vertices true vertices.",
+            **sources(surf, dat),
+            Provenance=provenance("baillarger.white.write_white_overview"),
+            Hemisphere=hemi,
+            VoxelToRAS=aff.ravel().tolist(),
+            EpsMM=float(eps_mm),
+            BlockMM=float(block_mm),
+            MaxDistanceMM=float(D.max_distance),
+            Vertices=len(D.vertex_ids),
+            Faces=len(D.faces),
+            TrueVertices=len(v),
+            TrueFaces=len(f),
+            Pieces=pieces,
+            IdsFile=paths["ids"].name,
+            Passes=D.passes,
+        ),
+    )
+    lap("write")
+    return SurfaceFiles(paths)
+
+
+@dataclass(frozen=True)
+class WhiteOverview:
+    """A white surface's overview read from its files (write_white_overview):
+    vertices (float32) in voxel coordinates of the grid, as WhiteSurface.load
+    gives the same vertices; faces into them; vertex_ids, the true vertex of
+    each."""
+
+    v: Float
+    f: Int
+    vertex_ids: Int
+    affine: Float
+    sidecar: dict[str, Any]
+
+    @classmethod
+    def load(cls, path: Path) -> "WhiteOverview":
+        side = read_sidecar(sidecar_path(path), OVERVIEW_SPEC)
+        aff = np.asarray(side["VoxelToRAS"], np.float64).reshape(4, 4)
+        pts, tri = GiftiImage.from_filename(str(path)).agg_data(
+            ("pointset", "triangle")
+        )
+        ids = GiftiImage.from_filename(str(path.with_name(side["IdsFile"])))
+        return cls(
+            mm_to_voxel(pts, aff),
+            np.asarray(tri, np.int64),
+            np.asarray(ids.darrays[0].data, np.int64),
+            aff,
+            side,
+        )
+
+    def check(self, surf: WhiteSurface) -> None:
+        """Raises ValueError unless the overview was made from surf's data (its
+        .dat's SHA-256, from the two sidecars: no hashing)."""
+        sha = [
+            v
+            for k, v in surf.sidecar["DataSHA256"].items()
+            if k.endswith("_white.dat") and "_desc-" not in k
+        ]
+        if not sha or sha[0] not in self.sidecar["SourcesSHA256"].values():
+            raise ValueError("the overview was not made from this surface's data")
+
+
 # ---------------------------------------------------------------- command line
 
 
@@ -758,14 +916,32 @@ def main(argv: list[str] | None = None) -> None:
         choices=backend.NAMES,
         help="where the mesh steps run (default: $BAILLARGER_DEVICE, else auto)",
     )
+    m.add_argument(
+        "--overview-eps",
+        type=float,
+        default=OVERVIEW_EPS_MM,
+        help="the overview's distance bound (mm)",
+    )
+    m.add_argument("--workers", type=int, default=4, help="processes to decimate")
+    o = sub.add_parser("overview", help="the overview of a surface that mesh wrote")
+    o.add_argument("surf", type=Path, help="a hemi-<h>_white.surf.gii (mesh)")
+    o.add_argument("--eps", type=float, default=OVERVIEW_EPS_MM, help="bound (mm)")
+    o.add_argument("--workers", type=int, default=4, help="processes to decimate")
     a = ap.parse_args(argv)
     if a.cmd == "dseg":
         for role, path in write_wm_topo(a.aseg, a.out).items():
             print(f"{role}: {path}")
-    else:
+    elif a.cmd == "mesh":
         w = write_white_surface(a.dseg, a.out, a.block_cells, a.device)
+        ov = write_white_overview(w.paths["surf"], a.overview_eps, workers=a.workers)
         for role, path in w.paths.items():
             print(f"{role}: {path}")
+        for role, path in ov.paths.items():
+            print(f"overview {role}: {path}")
+    else:
+        ov = write_white_overview(a.surf, a.eps, workers=a.workers)
+        for role, path in ov.paths.items():
+            print(f"overview {role}: {path}")
 
 
 if __name__ == "__main__":

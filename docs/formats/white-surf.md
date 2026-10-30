@@ -23,6 +23,9 @@ and `ses`, hemisphere `<h>` (`R` or `L`):
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-blocks_white.tsv` | The block index |
 | `sub-<sub>_ses-<ses>_hemi-<h>_white.json` | Sidecar, `white-surf/1` |
 
+The mesh command then writes the surface's overview next to these files
+(`desc-overview`, `desc-overviewids`): see `white-overview.md`.
+
 `DERIV/dataset_description.json` (`DatasetType` `derivative`) is written if
 it is not there. BIDS has no settled rule for surface derivatives; the names
 follow its entity order, and the `.dat` and `desc-blocks` files are ours.
