@@ -18,12 +18,17 @@ field values.
 
 import itertools
 import os
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
 from scipy import sparse
 from scipy.sparse.csgraph import connected_components
+
+if TYPE_CHECKING:
+    from baillarger.backend import Device
+    from baillarger.blocks import Source
 
 type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.int64]
@@ -45,15 +50,229 @@ def _kuhn_tets() -> npt.NDArray[np.int_]:
 
 _TETS = _kuhn_tets()
 
+#: the triangles of each case: (number of positive corners, edge pairs of
+#: each triangle), corners sorted positive first
+_CASES = (
+    (1, [[(0, 1), (0, 2), (0, 3)]]),
+    (3, [[(3, 0), (3, 1), (3, 2)]]),
+    (2, [[(0, 2), (0, 3), (1, 3)], [(0, 2), (1, 3), (1, 2)]]),
+)
 
-def marching_tetrahedra(F: npt.ArrayLike, level: float) -> tuple[Float, Int]:
+
+def _flip_table() -> npt.NDArray[np.bool_]:
+    """flip[tet, pattern, k]: whether triangle k of a tetrahedron of _TETS
+    with corner sign pattern (bit i: corner i positive) must be reversed for
+    its normal to point toward increasing F. In a linear field the level set
+    is a plane perpendicular to the gradient, and the triangle's vertices lie
+    on fixed edges, so the answer depends only on the tetrahedron and the
+    signs, never on the values: it is computed here once, from generic
+    values in float64, and marching_tetrahedra looks it up, so that its
+    triangles do not depend on the precision of its arithmetic."""
+    out = np.zeros((6, 16, 2), bool)
+    for ty in range(6):
+        P = _TETS[ty].astype(np.float64)
+        for pat in range(1, 15):
+            sgn = np.array([(pat >> i) & 1 for i in range(4)], bool)
+            val = np.where(sgn, 1.0 + 0.1 * np.arange(4), -1.0 - 0.13 * np.arange(4))
+            order = np.argsort(~sgn, kind="stable")
+            o_pos, o_val = P[order], val[order]
+            g = np.linalg.solve(P[1:] - P[:1], val[1:] - val[:1])
+            for n_pos, pairs_list in _CASES:
+                if n_pos != sgn.sum():
+                    continue
+                for k, pairs in enumerate(pairs_list):
+                    q = [
+                        o_pos[a]
+                        + o_val[a] / (o_val[a] - o_val[b]) * (o_pos[b] - o_pos[a])
+                        for a, b in pairs
+                    ]
+                    nrm = np.cross(q[1] - q[0], q[2] - q[0])
+                    out[ty, pat, k] = float(nrm @ g) < 0
+    return out
+
+
+_FLIP = _flip_table()
+
+
+#: cells per side of a block in marching_tetrahedra
+BLOCK = 64
+
+
+def marching_tetrahedra(
+    F: "npt.ArrayLike | Source",
+    level: float,
+    block: int = BLOCK,
+    dtype: npt.DTypeLike = np.float64,
+    device: "Device | None" = None,
+) -> tuple[Float, Int]:
     """Level set {F = level} of the piecewise-linear interpolant of F (3D
     array) on the Kuhn tetrahedralization. Returns vertices (voxel coordinates)
-    and faces."""
-    G = np.asarray(F, np.float64) - level
-    G[G == 0] = 1e-12  # no grid point exactly on the level
+    and faces, in block order (marching_tetrahedra_blocks)."""
+    v, f, _ = marching_tetrahedra_blocks(F, level, block, dtype, device)
+    return v, f
+
+
+@dataclass(frozen=True)
+class MeshBlocks:
+    """The block index of a mesh in block order: per block that the level
+    crosses, its first cell and its vertex and face ranges [start, stop)."""
+
+    #: block size, cells a side
+    cells: int
+    #: (k, 3) first cell of each block, voxel coordinates of the grid
+    origin: Int
+    vertex_start: Int
+    vertex_stop: Int
+    face_start: Int
+    face_stop: Int
+    #: (n,) each vertex's grid edge (edge_key); the same vertex keeps its key
+    #: when the mesh is made again, wherever the surface did not change
+    vertex_key: Int
+
+
+def edge_key(low: npt.ArrayLike, step: npt.ArrayLike) -> Int:
+    """The key of the Kuhn edges from grid points with linear index low (C
+    order) to low + step, step (n, 3) one of the 7 nonzero vectors of
+    {0, 1}^3 (every Kuhn edge, from its lower end): low * 7 + d with
+    d = 4 step_i + 2 step_j + step_k - 1. Its largest value is about 7 times
+    the number of grid points, so int64 holds it for any grid (a key of the
+    two ends' indices, about the square of that, would not past 3e9
+    points); and keys sort as by (low, high end)."""
+    st = np.asarray(step, np.int64)
+    d = 4 * st[..., 0] + 2 * st[..., 1] + st[..., 2] - 1
+    out: Int = np.asarray(low, np.int64) * 7 + d
+    return out
+
+
+def edge_points(key: npt.ArrayLike, shape: tuple[int, ...]) -> tuple[Int, Int]:
+    """The two grid points (n, 3), lower then upper, of each vertex key
+    (edge_key) on a grid of shape."""
+    k = np.asarray(key, np.int64)
+    low, d = np.divmod(k, 7)
+    d = d + 1
+    a = np.stack(np.unravel_index(low, shape), 1).astype(np.int64)
+    step = np.stack([(d >> 2) & 1, (d >> 1) & 1, d & 1], 1)
+    return a, a + step
+
+
+def marching_tetrahedra_blocks(
+    F: "npt.ArrayLike | Source",
+    level: float,
+    block: int = BLOCK,
+    dtype: npt.DTypeLike = np.float64,
+    device: "Device | None" = None,
+) -> tuple[Float, Int, MeshBlocks]:
+    """marching_tetrahedra and its block index.
+
+    The cells are taken in blocks of block cells a side, so that the work
+    arrays scale with one block's surface, not the whole grid's; a block
+    whose grid points are all on one side of the level is skipped. A vertex
+    is keyed by its grid edge in the whole grid and computed from the edge's
+    ends in a fixed order, so the blocks join exactly: the surface does not
+    depend on block, only the order of its vertices and faces does.
+
+    Order: blocks in Morton (Z) order of their indices (first cell / block,
+    baillarger.blocks.morton); the faces block by block
+    (each face comes from one cell); the vertices by the first block that
+    makes them (their owner), then by edge key. A block's faces use its own
+    vertices and some of earlier neighbouring blocks.
+
+    The arithmetic is in dtype (float32 for the white mesh, as on a GPU;
+    float64 is the reference): the field minus the level and the crossing
+    points. The triangles and their orientation follow from the corners'
+    signs alone (_FLIP), so they are the same in either precision; a shared
+    vertex is computed the same way in every block, so the blocks join
+    exactly in either.
+
+    F is an array, or a baillarger.blocks.Source, read block by block.
+
+    device (baillarger.backend): numpy (None, the default) or a PyTorch
+    device, which works in float32 (baillarger.mesh_torch.march_block):
+    the same triangles, vertices within float32 rounding of numpy's.
+    """
+    dt = np.dtype(dtype)
+    tdev = None if device is None or device.is_numpy else device.torch
+    if tdev is not None and dt != np.float32:
+        raise ValueError("a PyTorch device works in float32")
+    import torch
+
+    from baillarger.blocks import ArraySource, BlockReader, Source
+    from baillarger.mesh_torch import march_block
+
+    # a block's cells need the grid points up to one past them
+    src: Source = F if hasattr(F, "read") else ArraySource(F)  # type: ignore[assignment]
+    reader = BlockReader(src, block, 0, 1, device)
+    shape = reader.shape
+    vkeys, verts, faces, origins = [], [], [], []
+    n_verts = 0
+    for ijk in reader.indices():
+        blk, o = reader.read(ijk)
+        v: npt.NDArray[np.floating[Any]]
+        if isinstance(blk, torch.Tensor):
+            Gt = blk.to(torch.float32) - float(level)
+            Gt[Gt == 0] = 1e-12  # no grid point exactly on the level
+            post = Gt > 0
+            if bool(post.all()) or not bool(post.any()):
+                continue
+            k, v, f = march_block(Gt, o, shape)
+        else:
+            G = np.asarray(blk, dt) - np.asarray(level, dt)
+            G[G == 0] = 1e-12  # no grid point exactly on the level
+            pos = G > 0
+            if pos.all() or not pos.any():
+                continue
+            k, v, f = _march_block(G, pos, o, shape)
+        if not len(f):
+            continue
+        vkeys.append(k)
+        verts.append(v)
+        faces.append(f + n_verts)
+        origins.append(tuple(int(x) for x in o))
+        n_verts += len(k)
+    z = np.zeros(0, np.int64)
+    if not faces:
+        return (
+            np.zeros((0, 3), dt),
+            np.zeros((0, 3), np.int64),
+            MeshBlocks(block, np.zeros((0, 3), np.int64), z, z, z, z, z),
+        )
+    keys = np.concatenate(vkeys)
+    _, first, inv = np.unique(keys, return_index=True, return_inverse=True)
+    # order the vertices by their first occurrence: owner block, then key
+    order = np.argsort(first, kind="stable")
+    new = np.empty(len(first), np.int64)
+    new[order] = np.arange(len(first))
+    out_v: Float = np.concatenate(verts)[first[order]].astype(dt, copy=False)
+    out_f: Int = new[inv[np.concatenate(faces)]]
+    owner = np.repeat(np.arange(len(vkeys)), [len(k) for k in vkeys])[first[order]]
+    nv = np.bincount(owner, minlength=len(vkeys))
+    nf = np.array([len(f) for f in faces])
+    vstop, fstop = np.cumsum(nv), np.cumsum(nf)
+    blocks = MeshBlocks(
+        block,
+        np.array(origins, np.int64).reshape(-1, 3),
+        vstop - nv,
+        vstop,
+        fstop - nf,
+        fstop,
+        keys[first[order]],
+    )
+    return out_v, out_f, blocks
+
+
+def _march_block(
+    G: Float,
+    pos: npt.NDArray[np.bool_],
+    origin: npt.NDArray[np.int_],
+    shape: tuple[int, ...],
+) -> tuple[npt.NDArray[np.int64], Float, Int]:
+    """One block of marching_tetrahedra: G is F - level on the block's grid
+    points (one more than its cells a side), pos = G > 0, origin the block's
+    first grid point. Returns the block's vertex keys (grid-edge keys of the
+    whole grid, unique), vertices (whole-grid voxel coordinates) and faces
+    (indices into them)."""
     nx, ny, nz = G.shape
-    pos = G > 0
+    _, NY, NZ = shape
     # cells whose 8 corners do not all have the same sign
     c = [
         pos[i : nx - 1 + i, j : ny - 1 + j, k : nz - 1 + k]
@@ -63,76 +282,70 @@ def marching_tetrahedra(F: npt.ArrayLike, level: float) -> tuple[Float, Int]:
     ]
     anyp = np.logical_or.reduce(c)
     allp = np.logical_and.reduce(c)
-    cells = np.argwhere(anyp & ~allp)  # (M, 3)
-    if not len(cells):
-        return np.zeros((0, 3)), np.zeros((0, 3), int)
+    cells = np.argwhere(anyp & ~allp)  # (M, 3), block coordinates
     corners = cells[:, None, None, :] + _TETS[None]  # (M, 6, 4, 3)
     corners = corners.reshape(-1, 4, 3)
-    lin = (corners[..., 0] * ny + corners[..., 1]) * nz + corners[..., 2]
-    val = G.ravel()[lin]  # (T, 4)
+    ty = np.tile(np.arange(6), len(cells))  # which of _TETS
+    val = G[corners[..., 0], corners[..., 1], corners[..., 2]]  # (T, 4)
+    corners = corners + origin  # whole-grid coordinates
+    lin = (corners[..., 0].astype(np.int64) * NY + corners[..., 1]) * NZ + corners[
+        ..., 2
+    ]
     sgn = val > 0
     npos = sgn.sum(1)
     keep = (npos > 0) & (npos < 4)
-    corners, lin, val, sgn, npos = (
+    corners, lin, val, sgn, npos, ty = (
         corners[keep],
         lin[keep],
         val[keep],
         sgn[keep],
         npos[keep],
+        ty[keep],
     )
+    pat = sgn.astype(np.int64) @ np.array([1, 2, 4, 8])
     order = np.argsort(~sgn, axis=1, kind="stable")  # positive corners first
     r = np.arange(len(lin))[:, None]
     o_lin, o_val, o_pos = lin[r, order], val[r, order], corners[r, order]
 
     def edge(
         a: int, b: int, rows: npt.NDArray[np.intp]
-    ) -> tuple[npt.NDArray[Any], Float]:
+    ) -> tuple[npt.NDArray[np.int64], Float]:
         """Edge keys and points between corners a and b (indices into the
-        sorted corners)."""
+        sorted corners), each point computed from the edge's lower-key end,
+        so that every tetrahedron and block gives the same bits."""
         la, lb = o_lin[rows, a], o_lin[rows, b]
-        key = np.minimum(la, lb) * G.size + np.maximum(la, lb)
-        va, vb = o_val[rows, a], o_val[rows, b]
+        sw = la > lb
+        va = np.where(sw, o_val[rows, b], o_val[rows, a])
+        vb = np.where(sw, o_val[rows, a], o_val[rows, b])
+        ia = np.where(sw[:, None], o_pos[rows, b], o_pos[rows, a])
+        ib = np.where(sw[:, None], o_pos[rows, a], o_pos[rows, b])
+        key = edge_key(np.minimum(la, lb), ib - ia)
+        pa, pb = ia.astype(G.dtype), ib.astype(G.dtype)
         t = (va / (va - vb))[:, None]
-        pt = o_pos[rows, a] + t * (o_pos[rows, b] - o_pos[rows, a])
-        return key, pt
+        return key, pa + t * (pb - pa)
 
-    tri_keys, tri_pts, tri_rows = [], [], []
-    for n_pos, pairs_list in (
-        (1, [[(0, 1), (0, 2), (0, 3)]]),
-        (3, [[(3, 0), (3, 1), (3, 2)]]),
-        (2, [[(0, 2), (0, 3), (1, 3)], [(0, 2), (1, 3), (1, 2)]]),
-    ):
+    tri_keys, tri_pts, tri_flip = [], [], []
+    for n_pos, pairs_list in _CASES:
         rows = np.where(npos == n_pos)[0]
         if not len(rows):
             continue
-        for pairs in pairs_list:
+        for k, pairs in enumerate(pairs_list):
             ks, ps = zip(*[edge(a, b, rows) for a, b in pairs], strict=True)
             tri_keys.append(np.stack(ks, 1))
             tri_pts.append(np.stack(ps, 1))
-            tri_rows.append(rows)
+            tri_flip.append(_FLIP[ty[rows], pat[rows], k])
     keys = np.concatenate(tri_keys)  # (nT, 3)
     pts = np.concatenate(tri_pts)  # (nT, 3, 3)
-    rows = np.concatenate(tri_rows)
-    uk, inv = np.unique(keys.ravel(), return_inverse=True)
-    faces = inv.reshape(-1, 3)
-    verts = np.zeros((len(uk), 3))
-    verts[inv] = pts.reshape(-1, 3)
-    # orientation: normals toward increasing F (the gradient of the
-    # tetrahedron's linear field)
-    P = corners[rows].astype(np.float64)
-    V = val[rows]
-    M = P[:, 1:] - P[:, :1]
-    g = np.linalg.solve(M, (V[:, 1:] - V[:, :1])[..., None])[..., 0]
-    nrm = np.cross(
-        verts[faces[:, 1]] - verts[faces[:, 0]], verts[faces[:, 2]] - verts[faces[:, 0]]
-    )
-    flip = np.sum(nrm * g, 1) < 0
-    faces[flip] = faces[flip][:, [0, 2, 1]]
-    # drop triangles that collapsed to a line (two vertices on the same edge
-    # cannot happen; zero area only when the level passes within rounding of a
-    # grid point)
-    area = np.linalg.norm(nrm, axis=1)
-    return verts, faces[area > 0]
+    # orientation: normals toward increasing F, from the table (by the signs
+    # alone, so the triangles are the same in any precision); a triangle whose
+    # vertices round together (the level within rounding of a grid point) is
+    # kept: its connections are right, only its area is zero
+    flip = np.concatenate(tri_flip)
+    keys[flip] = keys[flip][:, [0, 2, 1]]
+    pts[flip] = pts[flip][:, [0, 2, 1]]
+    uk, first, inv = np.unique(keys.ravel(), return_index=True, return_inverse=True)
+    verts: Float = pts.reshape(-1, 3)[first]
+    return uk, verts, inv.reshape(-1, 3).astype(np.int64)
 
 
 def pl_sample(F: npt.ArrayLike, pts: npt.ArrayLike) -> Float:
@@ -176,12 +389,18 @@ def topology(faces: npt.NDArray[np.integer[Any]], nv: int) -> dict[str, Any]:
     e = np.sort(
         np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), 1
     )
-    eu, cnt = np.unique(e, axis=0, return_counts=True)
+    n = max(nv, 1)
+    key, cnt = np.unique(e[:, 0].astype(np.int64) * n + e[:, 1], return_counts=True)
+    eu = np.stack([key // n, key % n], 1)
     used = np.unique(faces)
-    A = sparse.coo_matrix((np.ones(len(eu)), (eu[:, 0], eu[:, 1])), shape=(nv, nv))
+    A = sparse.coo_matrix(
+        (np.ones(len(eu), np.int8), (eu[:, 0], eu[:, 1])), shape=(nv, nv)
+    )
     _, lab = connected_components(A, directed=False)
     bd = eu[cnt == 1]
-    B = sparse.coo_matrix((np.ones(len(bd)), (bd[:, 0], bd[:, 1])), shape=(nv, nv))
+    B = sparse.coo_matrix(
+        (np.ones(len(bd), np.int8), (bd[:, 0], bd[:, 1])), shape=(nv, nv)
+    )
     _, blab = connected_components(B, directed=False)
     loops = len(np.unique(blab[np.unique(bd)])) if len(bd) else 0
     comps = len(np.unique(lab[used]))
