@@ -1,9 +1,13 @@
-"""Tests of baillarger.viewer.overview on a surface and overview written by the
-mesh command from a synthetic segmentation: the Surface on the overview, its
-cache, and the refusals."""
+"""Tests of baillarger.viewer.overview and baillarger.viewer.white_view on a
+surface and overview written by the mesh command from a synthetic segmentation:
+the Surface on the overview, its cache, and the refusals; the server viewing the
+surface alone (--white)."""
 
 import json
 import shutil
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import nibabel as nib
@@ -12,6 +16,8 @@ import pytest
 
 from baillarger import white
 from baillarger.viewer import overview as OV
+from baillarger.viewer import server as VS
+from baillarger.viewer.white_view import WhiteView
 
 AFF = np.array([[0.2, 0, 0, -3.0], [0, 0.16, 0, 2.0], [0, 0, 0.2, 5.0], [0, 0, 0, 1.0]])
 EPS = 0.05
@@ -76,3 +82,47 @@ def test_no_overview_or_another_surface_is_refused(surf: Path, tmp_path: Path) -
     white.overview_paths(s2)["overview"].unlink()
     with pytest.raises(FileNotFoundError, match="baillarger.white overview"):
         OV.overview_surface(s2, tmp_path, log=lambda m: None)
+
+
+def get(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=10) as r:
+        out: bytes = r.read()
+    return out
+
+
+def test_the_server_views_a_white_surface_alone(surf: Path, tmp_path: Path) -> None:
+    w = WhiteView(surf, tmp_path, log=lambda m: None)
+    srv = VS.serve(None, 0, white=w)
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        meta = json.loads(get(base + "/meta"))
+        assert meta["surface_only"] and meta["n"] == 0 and meta["layers"] == []
+        assert meta["levels"][0] == "true surface" and len(meta["levels"]) == 4
+        assert meta["overview"]["faces"] == len(w.ov.f)
+        assert meta["overview"]["true_faces"] == len(w.W.f)
+        b = get(base + "/mesh?level=2&faces=1")
+        hl = int(np.frombuffer(b[:4], np.uint32)[0])
+        hdr = json.loads(b[4 : 4 + hl])
+        nv, nf = len(w.ov.vertex_ids), len(w.ov.f)
+        assert (hdr["nv"], hdr["nf"], hdr["faces"]) == (nv, nf, True)
+        vt = np.frombuffer(b, np.int32, nv, 4 + hl + 4 * 7 * nv)
+        assert (vt == -1).all()  # no traces
+        # the WM selection: an overview vertex and the true vertex it is
+        k = 5
+        sel = json.loads(get(base + f"/vertex?v={k}"))
+        t = sel["true_vertex"]
+        assert sel["vertex"] == k and t == int(w.ov.vertex_ids[k])
+        assert np.allclose(sel["world_mm"], w.S.world(w.W.v[t])[0], atol=1e-3)
+        mm = ",".join(str(x) for x in sel["world_mm"])
+        assert json.loads(get(base + f"/snap?mm={mm}"))["true_vertex"] == t
+        assert len(get(base + "/white.gii")) > 0
+        assert b"<html" in get(base + "/")[:200].lower()
+        for path in ("/section?i=0", "/layer?name=x", "/filters", "/echo2.nii.gz"):
+            with pytest.raises(urllib.error.HTTPError) as e:
+                get(base + path)
+            assert e.value.code == 404
+    finally:
+        srv.shutdown()
+        VS.Handler.white = None

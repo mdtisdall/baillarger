@@ -159,6 +159,7 @@ const $ = id => document.getElementById(id);
 const ME = Math.random().toString(36).slice(2);
 let META = null, VALS = null, CUR = null, SEC = null, FRAME = null, SELN = null, CROSS = null, ROT = 0;
 const q = new URLSearchParams(location.search);
+let OVTXT = "";   // a white surface alone: what the info line says with no selection
 let PANES = (q.get("panes") || "volume,surface,map,sections").split(",");
 const MAGMA = [[0,0,4],[40,11,84],[101,21,110],[159,42,99],[212,72,66],[245,125,21],[250,193,39],[252,253,191]];
 const RDBU = [[5,48,97],[67,147,195],[209,229,240],[247,247,247],[253,219,199],[214,96,77],[103,0,31]];
@@ -198,7 +199,7 @@ async function apply(st) {
     if ("selection" in st) await setSelection(st.selection, st.frame || null);
     else if ("rotation" in st && CUR !== null) await showTrace(CUR);
     if ("labels_seq" in st && LAB.on && st.labels_seq !== LAB.seq) await loadLabels();
-    if ("filter" in st && !META.labels_only && st.filter !== FIL.key) await refreshFilters(true);
+    if ("filter" in st && !META.labels_only && !META.surface_only && st.filter !== FIL.key) await refreshFilters(true);
   } finally { applying = false; }
 }
 function connect() {
@@ -214,7 +215,7 @@ async function setSelection(sel, frame) {
   showSelectionMarker();
   if (sel && sel.trace !== null) await showTrace(sel.trace);
   else { CUR = null; SEC = null; clearSections(); drawMap(); draw3d();
-    if (sel) log(`no shown trace within 1 mm of vertex ${sel.vertex}: no sections there`); }
+    if (sel && !META.surface_only) log(`no shown trace within 1 mm of vertex ${sel.vertex}: no sections there`); }
 }
 async function selectHere(sel, frame) { await setSelection(sel, frame); share({ selection: sel, frame }); }
 function crossHere(mm) { CROSS = mm; moveVolumeCrosshair(mm); share({ crosshair: mm }); }
@@ -406,9 +407,9 @@ async function loadMesh(level, faces) {
   g.bindBuffer(g.ARRAY_BUFFER, GL.bsulc); g.bufferData(g.ARRAY_BUFFER, sulc, g.DYNAMIC_DRAW);
 }
 function colour3d() {
-  if (!GL.vtrace || !VALS) return;
+  if (!GL.vtrace || (!VALS && META.layers.length)) return;   // no layers: all grey
   const st = diverging ? RDBU : MAGMA, col = new Float32Array(3 * GL.nv);
-  for (let v = 0; v < GL.nv; v++) { const t = GL.vtrace[v]; const x = t >= 0 ? VALS[t] : null;
+  for (let v = 0; v < GL.nv; v++) { const t = GL.vtrace[v]; const x = t >= 0 && VALS ? VALS[t] : null;
     const c = x === null ? [110, 110, 110] : ramp(st, (x - lo) / (hi - lo)); col[3*v] = c[0] / 255; col[3*v+1] = c[1] / 255; col[3*v+2] = c[2] / 255; }
   GL.g.bindBuffer(GL.g.ARRAY_BUFFER, GL.bcol); GL.g.bufferData(GL.g.ARRAY_BUFFER, col, GL.g.DYNAMIC_DRAW);
 }
@@ -587,7 +588,9 @@ function clearSections() {
   for (const id of ["cu", "cv", "cfu", "cfv"]) { const c = $(id); c.getContext("2d").clearRect(0, 0, c.width, c.height); }
   $("facing").style.display = "none";
   if (NV.nv) { dropMeshes(NV.tracts.map(m => m.mesh)); NV.tracts = []; if (NV.pia) { dropMesh(NV.pia); NV.pia = null; } dropMeshes(NV.axes); NV.axes = []; }
-  $("info").textContent = SELN ? `WM selection: vertex ${SELN.vertex} at (${SELN.world_mm}) mm; no shown trace within 1 mm` : "";
+  $("info").textContent = !SELN ? (META?.surface_only ? OVTXT : "")
+    : META.surface_only ? `WM selection: true vertex ${SELN.true_vertex} (overview vertex ${SELN.vertex}) at (${SELN.world_mm}) mm`
+    : `WM selection: vertex ${SELN.vertex} at (${SELN.world_mm}) mm; no shown trace within 1 mm`;
 }
 function showInfo() {
   const f = SEC.info;
@@ -762,15 +765,25 @@ window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections
     $("fbar").style.display = "none";
     $("rotbar").style.display = "none";
     $("newwin").style.display = "none";
+  } else if (META.surface_only) {   // a white surface alone: its overview in the surface pane
+    PANES = ["surface"]; layout();
+    for (const id of ["layer", "half", "dmax", "radius", "panesel"]) $(id).closest("label").style.display = "none";
+    $("fbar").style.display = "none";
+    $("rotbar").style.display = "none";
+    const o = META.overview;
+    OVTXT = `White surface ${META.site}: overview of ${o.faces.toLocaleString()} faces (true surface ${o.true_faces.toLocaleString()}), ` +
+      `every true vertex within ${o.max_distance_mm} mm of it (eps ${o.eps_mm} mm). Click: WM selection (its true vertex below); drag: turn; shift-drag: move; wheel: zoom.`;
+    $("info").textContent = OVTXT;
   }
   $("title").textContent = `Column viewer — ${META.site}`; document.title = `Column viewer ${META.site}`;
   for (const n of META.layers) { const o = document.createElement("option"); o.textContent = n; $("layer").appendChild(o); }
   META.levels.forEach((n, k) => { const o = document.createElement("option"); o.value = k; o.textContent = n; $("level").appendChild(o); });
   if (META.layers.includes("combined")) $("layer").value = "combined";
-  if (has("surface")) { initGL(); const lv = Math.min(2, META.levels.length - 1); $("level").value = lv; await loadMesh(lv, true); }
+  if (has("surface")) { initGL(); const lv = Math.min(2, META.levels.length - 1); $("level").value = lv; await loadMesh(lv, true);
+    if (!META.layers.length) { colour3d(); draw3d(); } }
   if (has("map")) fitMap();
   if (META.layers.length) await loadLayer();
-  if (!META.labels_only) {
+  if (!META.labels_only && !META.surface_only) {
     const F = await refreshFilters(false);
     if (F.status.status === "running") pollJob(F.status.key);
   }

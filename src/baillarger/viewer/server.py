@@ -32,6 +32,9 @@ Requests:
   /labels/echo<k>.nii.gz (k = 1, 2, 3: the echoes the detector reads).
 - Labels only (no column volume; --labels): /meta and /echo2.nii.gz come from the
   review, and only the page, /events, /state and the label routes are served.
+- A white surface alone (--white, baillarger.viewer.white_view): /meta, /mesh,
+  /vertex, /snap and /white.gii come from its overview, and only those, the page,
+  /events and /state are served.
 - POST /state {from, patch}: merge patch into the state; every page gets
   {from, seq, patch}.
 - POST /filters/run {from, params}: start a filter (one at a time, in a thread) or
@@ -57,6 +60,7 @@ from baillarger.viewer import filters as VF
 from baillarger.viewer import streamlines as SV
 from baillarger.viewer.data import Site
 from baillarger.viewer.labels import LabelReview
+from baillarger.viewer.white_view import WhiteView
 
 STATIC = Path(__file__).parent / "static"
 TYPES = {
@@ -109,13 +113,16 @@ def round3(a: Any) -> list[float | None]:
 
 # the routes that need no column volume (labels-only mode serves these, /meta and
 # /echo2.nii.gz from the review)
-NO_SITE = ("/", "/index.html", "/events", "/state", "/labels/list", "/labels.nii.gz")
+# the page and the shared state, which every mode serves and none computes
+PAGE = ("/", "/index.html", "/events", "/state")
+NO_SITE = (*PAGE, "/labels/list", "/labels.nii.gz")
 
 
 class Handler(BaseHTTPRequestHandler):
     site: Site | None
     shared: Shared
     labels: LabelReview | None = None
+    white: WhiteView | None = None
     lock = threading.Lock()  # one site computation at a time
     groups: dict[tuple[int, float], dict[str, list[int]]] = {}
     axes: dict[int, dict[str, list[list[float]]]] = {}
@@ -213,6 +220,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if self.white is not None:  # a white surface alone
+            w = self.white
+            if u.path == "/meta":
+                self.json(w.meta)
+            elif u.path == "/mesh":
+                lv, fc = int(q.get("level", 0)), q.get("faces") == "1"
+                self.binary(lambda: w.mesh_payload(lv, fc))
+            elif u.path == "/vertex":
+                self.json(lambda: w.vertex(int(q["v"])))
+            elif u.path == "/snap":
+                mm_ = floats(q["mm"])
+                self.json(lambda: w.snap(mm_ or []))
+            elif u.path == "/white.gii":
+                self.binary(w.white_bytes)
+            elif u.path not in PAGE and not u.path.startswith("/static/"):
+                self.send_error(404)
+            if u.path not in PAGE and not u.path.startswith("/static/"):
+                return
         if self.site is None:  # labels only
             if u.path == "/meta":
                 self.json(lambda: self.review().meta())
@@ -225,7 +250,8 @@ class Handler(BaseHTTPRequestHandler):
             ):
                 self.send_error(404)
                 return
-        # without a site only the NO_SITE routes, which do not use it, get here
+        # without a site only the NO_SITE (or, for a white surface, PAGE) routes, which
+        # do not use it, get here
         s = cast(Site, self.site)
         if u.path in ("/", "/index.html"):
             self.send((STATIC / "index.html").read_bytes(), TYPES[".html"])
@@ -364,12 +390,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(
-    site: Site | None, port: int, labels: LabelReview | None = None
+    site: Site | None,
+    port: int,
+    labels: LabelReview | None = None,
+    white: WhiteView | None = None,
 ) -> ThreadingHTTPServer:
-    """The server; without a site (labels only), labels is needed."""
-    if site is None and labels is None:
-        raise ValueError("give a column volume, or label changes to review")
+    """The server; without a site, labels (labels only) or white (a white surface
+    alone) is needed."""
+    if site is None and labels is None and white is None:
+        raise ValueError("give a column volume, label changes or a white surface")
     Handler.site = site
+    Handler.white = white
     Handler.shared = Shared()
     Handler.groups = {}
     Handler.axes = {}
@@ -400,12 +431,25 @@ def main(argv: list[str] | None = None) -> None:
         type=Path,
         help="pial_labels_<name>.npz (baillarger.pial_labels), saved in place",
     )
+    ap.add_argument(
+        "--white",
+        type=Path,
+        help="a white surface from the mesh command (..._white.surf.gii) with its "
+        "overview, alone",
+    )
     ap.add_argument("--port", type=int, default=8790)
     a = ap.parse_args(argv)
     t0 = time.time()
     site: Site | None = None
     review: LabelReview | None = None
-    if a.column_volume is None:
+    white: WhiteView | None = None
+    if a.white is not None:
+        if a.column_volume is not None or a.labels is not None:
+            ap.error("--white is viewed alone: no column volume or --labels")
+        if a.cache is None:
+            ap.error("--cache is needed with --white")
+        white = WhiteView(a.white, a.cache, log=print)
+    elif a.column_volume is None:
         if a.labels is None:
             ap.error("give a column volume, or --labels to review the labels alone")
         review = LabelReview.standalone(a.labels, a.echo)
@@ -417,7 +461,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         if a.labels:
             review = LabelReview(a.labels, site.lo, site.shape, site.affine)
-    srv = serve(site, a.port, review)
+    srv = serve(site, a.port, review, white)
     print(
         f"serving on http://127.0.0.1:{a.port}/ ({time.time() - t0:.0f} s)", flush=True
     )
