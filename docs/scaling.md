@@ -2,9 +2,10 @@
 
 The pipeline moves from boxes to whole hemispheres one stage at a time; each
 stage is scaled when we get to it, and only the computational problems met
-are fixed. Scaled so far: the WM topology correction and the white surface
-(`python -m baillarger.white dseg` and `mesh`; `docs/formats/wm-dseg.md`,
-`docs/formats/white-surf.md`).
+are fixed. Scaled so far: the WM topology correction, the white surface and
+its overview for viewing (`python -m baillarger.white dseg` and `mesh`;
+`docs/formats/wm-dseg.md`, `docs/formats/white-surf.md`,
+`docs/formats/white-overview.md`).
 
 The target beyond a hemisphere at 160 µm is whole brains at 50 µm: about 65
 times the voxels (about 2e10) and on the order of 350 M surface vertices. That
@@ -81,8 +82,9 @@ In order of cost at the large scale:
 
 Not on a GPU: handle removal (a priority queue, sequential; at whole-brain
 scale independent handles run in parallel on CPU cores, its first need, since
-in one piece it would take about 43 GB), relabelling cuts (small boxes), and
-reading, writing and hashing files. The self-intersection check
+in one piece it would take about 43 GB), relabelling cuts (small boxes), the
+overview's decimation (`baillarger.decimate`: priority queues, compiled, in
+parallel by blocks on CPU cores), and reading, writing and hashing files. The self-intersection check
 (`mesh_intersect`, numba on the CPU) is a test, not a step of a command.
 
 ## The antialiasing solver's cost
@@ -150,5 +152,28 @@ At 50 µm the whole brain's surface files would be about 20 GB.
   the normal smoothing (the averaged normal keeps as little as 0.56 of its
   length, against 0.9998 typically): there a rounding difference can turn the
   normal far. Left for the column stage, whose columns start along them.
-- Decimating the white mesh: left until a measurement asks for it (a question
-  for the column stage).
+- The overview's decimation before whole brains. On the hemisphere (25.3 M
+  faces, 4 workers) it peaks at 6.6 GB in the main process and 10.9 GB with
+  its workers; what stays whole is the mesh's positions, faces and quadrics
+  and its block and lock keys, which grow with the mesh. Two steps:
+  1. Int32 for faces and vertex ids, which fit up to about 2.1e9 vertices (a
+     whole brain has about 3.5e8); keys and products of indices (edge keys,
+     the 1-D edge keys of `boundary_vertices`, block keys) and positions in
+     arrays longer than 2^31 stay int64, cast up before they combine, since
+     numpy wraps around without a warning. A test builds keys from int32
+     indices on a grid past 3e9 points. About half the memory of the largest
+     arrays; the same results.
+  2. The first pass read block by block from the mesh's files. Its blocks are
+     the file's blocks: each worker memory-maps its block's faces, the
+     vertices they name and their edge keys, and locks the vertices whose
+     edge's cells reach outside the block (from the edge key and `BlockCells`
+     alone: a vertex's faces come only from cells that hold its edge), so
+     nothing global is needed. The main process sums the locked vertices'
+     quadrics from the faces in chunks (the same order of additions, the
+     same bits) and runs the second pass in memory on what is left (about 4 %
+     of the faces), on the grid shifted by half a block in voxels. The
+     overview's `BlockMM` becomes the block size in cells. The main process
+     then holds the reduced mesh only (for a whole brain about 3e7 faces and
+     one carried id per true vertex: a few GB).
+  Neither is the first limit at whole-brain scale: handle removal and the
+  whole-volume arrays of `dseg` and `mesh` are.
