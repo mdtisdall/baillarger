@@ -69,6 +69,23 @@ def test_one_hemisphere_only() -> None:
         white.hemisphere(np.full((3, 3, 3), 42))
 
 
+def test_a_fill_that_joins_two_pieces_into_a_handle_is_refused() -> None:
+    """remove_handles fixes each piece of the mask with the others as background,
+    so a fill of one piece can touch another. Here a WM plate has a 7 x 7 hole
+    (cheaper to fill than to cut), and a second piece of WM, a U, passes both
+    legs through it: the plug touches both legs, and plate, plug and U make a
+    handle. wm_topo refuses the result rather than write it."""
+    a = np.zeros((40, 40, 40), np.int16)
+    a[2:38, 2:38, 18:22] = 41  # the plate, 4 thick
+    a[16:23, 16:23, 18:22] = 42  # the hole, cortex
+    a[18, 19, 14:26] = 41  # the U's legs, 2 voxels from the hole's walls
+    a[20, 19, 14:26] = 41
+    a[18:21, 19, 25] = 41  # joined 3 voxels above the plate
+    assert kuhn_betti(np.isin(a, FILLED)) == (2, 1, 0)
+    with pytest.raises(RuntimeError, match=r"Betti numbers \(1, 1, 0\)"):
+        white.wm_topo(a, VOX)
+
+
 def test_cuts_take_the_nearest_donor_in_mm() -> None:
     labels = np.full((30, 30, 30), 41, np.int16)
     donor = np.zeros(labels.shape, bool)

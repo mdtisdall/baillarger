@@ -222,7 +222,9 @@ def wm_topo(aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike) -> WMTopo:
     (baillarger.handles.remove_handles). Cavity and handle fills become the
     WM label; each handle cut takes the label of the nearest voxel that is
     outside the corrected mask and not a cut. The corrected segmentation's
-    voxels with a filled label are exactly the corrected mask."""
+    voxels with a filled label are exactly the corrected mask. Raises
+    RuntimeError if that mask still has a handle or a cavity (b1 or b2 not 0),
+    which a fill of one piece of the mask touching another can make."""
     lap = Laps()
     a0 = np.asarray(aseg)
     hemi = hemisphere(a0)
@@ -256,6 +258,13 @@ def wm_topo(aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike) -> WMTopo:
         raise AssertionError("the corrected labels do not give the corrected mask")
     after = kuhn_betti(obj)
     lap("Betti after")
+    if after[1] or after[2]:
+        # remove_handles fixes each piece with the others as background: a fill
+        # of one piece can touch another and make a handle or a cavity
+        raise RuntimeError(
+            f"the corrected WM mask has Betti numbers {after} (before: {before}): "
+            "a handle fill of one piece of the mask touched another"
+        )
     dseg = a0.copy()
     dseg[box] = labels
     fixes = np.zeros(a0.shape, np.uint8)

@@ -72,7 +72,7 @@ voxels with the cavities emptied again.
 Every step of every front is a simple point, so the object front stays a
 ball: the result has no handle by construction, whatever the order of the
 steps. The union of the components keeps that unless a fill of one component
-touches another (not checked here: compare kuhn_betti before and after).
+touches another (not checked here; baillarger.white.wm_topo checks it).
 """
 
 import itertools

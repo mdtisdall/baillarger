@@ -48,7 +48,11 @@ axis does not run out from the WM below it.
 
 Guarantee: the corrected segmentation's voxels with a filled label are the
 corrected mask exactly, and its Betti numbers (Kuhn adjacency) are
-(b0, 0, 0). Voxels outside the mask's bounding box are unchanged.
+(b0, 0, 0). Voxels outside the mask's bounding box are unchanged. Each piece
+of the mask is made handle- and cavity-free by construction, with the other
+pieces as background; a fill of one piece can touch another and make a
+handle or a cavity of the union, so the command checks the Betti numbers and
+writes nothing if b1 or b2 is not 0.
 
 ## Planned: manual edits
 
