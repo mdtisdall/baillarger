@@ -7,7 +7,8 @@ the voxel size and the grid's voxel-to-world affine. Box mm: voxel index times t
 voxel size (the sections and the 3D surface pane); world mm: through the affine (the
 volume pane). The flat map and the inflation are cached in the cache directory under
 the surface's name, keyed by `key` (default: a hash of the mesh), so that a rebuilt
-mesh gets new ones.
+mesh gets new ones. With flat=False there is no flat map (uv_v and T_v are NaN): the
+flat map needs a boundary on every piece, which a closed surface does not have.
 """
 
 import hashlib
@@ -83,7 +84,8 @@ def gifti_bytes(v_world: Float, f: Arr) -> bytes:
 
 class Surface:
     """A white surface for viewing; see the module docstring. v_vox: vertices (voxel
-    coordinates); f: faces; vox: voxel size (mm); affine: voxel to world mm."""
+    coordinates); f: faces; vox: voxel size (mm); affine: voxel to world mm; flat:
+    make the flat map."""
 
     def __init__(
         self,
@@ -95,6 +97,7 @@ class Surface:
         name: str,
         key: str | None = None,
         log: Callable[[str], object] = print,
+        flat: bool = True,
     ) -> None:
         t0 = time.time()
         self.v_vox = np.asarray(v_vox, float)
@@ -105,13 +108,17 @@ class Surface:
         self.key = mesh_key(self.v_vox, self.f) if key is None else key
         self.G = mesh_graph(self.vmm, self.f)
         cache = Path(cache)
-        F = cached(
-            cache / f"flat_map_{name}.npz",
-            self.key,
-            lambda: FM.site_flat_map(self.vmm, self.f, log=log),
-        )
-        self.uv_v: Float = F["uv_v"]
-        self.T_v: Float = F["T_v"]
+        if flat:
+            F = cached(
+                cache / f"flat_map_{name}.npz",
+                self.key,
+                lambda: FM.site_flat_map(self.vmm, self.f, log=log),
+            )
+            self.uv_v: Float = F["uv_v"]
+            self.T_v: Float = F["T_v"]
+        else:
+            self.uv_v = np.full((len(self.vmm), 2), np.nan)
+            self.T_v = np.full((len(self.vmm), 3, 2), np.nan)
         Ip = cached(
             cache / f"inflate_{name}.npz",
             f"{self.key}-v{IN.VERSION}",
