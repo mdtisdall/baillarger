@@ -75,7 +75,10 @@ def margins(M, k, deltas):
         e += np.bincount(ta, dt, minlength=n) + np.bincount(tb, dt, minlength=n)
         # tables theta(k_a, k_b), nan padding outside the windows
         for qa, qb, T, p, t0 in tabs:
-            ia, ib = np.clip(k[qa] + d, 0, T.shape[1] - 1), np.clip(k[qb] + d, 0, T.shape[2] - 1)
+            ia, ib = (
+                np.clip(k[qa] + d, 0, T.shape[1] - 1),
+                np.clip(k[qb] + d, 0, T.shape[2] - 1),
+            )
             # outside a window: the unary part above is already inf; keep the table finite there
             da = np.where(ok[qa], T[p, ia, k[qb]] - t0, 0.0)
             db = np.where(ok[qb], T[p, k[qa], ib] - t0, 0.0)
@@ -124,10 +127,14 @@ def main(fig, work, tag):
     lo_mm = h * (np.asarray(M.o)[pv] + r.interval_lo[pv])
     hi_mm = h * (np.asarray(M.o)[pv] + r.interval_hi[pv])
     # an interval clipped by its window (at an edge that is not depth 0): its width is a lower bound
-    at_edge = ~cert & (((r.interval_lo[pv] == 0) & (np.asarray(M.o)[pv] > 0))
-                       | (r.interval_hi[pv] == np.asarray(M.K)[pv] - 1))
-    say(f"pia certified {cert.mean():.1%} (saved {cert_saved[-1].mean():.1%}); "
-        f"interval width of the uncertified: median {np.median(width[~cert]) if (~cert).any() else 0:.2f} mm")
+    at_edge = ~cert & (
+        ((r.interval_lo[pv] == 0) & (np.asarray(M.o)[pv] > 0))
+        | (r.interval_hi[pv] == np.asarray(M.K)[pv] - 1)
+    )
+    say(
+        f"pia certified {cert.mean():.1%} (saved {cert_saved[-1].mean():.1%}); "
+        f"interval width of the uncertified: median {np.median(width[~cert]) if (~cert).any() else 0:.2f} mm"
+    )
     # (b) the flat margin, on a 0.02 mm grid: the pia +-0.2 mm, the other levels fixed
     h2 = 0.02
     half2 = np.zeros((L, n))
@@ -137,7 +144,9 @@ def main(fig, work, tag):
     dl = [int(round(m / h2)) for m in MOVES_MM]
     mg = margins(M2, k2, dl)[:, pv]
     flat = np.min(np.where(np.isfinite(mg), mg, np.nan), axis=0)
-    say(f"margins: median flat margin {np.nanmedian(flat):.3f}; negative at {np.sum(flat < -1e-9):,} traces")
+    say(
+        f"margins: median flat margin {np.nanmedian(flat):.3f}; negative at {np.sum(flat < -1e-9):,} traces"
+    )
     # (c) model doubts
     c_single = Q["c"][sub]
     prof = Z["H_profile, top"][sub].astype(float)
@@ -151,7 +160,9 @@ def main(fig, work, tag):
         "flat margin": -flat,
         "|joint - single-surface|": np.abs(z[-1] - c_single),
         "|joint - profile split|": np.abs(z[-1] - prof),
-        "open top overridden": np.where(over > 0, over, np.where(np.isfinite(over), 0.0, np.nan)),
+        "open top overridden": np.where(
+            over > 0, over, np.where(np.isfinite(over), 0.0, np.nan)
+        ),
         "bands not found": nob,
     }
     R_ = {k: ranks(v) for k, v in doubts.items()}
@@ -160,34 +171,78 @@ def main(fig, work, tag):
     hits = ED.point_traces(Z, sub)
     err = ED.point_errors(z[-1], hits)
     has = np.array([i.size > 0 for i, _ in hits])
-    per = {k: np.array([np.median(v[i]) if i.size else np.nan for i, _ in hits]) for k, v in R_.items()}
-    per["combined"] = np.array([np.median(combined[i]) if i.size else np.nan for i, _ in hits])
-    per_raw = {k: np.array([np.median(np.nan_to_num(v[i], nan=0.0)) if i.size else np.nan for i, _ in hits])
-               for k, v in doubts.items()}
+    per = {
+        k: np.array([np.median(v[i]) if i.size else np.nan for i, _ in hits])
+        for k, v in R_.items()
+    }
+    per["combined"] = np.array(
+        [np.median(combined[i]) if i.size else np.nan for i, _ in hits]
+    )
+    per_raw = {
+        k: np.array(
+            [
+                np.median(np.nan_to_num(v[i], nan=0.0)) if i.size else np.nan
+                for i, _ in hits
+            ]
+        )
+        for k, v in doubts.items()
+    }
     q90 = float(np.percentile(combined, 90))
-    rho = {k: round(float(spearmanr(v[has], err[has]).statistic), 3) for k, v in per.items()}
+    rho = {
+        k: round(float(spearmanr(v[has], err[has]).statistic), 3)
+        for k, v in per.items()
+    }
     bad = has & (err > 0.3)
     flagged = has & (per["combined"] >= q90)
-    points = [dict(point=int(p + 1), traces=int(hits[p][0].size), error_mm=round(float(err[p]), 3),
-                   combined=round(float(per["combined"][p]), 3),
-                   **{k: round(float(per_raw[k][p]), 3) for k in doubts})
-              for p in np.flatnonzero(has)]
-    summary = dict(tag=tag, traces=int(n), pia_certified=round(float(cert.mean()), 4),
-                   pia_certified_saved=round(float(cert_saved[-1].mean()), 4),
-                   uncertified_interval_mm_p50_p90=[round(float(x), 3) for x in np.percentile(width[~cert], [50, 90])]
-                   if (~cert).any() else [0, 0],
-                   uncertified_interval_at_window_edge=int(at_edge.sum()),
-                   flat_margin_p10_p50=[round(float(x), 3) for x in np.nanpercentile(flat, [10, 50])],
-                   negative_margin_traces=int(np.sum(flat < -1e-9)),
-                   combined_q90=round(q90, 3), spearman_with_point_error=rho,
-                   points_over_0p3=[int(p + 1) for p in np.flatnonzero(bad)],
-                   points_flagged_top_decile=[int(p + 1) for p in np.flatnonzero(flagged)],
-                   over_0p3_and_flagged=[int(p + 1) for p in np.flatnonzero(bad & flagged)],
-                   points=points, seconds=round(time.time() - t0, 1))
-    np.savez_compressed(f"{work}/edit_priority_{tag}.npz", sub=sub, combined=combined, cert=cert, lo=lo_mm,
-                        hi=hi_mm, flat=flat, margins=mg, moves_mm=np.array(MOVES_MM),
-                        **{"doubt_" + k: v for k, v in doubts.items()}, **{"rank_" + k: v for k, v in R_.items()})
-    json.dump(summary, open(f"{work}/edit_priority_{tag}.json", "w"), indent=1, default=float)
+    points = [
+        dict(
+            point=int(p + 1),
+            traces=int(hits[p][0].size),
+            error_mm=round(float(err[p]), 3),
+            combined=round(float(per["combined"][p]), 3),
+            **{k: round(float(per_raw[k][p]), 3) for k in doubts},
+        )
+        for p in np.flatnonzero(has)
+    ]
+    summary = dict(
+        tag=tag,
+        traces=int(n),
+        pia_certified=round(float(cert.mean()), 4),
+        pia_certified_saved=round(float(cert_saved[-1].mean()), 4),
+        uncertified_interval_mm_p50_p90=[
+            round(float(x), 3) for x in np.percentile(width[~cert], [50, 90])
+        ]
+        if (~cert).any()
+        else [0, 0],
+        uncertified_interval_at_window_edge=int(at_edge.sum()),
+        flat_margin_p10_p50=[
+            round(float(x), 3) for x in np.nanpercentile(flat, [10, 50])
+        ],
+        negative_margin_traces=int(np.sum(flat < -1e-9)),
+        combined_q90=round(q90, 3),
+        spearman_with_point_error=rho,
+        points_over_0p3=[int(p + 1) for p in np.flatnonzero(bad)],
+        points_flagged_top_decile=[int(p + 1) for p in np.flatnonzero(flagged)],
+        over_0p3_and_flagged=[int(p + 1) for p in np.flatnonzero(bad & flagged)],
+        points=points,
+        seconds=round(time.time() - t0, 1),
+    )
+    np.savez_compressed(
+        f"{work}/edit_priority_{tag}.npz",
+        sub=sub,
+        combined=combined,
+        cert=cert,
+        lo=lo_mm,
+        hi=hi_mm,
+        flat=flat,
+        margins=mg,
+        moves_mm=np.array(MOVES_MM),
+        **{"doubt_" + k: v for k, v in doubts.items()},
+        **{"rank_" + k: v for k, v in R_.items()},
+    )
+    json.dump(
+        summary, open(f"{work}/edit_priority_{tag}.json", "w"), indent=1, default=float
+    )
     print(json.dumps({k: v for k, v in summary.items() if k != "points"}, indent=1))
     sections(fig, tag, Z, sub, z, lo_mm, hi_mm, cert, combined, R_, c_single)
     say("done")
@@ -211,14 +266,26 @@ def sections(fig, tag, Z, sub, z, lo_mm, hi_mm, cert, combined, rk, c_single):
     trace_of[tv] = np.arange(len(tv))
     loc = -np.ones(len(tv), int)
     loc[sub] = np.arange(sub.size)
-    rows = [(k, bi, tr, d) for k in planes
-            for bi, (tr, d) in enumerate(section_traces(Z, G, ax, k, P[np.abs(P[:, ax] - k) <= 2], trace_of, tv_set, vox))]
+    rows = [
+        (k, bi, tr, d)
+        for k in planes
+        for bi, (tr, d) in enumerate(
+            section_traces(
+                Z, G, ax, k, P[np.abs(P[:, ax] - k) <= 2], trace_of, tv_set, vox
+            )
+        )
+    ]
     step = X.STEP_MM
     depth = np.arange(0, 5.0 + 1e-9, step)
     vmax = np.nanpercentile(np.abs(fv[0][sub]), 97)
     names = list(rk)
-    fig_, axs = plt.subplots(2 * len(rows), 1, figsize=(20, 6.5 * len(rows)), squeeze=False,
-                             gridspec_kw=dict(height_ratios=[5, 1.6] * len(rows)))
+    fig_, axs = plt.subplots(
+        2 * len(rows),
+        1,
+        figsize=(20, 6.5 * len(rows)),
+        squeeze=False,
+        gridspec_kw=dict(height_ratios=[5, 1.6] * len(rows)),
+    )
     for ri, (k, bi, tr, dist) in enumerate(rows):
         a, b = axs[2 * ri, 0], axs[2 * ri + 1, 0]
         li = loc[tr]
@@ -229,27 +296,77 @@ def sections(fig, tag, Z, sub, z, lo_mm, hi_mm, cert, combined, rk, c_single):
             m_ = min(ns[t], depth.size)
             img[:m_, j] = fv[0, t, :m_]
         ext = [dist[0], dist[-1], depth[-1], 0] if tr.size > 1 else None
-        a.imshow(img, aspect="auto", cmap="gray", vmin=-vmax, vmax=vmax, extent=ext, interpolation="nearest")
+        a.imshow(
+            img,
+            aspect="auto",
+            cmap="gray",
+            vmin=-vmax,
+            vmax=vmax,
+            extent=ext,
+            interpolation="nearest",
+        )
         unc = ok & ~cert[lj]
-        a.fill_between(dist, np.where(unc, lo_mm[lj], np.nan), np.where(unc, hi_mm[lj], np.nan), color="#e34948",
-                       alpha=0.45, lw=0, label="pia interval (not certified)")
-        a.plot(dist, np.where(ok, c_single[lj], np.nan), "--", c="#30d5ff", lw=1.0, label="single-surface horizon")
-        a.plot(dist, np.where(ok, z[-1, lj], np.nan), "-", c="#ff2bd6", lw=1.4, label="joint pia")
+        a.fill_between(
+            dist,
+            np.where(unc, lo_mm[lj], np.nan),
+            np.where(unc, hi_mm[lj], np.nan),
+            color="#e34948",
+            alpha=0.45,
+            lw=0,
+            label="pia interval (not certified)",
+        )
+        a.plot(
+            dist,
+            np.where(ok, c_single[lj], np.nan),
+            "--",
+            c="#30d5ff",
+            lw=1.0,
+            label="single-surface horizon",
+        )
+        a.plot(
+            dist,
+            np.where(ok, z[-1, lj], np.nan),
+            "-",
+            c="#ff2bd6",
+            lw=1.4,
+            label="joint pia",
+        )
         Pk = P[np.abs(P[:, ax] - k) <= 2]
         for j, t in enumerate(tr):
-            p = pos[t, :ns[t]].astype(float) * vox
+            p = pos[t, : ns[t]].astype(float) * vox
             d_ = np.linalg.norm(p[:, None] - (Pk * vox)[None], axis=2)
             if d_.min() <= 0.3:
-                a.plot(dist[j], np.unravel_index(np.argmin(d_), d_.shape)[0] * step, "*", c="#ffd23f", ms=9)
+                a.plot(
+                    dist[j],
+                    np.unravel_index(np.argmin(d_), d_.shape)[0] * step,
+                    "*",
+                    c="#ffd23f",
+                    ms=9,
+                )
         a.set_ylim(depth[-1], 0)
         a.set_ylabel("depth (mm)")
-        a.set_title(f"plane {'ijk'[ax]} = {k}, bank {bi + 1}: echo 2; magenta joint pia, red its QPBO interval "
-                    f"where not certified, cyan dashed single-surface horizon, ★ your points", fontsize=10)
+        a.set_title(
+            f"plane {'ijk'[ax]} = {k}, bank {bi + 1}: echo 2; magenta joint pia, red its QPBO interval "
+            f"where not certified, cyan dashed single-surface horizon, ★ your points",
+            fontsize=10,
+        )
         if ri == 0:
             a.legend(fontsize=8, loc="lower right", ncol=3)
-        R_ = np.stack([np.where(ok, combined[lj], np.nan)] + [np.where(ok, rk[nm][lj], np.nan) for nm in names])
-        b.imshow(R_, aspect="auto", cmap="magma", vmin=0, vmax=1, interpolation="nearest",
-                 extent=[dist[0], dist[-1], R_.shape[0] - 0.5, -0.5] if tr.size > 1 else None)
+        R_ = np.stack(
+            [np.where(ok, combined[lj], np.nan)]
+            + [np.where(ok, rk[nm][lj], np.nan) for nm in names]
+        )
+        b.imshow(
+            R_,
+            aspect="auto",
+            cmap="magma",
+            vmin=0,
+            vmax=1,
+            interpolation="nearest",
+            extent=[dist[0], dist[-1], R_.shape[0] - 0.5, -0.5]
+            if tr.size > 1
+            else None,
+        )
         b.set_yticks(range(R_.shape[0]), ["combined"] + names, fontsize=7)
         b.set_xlabel("distance along the white surface (mm)")
     fig_.tight_layout()

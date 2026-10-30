@@ -49,10 +49,19 @@ from baillarger import streamlines as S
 
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
 CLASS = dict(enumerate(PCT.CLASS))
-TRACERS = ["current", "laplace", "fitted", "fitted_blend", "multiscale", "blend", "perbank"]
+TRACERS = [
+    "current",
+    "laplace",
+    "fitted",
+    "fitted_blend",
+    "multiscale",
+    "blend",
+    "perbank",
+]
 
 
 # ---------------------------------------------------------------- mesh (as column_volume.py)
+
 
 def white_mesh(wm):
     return PCT.white_mesh(wm)
@@ -65,11 +74,17 @@ def pick_vertices(v, n):
 
 # ---------------------------------------------------------------- tensors
 
+
 def tensor(img, m, sd=F.SD, si=F.SI):
     """flatten_fused2.tensor with its scales as arguments."""
     g = np.stack(np.gradient(F.mconv(img, m, sd)), -1)
-    return np.stack([F.mconv(g[..., i] * g[..., j], m, si)
-                     for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))], 0)
+    return np.stack(
+        [
+            F.mconv(g[..., i] * g[..., j], m, si)
+            for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))
+        ],
+        0,
+    )
 
 
 def base_tensor(B):
@@ -91,7 +106,9 @@ def multiscale_tensor(B, base=None):
     """(ii): c T_SI + (1 - c) T_2SI, each normalized by its trace, c the fine scale's coherence."""
     m = B["ctx"].astype(float)
     T1 = normalized(base_tensor(B) if base is None else base)
-    T2 = normalized(tensor(B["det"][1], m, si=2 * F.SI) + tensor(B["det"][2], m, si=2 * F.SI))
+    T2 = normalized(
+        tensor(B["det"][1], m, si=2 * F.SI) + tensor(B["det"][2], m, si=2 * F.SI)
+    )
     _, c = eig(T1)
     return c[None] * T1 + (1 - c[None]) * T2
 
@@ -107,7 +124,10 @@ def perbank_tensor(B):
     m = B["ctx"].astype(float)
     g = wm_direction(B["wm"], B["vox"])
     grads = [np.stack(np.gradient(F.mconv(B["det"][e], m, F.SD)), -1) for e in (1, 2)]
-    J = [sum(gr[..., i] * gr[..., j] for gr in grads) for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))]
+    J = [
+        sum(gr[..., i] * gr[..., j] for gr in grads)
+        for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))
+    ]
     del grads
     out = np.zeros((6,) + m.shape)
     for a in range(3):
@@ -123,12 +143,20 @@ def perbank_tensor(B):
 
 def rank1(u):
     """The tensor u u^T (6 components) of a unit vector field (..., 3)."""
-    return np.stack([u[..., i] * u[..., j] for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))], 0)
+    return np.stack(
+        [
+            u[..., i] * u[..., j]
+            for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))
+        ],
+        0,
+    )
 
 
 # ---------------------------------------------------------------- (i) the anisotropic Laplace potential
 
-OFF27 = np.array([(a, b, c) for a in (-1, 0, 1) for b in (-1, 0, 1) for c in (-1, 0, 1)])
+OFF27 = np.array(
+    [(a, b, c) for a in (-1, 0, 1) for b in (-1, 0, 1) for c in (-1, 0, 1)]
+)
 
 
 def _k(off):
@@ -163,8 +191,11 @@ def laplace_system(labels, nrm_field, coh, vox, floor=0.02):
         S[_k(e)][sl0] -= w
         S[_k(-e)][sl1] -= w
     # cells: M = c (I - n n^T), averaged over the 8 corners of each cell
-    M = [c_ * ((i == j) - nrm_field[..., i] * nrm_field[..., j]) for c_ in [coh]
-         for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))]
+    M = [
+        c_ * ((i == j) - nrm_field[..., i] * nrm_field[..., j])
+        for c_ in [coh]
+        for i, j in ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))
+    ]
     corners = np.array([(i, j, k) for i in (0, 1) for j in (0, 1) for k in (0, 1)])
     csl = lambda o: tuple(slice(o[a], shape[a] - 1 + o[a]) for a in range(3))  # noqa: E731
     cell_ok = np.ones(tuple(s - 1 for s in shape), bool)
@@ -183,7 +214,9 @@ def laplace_system(labels, nrm_field, coh, vox, floor=0.02):
             coef = np.zeros(cell_ok.shape)
             for a in range(3):
                 for b in range(3):
-                    coef += sgn[ii, a] * sgn[jj, b] * Mfull[(a, b)] / (16 * vox[a] * vox[b])
+                    coef += (
+                        sgn[ii, a] * sgn[jj, b] * Mfull[(a, b)] / (16 * vox[a] * vox[b])
+                    )
             S[_k(oj - oi)][csl(oi)] += V * coef
     del Mfull
     # the system over the unknowns (cortex), Dirichlet values moved to the right-hand side
@@ -212,7 +245,10 @@ def laplace_system(labels, nrm_field, coh, vox, floor=0.02):
         np.subtract.at(rhs, r[~u], sv[~u] * phiD[tuple(q[~u].T)])
     del S
     n = len(P)
-    A = sparse.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(n, n))
+    A = sparse.csr_matrix(
+        (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(n, n),
+    )
     return A, rhs, unk, dirW, dirF
 
 
@@ -227,14 +263,20 @@ def laplace(labels, nrm_field, coh, vox, floor=0.02, tol=1e-8, verbose=False):
     shape = labels.shape
     A, rhs, unk, dirW, dirF = laplace_system(labels, nrm_field, coh, vox, floor)
     n = A.shape[0]
-    A = A + sparse.identity(n) * (1e-9 * A.diagonal().mean())  # isolated pieces stay solvable
+    A = A + sparse.identity(n) * (
+        1e-9 * A.diagonal().mean()
+    )  # isolated pieces stay solvable
     try:
         import pyamg
 
         ml = pyamg.smoothed_aggregation_solver(A, symmetry="symmetric")
         res = []
         x = ml.solve(rhs, tol=tol, accel="cg", maxiter=500, residuals=res)
-        info = dict(solver="pyamg sa+cg", iters=len(res), resid=float(res[-1] / max(res[0], 1e-30)))
+        info = dict(
+            solver="pyamg sa+cg",
+            iters=len(res),
+            resid=float(res[-1] / max(res[0], 1e-30)),
+        )
     except ImportError:
         from scipy.sparse.linalg import cg
 
@@ -266,6 +308,7 @@ def laplace_tensor(B, labels, Tc=None):
 
 # ---------------------------------------------------------------- (i-b) the fitted field
 
+
 def fitted(B, Tc=None, lam=0.1, tol=1e-8):
     """streamlines.fitted_field on the box: T (full grid) and the solver's info."""
     Tc = base_tensor(B) if Tc is None else Tc
@@ -279,12 +322,14 @@ def fitted_tensor(B, Tc=None):
 
 # ---------------------------------------------------------------- (iii) the blended start
 
+
 def trace_blend(Tc, labels, dface, x0, d0, vox, nmax, blend_mm=0.3, **kw):
     """streamlines.trace with the blended start."""
     return S.trace(Tc, labels, dface, x0, d0, vox, nmax, blend_mm, **kw)
 
 
 # ---------------------------------------------------------------- fields per tracer
+
 
 def fields(B, labels, which=TRACERS, verbose=False, base=None):
     """The tensor field each tracer integrates (blend uses the base tensor), and notes. base: the
@@ -315,6 +360,7 @@ def primary(name, Tc, labels, dface, x0, d0, vox, nmax, **kw):
 
 # ---------------------------------------------------------------- the fallback and classes (column_volume.py)
 
+
 def orientation(B):
     """The one pass's direction: the coherence-weighted data normal, signed by the WM distance
     gradient, plus 0.1 x that gradient (column_traces.trace_columns)."""
@@ -340,7 +386,12 @@ class Pass:
         self.v, self.f, self.nrm = PCT.white_mesh(B["wm"])
         self.P = PCT.mesh_patches(self.v, self.f, np.asarray(B["vox"], float))
         self.op = PCT.one_pass(_Tissue(B), orientation(B), self.v, self.nrm, self.P)
-        self.s, self.f_eq, self.D, self.u = self.op.setup, self.op.fronts, self.P.D, self.op.u
+        self.s, self.f_eq, self.D, self.u = (
+            self.op.setup,
+            self.op.fronts,
+            self.P.D,
+            self.op.u,
+        )
         self.tree = cKDTree(self.v)
 
     def vertex_of(self, x):
@@ -359,7 +410,8 @@ def with_fallback(Pa, B, labels, x0, pos1, ns1, out1, nmax, same_mm=5.0):
     assert nmax == PCT.NMAX and same_mm == PCT.SAME_MM
     tv = Pa.vertex_of(x0)
     pos, ns, outc, tracer, end_patch, cls = PCT.finish(
-        _Tissue(B, labels), Pa.v, Pa.nrm, tv, Pa.P, Pa.op, pos1, ns1, out1)
+        _Tissue(B, labels), Pa.v, Pa.nrm, tv, Pa.P, Pa.op, pos1, ns1, out1
+    )
     return pos, ns, outc, tracer, cls, Pa.P.of_vertex[tv], end_patch
 
 
@@ -389,4 +441,6 @@ def load_site(site, size=141):
     if pf.exists():
         P = np.array(json.load(open(pf))["points_full0"], float) - lo
         P = P[np.all((P >= 0) & (P < hi - lo), 1)]
-    return dict(B=B, labels=labels, P=P, vox=B["vox"], lo=lo, hi=hi, points_file=str(pf))
+    return dict(
+        B=B, labels=labels, P=P, vox=B["vox"], lo=lo, hi=hi, points_file=str(pf)
+    )

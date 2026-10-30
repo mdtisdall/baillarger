@@ -13,7 +13,13 @@ Usage: wm_handles.py <work> <data>   (writes <data>/wm_handles.npz, <data>/wm_ha
 import sys
 from pathlib import Path
 
-from baillarger.white import KINDS, WMChanges, white_matter_box, wm_changes, write_changes
+from baillarger.white import (
+    KINDS,
+    WMChanges,
+    white_matter_box,
+    wm_changes,
+    write_changes,
+)
 
 KIND = KINDS
 
@@ -21,13 +27,19 @@ KIND = KINDS
 def fixed_wm(lo, hi, data):
     """The handle-free WM label of the box [lo, hi) of the full grid (bool), from
     <data>/wm_handles.npz."""
-    return white_matter_box(tuple(int(t) for t in lo), tuple(int(t) for t in hi),
-                            WMChanges.load(Path(data) / "wm_handles.npz"))
+    return white_matter_box(
+        tuple(int(t) for t in lo),
+        tuple(int(t) for t in hi),
+        WMChanges.load(Path(data) / "wm_handles.npz"),
+    )
 
 
 def main(work, data):
     ch = wm_changes()
-    print(f"(b0, b1, b2) {ch.betti_before} -> {ch.betti_after}, {len(ch.voxels)} voxels", flush=True)
+    print(
+        f"(b0, b1, b2) {ch.betti_before} -> {ch.betti_after}, {len(ch.voxels)} voxels",
+        flush=True,
+    )
     write_changes(ch, Path(data), "wm_handles")
 
 

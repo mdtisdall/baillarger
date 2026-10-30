@@ -53,14 +53,34 @@ STATIC = Path(__file__).parent / "static"
 def load_session(path: str, base: str):
     z = np.load(path)
     if "kind" in z.files and str(z["kind"]) == "surface":
-        s = S.SurfaceSession(z["v"], z["f"].astype(np.int64), z["n"], affine=z["affine"])
+        s = S.SurfaceSession(
+            z["v"], z["f"].astype(np.int64), z["n"], affine=z["affine"]
+        )
         s.white_v, s.white_f = z["white_v"], z["white_f"].astype(np.int64)
         return s, dict(bases={"contour": None}, near_face=z["near_face"])
-    cols = P.Columns(z["pts"], z["cnt"].astype(np.int64), z["s"].astype(np.float64), z["ridge_s"],
-                     z["fluid_s"], z["stop_s"], z["stop_why"].astype(np.int64), z["extended"])
-    g = SimpleNamespace(length=z["length"].astype(np.float64), root=z["root"].astype(np.float64))
+    cols = P.Columns(
+        z["pts"],
+        z["cnt"].astype(np.int64),
+        z["s"].astype(np.float64),
+        z["ridge_s"],
+        z["fluid_s"],
+        z["stop_s"],
+        z["stop_why"].astype(np.int64),
+        z["extended"],
+    )
+    g = SimpleNamespace(
+        length=z["length"].astype(np.float64), root=z["root"].astype(np.float64)
+    )
     bases = {k[2:]: z[k] for k in z.files if k.startswith("t_")}
-    s = S.Session(z["v"], z["f"].astype(np.int64), z["n"], g, cols, bases[base], affine=z["affine"])
+    s = S.Session(
+        z["v"],
+        z["f"].astype(np.int64),
+        z["n"],
+        g,
+        cols,
+        bases[base],
+        affine=z["affine"],
+    )
     return s, dict(bases=bases, near_face=z["near_face"])
 
 
@@ -80,7 +100,9 @@ class Editor:
         self.base = self.base_pending = base
         self.range_pending = self.s.prior.range_mm
         self.touch_mm = 0.1  # sheets closer than this (and not crossing) are touching
-        self.touch_pending = None  # (vertices, longest edge): a drag's touching still to recheck
+        self.touch_pending = (
+            None  # (vertices, longest edge): a drag's touching still to recheck
+        )
         self.edits_path = Path(edits_path)
         self.points: list[dict] = []  # {kind, mm}; results after a remesh
         self.redo_stack: list[dict] = []
@@ -88,15 +110,25 @@ class Editor:
         self.timings: dict = {}
         self.pos = self.s.positions()
         self.load_s = time.perf_counter() - t
-        print(f"session loaded in {self.load_s:.1f} s: {len(self.s.v):,} vertices", flush=True)
+        print(
+            f"session loaded in {self.load_s:.1f} s: {len(self.s.v):,} vertices",
+            flush=True,
+        )
 
     def mesh_payload(self, which: str) -> bytes:
         if which == "white":
-            v, f = getattr(self.s, "white_v", self.s.v), getattr(self.s, "white_f", self.s.f)
+            v, f = (
+                getattr(self.s, "white_v", self.s.v),
+                getattr(self.s, "white_f", self.s.f),
+            )
         else:
             v, f = self.pos, self.s.f
         head = np.array([len(v), len(f)], np.uint32).tobytes()
-        return head + self.s.to_mm(v).astype(np.float32).tobytes() + np.asarray(f).astype(np.uint32).tobytes()
+        return (
+            head
+            + self.s.to_mm(v).astype(np.float32).tobytes()
+            + np.asarray(f).astype(np.uint32).tobytes()
+        )
 
     def face_signs(self) -> bytes:
         """int8 per pial triangle: +1 where its winding (in world mm) gives the outward
@@ -106,11 +138,18 @@ class Editor:
         return (sign * np.sign(np.linalg.det(A))).astype(np.int8).tobytes()
 
     def state(self) -> dict:
-        return dict(base=self.base_pending, bases=list(self.extra["bases"]), range_mm=self.range_pending,
-                    touch_mm=self.touch_mm,
-                    edits_path=str(self.edits_path), dirty=self.dirty, timings=self.timings,
-                    can_undo=bool(self.points), can_redo=bool(self.redo_stack),
-                    points=[dict(i=i, **p) for i, p in enumerate(self.points)])
+        return dict(
+            base=self.base_pending,
+            bases=list(self.extra["bases"]),
+            range_mm=self.range_pending,
+            touch_mm=self.touch_mm,
+            edits_path=str(self.edits_path),
+            dirty=self.dirty,
+            timings=self.timings,
+            can_undo=bool(self.points),
+            can_redo=bool(self.redo_stack),
+            points=[dict(i=i, **p) for i, p in enumerate(self.points)],
+        )
 
     # -- list and settings
     def add(self, kind: str, mm, vertex=None) -> dict:
@@ -172,29 +211,56 @@ class Editor:
         """Settings, then every edit from the list, then the positions."""
         t0 = time.perf_counter()
         if abs(self.range_pending - self.s.prior.range_mm) > 1e-12:
-            self.s.prior.set_range(self.range_pending, self.s.prior.sd_mm)  # rebuild re-adds every observation
+            self.s.prior.set_range(
+                self.range_pending, self.s.prior.sd_mm
+            )  # rebuild re-adds every observation
             tm["factor_ms"] = 1e3 * (time.perf_counter() - t0)
-        if self.base_pending != self.base and self.extra["bases"][self.base_pending] is not None:
-            self.s.t_base = np.asarray(self.extra["bases"][self.base_pending], np.float64)
+        if (
+            self.base_pending != self.base
+            and self.extra["bases"][self.base_pending] is not None
+        ):
+            self.s.t_base = np.asarray(
+                self.extra["bases"][self.base_pending], np.float64
+            )
             self.s.thick.set_base(self.s.t_base * self.s.h)
             self.base = self.base_pending
         t1 = time.perf_counter()
-        self.made = self.s.rebuild([
-            (p["kind"], self.s.to_vox(np.asarray(p["mm"])))
-            + ((self.s.to_vox(np.asarray(p["from_mm"])),
-                [(self.s.to_vox(np.asarray(u["mm"])), self.s.to_vox(np.asarray(u["from_mm"])))
-                 for u in p.get("pushes", [])]) if p["kind"] == "drag" else ())
-            for p in self.points])
+        self.made = self.s.rebuild(
+            [
+                (p["kind"], self.s.to_vox(np.asarray(p["mm"])))
+                + (
+                    (
+                        self.s.to_vox(np.asarray(p["from_mm"])),
+                        [
+                            (
+                                self.s.to_vox(np.asarray(u["mm"])),
+                                self.s.to_vox(np.asarray(u["from_mm"])),
+                            )
+                            for u in p.get("pushes", [])
+                        ],
+                    )
+                    if p["kind"] == "drag"
+                    else ()
+                )
+                for p in self.points
+            ]
+        )
         tm["edits_ms"] = 1e3 * (time.perf_counter() - t1)
         t2 = time.perf_counter()
         self.pos = self.s.positions()
         tm["positions_ms"] = 1e3 * (time.perf_counter() - t2)
         for p, e in zip(self.points, self.made):
-            p.update(fallback=bool(e.fallback), miss_mm=[round(x, 3) for x in e.miss_mm],
-                     s_mm=[round(x, 3) for x in e.s_mm], sides=len(e.roots))
+            p.update(
+                fallback=bool(e.fallback),
+                miss_mm=[round(x, 3) for x in e.miss_mm],
+                s_mm=[round(x, 3) for x in e.s_mm],
+                sides=len(e.roots),
+            )
 
     def _white(self):
-        return getattr(self.s, "white_v", self.s.v), getattr(self.s, "white_f", self.s.f)
+        return getattr(self.s, "white_v", self.s.v), getattr(
+            self.s, "white_f", self.s.f
+        )
 
     def _contact_radius(self) -> float:
         """Voxels: the contact radius of a surface session (1 mm otherwise)."""
@@ -208,10 +274,16 @@ class Editor:
                 table, sign = self.s.loc.table, self.s.sign
             else:  # a column session: the pial has the white mesh's triangles
                 raw = S.face_normals(self.s.v, self.s.f)
-                sign = np.where(np.sum(raw * self.s.n[self.s.f].mean(1), 1) < 0, -1.0, 1.0)
+                sign = np.where(
+                    np.sum(raw * self.s.n[self.s.f].mean(1), 1) < 0, -1.0, 1.0
+                )
                 table = self.s.white.table
             wv, wf = self._white()
-            self._tg = (table, sign, S.Locator(np.asarray(wv, np.float64), np.asarray(wf, np.int64)))
+            self._tg = (
+                table,
+                sign,
+                S.Locator(np.asarray(wv, np.float64), np.asarray(wf, np.int64)),
+            )
         return self._tg
 
     def _crossings(self, tm: dict) -> None:
@@ -226,7 +298,9 @@ class Editor:
         m_white, _, _ = intersecting_faces(self.pos, self.s.f, wv, wf)
         self.cross = m_self | m_white
         table, sign, white = self._touch_geometry()
-        self.vtouch = S.touching_vertices(self.pos, self.s.f, table, sign, self.touch_mm / self.s.h, white)
+        self.vtouch = S.touching_vertices(
+            self.pos, self.s.f, table, sign, self.touch_mm / self.s.h, white
+        )
         self.touch_pending = None
         self._summarise()
         tm["checks_ms"] = tm.get("checks_ms", 0.0) + 1e3 * (time.perf_counter() - t0)
@@ -257,14 +331,17 @@ class Editor:
 
         t0 = time.perf_counter()
         wv, wf = self._white()
-        self.cross[sub] = faces_hitting(self.pos, self.s.f, sub) | faces_hitting(self.pos, self.s.f, sub, wv, wf)
+        self.cross[sub] = faces_hitting(self.pos, self.s.f, sub) | faces_hitting(
+            self.pos, self.s.f, sub, wv, wf
+        )
         tm["cross_ms"] = tm.get("cross_ms", 0.0) + 1e3 * (time.perf_counter() - t0)
 
     def _recheck_touch(self, verts: np.ndarray, e: float, tm: dict) -> None:
         t0 = time.perf_counter()
         table, sign, white = self._touch_geometry()
-        self.vtouch[verts] = S.touching_vertices(self.pos, self.s.f, table, sign, self.touch_mm / self.s.h, white,
-                                                 verts, e=e)[verts]
+        self.vtouch[verts] = S.touching_vertices(
+            self.pos, self.s.f, table, sign, self.touch_mm / self.s.h, white, verts, e=e
+        )[verts]
         tm["touch_ms"] = tm.get("touch_ms", 0.0) + 1e3 * (time.perf_counter() - t0)
         tm["checked_vertices"] = int(verts.size)
 
@@ -290,7 +367,13 @@ class Editor:
         from scipy.spatial import cKDTree
 
         self.touch = self.vtouch[self.s.f].any(1) & ~self.cross
-        contacts = np.array([self.s.to_vox(np.asarray(p["mm"])) for p in self.points if p["kind"] == "contact"])
+        contacts = np.array(
+            [
+                self.s.to_vox(np.asarray(p["mm"]))
+                for p in self.points
+                if p["kind"] == "contact"
+            ]
+        )
 
         def places(mask):
             idx = np.flatnonzero(mask)
@@ -298,45 +381,82 @@ class Editor:
                 return []
             c = self.pos[self.s.f[idx]].mean(1)
             pr = cKDTree(c).query_pairs(0.5 / self.s.h, output_type="ndarray")
-            G = sparse.coo_matrix((np.ones(len(pr)), (pr[:, 0], pr[:, 1])) if len(pr) else
-                                  (np.zeros(0), (np.zeros(0, int), np.zeros(0, int))), shape=(idx.size,) * 2)
+            G = sparse.coo_matrix(
+                (np.ones(len(pr)), (pr[:, 0], pr[:, 1]))
+                if len(pr)
+                else (np.zeros(0), (np.zeros(0, int), np.zeros(0, int))),
+                shape=(idx.size,) * 2,
+            )
             n, lab = connected_components(G, directed=False)
             out = []
             for k in range(n):
                 cen = c[lab == k].mean(0)
-                near = bool(len(contacts)) and bool(np.min(np.linalg.norm(contacts - cen, axis=1)) < self._contact_radius())
-                out.append(dict(mm=[round(float(x), 3) for x in self.s.to_mm(cen)], faces=int(np.sum(lab == k)),
-                                at_contact=near))
+                near = bool(len(contacts)) and bool(
+                    np.min(np.linalg.norm(contacts - cen, axis=1))
+                    < self._contact_radius()
+                )
+                out.append(
+                    dict(
+                        mm=[round(float(x), 3) for x in self.s.to_mm(cen)],
+                        faces=int(np.sum(lab == k)),
+                        at_contact=near,
+                    )
+                )
             out.sort(key=lambda d: (d["at_contact"], -d["faces"]))
             return out
 
         cl, tl = places(self.cross), places(self.touch)
-        self.crossings = dict(faces=int(self.cross.sum()), clusters=cl[:200], n_clusters=len(cl),
-                              at_contact=sum(c["at_contact"] for c in cl),
-                              touching_faces=int(self.touch.sum()), touching_places=len(tl),
-                              touching_at_contact=sum(c["at_contact"] for c in tl), touch_mm=self.touch_mm)
+        self.crossings = dict(
+            faces=int(self.cross.sum()),
+            clusters=cl[:200],
+            n_clusters=len(cl),
+            at_contact=sum(c["at_contact"] for c in cl),
+            touching_faces=int(self.touch.sum()),
+            touching_places=len(tl),
+            touching_at_contact=sum(c["at_contact"] for c in tl),
+            touch_mm=self.touch_mm,
+        )
 
-    def _payload(self, tm: dict, extra: dict | None = None, rows: np.ndarray | None = None) -> bytes:
+    def _payload(
+        self, tm: dict, extra: dict | None = None, rows: np.ndarray | None = None
+    ) -> bytes:
         """Header, then positions: all vertices, or (rows given) only those, as uint32 count,
         uint32 indices, float32 world mm; then the crossing and the touching triangles."""
-        tm["total_ms"] = sum(v for k, v in tm.items() if k.endswith("_ms") and k != "total_ms")
+        tm["total_ms"] = sum(
+            v for k, v in tm.items() if k.endswith("_ms") and k != "total_ms"
+        )
         tm["edits"] = len(self.points)
         self.timings = {k: round(v, 1) for k, v in tm.items()}
         self.dirty = False
-        head = json.dumps(dict(state=self.state(), crossings=self.crossings, sparse=rows is not None,
-                               **(extra or {}))).encode()
+        head = json.dumps(
+            dict(
+                state=self.state(),
+                crossings=self.crossings,
+                sparse=rows is not None,
+                **(extra or {}),
+            )
+        ).encode()
         head += b" " * (-len(head) % 4)
         if rows is None:
             body = self.s.to_mm(self.pos).astype(np.float32).tobytes()
         else:
             rows = np.asarray(rows, np.uint32)
-            body = (np.array([rows.size], np.uint32).tobytes() + rows.tobytes()
-                    + self.s.to_mm(self.pos[rows]).astype(np.float32).tobytes())
+            body = (
+                np.array([rows.size], np.uint32).tobytes()
+                + rows.tobytes()
+                + self.s.to_mm(self.pos[rows]).astype(np.float32).tobytes()
+            )
         idx = np.flatnonzero(self.cross).astype(np.uint32)
         tdx = np.flatnonzero(self.touch).astype(np.uint32)
-        return (np.array([len(head)], np.uint32).tobytes() + head + body
-                + np.array([idx.size], np.uint32).tobytes() + idx.tobytes()
-                + np.array([tdx.size], np.uint32).tobytes() + tdx.tobytes())
+        return (
+            np.array([len(head)], np.uint32).tobytes()
+            + head
+            + body
+            + np.array([idx.size], np.uint32).tobytes()
+            + idx.tobytes()
+            + np.array([tdx.size], np.uint32).tobytes()
+            + tdx.tobytes()
+        )
 
     def remesh(self) -> bytes:
         tm: dict = {}
@@ -344,7 +464,9 @@ class Editor:
         self._crossings(tm)
         return self._payload(tm)
 
-    PLACE_MM = 0.5  # a crossing within this of one that was there before is that one, shifted
+    PLACE_MM = (
+        0.5  # a crossing within this of one that was there before is that one, shifted
+    )
     PUSH_ROUNDS, PUSH_SPACING_MM, PUSH_MAX = 3, 0.3, 60
 
     def drag(self, vertex: int, mm, push: bool = False) -> bytes:
@@ -374,7 +496,9 @@ class Editor:
         from scipy.spatial import cKDTree
 
         tm: dict = {}
-        if self.dirty or not hasattr(self, "vtouch"):  # bring everything up to date first
+        if self.dirty or not hasattr(
+            self, "vtouch"
+        ):  # bring everything up to date first
             self._rebuild(tm)
             self._crossings(tm)
             full = True
@@ -387,10 +511,19 @@ class Editor:
         self.add("drag", mm, r)
         p = self.points[-1]
         t1 = time.perf_counter()
-        e = self.s.add_drag(self.s.to_vox(np.asarray(p["mm"])), self.s.to_vox(np.asarray(p["from_mm"])))
-        for q, ed in zip(self.points, self.s.edits):  # an earlier drag of r is superseded
+        e = self.s.add_drag(
+            self.s.to_vox(np.asarray(p["mm"])), self.s.to_vox(np.asarray(p["from_mm"]))
+        )
+        for q, ed in zip(
+            self.points, self.s.edits
+        ):  # an earlier drag of r is superseded
             if ed.kind == "drag":
-                q.update(fallback=False, miss_mm=[round(x, 3) for x in ed.miss_mm], s_mm=[], sides=len(ed.roots))
+                q.update(
+                    fallback=False,
+                    miss_mm=[round(x, 3) for x in ed.miss_mm],
+                    s_mm=[],
+                    sides=len(ed.roots),
+                )
         tm["edits_ms"] = 1e3 * (time.perf_counter() - t1)
         target = self.s.to_vox(np.asarray(p["mm"]))
         wv, wf = self._white()
@@ -410,7 +543,10 @@ class Editor:
             for hit in (faces_hitting(pos, f, sub), faces_hitting(pos, f, sub, wv, wf)):
                 F = sub[hit & ~before[sub]]
                 if F.size and old_tree is not None:
-                    F = F[old_tree.query(pos[f[F]].mean(1), distance_upper_bound=place)[0] > place]
+                    F = F[
+                        old_tree.query(pos[f[F]].mean(1), distance_upper_bound=place)[0]
+                        > place
+                    ]
                 out.append(F)
             return out[0], out[1]
 
@@ -445,7 +581,9 @@ class Editor:
             frac, fail = bisect(drag_to, white_only=False)
             self.s.set_drag_target(e, target)  # which contact points hold it
             t3 = time.perf_counter()
-            held_by = self._holders(start, lambda pos: sum(F.size for F in new_crossings(pos)))
+            held_by = self._holders(
+                start, lambda pos: sum(F.size for F in new_crossings(pos))
+            )
             tm["holders_ms"] = 1e3 * (time.perf_counter() - t3)
             drag_to(frac)
         elif n0:
@@ -460,7 +598,9 @@ class Editor:
                 pos = self.s.positions()
             tm["push_ms"] = 1e3 * (time.perf_counter() - t3)
             c = new_crossings(pos)
-            if c[0].size or c[1].size:  # the pushes did not clear it: a plain drag instead
+            if (
+                c[0].size or c[1].size
+            ):  # the pushes did not clear it: a plain drag instead
                 for _, obs, _ in e.pushes:
                     for name, k in obs:
                         self.s.free[int(name[-1])].remove(k)
@@ -470,22 +610,32 @@ class Editor:
                 push_failed = True
         p["mm"] = [float(x) for x in e.mm]
         if e.pushes:
-            p["pushes"] = [dict(from_mm=self.s.to_mm(self.s.v[q]).tolist(), mm=self.s.to_mm(x).tolist())
-                           for q, _, x in e.pushes]
+            p["pushes"] = [
+                dict(
+                    from_mm=self.s.to_mm(self.s.v[q]).tolist(),
+                    mm=self.s.to_mm(x).tolist(),
+                )
+                for q, _, x in e.pushes
+            ]
         else:
             p.pop("pushes", None)
         self.pos = self.s.positions()
-        tm["pullback_ms"] = (1e3 * (time.perf_counter() - t0) - tm.get("holders_ms", 0.0)
-                             - tm.get("push_ms", 0.0))
+        tm["pullback_ms"] = (
+            1e3 * (time.perf_counter() - t0)
+            - tm.get("holders_ms", 0.0)
+            - tm.get("push_ms", 0.0)
+        )
         blocked = None
         if fail is not None:  # where the first refused crossing was, nearest the vertex
             pos_f, (pp, pw) = fail
             F = np.concatenate([pp, pw])
             cen = pos_f[f[F]].mean(1)
             j = int(np.argmin(np.linalg.norm(cen - start, axis=1)))
-            blocked = dict(mm=[round(float(x), 2) for x in self.s.to_mm(cen[j])],
-                           away_mm=round(float(np.linalg.norm(cen[j] - start)) * self.s.h, 2),
-                           against="white surface" if j >= pp.size else "pial surface")
+            blocked = dict(
+                mm=[round(float(x), 2) for x in self.s.to_mm(cen[j])],
+                away_mm=round(float(np.linalg.norm(cen[j] - start)) * self.s.h, 2),
+                against="white surface" if j >= pp.size else "pial surface",
+            )
         moved = np.flatnonzero(np.linalg.norm(self.pos - prev, axis=1) > self.MOVED)
         t2 = time.perf_counter()
         if moved.size:
@@ -501,15 +651,27 @@ class Editor:
         self._summarise()
         p["pulled_back"] = frac < 1.0
         p["fraction"] = round(frac, 4)
-        for k, v in (("held_by", held_by if n0 and not push else None), ("blocked", blocked)):
+        for k, v in (
+            ("held_by", held_by if n0 and not push else None),
+            ("blocked", blocked),
+        ):
             if v is None:
                 p.pop(k, None)
             else:
                 p[k] = v
-        info = dict(requested_mm=[float(v) for v in mm], fraction=round(frac, 4), would_cross=n0, trials=trials,
-                    moved=int(moved.size), touching_pending=self.touch_pending is not None,
-                    held_by=held_by, blocked=blocked, push=bool(push), pushes=len(e.pushes),
-                    push_failed=push_failed)
+        info = dict(
+            requested_mm=[float(v) for v in mm],
+            fraction=round(frac, 4),
+            would_cross=n0,
+            trials=trials,
+            moved=int(moved.size),
+            touching_pending=self.touch_pending is not None,
+            held_by=held_by,
+            blocked=blocked,
+            push=bool(push),
+            pushes=len(e.pushes),
+            push_failed=push_failed,
+        )
         return self._payload(tm, dict(drag=info), rows=None if full else moved)
 
     def _push(self, e, r: int, pos, F) -> bool:
@@ -529,10 +691,16 @@ class Editor:
         fn = S.face_normals(pos, f, self.s.sign)
         cen = pos[f[F]].mean(1)
         tree = cKDTree(pos)
-        near = lambda R: np.unique(np.concatenate([np.asarray(x, np.int64) for x in tree.query_ball_point(cen, R)]))  # noqa: E731
+        near = lambda R: np.unique(
+            np.concatenate(
+                [np.asarray(x, np.int64) for x in tree.query_ball_point(cen, R)]
+            )
+        )  # noqa: E731
         region = near(1.0 / h)
         sub = np.flatnonzero(np.isin(f, region).any(1))
-        vn = S.vertex_normals_from(pos, f[sub], fn[sub])  # right on the region's vertices
+        vn = S.vertex_normals_from(
+            pos, f[sub], fn[sub]
+        )  # right on the region's vertices
         rf = np.flatnonzero((f == r).any(1))
         nr = S.vertex_normals_from(pos, f[rf], fn[rf])[r]
         own = region[vn[region] @ nr > -S.FACING]
@@ -563,7 +731,10 @@ class Editor:
                 continue
             if len(e.pushes) + len(new_q) >= self.PUSH_MAX:
                 break
-            if kept and np.min(np.linalg.norm(np.asarray(kept) - pos[q], axis=1)) < space:
+            if (
+                kept
+                and np.min(np.linalg.norm(np.asarray(kept) - pos[q], axis=1)) < space
+            ):
                 continue
             kept.append(pos[q])
             new_q.append(q)
@@ -586,15 +757,23 @@ class Editor:
         for i, (q, ed) in enumerate(zip(self.points, self.s.edits)):
             if q["kind"] != "contact" or not ed.obs:
                 continue
-            d = float(np.linalg.norm(self.s.to_vox(np.asarray(q["mm"])) - start)) * self.s.h
+            d = (
+                float(np.linalg.norm(self.s.to_vox(np.asarray(q["mm"])) - start))
+                * self.s.h
+            )
             if d <= R:
                 cand.append((d, i, ed))
         cand.sort(key=lambda c: c[0])
-        out: dict[int, tuple] = {}  # taken out: point index -> (distance, saved observations)
+        out: dict[
+            int, tuple
+        ] = {}  # taken out: point index -> (distance, saved observations)
 
         def take(c) -> None:
             saved = [(self.s.free[int(name[-1])], k) for name, k in c[2].obs]
-            out[c[1]] = (c[0], [(fd, k, fd.obs.pop(k), fd.cols.pop(k)) for fd, k in saved])
+            out[c[1]] = (
+                c[0],
+                [(fd, k, fd.obs.pop(k), fd.cols.pop(k)) for fd, k in saved],
+            )
 
         def put(i) -> None:
             for fd, k, o, col in out.pop(i)[1]:
@@ -612,19 +791,33 @@ class Editor:
                 put(c[1])
                 if not free():
                     take(c)
-            return [dict(i=i, mm_away=round(d, 2)) for i, (d, _) in sorted(out.items(), key=lambda x: x[1][0])]
+            return [
+                dict(i=i, mm_away=round(d, 2))
+                for i, (d, _) in sorted(out.items(), key=lambda x: x[1][0])
+            ]
         finally:
             for i in list(out):
                 put(i)
 
     def save(self) -> dict:
-        self.edits_path.write_text(json.dumps(dict(range_mm=self.range_pending, base=self.base_pending,
-                                                   edits=self.points), indent=1))
+        self.edits_path.write_text(
+            json.dumps(
+                dict(
+                    range_mm=self.range_pending,
+                    base=self.base_pending,
+                    edits=self.points,
+                ),
+                indent=1,
+            )
+        )
         return self.state()
 
     def load(self) -> bytes:
         d = json.loads(self.edits_path.read_text())
-        self.points = [{k: e[k] for k in ("kind", "mm", "from_mm", "pushes") if k in e} for e in d["edits"]]
+        self.points = [
+            {k: e[k] for k in ("kind", "mm", "from_mm", "pushes") if k in e}
+            for e in d["edits"]
+        ]
         self.range_pending = float(d.get("range_mm", self.range_pending))
         self.base_pending = d.get("base", self.base_pending)
         self.redo_stack.clear()
@@ -651,12 +844,16 @@ class Handler(BaseHTTPRequestHandler):
         p = self.path.split("?")[0]
         ed = self.editor
         if p in ("/", "/index.html"):
-            self._send((STATIC / "editor.html").read_bytes(), "text/html; charset=utf-8")
+            self._send(
+                (STATIC / "editor.html").read_bytes(), "text/html; charset=utf-8"
+            )
         elif p == "/volume.nii.gz":
             self._send(self.volume.read_bytes(), "application/octet-stream")
         elif p in ("/mesh/white", "/mesh/pial"):
             with self.lock:
-                self._send(ed.mesh_payload(p.rsplit("/", 1)[1]), "application/octet-stream")
+                self._send(
+                    ed.mesh_payload(p.rsplit("/", 1)[1]), "application/octet-stream"
+                )
         elif p == "/mesh/pial_sign":
             with self.lock:
                 self._send(ed.face_signs(), "application/octet-stream")
@@ -670,12 +867,19 @@ class Handler(BaseHTTPRequestHandler):
         req = json.loads(self.rfile.read(n)) if n else {}
         ed = self.editor
         ops = {
-            "/add": lambda: ed.add(req["kind"], req["mm"], req.get("vertex")), "/delete": lambda: ed.delete(req["i"]),
-            "/undo": ed.undo, "/redo": ed.redo, "/range": lambda: ed.set_range(req["mm"]),
-            "/base": lambda: ed.set_base(req["name"]), "/save": ed.save,
+            "/add": lambda: ed.add(req["kind"], req["mm"], req.get("vertex")),
+            "/delete": lambda: ed.delete(req["i"]),
+            "/undo": ed.undo,
+            "/redo": ed.redo,
+            "/range": lambda: ed.set_range(req["mm"]),
+            "/base": lambda: ed.set_base(req["name"]),
+            "/save": ed.save,
             "/touch": lambda: ed.set_touch(req["mm"]),
-            "/remesh": ed.remesh, "/load": ed.load,
-            "/drag": lambda: ed.drag(req["vertex"], req["mm"], bool(req.get("push", False))),
+            "/remesh": ed.remesh,
+            "/load": ed.load,
+            "/drag": lambda: ed.drag(
+                req["vertex"], req["mm"], bool(req.get("push", False))
+            ),
             "/touching": ed.touching,
         }
         if self.path not in ops:
@@ -685,7 +889,11 @@ class Handler(BaseHTTPRequestHandler):
             with self.lock:
                 out = ops[self.path]()
         except Exception as exc:  # report to the page, keep serving
-            self._send(json.dumps(dict(error=f"{type(exc).__name__}: {exc}")).encode(), "application/json", 500)
+            self._send(
+                json.dumps(dict(error=f"{type(exc).__name__}: {exc}")).encode(),
+                "application/json",
+                500,
+            )
             return
         if isinstance(out, bytes):
             self._send(out, "application/octet-stream")
@@ -701,7 +909,11 @@ def main() -> None:
     ap.add_argument("--base", default="label")
     ap.add_argument("--edits", default=None)
     a = ap.parse_args()
-    edits = a.edits or str(Path(a.session).with_name(Path(a.session).name.replace("_session.npz", "_edits.json")))
+    edits = a.edits or str(
+        Path(a.session).with_name(
+            Path(a.session).name.replace("_session.npz", "_edits.json")
+        )
+    )
     Handler.editor = Editor(a.session, a.base, edits)
     Handler.volume = Path(a.volume)
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)

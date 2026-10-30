@@ -63,12 +63,19 @@ class Mesh:
         self.v = self.v0.copy()
         self.tree = cKDTree(self.v0)
         self.name = Path(path).name
-        print(f"{self.name}: {len(self.v):,} vertices, {len(self.f):,} triangles, "
-              f"{time.time() - t:.1f} s", flush=True)
+        print(
+            f"{self.name}: {len(self.v):,} vertices, {len(self.f):,} triangles, "
+            f"{time.time() - t:.1f} s",
+            flush=True,
+        )
 
     def payload(self) -> bytes:
         head = np.array([len(self.v), len(self.f)], np.uint32).tobytes()
-        return head + self.v.astype(np.float32).tobytes() + self.f.astype(np.uint32).tobytes()
+        return (
+            head
+            + self.v.astype(np.float32).tobytes()
+            + self.f.astype(np.uint32).tobytes()
+        )
 
     def bump(self, x: np.ndarray, amp: float, rho: float) -> tuple[float, np.ndarray]:
         t = time.perf_counter()
@@ -103,9 +110,14 @@ class Handler(BaseHTTPRequestHandler):
         elif p == "/volume.nii.gz":
             self._send(self.volume.read_bytes(), "application/octet-stream")
         elif p == "/meshes":
-            self._send(json.dumps([m.name for m in self.meshes]).encode(), "application/json")
+            self._send(
+                json.dumps([m.name for m in self.meshes]).encode(), "application/json"
+            )
         elif p.startswith("/mesh/"):
-            self._send(self.meshes[int(p.rsplit("/", 1)[1])].payload(), "application/octet-stream")
+            self._send(
+                self.meshes[int(p.rsplit("/", 1)[1])].payload(),
+                "application/octet-stream",
+            )
         else:
             self.send_error(404)
 
@@ -119,16 +131,29 @@ class Handler(BaseHTTPRequestHandler):
             m.v[:] = m.v0
             dt, idx = 0.0, np.arange(len(m.v))
         else:
-            dt, idx = m.bump(np.array(req["mm"], float), float(req.get("amp", 0.3)), float(req.get("rho", 1.0)))
+            dt, idx = m.bump(
+                np.array(req["mm"], float),
+                float(req.get("amp", 0.3)),
+                float(req.get("rho", 1.0)),
+            )
         t = time.perf_counter()
         if req.get("sparse"):
             # uint32 count, uint32 indices, float32 positions (count x 3)
-            body = (np.array([idx.size], np.uint32).tobytes() + idx.astype(np.uint32).tobytes()
-                    + m.v[idx].astype(np.float32).tobytes())
+            body = (
+                np.array([idx.size], np.uint32).tobytes()
+                + idx.astype(np.uint32).tobytes()
+                + m.v[idx].astype(np.float32).tobytes()
+            )
         else:
             body = m.v.astype(np.float32).tobytes()
-        self._send(body, "application/octet-stream",
-                   {"X-Solve-Ms": f"{1e3 * dt:.2f}", "X-Pack-Ms": f"{1e3 * (time.perf_counter() - t):.2f}"})
+        self._send(
+            body,
+            "application/octet-stream",
+            {
+                "X-Solve-Ms": f"{1e3 * dt:.2f}",
+                "X-Pack-Ms": f"{1e3 * (time.perf_counter() - t):.2f}",
+            },
+        )
 
 
 def main() -> None:

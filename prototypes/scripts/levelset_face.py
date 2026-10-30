@@ -68,13 +68,24 @@ TOPO = os.environ.get("TOPO", "0") == "1"
 STOP = os.environ.get("STOP", "0") == "1"
 ITER = os.environ.get("ITER", "0") == "1"
 CALIB = os.environ.get("CALIB", "0") == "1"
-NSAMP_CAL = int(os.environ.get("NSAMP_CAL", "20"))  # perturb-and-MAP samples per fold (each a CG solve)
-FORMS = os.environ.get("FORMS", "length,volume").split(",")  # which forms' passes to run
+NSAMP_CAL = int(
+    os.environ.get("NSAMP_CAL", "20")
+)  # perturb-and-MAP samples per fold (each a CG solve)
+FORMS = os.environ.get("FORMS", "length,volume").split(
+    ","
+)  # which forms' passes to run
 SURFACE = os.environ.get("SURFACE", "twice")
 BAND_WM = 2.0
 TAG = os.environ.get("TAG", "") + ("" if SURFACE == "twice" else "_white_mesh")
 H_CLIP = 0.8
-BLUE, ORANGE, AQUA, RED, GREY, VIOLET = "#2a78d6", "#eb6834", "#1baf7a", "#e34948", "#8a8984", "#8a5cd1"
+BLUE, ORANGE, AQUA, RED, GREY, VIOLET = (
+    "#2a78d6",
+    "#eb6834",
+    "#1baf7a",
+    "#e34948",
+    "#8a8984",
+    "#8a5cd1",
+)
 
 
 def box_and_points(site):
@@ -149,10 +160,14 @@ class Face:
         self.fluid = (B["rim"] == 1) & ~self.miss
         self.dface = B["dface"]
         margin = np.min(np.minimum(self.P, (self.hi - self.lo) - 1 - self.P))
-        assert margin * self.h >= 6.0, f"a point is {margin * self.h:.1f} mm from a face"
+        assert margin * self.h >= 6.0, (
+            f"a point is {margin * self.h:.1f} mm from a face"
+        )
         self.nh, self.coh = C.tensor_normal(B)
-        log(f"{site}: box {tuple(self.hi - self.lo)}; {len(self.P)} points (nearest {margin * self.h:.1f} mm "
-            f"from a face); cortex {self.ctx.sum():,}; loaded and tensor in {time.time() - t0:.0f} s")
+        log(
+            f"{site}: box {tuple(self.hi - self.lo)}; {len(self.P)} points (nearest {margin * self.h:.1f} mm "
+            f"from a face); cortex {self.ctx.sum():,}; loaded and tensor in {time.time() - t0:.0f} s"
+        )
         t0 = time.time()
         import mesh_smoothing as MS
 
@@ -169,8 +184,10 @@ class Face:
         self.G = LM.edge_graph(self.mesh)
         self.vtree = cKDTree(v)
         el = self.G.data
-        log(f"   white mesh: {len(v):,} vertices, {len(f):,} faces, edge median {np.median(el):.3f} mm; "
-            f"H p5/50/95 {np.percentile(self.H, [5, 50, 95]).round(2)} ({time.time() - t0:.0f} s)")
+        log(
+            f"   white mesh: {len(v):,} vertices, {len(f):,} faces, edge median {np.median(el):.3f} mm; "
+            f"H p5/50/95 {np.percentile(self.H, [5, 50, 95]).round(2)} ({time.time() - t0:.0f} s)"
+        )
         t0 = time.time()
         st = np.ones((3, 3, 3), bool)
         near_ctx = ndi.binary_dilation(self.ctx, st, iterations=int(np.ceil(BAND_WM)))
@@ -191,17 +208,21 @@ class Face:
         self.phi[tuple(ci.T)] = phi
         self.foot[tuple(ci.T)] = foot
         self.normal[tuple(ci.T)] = nrm
-        self.band = (self.wm & near_ctx & (self.phi >= -BAND_WM)) | (self.ctx & near_wm & (self.phi < 1.0))
+        self.band = (self.wm & near_ctx & (self.phi >= -BAND_WM)) | (
+            self.ctx & near_wm & (self.phi < 1.0)
+        )
         self.band_tri = np.full(self.wm.shape, -1, np.int64)
         self.band_tri[tuple(ci.T)] = tri
         self.band_bary = np.zeros(self.wm.shape + (3,))
         self.band_bary[tuple(ci.T)] = bary
         bp = self.phi[self.band]
         wmb = self.phi[self.band & self.wm]
-        log(f"   band {self.band.sum():,} voxels; phi p1/50/99 {np.percentile(bp, [1, 50, 99]).round(2)} voxels; "
+        log(
+            f"   band {self.band.sum():,} voxels; phi p1/50/99 {np.percentile(bp, [1, 50, 99]).round(2)} voxels; "
             f"WM band voxels outside the mesh (phi > 0) {np.mean(wmb > 0):.1%}; cortex band voxels inside "
             f"{np.mean(self.phi[self.band & self.ctx] < 0):.1%}; closest points differing between the two "
-            f"searches {self.sign_disagree:.2%} ({time.time() - t0:.0f} s)")
+            f"searches {self.sign_disagree:.2%} ({time.time() - t0:.0f} s)"
+        )
         self.face_near = self.dface < FACE_MM
         self.miss_near = ndi.binary_dilation(self.miss, st)
 
@@ -215,8 +236,20 @@ class Face:
 
     def run(self, vb, mode, tau_stop=np.inf, topology=False):
         t0 = time.time()
-        f = L.march(self.ctx, self.wm, self.band, self.phi, self.foot, self.normal, self.band_budget(vb),
-                    self.nh, self.coh, mode=mode, tau_stop=tau_stop, topology=topology)
+        f = L.march(
+            self.ctx,
+            self.wm,
+            self.band,
+            self.phi,
+            self.foot,
+            self.normal,
+            self.band_budget(vb),
+            self.nh,
+            self.coh,
+            mode=mode,
+            tau_stop=tau_stop,
+            topology=topology,
+        )
         f.elapsed = time.time() - t0
         return f
 
@@ -318,12 +351,19 @@ def score(F, f, sm, P, u_pts, thin_sign, h):
         t_thick = np.where(a_thin, sm.tau_b[i], sm.tau_a[i])
         b_thin = np.where(a_thin, sm.b_a[i], sm.b_b[i]) * h
         b_thick = np.where(a_thin, sm.b_b[i], sm.b_a[i]) * h
-        row.update(offset=float(np.median(o)), n=int(i.size),
-                   S_thin=float(np.median(s_thin + o)), S_thick=float(np.median(s_thick - o)),
-                   W_thin=float(np.median(w_thin + o)), W_thick=float(np.median(w_thick - o)),
-                   b_thin=float(np.median(b_thin)), b_thick=float(np.median(b_thick)),
-                   tau_thin=float(np.median(t_thin)), tau_thick=float(np.median(t_thick)),
-                   angle=float(np.median(sm.angle[i])))
+        row.update(
+            offset=float(np.median(o)),
+            n=int(i.size),
+            S_thin=float(np.median(s_thin + o)),
+            S_thick=float(np.median(s_thick - o)),
+            W_thin=float(np.median(w_thin + o)),
+            W_thick=float(np.median(w_thick - o)),
+            b_thin=float(np.median(b_thin)),
+            b_thick=float(np.median(b_thick)),
+            tau_thin=float(np.median(t_thin)),
+            tau_thick=float(np.median(t_thick)),
+            angle=float(np.median(sm.angle[i])),
+        )
         rows.append(row)
     return rows
 
@@ -331,15 +371,32 @@ def score(F, f, sm, P, u_pts, thin_sign, h):
 def summary(rows):
     off = np.array([r["offset"] for r in rows])
     if not np.isfinite(off).any():
-        return dict(median=np.nan, iqr=np.nan, median_abs=np.nan, within_016=0.0, within_016_of_all=0.0,
-                    worst=np.nan, worst_point=0, missing=len(rows), nearest_median=np.nan, nearest_p90=np.nan)
+        return dict(
+            median=np.nan,
+            iqr=np.nan,
+            median_abs=np.nan,
+            within_016=0.0,
+            within_016_of_all=0.0,
+            worst=np.nan,
+            worst_point=0,
+            missing=len(rows),
+            nearest_median=np.nan,
+            nearest_p90=np.nan,
+        )
     near = np.array([r["nearest_mm"] for r in rows])
     a = np.abs(off)
-    return dict(median=float(np.nanmedian(off)), iqr=float(np.subtract(*np.nanpercentile(off, [75, 25]))),
-                median_abs=float(np.nanmedian(a)), within_016=float(np.nanmean(a <= 0.16)) if np.isfinite(a).any() else 0.0,
-                within_016_of_all=float(np.sum(a <= 0.16) / len(rows)),
-                worst=float(np.nanmax(a)), worst_point=int(np.nanargmax(a)) + 1, missing=int(np.isnan(off).sum()),
-                nearest_median=float(np.nanmedian(near)), nearest_p90=float(np.nanpercentile(near, 90)))
+    return dict(
+        median=float(np.nanmedian(off)),
+        iqr=float(np.subtract(*np.nanpercentile(off, [75, 25]))),
+        median_abs=float(np.nanmedian(a)),
+        within_016=float(np.nanmean(a <= 0.16)) if np.isfinite(a).any() else 0.0,
+        within_016_of_all=float(np.sum(a <= 0.16) / len(rows)),
+        worst=float(np.nanmax(a)),
+        worst_point=int(np.nanargmax(a)) + 1,
+        missing=int(np.isnan(off).sum()),
+        nearest_median=float(np.nanmedian(near)),
+        nearest_p90=float(np.nanpercentile(near, 90)),
+    )
 
 
 def seam_stats(f, sm, F):
@@ -348,12 +405,20 @@ def seam_stats(f, sm, F):
     cl = L.seam_class(sm)
     m = L.claimed(f) & F.ctx
     inner = ~F.face_near.ravel()[sm.p]
-    return dict(coverage=cov, seams=int(sm.p.size), seams_inner=int(inner.sum()),
-                classes_inner=np.bincount(cl[inner], minlength=4).tolist(),
-                beyond_tau1=float(np.mean(f.tau[m] > 1.0)), capped=int(f.capped[m].sum()),
-                capped_beyond_3mm=float(np.mean(f.s[m & f.capped] * F.h > 3.0)) if f.capped[m].any() else 0.0,
-                moved=int(f.moved[m].sum()),
-                blend_median=float(np.median(f.blend[m])), elapsed=float(f.elapsed))
+    return dict(
+        coverage=cov,
+        seams=int(sm.p.size),
+        seams_inner=int(inner.sum()),
+        classes_inner=np.bincount(cl[inner], minlength=4).tolist(),
+        beyond_tau1=float(np.mean(f.tau[m] > 1.0)),
+        capped=int(f.capped[m].sum()),
+        capped_beyond_3mm=float(np.mean(f.s[m & f.capped] * F.h > 3.0))
+        if f.capped[m].any()
+        else 0.0,
+        moved=int(f.moved[m].sum()),
+        blend_median=float(np.median(f.blend[m])),
+        elapsed=float(f.elapsed),
+    )
 
 
 # ------------------------------------------------------------------ calibration
@@ -374,9 +439,15 @@ def calibration(F, fld, y, label):
     z, e = np.concatenate(zs), np.concatenate(err)
     full = fld.fit(y, trend=True)
     res = y[ev] - full["mu"][ev]
-    out = dict(label=label, n=int(ev.size), z_sd=float(z.std()), in196=float(np.mean(np.abs(z) < 1.96)),
-               rmse=float(np.sqrt(np.mean(e**2))), resid_iqr=float(np.subtract(*np.percentile(res, [75, 25]))),
-               resid_median=float(np.median(res)))
+    out = dict(
+        label=label,
+        n=int(ev.size),
+        z_sd=float(z.std()),
+        in196=float(np.mean(np.abs(z) < 1.96)),
+        rmse=float(np.sqrt(np.mean(e**2))),
+        resid_iqr=float(np.subtract(*np.percentile(res, [75, 25]))),
+        resid_median=float(np.median(res)),
+    )
     log(f"   calibration {label}: {out}")
     return out
 
@@ -391,12 +462,19 @@ def calibration_old(F, tp, ok):
     K = C.curvature(F.B, 0.8)
     pts, nrm = K["pts"], K["n"]
     Hroot = np.clip(0.5 * (K["k1"] + K["k2"]), -H_CLIP, H_CLIP)
-    side = np.argmax(np.abs(nrm), 1) * 2 + (nrm[np.arange(len(nrm)), np.argmax(np.abs(nrm), 1)] > 0)
-    _, node_of, counts = np.unique(np.c_[pts // 2, side], axis=0, return_inverse=True, return_counts=True)
+    side = np.argmax(np.abs(nrm), 1) * 2 + (
+        nrm[np.arange(len(nrm)), np.argmax(np.abs(nrm), 1)] > 0
+    )
+    _, node_of, counts = np.unique(
+        np.c_[pts // 2, side], axis=0, return_inverse=True, return_counts=True
+    )
     node_of = node_of.ravel()
     nN = node_of.max() + 1
     ppos = pts * F.vox
-    npos = np.stack([np.bincount(node_of, ppos[:, a], nN) for a in range(3)], 1) / counts[:, None]
+    npos = (
+        np.stack([np.bincount(node_of, ppos[:, a], nN) for a in range(3)], 1)
+        / counts[:, None]
+    )
     nH = np.bincount(node_of, Hroot, nN) / counts
     Gc = shell_graph(pts, nrm, F.vox).tocoo()
     ea, eb = node_of[Gc.row], node_of[Gc.col]
@@ -425,10 +503,16 @@ def calibration_old(F, tp, ok):
     z, e = np.concatenate(zs), np.concatenate(err)
     m_, _, coef = fld.fit(y, trend=True, nsamp=2)
     res = y[ev] - m_[ev]
-    out = dict(label="old voxel graph, length", n=int(ev.size), z_sd=float(z.std()),
-               in196=float(np.mean(np.abs(z) < 1.96)), rmse=float(np.sqrt(np.mean(e**2))),
-               resid_iqr=float(np.subtract(*np.percentile(res, [75, 25]))), resid_median=float(np.median(res)),
-               a0=float(coef["a0"][0]))
+    out = dict(
+        label="old voxel graph, length",
+        n=int(ev.size),
+        z_sd=float(z.std()),
+        in196=float(np.mean(np.abs(z) < 1.96)),
+        rmse=float(np.sqrt(np.mean(e**2))),
+        resid_iqr=float(np.subtract(*np.percentile(res, [75, 25]))),
+        resid_median=float(np.median(res)),
+        a0=float(coef["a0"][0]),
+    )
     log(f"   calibration old: {out}")
     return out
 
@@ -442,20 +526,33 @@ def main():
     P = F.P
     Pi = np.round(P).astype(int)
     u_pts = F.nh[tuple(Pi.T)]
-    out = dict(site=A.site, box_lo=F.lo.tolist(), points=len(P), h=h, alpha=ALPHA, topology=TOPO,
-               mesh=dict(vertices=len(F.mesh.verts), faces=len(F.mesh.faces)))
+    out = dict(
+        site=A.site,
+        box_lo=F.lo.tolist(),
+        points=len(P),
+        h=h,
+        alpha=ALPHA,
+        topology=TOPO,
+        mesh=dict(vertices=len(F.mesh.verts), faces=len(F.mesh.faces)),
+    )
 
     # ---- evidence run: the prior budgets
     prior_len = np.exp(LM.M_MU + LM.A0_MU * F.H) / h  # voxels
     prior_vol = prior_len.copy()
     f_ev = F.run(prior_len, L.LENGTH)
     E = evidence(F, f_ev)
-    log(f"   evidence run {f_ev.elapsed:.0f} s: {E['ntops']:,} tops, {E['ntops_used']:,} used, "
+    log(
+        f"   evidence run {f_ev.elapsed:.0f} s: {E['ntops']:,} tops, {E['ntops_used']:,} used, "
         f"{np.isfinite(E['len']).sum():,} vertices; median s {np.exp(np.nanmedian(E['len'])):.2f} mm, "
-        f"w {np.exp(np.nanmedian(E['vol'])):.2f} mm")
-    out["evidence"] = dict(tops=E["ntops"], used=E["ntops_used"], vertices=int(np.isfinite(E["len"]).sum()),
-                           median_s=float(np.exp(np.nanmedian(E["len"]))),
-                           median_w=float(np.exp(np.nanmedian(E["vol"]))))
+        f"w {np.exp(np.nanmedian(E['vol'])):.2f} mm"
+    )
+    out["evidence"] = dict(
+        tops=E["ntops"],
+        used=E["ntops_used"],
+        vertices=int(np.isfinite(E["len"]).sum()),
+        median_s=float(np.exp(np.nanmedian(E["len"]))),
+        median_w=float(np.exp(np.nanmedian(E["vol"]))),
+    )
 
     # ---- fields
     t0 = time.time()
@@ -465,16 +562,27 @@ def main():
         r = budgets(F, fld, E[key], trend=True)
         r0 = fld.fit(E[key], trend=False)
         res = E[key][np.isfinite(E[key])] - r["mu"][np.isfinite(E[key])]
-        fits[key] = dict(a0=r["a0"], a_p5_50_95=np.percentile(r["a"], [5, 50, 95]).round(3).tolist(),
-                         m=float(np.exp(r["m"])), no_belief=r["nobel"],
-                         b_p1_50_99=np.percentile(r["b"], [1, 50, 99]).round(2).tolist(),
-                         resid_iqr=float(np.subtract(*np.percentile(res, [75, 25]))),
-                         notrend_m=float(np.exp(r0["m"])))
+        fits[key] = dict(
+            a0=r["a0"],
+            a_p5_50_95=np.percentile(r["a"], [5, 50, 95]).round(3).tolist(),
+            m=float(np.exp(r["m"])),
+            no_belief=r["nobel"],
+            b_p1_50_99=np.percentile(r["b"], [1, 50, 99]).round(2).tolist(),
+            resid_iqr=float(np.subtract(*np.percentile(res, [75, 25]))),
+            notrend_m=float(np.exp(r0["m"])),
+        )
         post[key] = r["b"] / h
     log(f"   fields ({time.time() - t0:.0f} s): {json.dumps(fits)}")
     out["fields"] = fits
-    eq = {k: np.full(len(F.mesh.verts), float(np.exp(np.nanmedian(E[k]))) / h) for k in ("len", "vol")}
-    settings = {"equal": eq, "prior": {"len": prior_len, "vol": prior_vol}, "posterior": post}
+    eq = {
+        k: np.full(len(F.mesh.verts), float(np.exp(np.nanmedian(E[k]))) / h)
+        for k in ("len", "vol")
+    }
+    settings = {
+        "equal": eq,
+        "prior": {"len": prior_len, "vol": prior_vol},
+        "posterior": post,
+    }
 
     # the + side at each point: the end whose posterior length budget is smaller
     f_tmp = f_ev
@@ -489,16 +597,26 @@ def main():
         ok[inside] = (L.claimed(f_tmp) & F.ctx)[tuple(line[inside].T)]
         neg, pos = np.flatnonzero(ok & (steps < 0)), np.flatnonzero(ok & (steps > 0))
         if neg.size and pos.size:
-            bm, bp = post["len"][rt[tuple(line[neg[0]])]], post["len"][rt[tuple(line[pos[-1]])]]
+            bm, bp = (
+                post["len"][rt[tuple(line[neg[0]])]],
+                post["len"][rt[tuple(line[pos[-1]])]],
+            )
             thin_sign[k] = -1.0 if bm < bp else 1.0
         else:
             thin_sign[k] = 1.0
 
     if os.environ.get("CALIB_ONLY", "0") == "1":
-        out["calibration"] = [calibration(F, fld, E["len"], "mesh field, length"),
-                              calibration_old(F, E["tops"], E["ok"]),
-                              calibration(F, fld, E["vol"], "mesh field, volume")]
-        json.dump(out, open(f"{A.work}/levelset_{A.site}_calibration.json", "w"), indent=1, default=float)
+        out["calibration"] = [
+            calibration(F, fld, E["len"], "mesh field, length"),
+            calibration_old(F, E["tops"], E["ok"]),
+            calibration(F, fld, E["vol"], "mesh field, volume"),
+        ]
+        json.dump(
+            out,
+            open(f"{A.work}/levelset_{A.site}_calibration.json", "w"),
+            indent=1,
+            default=float,
+        )
         return
     runs = {}
     for sname, bud in settings.items():
@@ -513,35 +631,50 @@ def main():
             for r in rows:
                 if np.isfinite(r["offset"]):
                     if mode == L.LENGTH:
-                        r["err_thin"], r["err_thick"] = r["b_thin"] - r["S_thin"], r["b_thick"] - r["S_thick"]
+                        r["err_thin"], r["err_thick"] = (
+                            r["b_thin"] - r["S_thin"],
+                            r["b_thick"] - r["S_thick"],
+                        )
                     else:
-                        r["err_thin"], r["err_thick"] = r["b_thin"] - r["W_thin"], r["b_thick"] - r["W_thick"]
+                        r["err_thin"], r["err_thick"] = (
+                            r["b_thin"] - r["W_thin"],
+                            r["b_thick"] - r["W_thick"],
+                        )
                 r["coh"] = float(F.coh[tuple(Pi[r["k"] - 1])])
                 r["blend"] = float(f.blend[tuple(Pi[r["k"] - 1])])
             s = summary(rows)
             st = seam_stats(f, sm, F)
             out[name] = dict(summary=s, stats=st, rows=rows)
-            log(f"   {name:22s} |offset| {s['median_abs']:.2f} mm (median {s['median']:+.2f}, IQR {s['iqr']:.2f}), "
+            log(
+                f"   {name:22s} |offset| {s['median_abs']:.2f} mm (median {s['median']:+.2f}, IQR {s['iqr']:.2f}), "
                 f"within 0.16 mm {s['within_016_of_all']:.0%} of points, worst {s['worst']:.2f} (point {s['worst_point']}), "
                 f"missing {s['missing']}; nearest {s['nearest_median']:.2f}/{s['nearest_p90']:.2f}; "
                 f"coverage {st['coverage']['fraction']:.4f}; classes c/f/o/m {st['classes_inner']}; "
                 f"beyond tau 1 {st['beyond_tau1']:.1%}; capped {st['capped']} ({st['capped_beyond_3mm']:.0%} beyond 3 mm); "
-                f"moved by the budgets {st['moved']:,}; {st['elapsed']:.0f} s")
+                f"moved by the budgets {st['moved']:,}; {st['elapsed']:.0f} s"
+            )
             runs[name] = (f, sm)
     # tops against budgets: the evidence of the posterior length run against the evidence run
     Ep = evidence(F, runs["posterior, length"][0])
     both = np.isfinite(E["len"]) & np.isfinite(Ep["len"])
     dlen = np.abs(E["len"][both] - Ep["len"][both])
-    out["tops_vs_budget"] = dict(vertices=int(both.sum()), frac_identical=float(np.mean(dlen < 1e-9)),
-                                 p99_abs_log=float(np.percentile(dlen, 99)), max_abs_log=float(dlen.max()))
+    out["tops_vs_budget"] = dict(
+        vertices=int(both.sum()),
+        frac_identical=float(np.mean(dlen < 1e-9)),
+        p99_abs_log=float(np.percentile(dlen, 99)),
+        max_abs_log=float(dlen.max()),
+    )
     log(f"   tops vs budgets: {out['tops_vs_budget']}")
     # carried budget against the budget looked up at the carried R (posterior, length)
     f = runs["posterior, length"][0]
     m = L.claimed(f) & F.ctx
     rv = F.root_vertex(f.R[m])
     diff = np.abs(np.log(f.b[m]) - np.log(post["len"][rv]))
-    out["carried_vs_lookup"] = dict(median=float(np.median(diff)), p95=float(np.percentile(diff, 95)),
-                                    p99=float(np.percentile(diff, 99)))
+    out["carried_vs_lookup"] = dict(
+        median=float(np.median(diff)),
+        p95=float(np.percentile(diff, 95)),
+        p99=float(np.percentile(diff, 99)),
+    )
     log(f"   carried budget vs lookup at R (|log|): {out['carried_vs_lookup']}")
     # A9-like: correlation of the two sides' errors at the points (posterior, length)
     rows = out["posterior, length"]["rows"]
@@ -551,10 +684,14 @@ def main():
     if okk.sum() > 5:
         out["side_error_corr"] = float(spearmanr(et[okk], ek[okk]).statistic)
     if CALIB:
-        out["calibration"] = [calibration(F, fld, E["len"], "mesh field, length"),
-                              calibration(F, fld, E["vol"], "mesh field, volume"),
-                              calibration_old(F, E["tops"], E["ok"])]
-    json.dump(out, open(f"{A.work}/levelset_{A.site}{TAG}.json", "w"), indent=1, default=float)
+        out["calibration"] = [
+            calibration(F, fld, E["len"], "mesh field, length"),
+            calibration(F, fld, E["vol"], "mesh field, volume"),
+            calibration_old(F, E["tops"], E["ok"]),
+        ]
+    json.dump(
+        out, open(f"{A.work}/levelset_{A.site}{TAG}.json", "w"), indent=1, default=float
+    )
     figures(F, out, runs)
     overlay(F, runs)
 
@@ -571,21 +708,33 @@ def figures(F, out, runs):
         sname = nm.split(",")[0]
         mk = "o" if "length" in nm else "s"
         s = out[nm]["summary"]
-        a.plot(k + (j - 2.5) * 0.12, off, mk, color=cols[sname], ms=4, mfc="none" if "length" in nm else cols[sname],
-               label=f"{nm}: |offset| {s['median_abs']:.2f} mm, missing {s['missing']}")
+        a.plot(
+            k + (j - 2.5) * 0.12,
+            off,
+            mk,
+            color=cols[sname],
+            ms=4,
+            mfc="none" if "length" in nm else cols[sname],
+            label=f"{nm}: |offset| {s['median_abs']:.2f} mm, missing {s['missing']}",
+        )
     a.axhspan(-0.16, 0.16, color="#dddddd", zorder=0, label="one voxel")
     a.axhline(0, color="#52514e", lw=0.8)
     a.set_ylabel("offset along the normal (mm)\n+ toward the side predicted thinner")
     a.set_title(f"{A.site}: level-set seam against your {len(P)} points (3D, 1x grid)")
     a.legend(fontsize=7, ncol=2)
-    for ax_i, (nm, lab) in enumerate((("posterior, length", "mu - S (mm)"), ("posterior, volume", "v - w (mm)")), start=1):
+    for ax_i, (nm, lab) in enumerate(
+        (("posterior, length", "mu - S (mm)"), ("posterior, volume", "v - w (mm)")),
+        start=1,
+    ):
         a = axs[ax_i]
         if nm not in out:
             a.axis("off")
             continue
         rows = out[nm]["rows"]
-        for key, col, l2, dx in (("err_thin", BLUE, "side predicted thinner", -0.12),
-                                 ("err_thick", ORANGE, "side predicted thicker", 0.12)):
+        for key, col, l2, dx in (
+            ("err_thin", BLUE, "side predicted thinner", -0.12),
+            ("err_thick", ORANGE, "side predicted thicker", 0.12),
+        ):
             e = np.array([r.get(key, np.nan) for r in rows])
             a.plot(k + dx, e, "o", color=col, ms=4, label=f"{l2}")
         a.axhline(0, color="#52514e", lw=0.8)
@@ -601,8 +750,22 @@ def figures(F, out, runs):
     ax_fix = int(np.argmin([len(np.unique(Pi[:, d])) for d in range(3)]))
     vals, cnt = np.unique(Pi[:, ax_fix], return_counts=True)
     planes = vals[np.argsort(-cnt)][:3]
-    show = [nm for nm in ("equal, length", "prior, length", "posterior, length", "posterior, volume") if nm in runs][:3]
-    fig, axs = plt.subplots(len(planes), len(show), figsize=(4.4 * len(show), 4.2 * len(planes)), squeeze=False)
+    show = [
+        nm
+        for nm in (
+            "equal, length",
+            "prior, length",
+            "posterior, length",
+            "posterior, volume",
+        )
+        if nm in runs
+    ][:3]
+    fig, axs = plt.subplots(
+        len(planes),
+        len(show),
+        figsize=(4.4 * len(show), 4.2 * len(planes)),
+        squeeze=False,
+    )
     disp = np.where(F.ctx, F.B["disp"], np.nan)
     lim = np.nanpercentile(np.abs(disp), 98)
     for i, pl in enumerate(planes):
@@ -612,15 +775,43 @@ def figures(F, out, runs):
         for j, nm in enumerate(show):
             a = axs[i][j]
             f, sm = runs[nm]
-            a.imshow(np.where(F.wm[tuple(sl)], 1.0, np.nan).T, origin="lower", cmap="Greys", vmin=0, vmax=2.5)
-            a.imshow(disp[tuple(sl)].T, origin="lower", cmap="gray", vmin=-lim, vmax=lim)
+            a.imshow(
+                np.where(F.wm[tuple(sl)], 1.0, np.nan).T,
+                origin="lower",
+                cmap="Greys",
+                vmin=0,
+                vmax=2.5,
+            )
+            a.imshow(
+                disp[tuple(sl)].T, origin="lower", cmap="gray", vmin=-lim, vmax=lim
+            )
             tau = np.where(L.claimed(f) & F.ctx, f.tau, np.nan)[tuple(sl)]
-            a.contour(tau.T, levels=[0.25, 0.5, 0.75, 1.0], colors=["#7fb8ff"] * 3 + ["#ffd23f"], linewidths=0.6,
-                      origin="lower")
+            a.contour(
+                tau.T,
+                levels=[0.25, 0.5, 0.75, 1.0],
+                colors=["#7fb8ff"] * 3 + ["#ffd23f"],
+                linewidths=0.6,
+                origin="lower",
+            )
             mm_ = np.abs(sm.pos[:, ax_fix] - pl) <= 0.5
-            a.plot(sm.pos[mm_, rest[0]], sm.pos[mm_, rest[1]], ".", color=ORANGE, ms=2.5, label="seam")
+            a.plot(
+                sm.pos[mm_, rest[0]],
+                sm.pos[mm_, rest[1]],
+                ".",
+                color=ORANGE,
+                ms=2.5,
+                label="seam",
+            )
             q = Pi[:, ax_fix] == pl
-            a.plot(P[q, rest[0]], P[q, rest[1]], "+", color=AQUA, ms=8, mew=1.6, label="your points")
+            a.plot(
+                P[q, rest[0]],
+                P[q, rest[1]],
+                "+",
+                color=AQUA,
+                ms=8,
+                mew=1.6,
+                label="your points",
+            )
             c0 = P[q][:, rest].mean(0)
             a.set_xlim(c0[0] - 30, c0[0] + 30)
             a.set_ylim(c0[1] - 30, c0[1] + 30)
@@ -628,8 +819,11 @@ def figures(F, out, runs):
             a.set_xticks([])
             a.set_yticks([])
     axs[0][0].legend(fontsize=7, loc="lower left")
-    fig.suptitle(f"{A.site}: echo 2 (trend removed), WM dark grey; tau 0.25/0.5/0.75 blue, 1 yellow; "
-                 "computed in 3D, shown on planes through the points", fontsize=10)
+    fig.suptitle(
+        f"{A.site}: echo 2 (trend removed), WM dark grey; tau 0.25/0.5/0.75 blue, 1 yellow; "
+        "computed in 3D, shown on planes through the points",
+        fontsize=10,
+    )
     fig.tight_layout()
     fig.savefig(f"{A.fig}/levelset_{A.site}{TAG}_planes.png", dpi=110)
     plt.close(fig)
@@ -641,7 +835,9 @@ def overlay(F, runs):
     volume) as a float image."""
     shape = F.wm.shape
     lab = np.zeros(shape, np.uint8)
-    f, _ = runs["posterior, volume" if "posterior, volume" in runs else "posterior, length"]
+    f, _ = runs[
+        "posterior, volume" if "posterior, volume" in runs else "posterior, length"
+    ]
     m = L.claimed(f) & F.ctx
     blk = np.floor(f.R[m] * F.h / 1.0).astype(np.int64)
     code = (blk[:, 0] * 7 + blk[:, 1] * 13 + blk[:, 2] * 29) % 6
@@ -660,21 +856,41 @@ def overlay(F, runs):
     for p in np.round(F.P).astype(int):
         lab[tuple(p)] = 5
     aff = F.B["p"].affine
-    nib.save(nib.Nifti1Image(lab, aff), f"{A.data}/levelset_{A.site}{TAG}_overlay.nii.gz")
-    nib.save(nib.Nifti1Image(np.where(m, f.tau, 0).astype(np.float32), aff), f"{A.data}/levelset_{A.site}{TAG}_tau.nii.gz")
-    nib.save(nib.Nifti1Image(np.where(F.ctx, F.B["disp"], 0.0).astype(np.float32), aff),
-             f"{A.data}/levelset_{A.site}_echo2_detrended.nii.gz")
+    nib.save(
+        nib.Nifti1Image(lab, aff), f"{A.data}/levelset_{A.site}{TAG}_overlay.nii.gz"
+    )
+    nib.save(
+        nib.Nifti1Image(np.where(m, f.tau, 0).astype(np.float32), aff),
+        f"{A.data}/levelset_{A.site}{TAG}_tau.nii.gz",
+    )
+    nib.save(
+        nib.Nifti1Image(np.where(F.ctx, F.B["disp"], 0.0).astype(np.float32), aff),
+        f"{A.data}/levelset_{A.site}_echo2_detrended.nii.gz",
+    )
     with open(f"{A.data}/levelset_labels.txt", "w") as fh:
         fh.write("# ITK-SNAP label description file\n")
         fh.write('    0     0    0    0        0  0  0    "Clear Label"\n')
-        names = [((150, 150, 150), "start band (WM boundary)"), ((42, 120, 214), "seam, posterior, length"),
-                 ((235, 104, 52), "seam, posterior, volume"), ((227, 73, 72), "seam, both forms"),
-                 ((27, 175, 122), "your points")]
-        pal = [(102, 194, 165), (252, 141, 98), (141, 160, 203), (231, 138, 195), (166, 216, 84), (255, 217, 47)]
+        names = [
+            ((150, 150, 150), "start band (WM boundary)"),
+            ((42, 120, 214), "seam, posterior, length"),
+            ((235, 104, 52), "seam, posterior, volume"),
+            ((227, 73, 72), "seam, both forms"),
+            ((27, 175, 122), "your points"),
+        ]
+        pal = [
+            (102, 194, 165),
+            (252, 141, 98),
+            (141, 160, 203),
+            (231, 138, 195),
+            (166, 216, 84),
+            (255, 217, 47),
+        ]
         names += [(c, f"side ownership: root block {i + 1}") for i, c in enumerate(pal)]
         for i, (rgb, nm) in enumerate(names, start=1):
             vis = 1 if i <= 5 else 0
-            fh.write(f'  {i:3d}  {rgb[0]:3d}  {rgb[1]:3d}  {rgb[2]:3d}        1  {vis}  1    "{nm}"\n')
+            fh.write(
+                f'  {i:3d}  {rgb[0]:3d}  {rgb[1]:3d}  {rgb[2]:3d}        1  {vis}  1    "{nm}"\n'
+            )
 
 
 if __name__ == "__main__":

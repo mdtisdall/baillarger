@@ -51,7 +51,11 @@ class Fold:
     shape: tuple[int, int, int]
     p: dict = field(default_factory=dict)
     R: np.ndarray = field(default_factory=lambda: R_DEFAULT.copy())
-    origin_mm: tuple[float, float, float] = (0.0, 0.0, 0.0)  # where the local origin sits, from the box centre
+    origin_mm: tuple[float, float, float] = (
+        0.0,
+        0.0,
+        0.0,
+    )  # where the local origin sits, from the box centre
 
     # ---- frames
     def to_local(self, X):
@@ -143,7 +147,9 @@ class Fold:
             A = r < Rc
             op = self.in_open(Y)
             r0 = np.where(A, Rc - tA, Rc + tB)
-            r1 = np.where(op, np.where(A, Rc - g / 2, Rc + g / 2), np.where(A, Rc + tB, Rc - tA))
+            r1 = np.where(
+                op, np.where(A, Rc - g / 2, Rc + g / 2), np.where(A, Rc + tB, Rc - tA)
+            )
             rc = np.where(op, np.nan, Rc)
             hm = np.where(A, 0.5 / (Rc - tA), -0.5 / (Rc + tB))
         return dict(c=c, u=u, r0=r0, r1=r1, rc=rc, hmean=hm)
@@ -151,16 +157,21 @@ class Fold:
 
 # ---------------------------------------------------------------- the standard set
 
+
 def standard(t=2.4):
     """The phantoms of the results: three crowns, two fundi, the kissing pair with and without the
     top's dark band at the contact (kiss_flat: the fused contact shows no notch)."""
     n_crown = lambda w: (int(2 * (w + t + 2.8) / H) + 1,) * 3  # noqa: E731
     out = {}
     for w in (0.32, 0.64, 1.28):
-        out[f"crown_w{w:.2f}"] = Fold("crown", n_crown(w), dict(w=w, t=t), origin_mm=(0.0, 0.0, 0.0))
+        out[f"crown_w{w:.2f}"] = Fold(
+            "crown", n_crown(w), dict(w=w, t=t), origin_mm=(0.0, 0.0, 0.0)
+        )
     for g in (0.16, 0.48):
         n = int(2 * (g + t + 2.8) / H) + 1
-        out[f"fundus_g{g:.2f}"] = Fold("fundus", (n, n, n), dict(g=g, t=t), origin_mm=(0.0, 0.0, 0.0))
+        out[f"fundus_g{g:.2f}"] = Fold(
+            "fundus", (n, n, n), dict(g=g, t=t), origin_mm=(0.0, 0.0, 0.0)
+        )
     kp = dict(Rc=3.6, tA=2.0, tB=2.6, g=0.32, open_deg=120.0)
     nk = int(2 * (kp["Rc"] + kp["tB"] + 2.8) / H) + 1
     out["kiss"] = Fold("kiss", (nk, nk, 64), dict(kp, flat=False))
@@ -169,6 +180,7 @@ def standard(t=2.4):
 
 
 # ---------------------------------------------------------------- the image
+
 
 def features(site, path=None):
     J = json.load(open(path or HERE / "fold_features.json"))[site]
@@ -227,7 +239,7 @@ def render(fold, feats, sub=3):
                         c = c & ~fused
                     val[c] = profile_at(prof, rel[c])
                     acc += val
-        imgs.append((acc / sub ** 3).reshape(shape))
+        imgs.append((acc / sub**3).reshape(shape))
     return labels, imgs
 
 
@@ -247,13 +259,27 @@ def make(fold, site, noise=1.0, seed=0, feats=None):
     det, sds = {}, []
     for k, (e, L0) in enumerate(zip(("echo2", "echo3"), imgs)):
         s0 = hp_stat(detrend(L0, ctx), ctx)
-        k1 = hp_stat(detrend(np.random.default_rng(seed + 99).standard_normal(L0.shape), ctx), ctx)
-        sd = np.sqrt(max(feats[e]["hp_stat"] ** 2 - s0 ** 2, 0.0)) / k1
+        k1 = hp_stat(
+            detrend(np.random.default_rng(seed + 99).standard_normal(L0.shape), ctx),
+            ctx,
+        )
+        sd = np.sqrt(max(feats[e]["hp_stat"] ** 2 - s0**2, 0.0)) / k1
         sds.append(float(sd))
         L = L0 + noise * sd * rng.standard_normal(L0.shape)
         det[k + 1] = detrend(L, ctx)
     rim = np.where(wm, 2, np.where(ctx, 3, 1)).astype(np.int16)
     vox = np.array([H, H, H])
-    return dict(det=det, disp=det[1], ctx=ctx, wm=wm, rim=rim, miss=np.zeros_like(ctx), vox=vox,
-                dface=face_dist(labels.shape, vox), labels=labels.astype(np.int16), noise_sd=sds,
-                fold=fold, lo=np.zeros(3, int))
+    return dict(
+        det=det,
+        disp=det[1],
+        ctx=ctx,
+        wm=wm,
+        rim=rim,
+        miss=np.zeros_like(ctx),
+        vox=vox,
+        dface=face_dist(labels.shape, vox),
+        labels=labels.astype(np.int16),
+        noise_sd=sds,
+        fold=fold,
+        lo=np.zeros(3, int),
+    )

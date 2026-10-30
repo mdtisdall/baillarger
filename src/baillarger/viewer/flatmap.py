@@ -25,10 +25,10 @@ the map.
    distortion s1 / s2.
 
 5. A patch round one vertex (patch_flat_map), for a mesh too big to flatten whole:
-   the geodesic ball of radius R along the mesh edges (dijkstra with a limit, faces
-   from a vertex -> face table built once), flattened by LSCM (free boundary, so a
-   ball with more than one boundary loop is fine) or by a discrete exponential map
-   (geodesic polar coordinates, Schmidt et al. 2006).
+   the geodesic ball of radius R along the mesh graph (dijkstra with a limit, faces
+   from a vertex -> face table; the caller builds both once), flattened by LSCM
+   (free boundary, so a ball with more than one boundary loop is fine) or by a
+   discrete exponential map (geodesic polar coordinates, Schmidt et al. 2006).
 
 site_flat_map runs flatten on a mesh and returns the arrays and the summary that the
 viewer keeps (baillarger.viewer.surface caches them).
@@ -561,32 +561,31 @@ def flatten(
 # ------------------------------------------------------------ a patch round a vertex
 
 
-def mesh_graph(v: Float, f: Faces) -> tuple[csr_matrix, csr_matrix]:
-    """Once per mesh: G, the edge graph (symmetric, edge lengths in mm; dijkstra with
-    directed=True, since directed=False transposes the whole graph on each call), and
-    VF, the vertex -> face incidence (row i: the faces of vertex i)."""
-    a, b = f.ravel(), np.roll(f, -1, axis=1).ravel()
-    w = np.maximum(np.linalg.norm(v[a] - v[b], axis=1), 1e-9)
-    G = csr_matrix((w, (a, b)), shape=(len(v), len(v)))
-    G = G.maximum(G.T).tocsr()  # a boundary edge has one half-edge
-    order = np.argsort(a, kind="stable")
-    ptr = np.r_[0, np.cumsum(np.bincount(a, minlength=len(v)))]
-    VF = csr_matrix((np.ones(a.size, np.int8), order // 3, ptr), shape=(len(v), len(f)))
-    return G, VF
+def rows_of(ptr: Int, idx: Int, rows: Int) -> Int:
+    """The entries of a CSR table (ptr, idx) in the given rows, concatenated."""
+    start, n = ptr[rows], ptr[rows + 1] - ptr[rows]
+    off = np.repeat(start - np.r_[0, np.cumsum(n)[:-1]], n)
+    out: Int = idx[off + np.arange(int(n.sum()))]
+    return out
 
 
 def geodesic_patch(
-    G: csr_matrix, VF: csr_matrix, f: Faces, v0: int, R: float
+    G: csr_matrix, vf: tuple[Int, Int], f: Faces, v0: int, R: float
 ) -> tuple[Faces, Int, Float]:
-    """The geodesic ball of radius R (mm, along mesh edges) round vertex v0, as a
-    surface: the faces whose three vertices are in the ball, the piece (connected
-    across edges) that holds v0's faces. A vertex where two fans of the ball meet only
-    at that vertex is split, one copy per fan (as cut does). Returns local faces,
-    orig (patch vertex -> mesh vertex; copy 0 is v0) and the edge distance from v0
-    (per patch vertex)."""
+    """The geodesic ball of radius R (mm along G) round vertex v0, as a surface: the
+    faces whose three vertices are in the ball, the piece (connected across edges)
+    that holds v0's faces. A vertex where two fans of the ball meet only at that
+    vertex is split, one copy per fan (as cut does).
+    G: a symmetric graph of the mesh. baillarger.mesh_graph.edge_graph adds the edges
+    across neighbouring triangles, which keep a voxel mesh's graph distance within
+    8 % of the geodesic (along the mesh edges alone it can be 41 % longer). dijkstra
+    runs with directed=True, since directed=False transposes the whole graph on each
+    call. vf: the vertex -> face table (indptr, indices; inflation.vertex_faces).
+    Returns local faces, orig (patch vertex -> mesh vertex; copy 0 is v0) and the
+    graph distance from v0 (per patch vertex)."""
     d = dijkstra(G, directed=True, indices=v0, limit=R)
     vid = np.flatnonzero(np.isfinite(d))
-    fk = np.unique(VF[vid].indices)
+    fk = np.unique(rows_of(*vf, vid))
     fk = fk[np.isfinite(d[f[fk]]).all(1)]
     assert fk.size, "no face in the ball: R is below the edge length"
     f2, o = cut(np.searchsorted(vid, f[fk]), np.zeros((0, 2), np.int64))
@@ -664,20 +663,21 @@ def exp_map(v: Float, f: Faces, root: int = 0) -> Float:
 def patch_flat_map(
     v: Float,
     f: Faces,
-    graph: tuple[csr_matrix, csr_matrix],
+    G: csr_matrix,
+    vf: tuple[Int, Int],
     v0: int,
     R: float,
     method: str = "lscm",
 ) -> dict[str, Any]:
-    """Flat map of the geodesic ball of radius R (mm) round vertex v0 (geodesic_patch;
-    graph: mesh_graph(v, f), built once). method "lscm": the free-boundary LSCM (any
+    """Flat map of the geodesic ball of radius R (mm) round vertex v0 (geodesic_patch,
+    with G and vf built once per mesh). method "lscm": the free-boundary LSCM (any
     number of boundary loops), scaled to the patch's 3D area; "exp": exp_map, in mm
     as it is. v0 maps to (0, 0); the map is turned to its principal axes.
     Returns a dict: f_cut (patch faces), orig (patch vertex -> mesh vertex, copy 0 is
-    v0), dist (edge distance from v0), uv, T, s1, s2, signed_area, area3 (per patch
+    v0), dist (graph distance from v0), uv, T, s1, s2, signed_area, area3 (per patch
     face, as flatten; distortion() reads them), T_v (per patch vertex: the area-weighted
     mean T of its faces), boundary_loops (their count)."""
-    fp, orig, dist = geodesic_patch(*graph, f, v0, R)
+    fp, orig, dist = geodesic_patch(G, vf, f, v0, R)
     vp = v[orig]
     if method == "lscm":
         uv = lscm(vp, fp)

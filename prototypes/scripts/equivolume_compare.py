@@ -84,22 +84,39 @@ def site(A, s):
     M = {m: load(d, s, m) for m, d in dirs.items()}
     N = M["normal"]
     for m in M:
-        assert np.array_equal(N["tv"], M[m]["tv"]) and np.allclose(N["pos"][:, 0], M[m]["pos"][:, 0]), \
-            f"{m} does not share normal's roots"
+        assert np.array_equal(N["tv"], M[m]["tv"]) and np.allclose(
+            N["pos"][:, 0], M[m]["pos"][:, 0]
+        ), f"{m} does not share normal's roots"
     keep = ~N["near_face"]
     R = dict(roots=int(keep.sum()))
     for name, X in M.items():
         R[name] = dict(
-            classes={CT.CLASS[c]: int(np.sum(keep & (X["cls"] == c))) for c in range(5)},
-            failed_by_outcome={OUTCOME[o]: int(np.sum(keep & (X["cls"] == CT.FAILED) & (X["outc"] == o)))
-                               for o in OUTCOME if np.sum(keep & (X["cls"] == CT.FAILED) & (X["outc"] == o))},
-            open_meeting_another_front=round(float(np.mean(X["crest_at"][keep & (X["cls"] == CT.OPEN)] >= 0)), 3),
-            profile_split_at_points=X["json"].get("at the points (|horizon - point depth|, mm)", {}).get("profile, top"),
+            classes={
+                CT.CLASS[c]: int(np.sum(keep & (X["cls"] == c))) for c in range(5)
+            },
+            failed_by_outcome={
+                OUTCOME[o]: int(
+                    np.sum(keep & (X["cls"] == CT.FAILED) & (X["outc"] == o))
+                )
+                for o in OUTCOME
+                if np.sum(keep & (X["cls"] == CT.FAILED) & (X["outc"] == o))
+            },
+            open_meeting_another_front=round(
+                float(np.mean(X["crest_at"][keep & (X["cls"] == CT.OPEN)] >= 0)), 3
+            ),
+            profile_split_at_points=X["json"]
+            .get("at the points (|horizon - point depth|, mm)", {})
+            .get("profile, top"),
         )
         if name != "normal":
             R[name]["class changes from normal"] = {
-                f"{CT.CLASS[a]} -> {CT.CLASS[b]}": int(np.sum(keep & (N["cls"] == a) & (X["cls"] == b)))
-                for a in range(5) for b in range(5) if a != b and np.sum(keep & (N["cls"] == a) & (X["cls"] == b))}
+                f"{CT.CLASS[a]} -> {CT.CLASS[b]}": int(
+                    np.sum(keep & (N["cls"] == a) & (X["cls"] == b))
+                )
+                for a in range(5)
+                for b in range(5)
+                if a != b and np.sum(keep & (N["cls"] == a) & (X["cls"] == b))
+            }
     # ---- at the points
     H = {m: passing(X, keep) for m, X in M.items()}
     vox = N["vox"]
@@ -115,9 +132,15 @@ def site(A, s):
             eq = X["eqv"][t, i].astype(float)
             top = X["eqv"][t, X["ns"][t] - 1].astype(float)
             op = X["cls"][t] == CT.OPEN
-            row[name] = dict(columns=int(t.size), open=int(op.sum()), arc_mm=round(float(np.median(i * S.STEP_MM)), 3),
-                             eqv_mm=round(float(np.median(eq)), 3),
-                             rel_depth_open=round(float(np.median(eq[op] / top[op])), 3) if op.any() else None)
+            row[name] = dict(
+                columns=int(t.size),
+                open=int(op.sum()),
+                arc_mm=round(float(np.median(i * S.STEP_MM)), 3),
+                eqv_mm=round(float(np.median(eq)), 3),
+                rel_depth_open=round(float(np.median(eq[op] / top[op])), 3)
+                if op.any()
+                else None,
+            )
         # per root through this point, by normal or the other: its two paths' difference
         for name in ("equivolume", "front-equivolume"):
             X = M[name]
@@ -125,32 +148,63 @@ def site(A, s):
             dmax, dpt = [], []
             for t, i in at.items():
                 m = int(min(N["ns"][t], X["ns"][t]))
-                d = np.linalg.norm((N["pos"][t, :m] - X["pos"][t, :m]).astype(float) * vox, axis=1)
+                d = np.linalg.norm(
+                    (N["pos"][t, :m] - X["pos"][t, :m]).astype(float) * vox, axis=1
+                )
                 dmax.append(d.max())
                 dpt.append(d[min(i, m - 1)])
             if at:
-                row[f"path difference, {name}"] = dict(roots=len(at), max_mm_median=round(float(np.median(dmax)), 3),
-                                                       at_point_mm_median=round(float(np.median(dpt)), 3))
+                row[f"path difference, {name}"] = dict(
+                    roots=len(at),
+                    max_mm_median=round(float(np.median(dmax)), 3),
+                    at_point_mm_median=round(float(np.median(dpt)), 3),
+                )
         rows.append(row)
     R["points"] = rows
 
     def per_point(name, key):
-        return pct([r[name][key] for r in rows if name in r and r[name][key] is not None])
+        return pct(
+            [r[name][key] for r in rows if name in r and r[name][key] is not None]
+        )
 
     summ = dict(points=len(rows))
     for name in M:
-        summ[name] = dict(reached=sum(name in r for r in rows), arc_mm_p50_90=per_point(name, "arc_mm"),
-                          eqv_mm_p50_90=per_point(name, "eqv_mm"), rel_depth_open_p50_90=per_point(name, "rel_depth_open"))
+        summ[name] = dict(
+            reached=sum(name in r for r in rows),
+            arc_mm_p50_90=per_point(name, "arc_mm"),
+            eqv_mm_p50_90=per_point(name, "eqv_mm"),
+            rel_depth_open_p50_90=per_point(name, "rel_depth_open"),
+        )
         if name == "normal":
             continue
         both = [r for r in rows if "normal" in r and name in r]
         summ[name].update(
-            vs_normal_eqv_abs_p50_90=pct([abs(r[name]["eqv_mm"] - r["normal"]["eqv_mm"]) for r in both]),
-            vs_normal_rel_depth_abs_p50_90=pct([abs(r[name]["rel_depth_open"] - r["normal"]["rel_depth_open"]) for r in both
-                                                if r[name]["rel_depth_open"] is not None and r["normal"]["rel_depth_open"] is not None]),
-            path_max_mm_p50_90=pct([r[f"path difference, {name}"]["max_mm_median"] for r in rows if f"path difference, {name}" in r]),
-            path_at_point_mm_p50_90=pct([r[f"path difference, {name}"]["at_point_mm_median"] for r in rows
-                                         if f"path difference, {name}" in r]))
+            vs_normal_eqv_abs_p50_90=pct(
+                [abs(r[name]["eqv_mm"] - r["normal"]["eqv_mm"]) for r in both]
+            ),
+            vs_normal_rel_depth_abs_p50_90=pct(
+                [
+                    abs(r[name]["rel_depth_open"] - r["normal"]["rel_depth_open"])
+                    for r in both
+                    if r[name]["rel_depth_open"] is not None
+                    and r["normal"]["rel_depth_open"] is not None
+                ]
+            ),
+            path_max_mm_p50_90=pct(
+                [
+                    r[f"path difference, {name}"]["max_mm_median"]
+                    for r in rows
+                    if f"path difference, {name}" in r
+                ]
+            ),
+            path_at_point_mm_p50_90=pct(
+                [
+                    r[f"path difference, {name}"]["at_point_mm_median"]
+                    for r in rows
+                    if f"path difference, {name}" in r
+                ]
+            ),
+        )
     R["at the points"] = summ
     return R
 

@@ -34,7 +34,9 @@ class Model:
     hard: list = field(default_factory=list)  # (a, b, lo, hi) arrays
     hinge: list = field(default_factory=list)  # (a, b, t, w) arrays
     tie: list = field(default_factory=list)  # (a, b, L, w) arrays
-    table: list = field(default_factory=list)  # (a, b, T): T (m, Ka_max, Kb_max), T[p, k_a, k_b]; nan padding
+    table: list = field(
+        default_factory=list
+    )  # (a, b, T): T (m, Ka_max, Kb_max), T[p, k_a, k_b]; nan padding
 
     @property
     def n(self):
@@ -44,7 +46,10 @@ class Model:
 def _cat(terms, k):
     if not terms:
         return [np.zeros(0, int if j < 2 or k == "hard" else float) for j in range(4)]
-    return [np.concatenate([np.atleast_1d(np.asarray(t[j])) for t in terms]) for j in range(4)]
+    return [
+        np.concatenate([np.atleast_1d(np.asarray(t[j])) for t in terms])
+        for j in range(4)
+    ]
 
 
 def energy(M, k):
@@ -52,7 +57,15 @@ def energy(M, k):
     k = np.asarray(k, int)
     x = np.asarray(M.o, int) + k
     start = np.r_[0, np.cumsum(np.asarray(M.K, int))]
-    e = float(np.concatenate([np.asarray(u, float) for u in M.unary])[start[:-1] + k].sum()) if M.n else 0.0
+    e = (
+        float(
+            np.concatenate([np.asarray(u, float) for u in M.unary])[
+                start[:-1] + k
+            ].sum()
+        )
+        if M.n
+        else 0.0
+    )
     a, b, lo, hi = _cat(M.hard, "hard")
     if a.size and np.any((x[b] - x[a] < lo) | (x[b] - x[a] > hi)):
         return np.inf
@@ -98,7 +111,7 @@ def _graph(M, extra_unary=None, chunk=100000):
     U = np.concatenate([np.asarray(M.unary[i], float) for i in range(n)])
     if extra_unary:
         for i, v in extra_unary.items():
-            U[start[i]:start[i + 1]] += v
+            U[start[i] : start[i + 1]] += v
     var = np.repeat(np.arange(n), K)
     lab = np.arange(N) - start[var]
     R, C, V = [], [], []
@@ -112,10 +125,12 @@ def _graph(M, extra_unary=None, chunk=100000):
     a_h, b_h, lo_h, hi_h = _cat(M.hard, "hard")
     a_g, b_g, t_g, w_g = _cat(M.hinge, "hinge")
     # hinges: w max(0, x_b - x_a - t) and w max(0, x_a - x_b + t)
-    for (A_, B_, T_, W_) in ((a_g, b_g, t_g, w_g), (b_g, a_g, -t_g, w_g)):
+    for A_, B_, T_, W_ in ((a_g, b_g, t_g, w_g), (b_g, a_g, -t_g, w_g)):
         for sl in _chunks(A_.size, chunk):
             A, B, W = A_[sl], B_[sl], W_[sl]
-            tl = (T_[sl] - (o[B] - o[A])).astype(int)[:, None]  # label space: max(0, k_b - k_a - tl)
+            tl = (T_[sl] - (o[B] - o[A])).astype(int)[
+                :, None
+            ]  # label space: max(0, k_b - k_a - tl)
             Ka, Kb = K[A][:, None], K[B][:, None]
             kk = np.arange(int(Ka.max()))[None]
             mk = kk < Ka
@@ -153,7 +168,7 @@ def _graph(M, extra_unary=None, chunk=100000):
     add(np.full(n, s), start[:-1], np.inf)
     add(nd, nd - 1, np.inf)
     # hard: x_b >= x_a + lo ; x_a >= x_b - hi
-    for (A_, B_, X_) in ((a_h, b_h, lo_h), (b_h, a_h, -hi_h)):
+    for A_, B_, X_ in ((a_h, b_h, lo_h), (b_h, a_h, -hi_h)):
         for sl in _chunks(A_.size, chunk):
             A, B = A_[sl], B_[sl]
             xl = (X_[sl] - (o[B] - o[A])).astype(int)[:, None]
@@ -183,7 +198,10 @@ def cut(M, extra_unary=None):
     INF = int(ci.sum()) + 1
     ci[inf] = INF
     keep = ci > 0
-    G = coo_matrix((ci[keep], (rows[keep].astype(np.int32), cols[keep].astype(np.int32))), shape=(N + 2,) * 2).tocsr()
+    G = coo_matrix(
+        (ci[keep], (rows[keep].astype(np.int32), cols[keep].astype(np.int32))),
+        shape=(N + 2,) * 2,
+    ).tocsr()
     G.sum_duplicates()
     res = maximum_flow(G, s, t_, method="dinic")
     if res.flow_value >= INF:
@@ -231,7 +249,9 @@ def qpbo(M, start_labels=None, improve=True, log=None):
         return bstart[var[nodes]] + lab[nodes] - 1
 
     fin = np.isfinite(caps)
-    big = BIG_FACTOR * (1.0 + float(caps[fin].sum()) + float(np.sum(w_t)) * float(K.max()) * 2)
+    big = BIG_FACTOR * (
+        1.0 + float(caps[fin].sum()) + float(np.sum(w_t)) * float(K.max()) * 2
+    )
     caps = np.where(fin, caps, big)
     ms = rows == s
     v = cols[ms]
@@ -265,14 +285,19 @@ def qpbo(M, start_labels=None, improve=True, log=None):
         E1 += np.bincount(ya[lo_], W[lo_], minlength=NB)
         E1 -= np.bincount(ya[hi_ | mid], W[hi_ | mid], minlength=NB)
         yb = bstart[b_t][:, None] + m - 1
-        pi.append(ya[mid]); pj.append(yb[mid]); p10.append(np.zeros(int(mid.sum()))); p11.append(2.0 * W[mid])
+        pi.append(ya[mid])
+        pj.append(yb[mid])
+        p10.append(np.zeros(int(mid.sum())))
+        p11.append(2.0 * W[mid])
     # tables: the positive second differences (not in the s-t graph), E11 = D
     for a_, b_, T_ in M.table:
         a_, b_ = np.asarray(a_, int), np.asarray(b_, int)
         valid, ua, ub, D = _table_parts(a_, b_, np.asarray(T_, float), K)
         p_, i_, j_ = np.nonzero(D > 0)
-        pi.append(bstart[a_][p_] + i_ - 1); pj.append(bstart[b_][p_] + j_ - 1)
-        p10.append(np.zeros(p_.size)); p11.append(D[p_, i_, j_])
+        pi.append(bstart[a_][p_] + i_ - 1)
+        pj.append(bstart[b_][p_] + j_ - 1)
+        p10.append(np.zeros(p_.size))
+        p11.append(D[p_, i_, j_])
     pi, pj = np.concatenate(pi).astype(np.int64), np.concatenate(pj).astype(np.int64)
     p10, p11 = np.concatenate(p10), np.concatenate(p11)
     # merge parallel terms (same ordered pair) before handing them over
@@ -314,7 +339,9 @@ def qpbo(M, start_labels=None, improve=True, log=None):
         inc = same & (yl[1:] > yl[:-1])
         bad_chain[bvar[1:][inc]] = True
         certified = ~unl & ~bad_chain
-        cert_lab = np.bincount(bvar, np.clip(yl, 0, 1).astype(float), minlength=n).astype(int)
+        cert_lab = np.bincount(
+            bvar, np.clip(yl, 0, 1).astype(float), minlength=n
+        ).astype(int)
     cert_lab = np.where(certified, cert_lab, -1)
     # QPBO-I from the start labeling
     k0 = cut(M) if start_labels is None else np.asarray(start_labels, int)
@@ -336,8 +363,16 @@ def qpbo(M, start_labels=None, improve=True, log=None):
         k, e = k0, e0
     # the encoding drops constants: relate the two scales at the (feasible) start labeling
     offset = e0 - _binary_energy(E0, E1, pi, pj, p10, p11, y0)
-    return dict(labels=k, energy=e, certified=certified, certified_labels=cert_lab,
-                lower_bound=lower + offset, chain_ok=chain_ok, binary_nodes=NB, pairwise=int(uk.size))
+    return dict(
+        labels=k,
+        energy=e,
+        certified=certified,
+        certified_labels=cert_lab,
+        lower_bound=lower + offset,
+        chain_ok=chain_ok,
+        binary_nodes=NB,
+        pairwise=int(uk.size),
+    )
 
 
 def _binary_energy(E0, E1, pi, pj, p10, p11, y):
@@ -345,7 +380,9 @@ def _binary_energy(E0, E1, pi, pj, p10, p11, y):
     e = float(np.sum(np.where(y == 1, E1, E0)))
     if len(pi):
         yi, yj = y[pi], y[pj]
-        e += float(np.sum(p10 * ((yi == 1) & (yj == 0)) + p11 * ((yi == 1) & (yj == 1))))
+        e += float(
+            np.sum(p10 * ((yi == 1) & (yj == 0)) + p11 * ((yi == 1) & (yj == 1)))
+        )
     return e
 
 
@@ -365,8 +402,12 @@ def reduce(M, fixed, labels, big=None):
     U = [np.asarray(M.unary[i], float).copy() for i in free]
     const = float(sum(float(M.unary[i][labels[i]]) for i in np.flatnonzero(fixed)))
     if big is None:
-        big = 1e3 * (1.0 + sum(float(np.ptp(u)) for u in M.unary) + float(np.sum(_cat(M.hinge, "hinge")[3])) * max(K)
-                     + float(np.sum(_cat(M.tie, "tie")[3])) * max(K))
+        big = 1e3 * (
+            1.0
+            + sum(float(np.ptp(u)) for u in M.unary)
+            + float(np.sum(_cat(M.hinge, "hinge")[3])) * max(K)
+            + float(np.sum(_cat(M.tie, "tie")[3])) * max(K)
+        )
     hard, hinge, tie = [], [], []
     a, b, lo, hi = _cat(M.hard, "hard")
     for aa, bb, l_, h_ in zip(a, b, lo, hi):
@@ -403,7 +444,7 @@ def reduce(M, fixed, labels, big=None):
     tab = []
     for a_, b_, T_ in M.table:
         for p_, (aa, bb) in enumerate(zip(np.asarray(a_, int), np.asarray(b_, int))):
-            Tp = np.asarray(T_[p_], float)[:K[aa], :K[bb]]
+            Tp = np.asarray(T_[p_], float)[: K[aa], : K[bb]]
             if fixed[aa] and fixed[bb]:
                 const += float(Tp[labels[aa], labels[bb]])
             elif not fixed[aa] and not fixed[bb]:
@@ -414,13 +455,22 @@ def reduce(M, fixed, labels, big=None):
                 U[new[aa]] += Tp[:, labels[bb]]
     tables = []
     if tab:
-        ka = max(t[2].shape[0] for t in tab); kb = max(t[2].shape[1] for t in tab)
+        ka = max(t[2].shape[0] for t in tab)
+        kb = max(t[2].shape[1] for t in tab)
         T = np.full((len(tab), ka, kb), np.nan)
         for p_, t in enumerate(tab):
-            T[p_, :t[2].shape[0], :t[2].shape[1]] = t[2]
+            T[p_, : t[2].shape[0], : t[2].shape[1]] = t[2]
         tables = [(np.array([t[0] for t in tab]), np.array([t[1] for t in tab]), T)]
-    pack = lambda terms: [tuple(np.concatenate([np.asarray(t[j]) for t in terms]) for j in range(4))] if terms else []  # noqa: E731
-    return Model(K[free], o[free], U, pack(hard), pack(hinge), pack(tie), tables), free, const
+    pack = lambda terms: (
+        [tuple(np.concatenate([np.asarray(t[j]) for t in terms]) for j in range(4))]
+        if terms
+        else []
+    )  # noqa: E731
+    return (
+        Model(K[free], o[free], U, pack(hard), pack(hinge), pack(tie), tables),
+        free,
+        const,
+    )
 
 
 def qpbo_pruned(M, start_labels=None, log=None):
@@ -433,11 +483,17 @@ def qpbo_pruned(M, start_labels=None, log=None):
         r.update(labels=k, energy=energy(M, k), n_free=0)
         return r
     R, free, const = reduce(M, cert, np.where(cert, r["certified_labels"], 0))
-    r2 = qpbo(R, start_labels=None if start_labels is None else np.asarray(start_labels)[free], log=log)
+    r2 = qpbo(
+        R,
+        start_labels=None if start_labels is None else np.asarray(start_labels)[free],
+        log=log,
+    )
     k = np.where(cert, r["certified_labels"], 0)
     k[free] = r2["labels"]
     e = energy(M, k)
-    if start_labels is not None and energy(M, start_labels) < e:  # never worse than the start
+    if (
+        start_labels is not None and energy(M, start_labels) < e
+    ):  # never worse than the start
         k, e = np.asarray(start_labels, int).copy(), energy(M, start_labels)
     r.update(labels=k, energy=e, n_free=int(free.size))
     return r

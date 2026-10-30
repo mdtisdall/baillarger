@@ -43,7 +43,9 @@ def tensor(img, m):
 
 
 def interp(vol, x):
-    return ndi.map_coordinates(vol, np.asarray(x, float).reshape(3, 1), order=1, mode="nearest")[0]
+    return ndi.map_coordinates(
+        vol, np.asarray(x, float).reshape(3, 1), order=1, mode="nearest"
+    )[0]
 
 
 def normal_at(Tc, x):
@@ -63,9 +65,15 @@ def boundary_path(shell2d, a, b):
             if di == dj == 0:
                 continue
             ni, nj = ii + di, jj + dj
-            ok = (ni >= 0) & (nj >= 0) & (ni < shell2d.shape[0]) & (nj < shell2d.shape[1])
+            ok = (
+                (ni >= 0)
+                & (nj >= 0)
+                & (ni < shell2d.shape[0])
+                & (nj < shell2d.shape[1])
+            )
             ok[ok] = idx[ni[ok], nj[ok]] >= 0
-            rows += list(np.nonzero(ok)[0]); cols += list(idx[ni[ok], nj[ok]])
+            rows += list(np.nonzero(ok)[0])
+            cols += list(idx[ni[ok], nj[ok]])
             w += [np.hypot(di, dj)] * int(ok.sum())
     G = coo_matrix((w, (rows, cols)), shape=(ii.size, ii.size)).tocsr()
     s, t = idx[a], idx[b]
@@ -119,7 +127,9 @@ def run(out):
     k = P1[2]
     # box around the stretch
     lo = np.array([min(P1[0], P2[0]) - 30, min(P1[1], P2[1]) - 30, k - 30]).clip(0)
-    hi = np.minimum(np.array([max(P1[0], P2[0]) + 31, max(P1[1], P2[1]) + 31, k + 31]), rim.shape)
+    hi = np.minimum(
+        np.array([max(P1[0], P2[0]) + 31, max(P1[1], P2[1]) + 31, k + 31]), rim.shape
+    )
     box = tuple(slice(a, b) for a, b in zip(lo, hi))
     rb, mb, missb = rim[box], m[box], miss[box]
     e = {i: np.log(np.maximum(p.echoes[box + (i,)].astype(float), 1.0)) for i in (1, 2)}
@@ -134,7 +144,8 @@ def run(out):
 
     wm = rb == 2
     shell = wm & ~ndi.binary_erosion(wm)
-    a = (P1[0] - lo[0], P1[1] - lo[1]); b = (P2[0] - lo[0], P2[1] - lo[1])
+    a = (P1[0] - lo[0], P1[1] - lo[1])
+    b = (P2[0] - lo[0], P2[1] - lo[1])
     kk = k - lo[2]
     path = boundary_path(shell[:, :, kk], a, b)
     seeds = [(i, j, kk) for i, j in path]
@@ -142,8 +153,9 @@ def run(out):
 
     fields = {
         "data normal": lambda x: normal_at(Tc, x),
-        "distance from WM (D-like)": lambda x: (lambda g: g / (np.linalg.norm(g) + 1e-12))(
-            np.array([interp(c, x) for c in gwm])),
+        "distance from WM (D-like)": lambda x: (
+            lambda g: g / (np.linalg.norm(g) + 1e-12)
+        )(np.array([interp(c, x) for c in gwm])),
     }
     nbin = 60
     results = {}
@@ -179,18 +191,25 @@ def run(out):
         results[name] = (img_r, img_rr, img_s, lines, marks)
         if marks:
             mk = np.array(marks)
-            print(f"   {name}: {len(mk)} columns reach the facing WM; contact at "
-                  f"{np.median(mk[:,1]):.2f} mm, midline at {np.median(mk[:,2]):.2f} mm; "
-                  f"median contact - midline {np.median(mk[:,1]-mk[:,2]):+.2f} mm")
+            print(
+                f"   {name}: {len(mk)} columns reach the facing WM; contact at "
+                f"{np.median(mk[:, 1]):.2f} mm, midline at {np.median(mk[:, 2]):.2f} mm; "
+                f"median contact - midline {np.median(mk[:, 1] - mk[:, 2]):+.2f} mm"
+            )
         print(f"{name}: {len(seeds)} seeds, {status}")
 
     sl = det[2][:, :, kk]
-    fig, axs = plt.subplots(2, 4, figsize=(20, 9.5),
-                            gridspec_kw={"width_ratios": [1.15, 1, 1, 1]})
+    fig, axs = plt.subplots(
+        2, 4, figsize=(20, 9.5), gridspec_kw={"width_ratios": [1.15, 1, 1, 1]}
+    )
     for r, (name, (img_r, img_rr, img_s, lines, marks)) in enumerate(results.items()):
         ax = axs[r, 0]
-        ax.imshow(np.where(ctx[box][:, :, kk], sl, np.nan).T, origin="lower", cmap="gray",
-                  interpolation="nearest")
+        ax.imshow(
+            np.where(ctx[box][:, :, kk], sl, np.nan).T,
+            origin="lower",
+            cmap="gray",
+            interpolation="nearest",
+        )
         ax.contour(shell[:, :, kk].T, levels=[0.5], colors="y", linewidths=0.6)
         for pts in lines:
             ax.plot(pts[:, 0], pts[:, 1], "c-", lw=0.6)
@@ -200,17 +219,55 @@ def run(out):
         ax.set_ylim(path[:, 1].min() - 25, path[:, 1].max() + 25)
         ext = [0, arc[-1], 0, 1]
         v = np.nanpercentile(np.abs(img_r), 98)
-        axs[r, 1].imshow(img_r, origin="lower", aspect="auto", cmap="gray", vmin=-v, vmax=v, extent=ext)
+        axs[r, 1].imshow(
+            img_r,
+            origin="lower",
+            aspect="auto",
+            cmap="gray",
+            vmin=-v,
+            vmax=v,
+            extent=ext,
+        )
         axs[r, 1].set_title(f"{name}: echo 3, trend removed, by relative depth")
         rv = np.nanpercentile(img_rr, [2, 98])
-        axs[r, 2].imshow(img_rr, origin="lower", aspect="auto", cmap="magma", vmin=rv[0], vmax=rv[1], extent=ext)
+        axs[r, 2].imshow(
+            img_rr,
+            origin="lower",
+            aspect="auto",
+            cmap="magma",
+            vmin=rv[0],
+            vmax=rv[1],
+            extent=ext,
+        )
         axs[r, 2].set_title(f"{name}: R2* proxy (s⁻¹), by relative depth")
-        axs[r, 3].imshow(img_s, origin="lower", aspect="auto", cmap="gray", vmin=-v, vmax=v,
-                         extent=[0, arc[-1], 0, img_s.shape[0] * vox[0]])
+        axs[r, 3].imshow(
+            img_s,
+            origin="lower",
+            aspect="auto",
+            cmap="gray",
+            vmin=-v,
+            vmax=v,
+            extent=[0, arc[-1], 0, img_s.shape[0] * vox[0]],
+        )
         if marks:
             mk = np.array(marks)
-            axs[r, 3].plot(mk[:, 0], mk[:, 1], "o", mfc="none", mec="c", ms=6, label="darkest point (contact?)")
-            axs[r, 3].plot(mk[:, 0], mk[:, 2], "x", c="orange", ms=6, label="midline between WM surfaces")
+            axs[r, 3].plot(
+                mk[:, 0],
+                mk[:, 1],
+                "o",
+                mfc="none",
+                mec="c",
+                ms=6,
+                label="darkest point (contact?)",
+            )
+            axs[r, 3].plot(
+                mk[:, 0],
+                mk[:, 2],
+                "x",
+                c="orange",
+                ms=6,
+                label="midline between WM surfaces",
+            )
             axs[r, 3].legend(loc="upper left", fontsize=8)
         axs[r, 3].set_title(f"{name}: echo 3, trend removed, by depth (mm)")
         for c in (1, 2):
@@ -218,8 +275,11 @@ def run(out):
         axs[r, 3].set_ylabel("depth from WM (mm)")
         for c in (1, 2, 3):
             axs[r, c].set_xlabel("position along the WM boundary (mm)")
-    fig.suptitle("V1V2, slice k = 27, fused stretch between (32, 78) and (49, 114): "
-                 "streamlines run from one bank's WM to fluid or across the contact to the facing WM", fontsize=14)
+    fig.suptitle(
+        "V1V2, slice k = 27, fused stretch between (32, 78) and (49, 114): "
+        "streamlines run from one bank's WM to fluid or across the contact to the facing WM",
+        fontsize=14,
+    )
     fig.tight_layout()
     fig.savefig(out, dpi=110)
     print("wrote", out)

@@ -29,7 +29,10 @@ def main(fig, data, site):
     lo, wm0 = tuple(int(t) for t in z["lo"]), z["wm"]
     hi = tuple(a + s for a, s in zip(lo, wm0.shape))
     img = nib.load(aseg_path())
-    assert np.array_equal(np.asarray(img.dataobj[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]) == ASEG_WM, wm0)
+    assert np.array_equal(
+        np.asarray(img.dataobj[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]]) == ASEG_WM,
+        wm0,
+    )
     ch = WMChanges.load(Path(data) / "wm_handles.npz")
     rep = write_box(lo, hi, ch, Path(data), f"wm_handles_{site}")
     print(json.dumps({k: v for k, v in rep.items() if k != "moves"}))
@@ -54,8 +57,13 @@ def view(fig, site, wm0, wm1, moves):
             rgb = np.where(w0[..., None], 0.6, 1.0) * np.ones(3)
             rgb[w0 & ~w1] = (0.85, 0.1, 0.1)
             rgb[w1 & ~w0] = (0.1, 0.3, 0.9)
-            ax.imshow(np.transpose(rgb, (1, 0, 2)), origin="lower", interpolation="nearest")
-            ax.set_title(f"{d['kind']} {d['voxels_in_box']} vox; axis {a} = {c[a] + 1}", fontsize=8)
+            ax.imshow(
+                np.transpose(rgb, (1, 0, 2)), origin="lower", interpolation="nearest"
+            )
+            ax.set_title(
+                f"{d['kind']} {d['voxels_in_box']} vox; axis {a} = {c[a] + 1}",
+                fontsize=8,
+            )
             ax.set_xticks([]), ax.set_yticks([])
         row[0].set_ylabel(f"ITK-SNAP {tuple(d['centre_itksnap_box'])}", fontsize=8)
     figh.suptitle(f"{site}: WM grey, removed red, added blue", fontsize=10)

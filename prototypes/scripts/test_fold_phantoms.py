@@ -18,17 +18,31 @@ import fold_eval as FE  # noqa: E402
 import fold_phantoms as FP  # noqa: E402
 from baillarger.frame import mesh_curvatures  # noqa: E402
 
-FEATS = {e: dict(profile=list(np.sin(np.linspace(0, 3 * np.pi, 50))), wm_level=-0.3, fluid_level=-2.0, hp_stat=0.0)
-         for e in ("echo2", "echo3")}
+FEATS = {
+    e: dict(
+        profile=list(np.sin(np.linspace(0, 3 * np.pi, 50))),
+        wm_level=-0.3,
+        fluid_level=-2.0,
+        hp_stat=0.0,
+    )
+    for e in ("echo2", "echo3")
+}
 
 
 def folds():
-    return [FP.Fold("crown", (60, 60, 60), dict(w=0.64, t=2.4)),
-            FP.Fold("fundus", (60, 60, 60), dict(g=0.16, t=2.4)),
-            FP.Fold("kiss", (90, 90, 40), dict(Rc=3.6, tA=2.0, tB=2.6, g=0.32, open_deg=120.0, flat=False))]
+    return [
+        FP.Fold("crown", (60, 60, 60), dict(w=0.64, t=2.4)),
+        FP.Fold("fundus", (60, 60, 60), dict(g=0.16, t=2.4)),
+        FP.Fold(
+            "kiss",
+            (90, 90, 40),
+            dict(Rc=3.6, tA=2.0, tB=2.6, g=0.32, open_deg=120.0, flat=False),
+        ),
+    ]
 
 
 # ---------------------------------------------------------------- geometry
+
 
 @pytest.mark.parametrize("fold", folds(), ids=lambda f: f.kind)
 def test_frames_round_trip(fold):
@@ -49,7 +63,9 @@ def test_columns_are_straight_and_normal_to_the_laminae(fold):
         Yc = c[i] + rr[:, None] * u[i]
         _, rel2, bank2, r2, c2, u2 = fold.geom(Yc)
         assert np.allclose(c2, c[i]) and np.allclose(u2, u[i]) and np.allclose(r2, rr)
-        ok = np.isfinite(rel2) & (bank2 == bank[i])  # one bank (kiss: the slope flips at the contact)
+        ok = np.isfinite(rel2) & (
+            bank2 == bank[i]
+        )  # one bank (kiss: the slope flips at the contact)
         # relative depth is linear in r with slope +-1/t
         if ok.sum() >= 2:
             sl = np.diff(rel2[ok]) / np.diff(rr[ok])
@@ -64,7 +80,9 @@ def test_crown_depths_and_truth():
     assert rel[0] == pytest.approx(0.5) and rel[1] == pytest.approx(0.25)
     tr = f.column(f.to_vox(Y[:2]))
     assert tr["r0"][0] == pytest.approx(0.64) and tr["r1"][0] == pytest.approx(3.04)
-    assert tr["hmean"][0] == pytest.approx(1 / 0.64) and tr["hmean"][1] == pytest.approx(0.5 / 0.64)
+    assert tr["hmean"][0] == pytest.approx(1 / 0.64) and tr["hmean"][
+        1
+    ] == pytest.approx(0.5 / 0.64)
     assert np.allclose(tr["u"][0], [0, 0, 1])
 
 
@@ -80,17 +98,28 @@ def test_fundus_truth():
 
 
 def test_kiss_truth():
-    f = FP.Fold("kiss", (90, 90, 40), dict(Rc=3.6, tA=2.0, tB=2.6, g=0.32, open_deg=120.0, flat=False))
+    f = FP.Fold(
+        "kiss",
+        (90, 90, 40),
+        dict(Rc=3.6, tA=2.0, tB=2.6, g=0.32, open_deg=120.0, flat=False),
+    )
     # fused sector (angle 180 deg), bank A and B; open sector (angle 0): the gap
     Y = np.array([[-2.0, 0, 0], [-5.0, 0, 0], [3.6, 0, 0], [-3.6, 0, 0]])
     lab, rel, bank, *_ = f.geom(Y)
     assert list(lab) == [0, 0, 1, 0] and list(bank[:2]) == [0, 1]
     tr = f.column(f.to_vox(Y[:2]))
-    assert tr["r0"][0] == pytest.approx(1.6) and tr["r1"][0] == pytest.approx(6.2) and tr["rc"][0] == 3.6
+    assert (
+        tr["r0"][0] == pytest.approx(1.6)
+        and tr["r1"][0] == pytest.approx(6.2)
+        and tr["rc"][0] == 3.6
+    )
     assert tr["r0"][1] == pytest.approx(6.2) and tr["r1"][1] == pytest.approx(1.6)
     tr2 = f.column(f.to_vox(np.array([[2.0, 0.0, 0.0]])))
     assert tr2["r1"][0] == pytest.approx(3.6 - 0.16) and np.isnan(tr2["rc"][0])
-    assert list(FE.true_class(tr)) == [CT.CROSS, CT.CROSS] and FE.true_class(tr2)[0] == CT.OPEN
+    assert (
+        list(FE.true_class(tr)) == [CT.CROSS, CT.CROSS]
+        and FE.true_class(tr2)[0] == CT.OPEN
+    )
 
 
 def test_render_noise_free_matches_the_profile_in_the_cortex_interior():
@@ -109,7 +138,14 @@ def test_render_noise_free_matches_the_profile_in_the_cortex_interior():
 def test_noise_matching_hits_the_target_statistic():
     f = FP.Fold("crown", (60, 60, 60), dict(w=0.64, t=2.4))
     # a smooth, weak profile, so that its own high-pass part is well under the target
-    feats = {e: dict(FEATS[e], profile=list(0.05 * np.sin(np.linspace(0, np.pi, 50))), hp_stat=0.1) for e in FEATS}
+    feats = {
+        e: dict(
+            FEATS[e],
+            profile=list(0.05 * np.sin(np.linspace(0, np.pi, 50))),
+            hp_stat=0.1,
+        )
+        for e in FEATS
+    }
     B = FP.make(f, None, noise=1.0, feats=feats)
     for k in (1, 2):
         assert FP.hp_stat(B["det"][k], B["ctx"]) == pytest.approx(0.1, rel=0.05)
@@ -134,6 +170,7 @@ def test_mesh_curvature_at_the_crown_tip():
 
 # ---------------------------------------------------------------- error measures
 
+
 def test_errors_zero_on_the_true_column_and_the_shift_off_it():
     f = FP.Fold("crown", (60, 60, 60), dict(w=0.64, t=2.4))
     Y0 = np.array([[0.64, 0.0, -1.0], [0.0, 0.0, 0.64]])
@@ -145,15 +182,23 @@ def test_errors_zero_on_the_true_column_and_the_shift_off_it():
         Y = tr["c"][i] + s[:, None] * tr["u"][i]
         if i == 1:  # shift sideways by 0.1 mm, perpendicular to u = z
             Y = Y + np.array([0.1, 0.0, 0.0])
-        pos[i, :len(s)] = f.to_vox(Y)
+        pos[i, : len(s)] = f.to_vox(Y)
         ns[i] = len(s)
     emax, emean, eend, econ = FE.errors(f, tr, pos, ns, np.full(3, FP.H))
-    assert emax[0] == pytest.approx(0, abs=1e-5) and eend[0] == pytest.approx(0, abs=0.04)
-    assert emax[1] == pytest.approx(0.1, abs=1e-5) and emean[1] == pytest.approx(0.1, abs=1e-5)
+    assert emax[0] == pytest.approx(0, abs=1e-5) and eend[0] == pytest.approx(
+        0, abs=0.04
+    )
+    assert emax[1] == pytest.approx(0.1, abs=1e-5) and emean[1] == pytest.approx(
+        0.1, abs=1e-5
+    )
 
 
 def test_contact_error_is_where_the_trace_crosses_the_contact():
-    f = FP.Fold("kiss", (90, 90, 40), dict(Rc=3.6, tA=2.0, tB=2.6, g=0.32, open_deg=120.0, flat=False))
+    f = FP.Fold(
+        "kiss",
+        (90, 90, 40),
+        dict(Rc=3.6, tA=2.0, tB=2.6, g=0.32, open_deg=120.0, flat=False),
+    )
     Y0 = np.array([[-1.6, 0.0, 0.0]])
     tr = f.column(f.to_vox(Y0))
     s = np.arange(1.6, 6.2, 0.04)
@@ -164,6 +209,7 @@ def test_contact_error_is_where_the_trace_crosses_the_contact():
 
 
 # ---------------------------------------------------------------- tracers
+
 
 def test_laplace_stencil_annihilates_linear_functions():
     """For constant D (any orientation, any coherence), a linear phi has zero divergence of
@@ -176,7 +222,9 @@ def test_laplace_stencil_annihilates_linear_functions():
     d = np.array([0.6, 0.64, 0.48])
     nv = np.broadcast_to(d / np.linalg.norm(d), n + (3,)).copy()
     for c in (0.0, 0.5, 0.95):
-        A, rhs, unk, _, _ = CT.laplace_system(labels, nv, np.full(n, c), np.array([0.16, 0.17, 0.15]))
+        A, rhs, unk, _, _ = CT.laplace_system(
+            labels, nv, np.full(n, c), np.array([0.16, 0.17, 0.15])
+        )
         P = np.argwhere(unk)
         g = np.array([0.3, -1.1, 0.7])
         phi = (P * np.array([0.16, 0.17, 0.15])) @ g
@@ -195,7 +243,9 @@ def test_laplace_slab_is_linear():
     nv = np.zeros(n + (3,))
     nv[..., 0] = 1.0
     phi, info = CT.laplace(labels, nv, np.full(n, 0.8), np.full(3, 0.16), tol=1e-12)
-    want = (np.arange(n[0]) - 2) / (n[0] - 3 - 2)  # 0 at the last WM row, 1 at the first fluid row
+    want = (np.arange(n[0]) - 2) / (
+        n[0] - 3 - 2
+    )  # 0 at the last WM row, 1 at the first fluid row
     assert np.max(np.abs(phi[2:-2] - want[2:-2, None, None])) < 1e-6
 
 
@@ -208,7 +258,9 @@ def test_laplace_isotropic_cylinder_is_logarithmic():
     r0, r1 = 1.0, 3.5
     labels = np.where(r < r0, 2, np.where(r > r1, 1, 0)).astype(np.int16)
     labels[r > 4.4] = 4  # outside the outer ring: not in the domain
-    phi, _ = CT.laplace(labels, np.zeros((n, n, 8, 3)), np.zeros((n, n, 8)), np.full(3, 0.16))
+    phi, _ = CT.laplace(
+        labels, np.zeros((n, n, 8, 3)), np.zeros((n, n, 8)), np.full(3, 0.16)
+    )
     m = labels == 0
     want = np.log(r[m] / r0) / np.log(r1 / r0)
     assert np.max(np.abs(phi[m] - want)) < 0.06
@@ -227,13 +279,15 @@ def test_blend_turns_from_the_mesh_normal_to_the_data_normal_as_prescribed():
     d0 = np.array([[0.0, 1.0, 0.0]])
     vox = np.full(3, 0.16)
     pos, ns, out = CT.trace_blend(Tc, labels, dface, x0, d0, vox, 20, blend_mm=0.3)
-    step = np.diff(pos[0, :ns[0]], axis=0) * vox
+    step = np.diff(pos[0, : ns[0]], axis=0) * vox
     for i, st in enumerate(step):
         s = i * X.STEP_MM + 0.5 * X.STEP_MM  # the midpoint's arc length
         w = min(1.0, s / 0.3)
         want = np.array([w, 1 - w, 0.0])
         want /= np.linalg.norm(want)
-        assert np.allclose(st / np.linalg.norm(st), want, atol=1e-4)  # positions are float32
+        assert np.allclose(
+            st / np.linalg.norm(st), want, atol=1e-4
+        )  # positions are float32
 
 
 def _tilted_slabs():
@@ -250,7 +304,9 @@ def _tilted_slabs():
     labels = np.zeros(n, np.int16)
     labels[np.abs(x) > 4.0] = 2
     ctx = labels == 0
-    B = dict(det={1: img * ctx, 2: img * ctx}, ctx=ctx, wm=labels == 2, vox=np.full(3, 0.16))
+    B = dict(
+        det={1: img * ctx, 2: img * ctx}, ctx=ctx, wm=labels == 2, vox=np.full(3, 0.16)
+    )
     return B, x, np.array([np.cos(a), np.sin(a), 0.0])
 
 
@@ -271,7 +327,9 @@ def test_perbank_tensor_does_not_mix_the_far_bank():
     vb, _ = CT.eig(CT.base_tensor(B))
     vp, _ = CT.eig(CT.perbank_tensor(B))
     for lo, hi in ((-0.24, 0.0), (-0.48, -0.24)):
-        assert np.median(_angles(B, x, nA, vp, lo, hi)) < 0.7 * np.median(_angles(B, x, nA, vb, lo, hi))
+        assert np.median(_angles(B, x, nA, vp, lo, hi)) < 0.7 * np.median(
+            _angles(B, x, nA, vb, lo, hi)
+        )
     a_b, a_p = _angles(B, x, nA, vb, -3.0, -1.5), _angles(B, x, nA, vp, -3.0, -1.5)
     assert np.allclose(a_p, a_b, atol=0.05)
 
@@ -282,14 +340,18 @@ def test_multiscale_keeps_the_orientation_of_planar_layers():
     B, x, nA = _tilted_slabs()
     vb, _ = CT.eig(CT.base_tensor(B))
     vm, _ = CT.eig(CT.multiscale_tensor(B))
-    assert np.allclose(_angles(B, x, nA, vm, -3.0, -1.5), _angles(B, x, nA, vb, -3.0, -1.5), atol=0.1)
+    assert np.allclose(
+        _angles(B, x, nA, vm, -3.0, -1.5), _angles(B, x, nA, vb, -3.0, -1.5), atol=0.1
+    )
 
 
 def test_rank1_eig_round_trip():
     u = np.random.default_rng(3).standard_normal((5, 4, 3, 3))
     u /= np.linalg.norm(u, axis=-1, keepdims=True)
     v, c = CT.eig(CT.rank1(u))
-    assert np.allclose(np.abs((u * v).sum(-1)), 1, atol=1e-6) and np.allclose(c, 1, atol=1e-6)
+    assert np.allclose(np.abs((u * v).sum(-1)), 1, atol=1e-6) and np.allclose(
+        c, 1, atol=1e-6
+    )
 
 
 def test_fitted_field_on_a_slab_is_the_distance_from_the_wm():
@@ -301,7 +363,9 @@ def test_fitted_field_on_a_slab_is_the_distance_from_the_wm():
     labels = np.zeros(n, np.int16)
     labels[:5] = 2
     ctx = labels == 0
-    B = dict(det={1: img * ctx, 2: img * ctx}, ctx=ctx, wm=labels == 2, vox=np.full(3, 0.16))
+    B = dict(
+        det={1: img * ctx, 2: img * ctx}, ctx=ctx, wm=labels == 2, vox=np.full(3, 0.16)
+    )
     T, info = CT.fitted(B)
     want = (np.arange(n[0]) - 4) * 0.16
     inner = T[5:-3, 4:-4, 4:-4]

@@ -1,5 +1,5 @@
 """Tests of edit_resolve with exact answers.
-    nix develop --command uv run --with thinqpbo pytest -q prototypes/scripts/test_edit_resolve.py
+nix develop --command uv run --with thinqpbo pytest -q prototypes/scripts/test_edit_resolve.py
 """
 
 import itertools
@@ -20,9 +20,18 @@ def chain_data(rng, n, tau=JL.TAU, m=120, ties=((1, 4),)):
     pairs = np.array([(i, i + 1) for i in range(n - 1)] + [(0, 2)])
     top = np.where(rng.random(n) < 0.5, rng.uniform(1.8, 2.2, n), np.nan)
     ties = np.array(ties, int).reshape(-1, 2)
-    D = JL.Data(step=0.04, ns=np.full(n, m), top=top, mu=rng.normal(0, 0.1, n), pairs=pairs,
-                S=rng.normal(0, 0.05, (len(pairs), m)), W=rng.uniform(0, 1, (len(pairs), m)), ties=ties,
-                tie_L=np.full(len(ties), 4.1), tie_w=np.full(len(ties), 0.8))
+    D = JL.Data(
+        step=0.04,
+        ns=np.full(n, m),
+        top=top,
+        mu=rng.normal(0, 0.1, n),
+        pairs=pairs,
+        S=rng.normal(0, 0.05, (len(pairs), m)),
+        W=rng.uniform(0, 1, (len(pairs), m)),
+        ties=ties,
+        tie_L=np.full(len(ties), 4.1),
+        tie_w=np.full(len(ties), 0.8),
+    )
     D.c0 = np.full(n, 2.0)
     D.tau = tau
     return D
@@ -79,14 +88,18 @@ def test_part_free_equals_brute_force(seed, edit):
     free[[2, 3]] = True
     edits = {2: float(z[-1, 2] + 0.16)} if edit else {}
     out, info = ER.local_solve(D, z, free, h=h, half=half, edits=edits, recentre=0)
-    assert info["ring_traces"] == 4  # 1, 4 and 0 by pairs (0 by the pair (0, 2)); 5 by the tie
+    assert (
+        info["ring_traces"] == 4
+    )  # 1, 4 and 0 by pairs (0 by the pair (0, 2)); 5 by the tie
     hw = np.where(free[None], half, 0.0) * np.ones((2, 1))
     for t, d in edits.items():
         hw[-1, t] = max(hw[-1, t], abs(d - z[-1, t]) + 2 * h)
     M, o = JL.build(D, h, z, hw)
     for t, d in edits.items():
         i = n + t
-        M.unary[i] = M.unary[i] + ER.W_EDIT * np.abs(h * (M.o[i] + np.arange(M.K[i])) - d)
+        M.unary[i] = M.unary[i] + ER.W_EDIT * np.abs(
+            h * (M.o[i] + np.arange(M.K[i])) - d
+        )
     lab = np.round(z.ravel() / h).astype(int) - np.asarray(M.o)
     fixed = np.repeat(~free[None], 2, 0).ravel()
     best, _ = brute_with_fixed(M, fixed, lab)
@@ -129,6 +142,8 @@ def test_edits_persist_and_only_free_edits_count():
     assert abs(z2[-1, 3] - 2.24) < 1e-9 and abs(z2[-1, 5] - 1.84) < 1e-9
     part = np.zeros(n, bool)
     part[[0, 1]] = True
-    z3, _ = ER.local_solve(D, z2, part, h=h, half=0.32, edits={3: 2.24, 5: 1.84, 7: 1.0})
+    z3, _ = ER.local_solve(
+        D, z2, part, h=h, half=0.32, edits={3: 2.24, 5: 1.84, 7: 1.0}
+    )
     z4, _ = ER.local_solve(D, z2, part, h=h, half=0.32, edits={})
     assert np.allclose(z3, z4)

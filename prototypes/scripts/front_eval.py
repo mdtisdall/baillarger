@@ -47,8 +47,17 @@ def say(msg):
 
 def phantom_tissue(B):
     """A column_traces.Tissue from a fold phantom (fold_phantoms.make)."""
-    return CT.Tissue(patch=None, vox=np.asarray(B["vox"], float), rim=B["rim"], miss=B["miss"],
-                     ctx=B["ctx"], wm=B["wm"], det=B["det"], dface=B["dface"], labels=B["labels"])
+    return CT.Tissue(
+        patch=None,
+        vox=np.asarray(B["vox"], float),
+        rim=B["rim"],
+        miss=B["miss"],
+        ctx=B["ctx"],
+        wm=B["wm"],
+        det=B["det"],
+        dface=B["dface"],
+        labels=B["labels"],
+    )
 
 
 def pct(a, q=(50, 90)):
@@ -75,22 +84,32 @@ def phantoms(A):
             tc = FE.true_class(truth)
             emax, _, eend, econ = FE.errors(fold, truth, R.pos, R.ns, t.vox)
             k = keep
-            r = dict(roots=int(k.sum()),
-                     right_class=round(float(np.mean(R.cls[k] == tc[k])), 3),
-                     failed=round(float(np.mean(R.cls[k] == CT.FAILED)), 3),
-                     own_bank=round(float(np.mean(R.cls[k] == CT.OWN)), 3),
-                     to_contact=round(float(np.mean(R.cls[k] == CT.TOCONTACT)), 3),
-                     path_err_p50_p90=pct(emax[k]), end_err_p50_p90=pct(eend[k]),
-                     contact_err_p50_p90=pct(econ[k]) if np.isfinite(econ[k]).any() else None)
+            r = dict(
+                roots=int(k.sum()),
+                right_class=round(float(np.mean(R.cls[k] == tc[k])), 3),
+                failed=round(float(np.mean(R.cls[k] == CT.FAILED)), 3),
+                own_bank=round(float(np.mean(R.cls[k] == CT.OWN)), 3),
+                to_contact=round(float(np.mean(R.cls[k] == CT.TOCONTACT)), 3),
+                path_err_p50_p90=pct(emax[k]),
+                end_err_p50_p90=pct(eend[k]),
+                contact_err_p50_p90=pct(econ[k])
+                if np.isfinite(econ[k]).any()
+                else None,
+            )
             if m == "front":
-                r["descending (turn_at >= 0)"] = round(float(np.mean(R.turn_at[k] >= 0)), 3)
+                r["descending (turn_at >= 0)"] = round(
+                    float(np.mean(R.turn_at[k] >= 0)), 3
+                )
                 r["area"] = front_area_vs_truth(fold, truth, R, k)
             paths[m] = (R.pos, R.ns, R.outc, k)
             row[m] = r
-            say(f"{pname} {m}: right {r['right_class']}, failed {r['failed']}, own {r['own_bank']}, "
-                f"path {r['path_err_p50_p90']}, end {r['end_err_p50_p90']}, contact {r['contact_err_p50_p90']}")
-        row["front vs crest, path distance (mm) p50/p90/p99"] = agreement(paths["crest"], paths["front"],
-                                                                          t.vox)
+            say(
+                f"{pname} {m}: right {r['right_class']}, failed {r['failed']}, own {r['own_bank']}, "
+                f"path {r['path_err_p50_p90']}, end {r['end_err_p50_p90']}, contact {r['contact_err_p50_p90']}"
+            )
+        row["front vs crest, path distance (mm) p50/p90/p99"] = agreement(
+            paths["crest"], paths["front"], t.vox
+        )
         res["phantoms"][pname] = row
     json.dump(res, open(f"{A.work}/front_eval_phantoms_{A.site}.json", "w"), indent=1)
 
@@ -120,11 +139,21 @@ def front_area_vs_truth(fold, truth, R, keep):
         r = r0[m] + sg[m] * s
         true = (r / r0[m]) ** p[m]
         got = R.area[m, i] / R.area[m, 0]
-        vt = np.where(p[m] == 0, s, r0[m] / (p[m] + 1) * sg[m] * ((r / r0[m]) ** (p[m] + 1) - 1))
-        out[f"{s} mm"] = dict(n=int(m.sum()),
-                              area_front_over_true_p10_50_90=np.percentile(got / true, [10, 50, 90]).round(3).tolist(),
-                              area_total_front_over_true=round(float((R.area[m, i]).sum() / (R.area[m, 0] * true).sum()), 4),
-                              vol_total_front_over_true=round(float((R.vol[m, i] * R.area[m, 0]).sum() / (R.area[m, 0] * vt).sum()), 4))
+        vt = np.where(
+            p[m] == 0, s, r0[m] / (p[m] + 1) * sg[m] * ((r / r0[m]) ** (p[m] + 1) - 1)
+        )
+        out[f"{s} mm"] = dict(
+            n=int(m.sum()),
+            area_front_over_true_p10_50_90=np.percentile(got / true, [10, 50, 90])
+            .round(3)
+            .tolist(),
+            area_total_front_over_true=round(
+                float((R.area[m, i]).sum() / (R.area[m, 0] * true).sum()), 4
+            ),
+            vol_total_front_over_true=round(
+                float((R.vol[m, i] * R.area[m, 0]).sum() / (R.area[m, 0] * vt).sum()), 4
+            ),
+        )
     return out
 
 
@@ -137,11 +166,31 @@ def agreement(a, b, vox):
     dev = []
     for i in same:
         n = min(na[i], nb[i])
-        dev.append(float(np.max(np.linalg.norm((pa[i, :n] - pb[i, :n]).astype(float) * vox, axis=1))))
+        dev.append(
+            float(
+                np.max(
+                    np.linalg.norm((pa[i, :n] - pb[i, :n]).astype(float) * vox, axis=1)
+                )
+            )
+        )
     return np.percentile(dev, [50, 90, 99]).round(3).tolist() if dev else None
 
 
-KEYS = ("vox", "P", "near_face", "cls", "outc", "pos", "ns", "nrm", "tv", "crest_at", "area", "vol", "turn_at")
+KEYS = (
+    "vox",
+    "P",
+    "near_face",
+    "cls",
+    "outc",
+    "pos",
+    "ns",
+    "nrm",
+    "tv",
+    "crest_at",
+    "area",
+    "vol",
+    "turn_at",
+)
 
 
 def load(path):
@@ -153,8 +202,11 @@ def sites(A):
     res = {}
     for site, lo in SITES.items():
         # each array read once: an NpzFile decompresses an array on every access
-        Z = {m: load(f"{A.dir}/column_volume_{site}_{m}.npz") for m in METHODS
-             if Path(f"{A.dir}/column_volume_{site}_{m}.npz").exists()}
+        Z = {
+            m: load(f"{A.dir}/column_volume_{site}_{m}.npz")
+            for m in METHODS
+            if Path(f"{A.dir}/column_volume_{site}_{m}.npz").exists()
+        }
         if "front" not in Z:
             continue
         vox = Z["front"]["vox"]
@@ -163,36 +215,57 @@ def sites(A):
         for m, z in Z.items():
             keep = ~z["near_face"]
             cls, outc = z["cls"], z["outc"]
-            d = dict(classes={CT.CLASS[c]: int(np.sum(keep & (cls == c))) for c in range(5)},
-                     failed_by_outcome={S.OUTCOME[o]: int(np.sum(keep & (cls == CT.FAILED) & (outc == o)))
-                                        for o in range(10) if np.sum(keep & (cls == CT.FAILED) & (outc == o))})
+            d = dict(
+                classes={CT.CLASS[c]: int(np.sum(keep & (cls == c))) for c in range(5)},
+                failed_by_outcome={
+                    S.OUTCOME[o]: int(np.sum(keep & (cls == CT.FAILED) & (outc == o)))
+                    for o in range(10)
+                    if np.sum(keep & (cls == CT.FAILED) & (outc == o))
+                },
+            )
             if len(Pts):
                 tree = cKDTree(Pts * vox)
                 hit = {CT.CROSS: set(), CT.TOCONTACT: set()}
                 for c in hit:
                     for i in np.flatnonzero(keep & (cls == c)):
-                        dd, j = tree.query(z["pos"][i, :z["ns"][i]].astype(float) * vox)
+                        dd, j = tree.query(
+                            z["pos"][i, : z["ns"][i]].astype(float) * vox
+                        )
                         hit[c].update(j[dd <= 0.3].tolist())
                 d["marked points crossed (crossing columns)"] = len(hit[CT.CROSS])
-                d["marked points reached (crossing or to the contact)"] = len(hit[CT.CROSS] | hit[CT.TOCONTACT])
+                d["marked points reached (crossing or to the contact)"] = len(
+                    hit[CT.CROSS] | hit[CT.TOCONTACT]
+                )
                 d["points"] = len(Pts)
             k_ = np.arange(len(cls))
             ns_ = z["ns"]
-            d_end = (z["pos"][k_, ns_ - 1] - z["pos"][k_, np.maximum(ns_ - 2, 0)]).astype(float)
+            d_end = (
+                z["pos"][k_, ns_ - 1] - z["pos"][k_, np.maximum(ns_ - 2, 0)]
+            ).astype(float)
             fwd = (d_end * z["nrm"][z["tv"]]).sum(1) > 0
             own = keep & (cls == CT.OWN)
-            d["own bank: entering the WM heading on / back"] = [int(np.sum(own & fwd)), int(np.sum(own & ~fwd))]
+            d["own bank: entering the WM heading on / back"] = [
+                int(np.sum(own & fwd)),
+                int(np.sum(own & ~fwd)),
+            ]
             ca = z["crest_at"]
-            d["meeting a crest, by class"] = {CT.CLASS[c]: int(np.sum(keep & (cls == c) & (ca >= 0)))
-                                              for c in range(5)}
+            d["meeting a crest, by class"] = {
+                CT.CLASS[c]: int(np.sum(keep & (cls == c) & (ca >= 0)))
+                for c in range(5)
+            }
             r[m] = d
         zf = Z["front"]
         keep = ~zf["near_face"]
         for other in ("crest", "traverse"):
             zc = Z[other]
             assert np.array_equal(zf["tv"], zc["tv"])
-            r[f"front vs {other}: path distance (mm) p50/p90/p99, same outcome"] = agreement(
-                (zc["pos"], zc["ns"], zc["outc"], keep), (zf["pos"], zf["ns"], zf["outc"], keep), vox)
+            r[f"front vs {other}: path distance (mm) p50/p90/p99, same outcome"] = (
+                agreement(
+                    (zc["pos"], zc["ns"], zc["outc"], keep),
+                    (zf["pos"], zf["ns"], zf["outc"], keep),
+                    vox,
+                )
+            )
             ch = {}
             for a in range(5):
                 for b in range(5):
@@ -201,15 +274,20 @@ def sites(A):
                         ch[f"{CT.CLASS[a]} -> {CT.CLASS[b]}"] = n
             r[f"front vs {other}: class changes"] = ch
         ta = zf["turn_at"]
-        r["front: descending, by class"] = {CT.CLASS[c]: int(np.sum(keep & (zf["cls"] == c) & (ta >= 0)))
-                                            for c in range(5)}
+        r["front: descending, by class"] = {
+            CT.CLASS[c]: int(np.sum(keep & (zf["cls"] == c) & (ta >= 0)))
+            for c in range(5)
+        }
         op = keep & (zf["cls"] == CT.OPEN)
         k = np.flatnonzero(op)
         a0, a1 = zf["area"][k, 0], zf["area"][k, zf["ns"][k] - 1]
         L = (zf["ns"][k] - 1) * S.STEP_MM
-        r["front, open columns: top area / root area p10/50/90"] = pct(a1 / a0, (10, 50, 90))
+        r["front, open columns: top area / root area p10/50/90"] = pct(
+            a1 / a0, (10, 50, 90)
+        )
         r["front, open columns: swept volume per root area / length p10/50/90"] = pct(
-            zf["vol"][k, zf["ns"][k] - 1] / L, (10, 50, 90))
+            zf["vol"][k, zf["ns"][k] - 1] / L, (10, 50, 90)
+        )
         res[site] = r
         say(f"{site}: " + json.dumps(r))
     json.dump(res, open(f"{A.work}/front_eval_sites.json", "w"), indent=1)

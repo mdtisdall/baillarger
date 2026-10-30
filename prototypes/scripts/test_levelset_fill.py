@@ -16,8 +16,14 @@ import levelset_phantoms as PH
 
 
 def run(ph, budget, mode, **kw):
-    b = budget if isinstance(budget, np.ndarray) else np.full(ph.wm.shape, float(budget))
-    return L.march(ph.cortex, ph.wm, ph.band, ph.phi, ph.foot, ph.normal, b, ph.n, mode=mode, **kw)
+    b = (
+        budget
+        if isinstance(budget, np.ndarray)
+        else np.full(ph.wm.shape, float(budget))
+    )
+    return L.march(
+        ph.cortex, ph.wm, ph.band, ph.phi, ph.foot, ph.normal, b, ph.n, mode=mode, **kw
+    )
 
 
 # ------------------------------------------------------------------ 1. flat slab
@@ -37,8 +43,14 @@ def test_slab_exact(mode):
     np.testing.assert_allclose(f.a[c], 1.0, atol=1e-9)
     # R is the foot point
     X, Y = np.meshgrid(np.arange(c.shape[0]), np.arange(c.shape[1]), indexing="ij")
-    foot = np.stack([np.broadcast_to(X[..., None], c.shape), np.broadcast_to(Y[..., None], c.shape),
-                     np.full(c.shape, 9.5)], -1)
+    foot = np.stack(
+        [
+            np.broadcast_to(X[..., None], c.shape),
+            np.broadcast_to(Y[..., None], c.shape),
+            np.full(c.shape, 9.5),
+        ],
+        -1,
+    )
     np.testing.assert_allclose(f.R[c], foot[c], atol=1e-9)
     tp = L.tops(f, ph.fluid)
     assert tp.idx.size == c.shape[0] * c.shape[1]
@@ -53,7 +65,12 @@ def test_phantom_normals_on_the_surface():
     """The analytic surface's normal is defined at voxels lying on it (phi = 0), not from x - foot."""
     ph = PH.cylinder()
     c = ph.extra["c"]
-    G = np.stack(np.meshgrid(*[np.arange(m) for m in ph.wm.shape], indexing="ij"), -1).astype(float) - c
+    G = (
+        np.stack(
+            np.meshgrid(*[np.arange(m) for m in ph.wm.shape], indexing="ij"), -1
+        ).astype(float)
+        - c
+    )
     G[..., 1] = 0
     u = G / np.maximum(np.linalg.norm(G, axis=-1, keepdims=True), 1e-12)
     cosang = np.sum(ph.normal[ph.band] * u[ph.band], 1)
@@ -63,7 +80,12 @@ def test_phantom_normals_on_the_surface():
 def crown_exact(ph, kind):
     r0, r1, c = ph.extra["r0"], ph.extra["r1"], ph.extra["c"]
     k = 1 if kind == "cylinder" else 2
-    G = np.stack(np.meshgrid(*[np.arange(m) for m in ph.wm.shape], indexing="ij"), -1).astype(float) - c
+    G = (
+        np.stack(
+            np.meshgrid(*[np.arange(m) for m in ph.wm.shape], indexing="ij"), -1
+        ).astype(float)
+        - c
+    )
     if k == 1:
         G[..., 1] = 0
     r = np.linalg.norm(G, axis=-1)
@@ -113,15 +135,21 @@ def test_crown_cross_section(kind):
     aR = L.a_from_R(f)
     e_R = aR[inner] / ex[inner] - 1
     assert abs(np.median(e_div)) < 0.02 and np.percentile(np.abs(e_div), 95) < 0.05, (
-        np.median(e_div), np.percentile(np.abs(e_div), 95))
+        np.median(e_div),
+        np.percentile(np.abs(e_div), 95),
+    )
     assert abs(np.nanmedian(e_R)) < 0.02 and np.nanpercentile(np.abs(e_R), 95) < 0.05, (
-        np.nanmedian(e_R), np.nanpercentile(np.abs(e_R), 95))
+        np.nanmedian(e_R),
+        np.nanpercentile(np.abs(e_R), 95),
+    )
     # w through the radius it implies (w grows to ~50 voxels on the sphere; the radius is the scale that
     # matters, as for the level sets)
     rw = (r0 ** (k + 1) + f.w[inner] * (k + 1) * r0**k) ** (1 / (k + 1))
     ew = rw - r[inner]
-    assert abs(np.median(ew)) < 0.1 and np.percentile(np.abs(ew), 95) < 0.5, (np.median(ew),
-                                                                           np.percentile(np.abs(ew), 95))
+    assert abs(np.median(ew)) < 0.1 and np.percentile(np.abs(ew), 95) < 0.5, (
+        np.median(ew),
+        np.percentile(np.abs(ew), 95),
+    )
 
 
 # ------------------------------------------------------------------ 3. apposed slabs, P4 and P8
@@ -210,7 +238,16 @@ def wedge_reference(ph):
     out = []
     for sel, nv, mu in ((sideA, e["nA"], e["mu_a"]), (~sideA, e["nB"], e["mu_b"])):
         n3 = np.broadcast_to(np.array([nv[0], 0, nv[1]]), ph.wm.shape + (3,))
-        f = L.march(ph.cortex, ph.wm, ph.band & sel, ph.phi, ph.foot, ph.normal, np.full(ph.wm.shape, mu), n3)
+        f = L.march(
+            ph.cortex,
+            ph.wm,
+            ph.band & sel,
+            ph.phi,
+            ph.foot,
+            ph.normal,
+            np.full(ph.wm.shape, mu),
+            n3,
+        )
         out.append(f.tau)
     return out
 
@@ -222,7 +259,11 @@ def seam_vs_reference(ph, f, tA, tB):
         yi, zi = int(round(y)), int(round(z))
         dd = tA[:, yi, zi] - tB[:, yi, zi]
         xs = np.flatnonzero(np.isfinite(dd) & ph.cortex[:, yi, zi])
-        ch = [c for c in np.flatnonzero(np.diff(np.sign(dd[xs])) != 0) if xs[c + 1] == xs[c] + 1]
+        ch = [
+            c
+            for c in np.flatnonzero(np.diff(np.sign(dd[xs])) != 0)
+            if xs[c + 1] == xs[c] + 1
+        ]
         if ch:
             a0, a1 = dd[xs[ch[0]]], dd[xs[ch[0]] + 1]
             errs.append(x - (xs[ch[0]] + a0 / (a0 - a1)))
@@ -245,9 +286,12 @@ def test_wedge_own_normals(theta):
     assert np.abs(err).max() < 0.05, np.abs(err).max()
 
 
-@pytest.mark.xfail(strict=True, reason="a known limitation, reported: where coherence is 0 and two fronts "
-                   "meet at 90 degrees, the blend turns the direction in steps under 90 degrees from one "
-                   "front's to the other's, so neighbours agree everywhere, no seam forms and the fronts merge")
+@pytest.mark.xfail(
+    strict=True,
+    reason="a known limitation, reported: where coherence is 0 and two fronts "
+    "meet at 90 degrees, the blend turns the direction in steps under 90 degrees from one "
+    "front's to the other's, so neighbours agree everywhere, no seam forms and the fronts merge",
+)
 def test_wedge_seam_at_90():
     """Version C at 90 degrees: with coherence 0 at the bisector the direction is the front's own normal
     there. The plan expects the budgets to decide a seam inside that band. What happens: directions run
@@ -298,7 +342,12 @@ def test_omega_no_bending(mode):
     fx = ph.foot[..., 0]
     f_step = run(ph, np.where(fx < e["cx"], e["tl"], e["tr"]), mode)
     f_eq = run(ph, 15.0, mode)
-    floor = ph.cortex & L.claimed(f_step) & (np.abs(fx - e["cx"]) < 12) & (ph.foot[..., 2] < 20)
+    floor = (
+        ph.cortex
+        & L.claimed(f_step)
+        & (np.abs(fx - e["cx"]) < 12)
+        & (ph.foot[..., 2] < 20)
+    )
     assert floor.sum() > 500
     dR = np.linalg.norm(f_step.R - ph.foot, axis=-1)[floor]
     assert np.percentile(dR, 99) < 0.5, np.percentile(dR, 99)
@@ -324,7 +373,9 @@ def test_blade_sides_do_not_mix():
     m = L.claimed(f) & ph.cortex
     assert m.sum() == ph.cortex.sum()
     sides = m & (ph.foot[..., 2] < e["ztip"] - 0.6)
-    assert np.all(np.sign(f.R[sides][:, 0] - e["mid"]) == np.sign(ph.foot[sides][:, 0] - e["mid"]))
+    assert np.all(
+        np.sign(f.R[sides][:, 0] - e["mid"]) == np.sign(ph.foot[sides][:, 0] - e["mid"])
+    )
     assert np.linalg.norm(f.R - ph.foot, axis=-1)[m].max() < 0.5
 
 
@@ -389,7 +440,11 @@ def test_mesh_field_cg_matches_direct(alpha, trend):
     fld = LM.MeshField(mesh, H, alpha=alpha)
     y = np.full(n, np.nan)
     o = rng.choice(n, n // 5, replace=False)
-    y[o] = np.log(2.5) + 0.2 * np.sin(mesh.mm[o, 0] * 3) + 0.05 * rng.standard_normal(o.size)
+    y[o] = (
+        np.log(2.5)
+        + 0.2 * np.sin(mesh.mm[o, 0] * 3)
+        + 0.05 * rng.standard_normal(o.size)
+    )
     a = fld.fit(y, trend=trend)
     b = fld.fit(y, trend=trend, direct=True)
     np.testing.assert_allclose(a["mu"], b["mu"], atol=1e-5)
@@ -404,7 +459,9 @@ def test_mesh_field_length():
     import levelset_mesh as LM
 
     wm = np.zeros((100, 100, 10), bool)
-    wm[:, :, :5] = True  # a flat sheet 16 mm across (a small ball is closed within one length)
+    wm[:, :, :5] = (
+        True  # a flat sheet 16 mm across (a small ball is closed within one length)
+    )
     v0, f = MS.contour(wm, 0.0)
     mesh = LM.Mesh(v0, f, MS.smooth_normals(v0, f), np.array([0.16, 0.16, 0.16]))
     n = len(mesh.verts)
@@ -446,8 +503,12 @@ def test_low_coherence_paths_do_not_depend_on_budgets(mode, noise):
     coh = np.full(ph.wm.shape, 0.5)
     b1 = np.full(ph.wm.shape, 16.0)
     b2 = 16.0 + 5.0 * (ph.foot[..., 2] - c) / ph.extra["r0"]
-    f1 = L.march(ph.cortex, ph.wm, ph.band, ph.phi, ph.foot, ph.normal, b1, n, coh, mode=mode)
-    f2 = L.march(ph.cortex, ph.wm, ph.band, ph.phi, ph.foot, ph.normal, b2, n, coh, mode=mode)
+    f1 = L.march(
+        ph.cortex, ph.wm, ph.band, ph.phi, ph.foot, ph.normal, b1, n, coh, mode=mode
+    )
+    f2 = L.march(
+        ph.cortex, ph.wm, ph.band, ph.phi, ph.foot, ph.normal, b2, n, coh, mode=mode
+    )
     m = L.claimed(f1) & L.claimed(f2) & ph.cortex
     assert m.sum() > 0.99 * ph.cortex.sum()
     assert np.mean(f1.blend[m] > 0) > 0.9
@@ -456,7 +517,9 @@ def test_low_coherence_paths_do_not_depend_on_budgets(mode, noise):
         assert not moved.any()
     k = m & ~moved
     for name in ("d", "R", "s", "w"):
-        np.testing.assert_allclose(getattr(f1, name)[k], getattr(f2, name)[k], atol=1e-9, err_msg=name)
+        np.testing.assert_allclose(
+            getattr(f1, name)[k], getattr(f2, name)[k], atol=1e-9, err_msg=name
+        )
     t1, t2 = L.tops(f1, ph.fluid), L.tops(f2, ph.fluid)
     keep1 = ~moved.ravel()[t1.idx]
     keep2 = ~moved.ravel()[t2.idx]

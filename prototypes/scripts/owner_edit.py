@@ -51,7 +51,17 @@ import curv_lib as C
 import mesh_smoothing as M
 import pial_height as P_
 from baillarger.mesh_intersect import intersecting_faces
-from click_evidence import FULL, HALF, PATCH, RATIO, FACE_MM, Thickness, end_labels, orientation, score
+from click_evidence import (
+    FULL,
+    HALF,
+    PATCH,
+    RATIO,
+    FACE_MM,
+    Thickness,
+    end_labels,
+    orientation,
+    score,
+)
 from onepass_lib import contacts, run, setup
 
 FIG, WORK, DATA = sys.argv[1:4]
@@ -70,7 +80,8 @@ def side_S(s, f, mu, sd, P, u_pts, h, idx):
     out = []
     for (lm, lp), r in zip(ends, rows):
         if lm < 0 or not np.isfinite(r["S_thin"]):
-            out.append([]); continue
+            out.append([])
+            continue
         thin = lm if mu[lm] < mu[lp] else lp  # as score_points_sides
         thick = lp if thin == lm else lm
         out.append([(int(thin), float(r["S_thin"])), (int(thick), float(r["S_thick"]))])
@@ -81,7 +92,9 @@ def apply(s, mu, sd, P, u_pts, h, idx, spread, timing):
     """mu after the edits at points idx (ROUNDS rounds); the last pass."""
     mu = mu.copy()
     for _ in range(ROUNDS):
-        t = time.time(); f = run(s, mu, sd, ratio=RATIO); timing.append(time.time() - t)
+        t = time.time()
+        f = run(s, mu, sd, ratio=RATIO)
+        timing.append(time.time() - t)
         corr = {}
         for sides in side_S(s, f, mu, sd, P, u_pts, h, idx):
             for root, S in sides:
@@ -92,21 +105,32 @@ def apply(s, mu, sd, P, u_pts, h, idx, spread, timing):
         if not spread:
             mu[roots] *= np.exp(c)
             continue
-        d = dijkstra(s.graph, indices=s.rep[roots], limit=SPREAD_MAX_MM / h)[:, s.rep] * h  # (edits, patches) mm
+        d = (
+            dijkstra(s.graph, indices=s.rep[roots], limit=SPREAD_MAX_MM / h)[:, s.rep]
+            * h
+        )  # (edits, patches) mm
         w = np.exp(-0.5 * (d / SPREAD_MM) ** 2)
         w[~np.isfinite(d)] = 0.0
         wsum = w.sum(0)
         has = wsum > 0
         mean_c = (w * c[:, None]).sum(0)[has] / wsum[has]
-        mu[has] *= np.exp(mean_c * np.minimum(1.0, w.max(0)[has]))  # the edited roots themselves get w = 1
-    t = time.time(); f = run(s, mu, sd, ratio=RATIO); timing.append(time.time() - t)
+        mu[has] *= np.exp(
+            mean_c * np.minimum(1.0, w.max(0)[has])
+        )  # the edited roots themselves get w = 1
+    t = time.time()
+    f = run(s, mu, sd, ratio=RATIO)
+    timing.append(time.time() - t)
     return mu, f
 
 
 def offsets(rows):
     o = np.array([r["offset"] for r in rows])
-    return dict(median_abs=round(float(np.nanmedian(np.abs(o))), 3), median=round(float(np.nanmedian(o)), 3),
-                worst=round(float(np.nanmax(np.abs(o))), 3), missing=int(np.isnan(o).sum()))
+    return dict(
+        median_abs=round(float(np.nanmedian(np.abs(o))), 3),
+        median=round(float(np.nanmedian(o)), 3),
+        worst=round(float(np.nanmax(np.abs(o))), 3),
+        missing=int(np.isnan(o).sum()),
+    )
 
 
 def shared_surface(B, s, f, mu, sd):
@@ -117,10 +141,12 @@ def shared_surface(B, s, f, mu, sd):
     quads, shift, kind = [], [], []
     for a in range(3):
         b_, c_ = (a + 1) % 3, (a + 2) % 3
-        eb, ec = np.zeros(3), np.zeros(3); eb[b_], ec[c_] = 0.5, 0.5
+        eb, ec = np.zeros(3), np.zeros(3)
+        eb[b_], ec[c_] = 0.5, 0.5
         for sgn in (-1, 1):
             nb = np.ones_like(tissue)
-            src = [slice(None)] * 3; dst = [slice(None)] * 3
+            src = [slice(None)] * 3
+            dst = [slice(None)] * 3
             if sgn > 0:
                 src[a], dst[a] = slice(1, None), slice(0, -1)
             else:
@@ -128,8 +154,12 @@ def shared_surface(B, s, f, mu, sd):
             nb[tuple(dst)] = tissue[tuple(src)]
             ctr = np.argwhere(tissue & ~nb).astype(float)
             ctr[:, a] += 0.5 * sgn
-            q = np.stack([ctr - eb - ec, ctr + eb - ec, ctr + eb + ec, ctr - eb + ec], 1)
-            quads.append(q if sgn > 0 else q[:, ::-1]); shift.append(np.zeros((len(q), 3))); kind.append(np.zeros(len(q), bool))
+            q = np.stack(
+                [ctr - eb - ec, ctr + eb - ec, ctr + eb + ec, ctr - eb + ec], 1
+            )
+            quads.append(q if sgn > 0 else q[:, ::-1])
+            shift.append(np.zeros((len(q), 3)))
+            kind.append(np.zeros(len(q), bool))
     c = contacts(s, f, mu, sd, sep_min=SEP)
     ra, rb = c.da / mu[c.a], c.db / mu[c.b]
     keep = ~((ra <= 0.8) & (rb <= 0.8))
@@ -140,21 +170,31 @@ def shared_surface(B, s, f, mu, sd):
     ax, fr = c.axis[keep], c.frac[keep]
     step = qc - pc  # a unit step along ax
     ctr = 0.5 * (pc + qc)
-    e1 = np.zeros((len(ax), 3)); e2 = np.zeros((len(ax), 3))
-    e1[np.arange(len(ax)), (ax + 1) % 3] = 0.5; e2[np.arange(len(ax)), (ax + 2) % 3] = 0.5
-    quads.append(np.stack([ctr - e1 - e2, ctr + e1 - e2, ctr + e1 + e2, ctr - e1 + e2], 1))
-    shift.append((fr - 0.5)[:, None] * step); kind.append(np.ones(len(ax), bool))
-    Q = np.concatenate(quads); SH = np.concatenate(shift); K = np.concatenate(kind)
+    e1 = np.zeros((len(ax), 3))
+    e2 = np.zeros((len(ax), 3))
+    e1[np.arange(len(ax)), (ax + 1) % 3] = 0.5
+    e2[np.arange(len(ax)), (ax + 2) % 3] = 0.5
+    quads.append(
+        np.stack([ctr - e1 - e2, ctr + e1 - e2, ctr + e1 + e2, ctr - e1 + e2], 1)
+    )
+    shift.append((fr - 0.5)[:, None] * step)
+    kind.append(np.ones(len(ax), bool))
+    Q = np.concatenate(quads)
+    SH = np.concatenate(shift)
+    K = np.concatenate(kind)
     tri = np.concatenate([Q[:, [0, 1, 2]], Q[:, [0, 2, 3]]])
-    tsh = np.concatenate([SH, SH]); tk = np.concatenate([K, K])
+    tsh = np.concatenate([SH, SH])
+    tk = np.concatenate([K, K])
     key = np.round(tri.reshape(-1, 3) * 2).astype(np.int64)
     uk, inv = np.unique(key, axis=0, return_inverse=True)
     v = uk / 2.0
     fc = inv.reshape(-1, 3)
     # sub-voxel: each vertex on contact faces moves by the mean shift of those faces
-    acc = np.zeros_like(v); cnt = np.zeros(len(v))
+    acc = np.zeros_like(v)
+    cnt = np.zeros(len(v))
     for k in range(3):
-        np.add.at(acc, fc[tk, k], tsh[tk]); np.add.at(cnt, fc[tk, k], 1)
+        np.add.at(acc, fc[tk, k], tsh[tk])
+        np.add.at(cnt, fc[tk, k], 1)
     v[cnt > 0] += acc[cnt > 0] / cnt[cnt > 0, None]
     v = M.twice(M.relax(v, fc), fc, 2.0)
     return v, fc, tk, int(keep.sum())
@@ -166,10 +206,19 @@ def surface_report(v, fc, tk, P, h):
     xf, _ = intersecting_faces(v, fc)
     cl, _, _ = M.closest_on_mesh(v, fc[tk], P)
     d = np.linalg.norm(cl - P, axis=1) * h
-    return dict(triangles=int(len(fc)), contact_triangles=int(tk.sum()), edges_over_two_triangles=int(np.sum(cnt > 2)),
-                crossing_triangles=int(xf.sum()), crossing_contact_triangles=int((xf & tk).sum()),
-                point_to_contact_sheet_mm=dict(median=round(float(np.median(d)), 3), p90=round(float(np.percentile(d, 90)), 3),
-                                               worst=round(float(d.max()), 3)), d=d.round(3).tolist())
+    return dict(
+        triangles=int(len(fc)),
+        contact_triangles=int(tk.sum()),
+        edges_over_two_triangles=int(np.sum(cnt > 2)),
+        crossing_triangles=int(xf.sum()),
+        crossing_contact_triangles=int((xf & tk).sum()),
+        point_to_contact_sheet_mm=dict(
+            median=round(float(np.median(d)), 3),
+            p90=round(float(np.percentile(d, 90)), 3),
+            worst=round(float(d.max()), 3),
+        ),
+        d=d.round(3).tolist(),
+    )
 
 
 def main():
@@ -188,17 +237,27 @@ def main():
     del dirv
     T = Thickness(B, s, h)
     mu0, sd0, _ = T.weights(T.y_tops)
-    t = time.time(); f0 = run(s, mu0, sd0, ratio=RATIO); t_pass = time.time() - t
+    t = time.time()
+    f0 = run(s, mu0, sd0, ratio=RATIO)
+    t_pass = time.time() - t
     say(f"setup; one pass {t_pass:.1f} s ({s.domain.sum():,} voxels)")
-    out = dict(pass_seconds=round(t_pass, 2), before=offsets(score(s, f0, mu0, sd0, P, u_pts, h, np.arange(n))))
+    out = dict(
+        pass_seconds=round(t_pass, 2),
+        before=offsets(score(s, f0, mu0, sd0, P, u_pts, h, np.arange(n))),
+    )
     say(f"before: {out['before']}")
     keep = {}
     for variant, spread in (("roots", False), ("spread 1 mm", True)):
         timing: list = []
         mu_all, f_all = apply(s, mu0, sd0, P, u_pts, h, np.arange(n), spread, timing)
-        res = {"all 23": offsets(score(s, f_all, mu_all, sd0, P, u_pts, h, np.arange(n)))}
+        res = {
+            "all 23": offsets(score(s, f_all, mu_all, sd0, P, u_pts, h, np.arange(n)))
+        }
         rows = []
-        for place, held in ((np.arange(0, n, 2), np.arange(1, n, 2)), (np.arange(1, n, 2), np.arange(0, n, 2))):
+        for place, held in (
+            (np.arange(0, n, 2), np.arange(1, n, 2)),
+            (np.arange(1, n, 2), np.arange(0, n, 2)),
+        ):
             mu_h, f_h = apply(s, mu0, sd0, P, u_pts, h, place, spread, timing)
             rows += score(s, f_h, mu_h, sd0, P, u_pts, h, held)
         res["interleaved (held out)"] = offsets(rows)
@@ -210,7 +269,10 @@ def main():
 
     # the surface without a slit, before and after (spread variant)
     surf = {}
-    for name, (mu, f) in (("before", (mu0, f0)), ("after all 23 (spread 1 mm)", keep["spread 1 mm"])):
+    for name, (mu, f) in (
+        ("before", (mu0, f0)),
+        ("after all 23 (spread 1 mm)", keep["spread 1 mm"]),
+    ):
         t = time.time()
         v, fc, tk, npairs = shared_surface(B, s, f, mu, sd0)
         te = time.time() - t
@@ -218,7 +280,9 @@ def main():
         rep.update(contact_pairs=npairs, extraction_seconds=round(te, 1))
         surf[name] = rep
         keep[name] = (v, fc, tk)
-        say(f"surface {name}: " + json.dumps({k: x for k, x in rep.items() if k != "d"}))
+        say(
+            f"surface {name}: " + json.dumps({k: x for k, x in rep.items() if k != "d"})
+        )
     out["surface"] = surf
     json.dump(out, open(f"{WORK}/owner_edit_M1S1.json", "w"), indent=1, default=float)
 
@@ -232,22 +296,44 @@ def main():
             vals, cnt = np.unique(np.round(P[:, a]).astype(int), return_counts=True)
             c = vals[np.argmax(cnt)]
             o = [i for i in range(3) if i != a]
-            sl = [slice(None)] * 3; sl[a] = c
-            ax.imshow(img[tuple(sl)].T, cmap="gray", origin="lower", vmin=-lim, vmax=lim, interpolation="nearest")
+            sl = [slice(None)] * 3
+            sl[a] = c
+            ax.imshow(
+                img[tuple(sl)].T,
+                cmap="gray",
+                origin="lower",
+                vmin=-lim,
+                vmax=lim,
+                interpolation="nearest",
+            )
             for ff, col, lw in ((fc[~tk], "#eb6834", 1.0), (fc[tk], "#2a78d6", 1.6)):
                 for sg in P_.plane_section(v, ff, a, float(c)):
                     ax.plot(sg[:, o[0]], sg[:, o[1]], color=col, lw=lw)
             on = np.abs(P[:, a] - c) < 1.5
             ax.plot(P[on, o[0]], P[on, o[1]], "x", color="#e34948", ms=7, mew=2)
             lo_, hi_ = P[:, o].min(0) - 25, P[:, o].max(0) + 25
-            ax.set_xlim(lo_[0], hi_[0]); ax.set_ylim(lo_[1], hi_[1]); ax.set_xticks([]); ax.set_yticks([])
+            ax.set_xlim(lo_[0], hi_[0])
+            ax.set_ylim(lo_[1], hi_[1])
+            ax.set_xticks([])
+            ax.set_yticks([])
             r = surf[name]
-            ax.set_title(f"{name}, plane {'ijk'[a]} = {c}" + (
-                f"\npoints to contact sheet: median {r['point_to_contact_sheet_mm']['median']:.2f} mm; "
-                f"crossing triangles {r['crossing_triangles']}" if a == 0 else ""), fontsize=10)
-    fig.suptitle("M1S1, the pial surface read off the one pass's owners (no slit): open surface (orange), the contact "
-                 "as one shared sheet (blue); red x: the 23 points. Echo 2, trend removed.", fontsize=11)
-    fig.tight_layout(); fig.savefig(f"{FIG}/owner_edit_M1S1.png", dpi=110)
+            ax.set_title(
+                f"{name}, plane {'ijk'[a]} = {c}"
+                + (
+                    f"\npoints to contact sheet: median {r['point_to_contact_sheet_mm']['median']:.2f} mm; "
+                    f"crossing triangles {r['crossing_triangles']}"
+                    if a == 0
+                    else ""
+                ),
+                fontsize=10,
+            )
+    fig.suptitle(
+        "M1S1, the pial surface read off the one pass's owners (no slit): open surface (orange), the contact "
+        "as one shared sheet (blue); red x: the 23 points. Echo 2, trend removed.",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    fig.savefig(f"{FIG}/owner_edit_M1S1.png", dpi=110)
     say("done")
 
 

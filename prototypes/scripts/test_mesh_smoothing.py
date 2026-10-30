@@ -31,8 +31,13 @@ def test_ball_truth_exact():
 
 def test_graph_peak_curvature_and_orthogonality():
     A, lam = 2.0, 40.0
-    ph = M.Phantom("g", (10, 10, 10), 5.0, "graph",
-                   dict(Q=np.eye(3), o=np.zeros(3), z0=0.0, A=A, lam=lam))
+    ph = M.Phantom(
+        "g",
+        (10, 10, 10),
+        5.0,
+        "graph",
+        dict(Q=np.eye(3), o=np.zeros(3), z0=0.0, A=A, lam=lam),
+    )
     w = 2 * np.pi / lam
     tr = ph.truth(np.array([[0.0, 0.0, 7.0]]))
     np.testing.assert_allclose(tr.d, 5.0, atol=1e-12)
@@ -53,7 +58,9 @@ def test_blade_offsets():
     rng = np.random.default_rng(1)
     X = ph.p["o"] + rng.uniform(-12, 12, (300, 3))
     tr = ph.truth(X)
-    np.testing.assert_allclose(np.linalg.norm(X - tr.foot, axis=1), np.abs(tr.d), atol=1e-9)
+    np.testing.assert_allclose(
+        np.linalg.norm(X - tr.foot, axis=1), np.abs(tr.d), atol=1e-9
+    )
     # feet lie on the blade's surface
     np.testing.assert_allclose(ph.truth(tr.foot).d, 0, atol=1e-9)
     # the normal points away from the WM: a step out raises d by the step
@@ -145,9 +152,15 @@ def test_graph_truth_far_above_troughs():
     rng = np.random.default_rng(4)
     X = ph.p["o"] + rng.uniform(-30, 30, (300, 3)) @ ph.p["Q"].T + 25 * ph.p["Q"][:, 2]
     tr = ph.truth(X)
-    uu, vv = np.meshgrid(np.arange(-90, 90, 0.05), np.arange(-90, 90, 0.05), indexing="ij")
-    S = np.c_[uu.ravel(), vv.ravel(), ph._h(uu.ravel(), vv.ravel())[0]] @ ph.p["Q"].T + ph.p["o"]
+    uu, vv = np.meshgrid(
+        np.arange(-90, 90, 0.05), np.arange(-90, 90, 0.05), indexing="ij"
+    )
+    S = (
+        np.c_[uu.ravel(), vv.ravel(), ph._h(uu.ravel(), vv.ravel())[0]] @ ph.p["Q"].T
+        + ph.p["o"]
+    )
     from scipy.spatial import cKDTree
+
     dbf, _ = cKDTree(S).query(X)
     np.testing.assert_allclose(np.abs(tr.d), dbf, atol=2e-3)
 
@@ -157,7 +170,9 @@ def test_closest_on_mesh_projects_onto_a_plane():
     X = np.array([[10.0, 10.0, 3.0], [8.0, 9.0, 14.0]])
     P, _, n = M.closest_on_mesh(v, f, X)
     np.testing.assert_allclose(P, X - (X @ nrm - 9.3)[:, None] * nrm, atol=1e-9)
-    np.testing.assert_allclose(n, np.broadcast_to(nrm, n.shape) * np.sign(n @ nrm)[:, None], atol=1e-9)
+    np.testing.assert_allclose(
+        n, np.broadcast_to(nrm, n.shape) * np.sign(n @ nrm)[:, None], atol=1e-9
+    )
 
 
 def test_band_seeds_metric_distance_brute_force():
@@ -168,7 +183,9 @@ def test_band_seeds_metric_distance_brute_force():
         D = np.linalg.inv(Mt)
         x = np.array([0.1, -0.2, 0.7])
         t, s, foot = M.band_seeds(x[None], np.zeros((1, 3)), n[None], D[None])
-        uv = np.stack(np.meshgrid(np.linspace(-3, 3, 1201), np.linspace(-3, 3, 1201)), -1).reshape(-1, 2)
+        uv = np.stack(
+            np.meshgrid(np.linspace(-3, 3, 1201), np.linspace(-3, 3, 1201)), -1
+        ).reshape(-1, 2)
         Y = np.c_[uv, np.zeros(len(uv))]
         r = x - Y
         best = np.sqrt(np.einsum("ni,ij,nj->n", r, Mt, r)).min()
@@ -194,11 +211,21 @@ def test_march_band_matches_the_package_from_point_seeds():
     seeds = lab >= 0
     k = np.flatnonzero(seeds.ravel())
     pos = np.stack(np.unravel_index(k, shape), -1).astype(float)
-    out = M.march_band(Mt, mask, seeds, np.zeros(3), np.zeros(3), pos, lab.ravel()[k],
-                       spacing=(1.0, 1.1, 0.9))
+    out = M.march_band(
+        Mt,
+        mask,
+        seeds,
+        np.zeros(3),
+        np.zeros(3),
+        pos,
+        lab.ravel()[k],
+        spacing=(1.0, 1.1, 0.9),
+    )
     np.testing.assert_array_equal(out.arrival, ref.arrival)
     np.testing.assert_array_equal(out.label, ref.label)
-    np.testing.assert_array_equal(np.nan_to_num(out.length, nan=-1), np.nan_to_num(ref.length, nan=-1))
+    np.testing.assert_array_equal(
+        np.nan_to_num(out.length, nan=-1), np.nan_to_num(ref.length, nan=-1)
+    )
 
 
 @pytest.mark.parametrize("ratio", [1.0, 3.0])
@@ -208,7 +235,9 @@ def test_march_band_exact_from_an_oblique_plane(ratio):
     Q = np.c_[Q[:, 1], Q[:, 2], Q[:, 0]] * np.sign(Q[:, 0] @ nrm)
     Q[:, 2] = nrm
     Q[:, 1] = np.cross(Q[:, 2], Q[:, 0])
-    ph = M.Phantom("p", (24, 24, 24), 12.0, "graph", dict(Q=Q, o=np.full(3, 8.0), z0=0.0))
+    ph = M.Phantom(
+        "p", (24, 24, 24), 12.0, "graph", dict(Q=Q, o=np.full(3, 8.0), z0=0.0)
+    )
     wm, ctx, tr = ph.labels()
     X = ph.grid()
     D = np.linalg.inv(riemann_from_direction(np.broadcast_to(nrm, X.shape), ratio))
@@ -254,6 +283,7 @@ def test_fin_distance_brute_force_outside():
     g = ph.grid(4).reshape(-1, 3)
     inside = g[ph.truth(g).d < 0]
     from scipy.spatial import cKDTree
+
     dbf, _ = cKDTree(inside).query(X)
     assert np.all(dbf >= tr_d - 1e-9) and np.all(dbf <= tr_d + 0.25)
 
@@ -272,6 +302,7 @@ def test_closest_on_mesh_sign_at_staircase_edges():
     # brute-force closest distance, and the side from the label (a point is inside
     # the binary contour when its nearest... ) -- here: |s| equals the true mesh distance
     from scipy.spatial import cKDTree
+
     np.testing.assert_allclose(np.abs(s), np.linalg.norm(X - P, axis=1), atol=1e-9)
     # outside the label's staircase by more than its half-voxel step: positive
     assert np.all(s[ph.truth(X).d > 0.9] > 0) and np.all(s[ph.truth(X).d < -0.9] < 0)
@@ -287,6 +318,7 @@ def test_implicit_closest_on_a_ball_and_a_thin_blade():
     P, n = cl(X)
     from scipy import ndimage as ndi
     from scipy.special import ndtri
+
     F = ndi.gaussian_filter(wm.astype(float), 1.0, truncate=6.0)
     coef = ndi.spline_filter(ndtri(np.clip(F, 1e-9, 1 - 1e-9)), order=3)
     val = ndi.map_coordinates(coef, P.T, order=3, prefilter=False, mode="nearest")
@@ -310,25 +342,35 @@ def test_voxel_face_mesh_is_the_label_boundary():
     v, f = M.voxel_face_mesh(wm)
     # area = surface area of the box 2 x 3 x 2
     P = v[f]
-    area = 0.5 * np.linalg.norm(np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0]), axis=1).sum()
+    area = (
+        0.5
+        * np.linalg.norm(np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0]), axis=1).sum()
+    )
     assert area == 2 * (2 * 3 + 3 * 2 + 2 * 2)
     n = M.vertex_normals(v, f)
     c = np.array([2.5, 3.0, 1.5])
     assert np.all(np.sum(n * (v - c), 1) > 0)
-    np.testing.assert_allclose(M.aspect_ratios(np.array([[0, 0, 0], [1, 0, 0], [0.5, np.sqrt(3) / 2, 0]]),
-                                               np.array([[0, 1, 2]])), 1.0)
+    np.testing.assert_allclose(
+        M.aspect_ratios(
+            np.array([[0, 0, 0], [1, 0, 0], [0.5, np.sqrt(3) / 2, 0]]),
+            np.array([[0, 1, 2]]),
+        ),
+        1.0,
+    )
 
 
 def test_implicit_closest_converges_across_the_band():
     # with a lightly smoothed label the field is flat beyond about a voxel; points
     # there must still reach the zero set (they did not: 55 % stopped short)
     from scipy import ndimage as ndi
+
     ph = M.wavy()
     wm, _, _ = ph.labels()
     G = ph.grid().reshape(-1, 3)
     X = G[np.abs(ph.truth(G).d) <= 2][::20]
     P, n = M.implicit_closest(wm, 0.5)(X)
     from scipy.special import ndtri
+
     F = ndi.gaussian_filter(wm.astype(float), 0.5, truncate=6.0)
     coef = ndi.spline_filter(0.5 * ndtri(np.clip(F, 1e-9, 1 - 1e-9)), order=3)
     res = ndi.map_coordinates(coef, P.T, order=3, prefilter=False, mode="nearest")

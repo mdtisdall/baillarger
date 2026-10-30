@@ -38,7 +38,15 @@ import pial_height as P_
 from baillarger.data import PATCHES
 from baillarger.mesh import topology, write_vtk
 from baillarger.mesh_intersect import intersecting_faces
-from click_evidence import RATIO, PATCH, FACE_MM, Thickness, end_labels, orientation, score
+from click_evidence import (
+    RATIO,
+    PATCH,
+    FACE_MM,
+    Thickness,
+    end_labels,
+    orientation,
+    score,
+)
 from onepass_lib import contacts, run, setup
 
 FIG, WORK, DATA = sys.argv[1:4]
@@ -65,13 +73,34 @@ def build(B, s, mu, sd, name, white):
     nf = B["dface"][tuple(vi.T)] < FACE_MM
     xf, _ = intersecting_faces(v, fc)
     aff = B["p"].affine
-    np.savez(f"{DATA}/pial_M1S1_contour_{name}_session.npz", kind="surface", white_v=white[0], white_f=white[1],
-             v=v, f=fc, n=n, near_face=nf, affine=aff)
-    write_vtk(f"{DATA}/pial_M1S1_contour_{name}.vtk", aff, v, fc, {"near_box_face": nf.astype(float)})
+    np.savez(
+        f"{DATA}/pial_M1S1_contour_{name}_session.npz",
+        kind="surface",
+        white_v=white[0],
+        white_f=white[1],
+        v=v,
+        f=fc,
+        n=n,
+        near_face=nf,
+        affine=aff,
+    )
+    write_vtk(
+        f"{DATA}/pial_M1S1_contour_{name}.vtk",
+        aff,
+        v,
+        fc,
+        {"near_box_face": nf.astype(float)},
+    )
     topo = topology(fc, len(v))
-    return (v, fc, n), dict(pairs=int(c.p.size), carved=int(carve.sum()), fold_like=int(fold.sum()),
-                            vertices=int(len(v)), intersecting_faces=int(xf.sum()),
-                            genus=topo.get("genus"), components=topo.get("components"))
+    return (v, fc, n), dict(
+        pairs=int(c.p.size),
+        carved=int(carve.sum()),
+        fold_like=int(fold.sum()),
+        vertices=int(len(v)),
+        intersecting_faces=int(xf.sum()),
+        genus=topo.get("genus"),
+        components=topo.get("components"),
+    )
 
 
 def at_points(mesh, P, h):
@@ -107,12 +136,18 @@ def main():
     say(f"patch {tuple(hi - lo)}; patches {s.npatch:,}")
     T = Thickness(B, s, h)
     mu0, sd0, nob0 = T.weights(T.y_tops)
-    mu_eq = np.full(s.npatch, float(np.median(mu0))); sd_eq = 0.1 * mu_eq
+    mu_eq = np.full(s.npatch, float(np.median(mu0)))
+    sd_eq = 0.1 * mu_eq
     f_eq = run(s, mu_eq, sd_eq, ratio=RATIO)
     rows = score(s, f_eq, mu_eq, sd_eq, Pts, u_pts, h, np.arange(len(Pts)))
     clicks = []
     for (lm, lp), r in zip(end_labels(s, f_eq, Pts, u_pts, h), rows):
-        if lm >= 0 and np.isfinite(r["S_thin"]) and r["S_thin"] > 0.3 and r["S_thick"] > 0.3:
+        if (
+            lm >= 0
+            and np.isfinite(r["S_thin"])
+            and r["S_thin"] > 0.3
+            and r["S_thick"] > 0.3
+        ):
             clicks += [(int(lm), float(r["S_thick"])), (int(lp), float(r["S_thin"]))]
     say(f"clicks: {len(clicks) // 2} of {len(Pts)} points with both sides")
     mu1, sd1, nob1 = T.weights(T.with_clicks(clicks))
@@ -121,17 +156,26 @@ def main():
     del z
     zc = np.load(f"{DATA}/pial_M1S1_contour_slit2_session.npz")
     meshes = {"equal": (zc["v"], zc["f"], zc["n"])}
-    log = dict(points=len(Pts), click_points=len(clicks) // 2, no_belief=dict(field=nob0, clicks=nob1), bases={})
+    log = dict(
+        points=len(Pts),
+        click_points=len(clicks) // 2,
+        no_belief=dict(field=nob0, clicks=nob1),
+        bases={},
+    )
     for name, (mu, sd) in (("field", (mu0, sd0)), ("clicks", (mu1, sd1))):
         meshes[name], log["bases"][name] = build(B, s, mu, sd, name, white)
         say(f"{name}: {log['bases'][name]}")
     log["at_points"] = {k: at_points(mesh, Pts, h) for k, mesh in meshes.items()}
     for k, rows_ in log["at_points"].items():
-        mid = np.array([r["midline_mm"] if r["midline_mm"] is not None else np.nan for r in rows_])
-        log.setdefault("summary", {})[k] = dict(carved_at=int(np.isfinite(mid).sum()),
-                                                midline_abs_median=round(float(np.nanmedian(np.abs(mid))), 3),
-                                                midline_abs_p90=round(float(np.nanpercentile(np.abs(mid), 90)), 3),
-                                                d1_median=round(float(np.median([r["d1_mm"] for r in rows_])), 3))
+        mid = np.array(
+            [r["midline_mm"] if r["midline_mm"] is not None else np.nan for r in rows_]
+        )
+        log.setdefault("summary", {})[k] = dict(
+            carved_at=int(np.isfinite(mid).sum()),
+            midline_abs_median=round(float(np.nanmedian(np.abs(mid))), 3),
+            midline_abs_p90=round(float(np.nanpercentile(np.abs(mid), 90)), 3),
+            d1_median=round(float(np.median([r["d1_mm"] for r in rows_])), 3),
+        )
         print(f"   {k:7s} {log['summary'][k]}", flush=True)
     json.dump(log, open(f"{WORK}/click_base_M1S1.json", "w"), indent=1, default=float)
 
@@ -144,19 +188,34 @@ def main():
         vals, cnt = np.unique(np.round(Pts[:, a]).astype(int), return_counts=True)
         c = vals[np.argmax(cnt)]
         o = [i for i in range(3) if i != a]
-        sl = [slice(None)] * 3; sl[a] = c
-        ax.imshow(img[tuple(sl)].T, cmap="gray", origin="lower", vmin=-lim, vmax=lim, interpolation="nearest")
+        sl = [slice(None)] * 3
+        sl[a] = c
+        ax.imshow(
+            img[tuple(sl)].T,
+            cmap="gray",
+            origin="lower",
+            vmin=-lim,
+            vmax=lim,
+            interpolation="nearest",
+        )
         for k, (v, fc, _) in meshes.items():
             for sg in P_.plane_section(v, fc, a, float(c)):
                 ax.plot(sg[:, o[0]], sg[:, o[1]], color=cols[k], lw=0.9)
         on = np.abs(Pts[:, a] - c) < 1.5
         ax.plot(Pts[on, o[0]], Pts[on, o[1]], "x", color="#e34948", ms=7, mew=2)
         lo_, hi_ = Pts[:, o].min(0) - 25, Pts[:, o].max(0) + 25
-        ax.set_xlim(lo_[0], hi_[0]); ax.set_ylim(lo_[1], hi_[1])
-        ax.set_title(f"plane {'ijk'[a]} = {c} (patch voxels)", fontsize=10); ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle("M1S1 contoured pial base: equal arrival (grey, the editor's current base), field weights (blue), "
-                 "field + the 23 points as clicks (orange); points (red x); echo 2, trend removed", fontsize=10)
-    fig.tight_layout(); fig.savefig(f"{FIG}/click_base_M1S1.png", dpi=110)
+        ax.set_xlim(lo_[0], hi_[0])
+        ax.set_ylim(lo_[1], hi_[1])
+        ax.set_title(f"plane {'ijk'[a]} = {c} (patch voxels)", fontsize=10)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    fig.suptitle(
+        "M1S1 contoured pial base: equal arrival (grey, the editor's current base), field weights (blue), "
+        "field + the 23 points as clicks (orange); points (red x); echo 2, trend removed",
+        fontsize=10,
+    )
+    fig.tight_layout()
+    fig.savefig(f"{FIG}/click_base_M1S1.png", dpi=110)
     say("done")
 
 

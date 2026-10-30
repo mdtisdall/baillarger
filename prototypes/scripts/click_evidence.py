@@ -48,7 +48,14 @@ from scipy.sparse.csgraph import connected_components, dijkstra
 
 import curv_lib as C
 from collide import H_CLIP, Field, graph_L, lognormal, shell_graph
-from onepass_lib import contact_points, contacts, open_thickness, run, score_points_sides, setup
+from onepass_lib import (
+    contact_points,
+    contacts,
+    open_thickness,
+    run,
+    score_points_sides,
+    setup,
+)
 
 FIG, WORK, DATA = sys.argv[1:4]
 FULL = np.array([700, 384, 1148])
@@ -68,7 +75,8 @@ def orientation(B):
     d_wm = ndi.distance_transform_edt(~B["wm"], sampling=vox)
     g = np.stack(np.gradient(ndi.gaussian_filter(d_wm, 1.0), *vox), -1)
     gh = g / (np.linalg.norm(g, axis=-1, keepdims=True) + 1e-12)
-    sgn = np.sign((nh * gh).sum(-1)); sgn[sgn == 0] = 1
+    sgn = np.sign((nh * gh).sum(-1))
+    sgn[sgn == 0] = 1
     dirv = coh[..., None] * nh * sgn[..., None] + 0.1 * gh
     return dirv / (np.linalg.norm(dirv, axis=-1, keepdims=True) + 1e-12)
 
@@ -85,11 +93,22 @@ class Thickness:
         K = C.curvature(B, 0.8)
         pts, nrm = K["pts"], K["n"]
         Hroot = np.clip(0.5 * (K["k1"] + K["k2"]), -H_CLIP, H_CLIP)
-        ptsid = -np.ones(wm.shape, np.int64); ptsid[tuple(pts.T)] = np.arange(len(pts))
-        side = np.argmax(np.abs(nrm), 1) * 2 + (nrm[np.arange(len(nrm)), np.argmax(np.abs(nrm), 1)] > 0)
-        _, node_of, counts = np.unique(np.c_[pts // 2, side], axis=0, return_inverse=True, return_counts=True)
-        node_of = node_of.ravel(); nN = node_of.max() + 1
-        npos = np.stack([np.bincount(node_of, (pts * B["vox"])[:, a], nN) for a in range(3)], 1) / counts[:, None]
+        ptsid = -np.ones(wm.shape, np.int64)
+        ptsid[tuple(pts.T)] = np.arange(len(pts))
+        side = np.argmax(np.abs(nrm), 1) * 2 + (
+            nrm[np.arange(len(nrm)), np.argmax(np.abs(nrm), 1)] > 0
+        )
+        _, node_of, counts = np.unique(
+            np.c_[pts // 2, side], axis=0, return_inverse=True, return_counts=True
+        )
+        node_of = node_of.ravel()
+        nN = node_of.max() + 1
+        npos = (
+            np.stack(
+                [np.bincount(node_of, (pts * B["vox"])[:, a], nN) for a in range(3)], 1
+            )
+            / counts[:, None]
+        )
         nH = np.bincount(node_of, Hroot, nN) / counts
         Gc = shell_graph(pts, nrm, B["vox"]).tocoo()
         ea, eb = node_of[Gc.row], node_of[Gc.col]
@@ -101,24 +120,34 @@ class Thickness:
         seed_pts = ptsid.ravel()[s.sflat]
         miss = seed_pts < 0
         if miss.any():
-            seed_pts[miss] = cKDTree(pts).query(np.stack(np.unravel_index(s.sflat[miss], wm.shape), -1))[1]
+            seed_pts[miss] = cKDTree(pts).query(
+                np.stack(np.unravel_index(s.sflat[miss], wm.shape), -1)
+            )[1]
         self.seed_node = node_of[seed_pts]
         self.seed_patch = s.patch.ravel()[s.sflat]
         self.cnode = node_of[seed_pts[s.rep]]
         fluid_f = (B["rim"] == 1) & (B["dface"] >= FACE_MM)
         mu_tops, has = open_thickness(s, fluid_f, RATIO, along=True)
         root_ok = B["dface"].ravel()[s.sflat] >= FACE_MM
-        ok = has[self.seed_patch] & root_ok & (mu_tops[self.seed_patch] * h > 0.8) & (mu_tops[self.seed_patch] * h < 7.0)
-        self.y_tops = self._per_node(self.seed_node[ok], np.log(mu_tops[self.seed_patch[ok]] * h), nN)
+        ok = (
+            has[self.seed_patch]
+            & root_ok
+            & (mu_tops[self.seed_patch] * h > 0.8)
+            & (mu_tops[self.seed_patch] * h < 7.0)
+        )
+        self.y_tops = self._per_node(
+            self.seed_node[ok], np.log(mu_tops[self.seed_patch[ok]] * h), nN
+        )
         self.nN = nN
 
     @staticmethod
     def _per_node(nd, val, nN):
         y = np.full(nN, np.nan)
-        o = np.argsort(nd); nd, val = nd[o], val[o]
+        o = np.argsort(nd)
+        nd, val = nd[o], val[o]
         st = np.flatnonzero(np.r_[True, np.diff(nd) != 0])
         for i, a in enumerate(st):
-            y[nd[a]] = np.median(val[a: st[i + 1] if i + 1 < st.size else nd.size])
+            y[nd[a]] = np.median(val[a : st[i + 1] if i + 1 < st.size else nd.size])
         return y
 
     def with_clicks(self, clicks):
@@ -128,7 +157,8 @@ class Thickness:
         nd, val = [], []
         for patch, S in clicks:
             n_ = np.unique(self.seed_node[self.seed_patch == patch])
-            nd.append(n_); val.append(np.full(n_.size, np.log(S)))
+            nd.append(n_)
+            val.append(np.full(n_.size, np.log(S)))
         if nd:
             yc = self._per_node(np.concatenate(nd), np.concatenate(val), self.nN)
             y[np.isfinite(yc)] = yc[np.isfinite(yc)]
@@ -139,9 +169,12 @@ class Thickness:
         mu_n, sd_n, _ = self.fld.fit(y, trend=True)
         tmean, tsd = lognormal(mu_n, sd_n)
         mu, sd = tmean[self.cnode] / self.h, tsd[self.cnode] / self.h
-        ev_piece = np.bincount(self.piece[np.isfinite(y)], minlength=self.piece.max() + 1) > 0
+        ev_piece = (
+            np.bincount(self.piece[np.isfinite(y)], minlength=self.piece.max() + 1) > 0
+        )
         nobel = ~ev_piece[self.piece[self.cnode]]
-        mu[nobel] = np.median(mu[~nobel]); sd[nobel] = np.median(sd[~nobel])
+        mu[nobel] = np.median(mu[~nobel])
+        sd[nobel] = np.median(sd[~nobel])
         return mu, sd, int(nobel.sum())
 
 
@@ -155,16 +188,29 @@ def end_labels(s, f, P, u_pts, h):
         u = u_pts[k] / (np.linalg.norm(u_pts[k]) + 1e-12)
         line = np.round(Pk + steps[:, None] * u).astype(int)
         inside = np.all((line >= 0) & (line < shape), 1)
-        lab = np.full(steps.size, -1); lab[inside] = f.label[tuple(line[inside].T)]
-        cx = np.zeros(steps.size, bool); cx[inside] = s.cortex[tuple(line[inside].T)]
-        neg = np.flatnonzero(cx & (lab >= 0) & (steps < 0)); pos = np.flatnonzero(cx & (lab >= 0) & (steps > 0))
+        lab = np.full(steps.size, -1)
+        lab[inside] = f.label[tuple(line[inside].T)]
+        cx = np.zeros(steps.size, bool)
+        cx[inside] = s.cortex[tuple(line[inside].T)]
+        neg = np.flatnonzero(cx & (lab >= 0) & (steps < 0))
+        pos = np.flatnonzero(cx & (lab >= 0) & (steps > 0))
         out.append((lab[neg[0]], lab[pos[-1]]) if neg.size and pos.size else (-1, -1))
     return out
 
 
 def score(s, f, mu, sd, P, u_pts, h, idx):
     c_all = contacts(s, f, mu, sd, sep_min=0.0)
-    rows = score_points_sides(s, f, P[idx], u_pts[idx], c_all, contact_points(c_all, s.cortex.shape), mu, sd, h)
+    rows = score_points_sides(
+        s,
+        f,
+        P[idx],
+        u_pts[idx],
+        c_all,
+        contact_points(c_all, s.cortex.shape),
+        mu,
+        sd,
+        h,
+    )
     for r, k in zip(rows, idx):
         r["k"] = int(k) + 1
     return rows
@@ -180,8 +226,10 @@ def main():
     n = len(P)
     B = C.load(lo, hi, "click_evidence_M1S1")
     h = float(np.mean(B["vox"]))
-    say(f"box {tuple(hi - lo)} from {tuple(lo)}; {n} points, nearest "
-        f"{np.min(np.minimum(P, (hi - lo) - 1 - P)) * h:.1f} mm from a face")
+    say(
+        f"box {tuple(hi - lo)} from {tuple(lo)}; {n} points, nearest "
+        f"{np.min(np.minimum(P, (hi - lo) - 1 - P)) * h:.1f} mm from a face"
+    )
     dirv = orientation(B)
     s = setup(B["wm"], B["ctx"], patch=PATCH, direction=dirv)
     u_pts = dirv[tuple(np.round(P).astype(int).T)]
@@ -192,24 +240,43 @@ def main():
 
     # ---- the clicks' evidence, from the equal-arrival pass
     mu0, sd0, _ = T.weights(T.y_tops)
-    mu_eq = np.full(s.npatch, float(np.median(mu0))); sd_eq = 0.1 * mu_eq
+    mu_eq = np.full(s.npatch, float(np.median(mu0)))
+    sd_eq = 0.1 * mu_eq
     f_eq = run(s, mu_eq, sd_eq, ratio=RATIO)
     rows_eq = score(s, f_eq, mu_eq, sd_eq, P, u_pts, h, np.arange(n))
     ends = end_labels(s, f_eq, P, u_pts, h)
     clicks = []  # per point: [(patch, S mm) for each side] or []
     for (lm, lp), r in zip(ends, rows_eq):
         # equal mu: score_points_sides takes lp as the "thin" end, so S_thin is lp's, S_thick lm's
-        ok = lm >= 0 and np.isfinite(r["S_thin"]) and r["S_thin"] > 0.3 and r["S_thick"] > 0.3
-        clicks.append([(int(lm), float(r["S_thick"])), (int(lp), float(r["S_thin"]))] if ok else [])
-    say(f"clicks with evidence on both sides: {sum(bool(cl) for cl in clicks)} of {n}; "
-        f"S median {np.median([S for cl in clicks for _, S in cl]):.2f} mm")
+        ok = (
+            lm >= 0
+            and np.isfinite(r["S_thin"])
+            and r["S_thin"] > 0.3
+            and r["S_thick"] > 0.3
+        )
+        clicks.append(
+            [(int(lm), float(r["S_thick"])), (int(lp), float(r["S_thin"]))]
+            if ok
+            else []
+        )
+    say(
+        f"clicks with evidence on both sides: {sum(bool(cl) for cl in clicks)} of {n}; "
+        f"S median {np.median([S for cl in clicks for _, S in cl]):.2f} mm"
+    )
 
     # ---- the settings: which clicks are evidence, which points are scored
-    folds = {"tops only": [([], np.arange(n))],
-             "interleaved": [(np.arange(0, n, 2), np.arange(1, n, 2)), (np.arange(1, n, 2), np.arange(0, n, 2))],
-             "in sample": [(np.arange(n), np.arange(n))]}
+    folds = {
+        "tops only": [([], np.arange(n))],
+        "interleaved": [
+            (np.arange(0, n, 2), np.arange(1, n, 2)),
+            (np.arange(1, n, 2), np.arange(0, n, 2)),
+        ],
+        "in sample": [(np.arange(n), np.arange(n))],
+    }
     _, grp = kmeans2(P * h, 3, seed=1, minit="++")
-    folds["blocks"] = [(np.flatnonzero(grp != g), np.flatnonzero(grp == g)) for g in range(3)]
+    folds["blocks"] = [
+        (np.flatnonzero(grp != g), np.flatnonzero(grp == g)) for g in range(3)
+    ]
     results = {"equal arrival": dict(rows=rows_eq)}
     for name, fl in folds.items():
         rows, info = [], []
@@ -219,39 +286,82 @@ def main():
             f = run(s, mu, sd, ratio=RATIO)
             rows += score(s, f, mu, sd, P, u_pts, h, np.asarray(held))
             # how far the belief moved at the scored points' roots (mm), and the evidence there
-            info.append(dict(clicks=int(len(ev)), scored=int(len(held)), no_belief=nobel,
-                             mu_mm_at_scored_roots=[round(float(mu[p] * h), 2) for k in held for p, _ in clicks[k]],
-                             mu0_mm_at_scored_roots=[round(float(mu0[p] * h), 2) for k in held for p, _ in clicks[k]],
-                             S_mm_at_scored_points=[round(S, 2) for k in held for _, S in clicks[k]]))
+            info.append(
+                dict(
+                    clicks=int(len(ev)),
+                    scored=int(len(held)),
+                    no_belief=nobel,
+                    mu_mm_at_scored_roots=[
+                        round(float(mu[p] * h), 2) for k in held for p, _ in clicks[k]
+                    ],
+                    mu0_mm_at_scored_roots=[
+                        round(float(mu0[p] * h), 2) for k in held for p, _ in clicks[k]
+                    ],
+                    S_mm_at_scored_points=[
+                        round(S, 2) for k in held for _, S in clicks[k]
+                    ],
+                )
+            )
             say(f"{name}: {len(ev)} clicks, {len(held)} scored")
         results[name] = dict(rows=sorted(rows, key=lambda r: r["k"]), folds=info)
     summary = {}
     for name, r in results.items():
-        off = np.array([x["offset"] for x in r["rows"]]); near = np.array([x.get("nearest_mm", np.nan) for x in r["rows"]])
-        summary[name] = dict(median=round(float(np.nanmedian(off)), 3),
-                             iqr=round(float(np.subtract(*np.nanpercentile(off, [75, 25]))), 3),
-                             median_abs=round(float(np.nanmedian(np.abs(off))), 3),
-                             worst=round(float(np.nanmax(np.abs(off))), 3), missing=int(np.isnan(off).sum()),
-                             nearest_median=round(float(np.nanmedian(near)), 3),
-                             nearest_p90=round(float(np.nanpercentile(near, 90)), 3))
-        print(f"   {name:14s} |offset| median {summary[name]['median_abs']:.2f} mm (median {summary[name]['median']:+.2f}, "
-              f"IQR {summary[name]['iqr']:.2f}, worst {summary[name]['worst']:.2f}, missing {summary[name]['missing']}); "
-              f"nearest crossing median {summary[name]['nearest_median']:.2f}, p90 {summary[name]['nearest_p90']:.2f}",
-              flush=True)
-    json.dump(dict(box_lo=lo.tolist(), groups=grp.tolist(), clicks=clicks, summary=summary, results=results),
-              open(f"{WORK}/click_evidence_M1S1.json", "w"), indent=1, default=float)
+        off = np.array([x["offset"] for x in r["rows"]])
+        near = np.array([x.get("nearest_mm", np.nan) for x in r["rows"]])
+        summary[name] = dict(
+            median=round(float(np.nanmedian(off)), 3),
+            iqr=round(float(np.subtract(*np.nanpercentile(off, [75, 25]))), 3),
+            median_abs=round(float(np.nanmedian(np.abs(off))), 3),
+            worst=round(float(np.nanmax(np.abs(off))), 3),
+            missing=int(np.isnan(off).sum()),
+            nearest_median=round(float(np.nanmedian(near)), 3),
+            nearest_p90=round(float(np.nanpercentile(near, 90)), 3),
+        )
+        print(
+            f"   {name:14s} |offset| median {summary[name]['median_abs']:.2f} mm (median {summary[name]['median']:+.2f}, "
+            f"IQR {summary[name]['iqr']:.2f}, worst {summary[name]['worst']:.2f}, missing {summary[name]['missing']}); "
+            f"nearest crossing median {summary[name]['nearest_median']:.2f}, p90 {summary[name]['nearest_p90']:.2f}",
+            flush=True,
+        )
+    json.dump(
+        dict(
+            box_lo=lo.tolist(),
+            groups=grp.tolist(),
+            clicks=clicks,
+            summary=summary,
+            results=results,
+        ),
+        open(f"{WORK}/click_evidence_M1S1.json", "w"),
+        indent=1,
+        default=float,
+    )
 
     fig, ax = plt.subplots(figsize=(11, 4.5))
     k = np.arange(1, n + 1)
-    for j, (name, col) in enumerate(zip(results, ("#8a8984", "#2a78d6", "#eb6834", "#1baf7a", "#6250d6"))):
+    for j, (name, col) in enumerate(
+        zip(results, ("#8a8984", "#2a78d6", "#eb6834", "#1baf7a", "#6250d6"))
+    ):
         off = np.array([x["offset"] for x in results[name]["rows"]])
-        ax.plot(k + (j - 2) * 0.15, np.abs(off), "o", color=col, ms=5,
-                label=f"{name}: median {summary[name]['median_abs']:.2f} mm, missing {summary[name]['missing']}")
-    ax.set_xticks(k); ax.set_xlabel("point"); ax.set_ylabel("|offset| of the contact (mm)")
-    ax.set_title("M1S1, 23 marked contact points: clicks as thickness evidence (each point scored by a model "
-                 "that did not see it, except 'in sample')", fontsize=10)
-    ax.legend(fontsize=8); ax.grid(alpha=0.3)
-    fig.tight_layout(); fig.savefig(f"{FIG}/click_evidence_M1S1.png", dpi=110)
+        ax.plot(
+            k + (j - 2) * 0.15,
+            np.abs(off),
+            "o",
+            color=col,
+            ms=5,
+            label=f"{name}: median {summary[name]['median_abs']:.2f} mm, missing {summary[name]['missing']}",
+        )
+    ax.set_xticks(k)
+    ax.set_xlabel("point")
+    ax.set_ylabel("|offset| of the contact (mm)")
+    ax.set_title(
+        "M1S1, 23 marked contact points: clicks as thickness evidence (each point scored by a model "
+        "that did not see it, except 'in sample')",
+        fontsize=10,
+    )
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(f"{FIG}/click_evidence_M1S1.png", dpi=110)
     say("done")
 
 

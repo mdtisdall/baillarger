@@ -144,12 +144,27 @@ def thin_plate(
         cpos = down(np.asarray(pos), np.all)
         cneg = down(np.asarray(neg), np.all)
         cphi, cinfo = thin_plate(
-            cref, None, band, eps, device, iters, tol, fixed=cref, fused=fused,
-            stop="band", start=start, levels=levels - 1, pos=cpos, neg=cneg, quiet=quiet,
+            cref,
+            None,
+            band,
+            eps,
+            device,
+            iters,
+            tol,
+            fixed=cref,
+            fused=fused,
+            stop="band",
+            start=start,
+            levels=levels - 1,
+            pos=cpos,
+            neg=cneg,
+            quiet=quiet,
             restart=restart,
         )
         up = Fn.interpolate(
-            torch.as_tensor(cphi)[None, None], scale_factor=2, mode="trilinear",
+            torch.as_tensor(cphi)[None, None],
+            scale_factor=2,
+            mode="trilinear",
             align_corners=False,
         )[0, 0].numpy()
         init = up[: shape[0], : shape[1], : shape[2]].astype(np.float32)
@@ -163,7 +178,10 @@ def thin_plate(
             D, H, W = x.shape
             g = torch.zeros_like(x)
             for (di, dj, dk), c in taps:
-                g.add_(p[2 + di : 2 + di + D, 2 + dj : 2 + dj + H, 2 + dk : 2 + dk + W], alpha=c)
+                g.add_(
+                    p[2 + di : 2 + di + D, 2 + dj : 2 + dj + H, 2 + dk : 2 + dk + W],
+                    alpha=c,
+                )
             return g
 
     else:
@@ -176,7 +194,11 @@ def thin_plate(
             D, H, W = x.shape
 
             def sl(d):
-                return p[1 + d[0] : 1 + d[0] + D, 1 + d[1] : 1 + d[1] + H, 1 + d[2] : 1 + d[2] + W]
+                return p[
+                    1 + d[0] : 1 + d[0] + D,
+                    1 + d[1] : 1 + d[1] + H,
+                    1 + d[2] : 1 + d[2] + W,
+                ]
 
             if i < 3:
                 e = [0, 0, 0]
@@ -233,7 +255,9 @@ def thin_plate(
 
     x = project(torch.as_tensor(init, device=dev))
     y, t = x.clone(), 1.0
-    snap = x.clone()  # x 25 iterations ago: the stopping test is on the change over the window
+    snap = (
+        x.clone()
+    )  # x 25 iterations ago: the stopping test is on the change over the window
     step = float("inf")
     t0 = time.perf_counter()
     restarts = 0
@@ -254,22 +278,36 @@ def thin_plate(
             snap = x.clone()
         if check:
             if not quiet and k % 100 == 0:
-                log(f"  thin plate {shape} "
-                    f"iteration {k}: max change {step:.2e}")
+                log(f"  thin plate {shape} iteration {k}: max change {step:.2e}")
             if k > 0 and step < tol:
                 break
     if dev.type == "mps":
         torch.mps.synchronize()
     info["levels"] = info["levels"] + [
-        dict(shape=list(np.shape(ref)), iterations=k + 1, last_change=step,
-             seconds=round(time.perf_counter() - t0, 2), restarts=restarts)
+        dict(
+            shape=list(np.shape(ref)),
+            iterations=k + 1,
+            last_change=step,
+            seconds=round(time.perf_counter() - t0, 2),
+            restarts=restarts,
+        )
     ]
     info.update(L=L, iterations=k + 1, last_change=step)
     return x.cpu().numpy(), info
 
 
 def thin_plate_band(
-    sdf, mask, band, eps, device, iters, tol, block=64, chunk=48, quiet=False, fixed=None
+    sdf,
+    mask,
+    band,
+    eps,
+    device,
+    iters,
+    tol,
+    block=64,
+    chunk=48,
+    quiet=False,
+    fixed=None,
 ):
     """thin_plate (separate stencils, restart, surface stopping, start from sdf), computed only
     on the blocks (block voxels a side, from voxel 0) that hold band voxels: the same problem,
@@ -286,7 +324,9 @@ def thin_plate_band(
     shape = ref.shape
     B, h = block, 2
     nb = [-(-n // B) for n in shape]
-    gshape = [n * B + 2 * h for n in nb]  # the global field: blocks plus a halo of zeros
+    gshape = [
+        n * B + 2 * h for n in nb
+    ]  # the global field: blocks plus a halo of zeros
     free_v = np.abs(ref) <= band
 
     def pad_global(arr, fill):
@@ -306,7 +346,9 @@ def thin_plate_band(
     win = torch.as_tensor(w @ stride, device=dev)
     inn = np.indices((B,) * 3).reshape(3, -1).T + h
     inner = torch.as_tensor(inn @ stride, device=dev)
-    base = torch.as_tensor((act * B) @ stride, device=dev)  # window origin = block origin - h + h
+    base = torch.as_tensor(
+        (act * B) @ stride, device=dev
+    )  # window origin = block origin - h + h
 
     def compact(arr_g):
         """The interiors of the active blocks of a global array: (N, B^3)."""
@@ -316,7 +358,9 @@ def thin_plate_band(
     fixed_g = pad_global(ref, np.float32(0.0))
     # inside the volume: the first stencil's output is zero outside it (as thin_plate's
     # zero padding between the two passes)
-    vol_flat = torch.as_tensor(pad_global(np.ones(shape, bool), False).ravel(), device=dev)
+    vol_flat = torch.as_tensor(
+        pad_global(np.ones(shape, bool), False).ravel(), device=dev
+    )
     free_c = compact(free_g)
     lo_c = compact(pad_global(np.asarray(mask), False)) & free_c
     hi_c = compact(pad_global(~np.asarray(mask), False)) & free_c
@@ -340,7 +384,12 @@ def thin_plate_band(
         _, D, H, W = x.shape
 
         def sl(d):
-            return p[:, 1 + d[0] : 1 + d[0] + D, 1 + d[1] : 1 + d[1] + H, 1 + d[2] : 1 + d[2] + W]
+            return p[
+                :,
+                1 + d[0] : 1 + d[0] + D,
+                1 + d[1] : 1 + d[1] + H,
+                1 + d[2] : 1 + d[2] + W,
+            ]
 
         if i < 3:
             e = [0, 0, 0]
@@ -365,7 +414,9 @@ def thin_plate_band(
             g = torch.zeros_like(xw)
             for i, wt in enumerate(weights):
                 g += (2.0 * wt) * stencil(torch.where(inv, stencil(xw, i), 0.0), i)
-            out[s0 : s0 + chunk] = g[:, h : h + B, h : h + B, h : h + B].reshape(-1, B**3)
+            out[s0 : s0 + chunk] = g[:, h : h + B, h : h + B, h : h + B].reshape(
+                -1, B**3
+            )
         return out
 
     # the Lipschitz constant: as thin_plate (the same stencils)
@@ -406,14 +457,19 @@ def thin_plate_band(
             snap_prev = snap
             snap = x.clone()
             # per block: its largest change over the window, on its watched voxels
-            per = torch.amax(torch.where(watch_c, torch.abs(x - snap_prev), 0.0), dim=1) / 25.0
+            per = (
+                torch.amax(torch.where(watch_c, torch.abs(x - snap_prev), 0.0), dim=1)
+                / 25.0
+            )
             done_now = (per < tol).cpu().numpy()
             first_done[(first_done < 0) & done_now] = k
             if not quiet and k % 100 == 0:
                 slow = np.argsort(-per.cpu().numpy())[:3]
-                log(f"  thin plate (band, {N} blocks) iteration {k}: max change {step:.2e}; "
+                log(
+                    f"  thin plate (band, {N} blocks) iteration {k}: max change {step:.2e}; "
                     f"blocks below tol {int(done_now.sum())}/{N}; slowest at (voxels) "
-                    f"{[(act[i] * B + B // 2).tolist() for i in slow]}")
+                    f"{[(act[i] * B + B // 2).tolist() for i in slow]}"
+                )
             if step < tol:
                 break
     gflat[put] = x
@@ -421,8 +477,13 @@ def thin_plate_band(
         torch.mps.synchronize()
     out = gflat.reshape(gshape)[h : h + shape[0], h : h + shape[1], h : h + shape[2]]
     info = dict(
-        L=L, iterations=k + 1, last_change=step, restarts=restarts, blocks=N,
-        blocks_total=int(np.prod(nb)), seconds=round(time.perf_counter() - t0, 2),
+        L=L,
+        iterations=k + 1,
+        last_change=step,
+        restarts=restarts,
+        blocks=N,
+        blocks_total=int(np.prod(nb)),
+        seconds=round(time.perf_counter() - t0, 2),
         blocks_converged_by=dict(
             (int(q), int(np.percentile(np.where(first_done < 0, k + 1, first_done), q)))
             for q in (25, 50, 75, 90, 99, 100)
@@ -446,7 +507,10 @@ def pct(x, qs=(50, 90, 99, 99.9)):
 
 def area_mm2(v, f, vox):
     p = v[f] * vox
-    return float(0.5 * np.linalg.norm(np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]), axis=1).sum())
+    return float(
+        0.5
+        * np.linalg.norm(np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]), axis=1).sum()
+    )
 
 
 def main():
@@ -466,7 +530,9 @@ def main():
     ap.add_argument("--stop", choices=("surface", "band"), default="surface")
     ap.add_argument("--unfused", action="store_true")
     ap.add_argument("--restart", action="store_true")
-    ap.add_argument("--blocked", action="store_true", help="thin_plate_band: active blocks only")
+    ap.add_argument(
+        "--blocked", action="store_true", help="thin_plate_band: active blocks only"
+    )
     ap.add_argument("--block", type=int, default=64)
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
@@ -475,8 +541,13 @@ def main():
     vol = open_volume(a.dseg)
     full = vol.shape
     vox = np.array(vol.img.header.get_zooms()[:3], float)
-    mask_full = np.isin(vol.read(tuple(slice(0, n) for n in full)), side["FilledLabels"])
-    nz = [np.flatnonzero(mask_full.any(axis=tuple(j for j in range(3) if j != i))) for i in range(3)]
+    mask_full = np.isin(
+        vol.read(tuple(slice(0, n) for n in full)), side["FilledLabels"]
+    )
+    nz = [
+        np.flatnonzero(mask_full.any(axis=tuple(j for j in range(3) if j != i)))
+        for i in range(3)
+    ]
     m = int(a.band) + 2
     lo = np.array([max(int(t[0]) - m, 0) for t in nz])
     hi = np.array([min(int(t[-1]) + 1 + m, n) for t, n in zip(nz, full)])
@@ -509,10 +580,22 @@ def main():
             )
         else:
             phi, solve = thin_plate(
-                phi, mask, a.band, a.eps, a.device, a.iters, a.tol, fused=not a.unfused,
-                stop=a.stop, start=a.start, levels=a.levels, restart=a.restart,
+                phi,
+                mask,
+                a.band,
+                a.eps,
+                a.device,
+                a.iters,
+                a.tol,
+                fused=not a.unfused,
+                stop=a.stop,
+                start=a.start,
+                levels=a.levels,
+                restart=a.restart,
             )
-        log(f"thin plate: {solve['iterations']} iterations, last change {solve['last_change']:.2e}")
+        log(
+            f"thin plate: {solve['iterations']} iterations, last change {solve['last_change']:.2e}"
+        )
     v, f, b = marching_tetrahedra_blocks(phi, 0.0, 64, np.float32)
     vr, fr, br = marching_tetrahedra_blocks(mask.view(np.uint8), 0.5, 64, np.float32)
     f, fr = f[:, [0, 2, 1]].copy(), fr[:, [0, 2, 1]].copy()  # out of the WM
@@ -528,7 +611,9 @@ def main():
     key = edge_key(np.ravel_multi_index(tuple((p0 + lo).T), full), p1 - p0)
     cur = WhiteSurface.load(a.current)
     o_new, o_cur = np.argsort(key), np.argsort(cur.vertex_key)
-    assert np.array_equal(key[o_new], cur.vertex_key[o_cur]), "the meshes cross other edges"
+    assert np.array_equal(key[o_new], cur.vertex_key[o_cur]), (
+        "the meshes cross other edges"
+    )
     to_cur = np.empty(len(key), np.int64)
     to_cur[o_new] = o_cur  # new vertex i is current vertex to_cur[i]
     vc = cur.v[to_cur].astype(np.float64) - lo
@@ -543,7 +628,9 @@ def main():
         up = ndi.map_coordinates(phi, (v + e).T, order=1, mode="nearest")
         dn = ndi.map_coordinates(phi, (v - e).T, order=1, mode="nearest")
         g[:, k] = (up - dn) / (2 * h)
-    n_grad = -g / np.linalg.norm(g, axis=1, keepdims=True)  # phi > 0 inside: out of the WM
+    n_grad = -g / np.linalg.norm(
+        g, axis=1, keepdims=True
+    )  # phi > 0 inside: out of the WM
     vv = v.astype(np.float64)
     n_mesh = S.vertex_normals(vv, f)
     n_mesh_s = S.smooth_normals(vv, f)
@@ -554,9 +641,21 @@ def main():
         return np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", n1, n2), -1, 1)))
 
     rep = dict(
-        params=dict(method=a.method, iters=a.iters, sigma=a.sigma, eps=a.eps, band=a.band, tol=a.tol,
-                    levels=a.levels, start=a.start, stop=a.stop, fused=not a.unfused,
-                    restart=a.restart, blocked=a.blocked, block=a.block),
+        params=dict(
+            method=a.method,
+            iters=a.iters,
+            sigma=a.sigma,
+            eps=a.eps,
+            band=a.band,
+            tol=a.tol,
+            levels=a.levels,
+            start=a.start,
+            stop=a.stop,
+            fused=not a.unfused,
+            restart=a.restart,
+            blocked=a.blocked,
+            block=a.block,
+        ),
         solve=solve,
         vertices=len(v),
         faces=len(f),
@@ -582,8 +681,13 @@ def main():
         ),
     )
     (a.out / "antialias_report.json").write_text(json.dumps(rep, indent=1))
-    np.savez_compressed(a.out / "antialias_mesh.npz", v=v + lo, f=f, n_grad=n_grad.astype(np.float32),
-                        key=key)
+    np.savez_compressed(
+        a.out / "antialias_mesh.npz",
+        v=v + lo,
+        f=f,
+        n_grad=n_grad.astype(np.float32),
+        key=key,
+    )
     log("done")
     print(json.dumps(rep, indent=1))
 

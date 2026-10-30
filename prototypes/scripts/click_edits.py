@@ -47,9 +47,15 @@ def say(msg):
 
 
 def summary(rows):
-    mid = np.array([r["midline_mm"] if r["midline_mm"] is not None else np.nan for r in rows])
-    return dict(carved_at=int(np.isfinite(mid).sum()), median=round(float(np.nanmedian(mid)), 3),
-                p90=round(float(np.nanpercentile(mid, 90)), 3), worst=round(float(np.nanmax(mid)), 3))
+    mid = np.array(
+        [r["midline_mm"] if r["midline_mm"] is not None else np.nan for r in rows]
+    )
+    return dict(
+        carved_at=int(np.isfinite(mid).sum()),
+        median=round(float(np.nanmedian(mid)), 3),
+        p90=round(float(np.nanpercentile(mid, 90)), 3),
+        worst=round(float(np.nanmax(mid)), 3),
+    )
 
 
 def main():
@@ -72,16 +78,24 @@ def main():
         ed.remesh()
         moved = np.linalg.norm(ed.pos - v0, axis=1) * h
         allrows = at_points((ed.pos, f, n0), Pts, h)
-        res["all 23"] = dict(**summary(allrows), crossing_faces=ed.crossings["faces"],
-                             crossing_places=ed.crossings["n_clusters"], at_contact=ed.crossings["at_contact"],
-                             moved_vertices=int(np.sum(moved > 0.05)), max_move_mm=round(float(moved.max()), 3),
-                             sides=[p_["sides"] for p_ in ed.points])
+        res["all 23"] = dict(
+            **summary(allrows),
+            crossing_faces=ed.crossings["faces"],
+            crossing_places=ed.crossings["n_clusters"],
+            at_contact=ed.crossings["at_contact"],
+            moved_vertices=int(np.sum(moved > 0.05)),
+            max_move_mm=round(float(moved.max()), 3),
+            sides=[p_["sides"] for p_ in ed.points],
+        )
         shown[base] = (v0, ed.pos.copy(), f)
         say(f"{base}: before {res['before']}; all 23 {res['all 23']}")
 
         # interleaved: place half, score the other half
         rows = [None] * n
-        for place, held in ((np.arange(0, n, 2), np.arange(1, n, 2)), (np.arange(1, n, 2), np.arange(0, n, 2))):
+        for place, held in (
+            (np.arange(0, n, 2), np.arange(1, n, 2)),
+            (np.arange(1, n, 2), np.arange(0, n, 2)),
+        ):
             ed.points = []
             for k in place:
                 ed.add("contact", mm[k].tolist())
@@ -107,24 +121,44 @@ def main():
             vals, cnt = np.unique(np.round(Pts[:, a]).astype(int), return_counts=True)
             c = vals[np.argmax(cnt)]
             o = [i for i in range(3) if i != a]
-            sl = [slice(None)] * 3; sl[a] = c
-            ax.imshow(img[tuple(sl)].T, cmap="gray", origin="lower", vmin=-lim, vmax=lim, interpolation="nearest")
+            sl = [slice(None)] * 3
+            sl[a] = c
+            ax.imshow(
+                img[tuple(sl)].T,
+                cmap="gray",
+                origin="lower",
+                vmin=-lim,
+                vmax=lim,
+                interpolation="nearest",
+            )
             for v, col, lw in ((v0, "#8a8984", 0.9), (v1, "#eb6834", 1.6)):
                 for sg in P_.plane_section(v, f, a, float(c)):
                     ax.plot(sg[:, o[0]], sg[:, o[1]], color=col, lw=lw)
             on = np.abs(Pts[:, a] - c) < 1.5
             ax.plot(Pts[on, o[0]], Pts[on, o[1]], "x", color="#e34948", ms=7, mew=2)
             lo_, hi_ = Pts[:, o].min(0) - 25, Pts[:, o].max(0) + 25
-            ax.set_xlim(lo_[0], hi_[0]); ax.set_ylim(lo_[1], hi_[1])
-            ax.set_xticks([]); ax.set_yticks([])
+            ax.set_xlim(lo_[0], hi_[0])
+            ax.set_ylim(lo_[1], hi_[1])
+            ax.set_xticks([])
+            ax.set_yticks([])
             r = out[base]
-            ax.set_title(f"{base}, plane {'ijk'[a]} = {c}" + (
-                f"\nmidline to points: before {r['before']['median']:.2f} mm, all 23 placed "
-                f"{r['all 23']['median']:.2f}, held out {r['interleaved (held out)']['median']:.2f}" if a == 0 else ""),
-                fontsize=10)
-    fig.suptitle("M1S1: the 23 marked points placed as editor contact points. Grey: the base before; orange: after "
-                 "all 23 (remeshed); red x: the points. Echo 2, trend removed.", fontsize=11)
-    fig.tight_layout(); fig.savefig(f"{FIG}/click_edits_M1S1.png", dpi=110)
+            ax.set_title(
+                f"{base}, plane {'ijk'[a]} = {c}"
+                + (
+                    f"\nmidline to points: before {r['before']['median']:.2f} mm, all 23 placed "
+                    f"{r['all 23']['median']:.2f}, held out {r['interleaved (held out)']['median']:.2f}"
+                    if a == 0
+                    else ""
+                ),
+                fontsize=10,
+            )
+    fig.suptitle(
+        "M1S1: the 23 marked points placed as editor contact points. Grey: the base before; orange: after "
+        "all 23 (remeshed); red x: the points. Echo 2, trend removed.",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    fig.savefig(f"{FIG}/click_edits_M1S1.png", dpi=110)
     say("done")
 
 

@@ -55,12 +55,16 @@ def round_trip(Tc, labels, dface, vox, pos, ns, outc, tracer, x0):
     n = len(ns)
     rt = np.full(n, np.nan)
     rto = np.full(n, -1)
-    go = np.flatnonzero((tracer == 0) & ((outc == X.FLUID) | (outc == X.WM)) & (ns >= 4))
+    go = np.flatnonzero(
+        (tracer == 0) & ((outc == X.FLUID) | (outc == X.WM)) & (ns >= 4)
+    )
     xs = pos[go, ns[go] - 2].astype(float)
     ds = pos[go, ns[go] - 3].astype(float) - xs
     pb, nb, ob = X.trace_array(Tc, labels, dface, xs, ds, vox, NMAX, wm_after=0.0)
     # the return's closest approach to the root (its end lies up to a step inside the WM)
-    d = np.nanmin(np.linalg.norm((pb.astype(float) - x0[go, None]) * vox, axis=2), axis=1)
+    d = np.nanmin(
+        np.linalg.norm((pb.astype(float) - x0[go, None]) * vox, axis=2), axis=1
+    )
     rt[go] = np.where(ob == X.WM, d, np.nan)
     rto[go] = ob
     return rt, rto
@@ -69,7 +73,11 @@ def round_trip(Tc, labels, dface, vox, pos, ns, outc, tracer, x0):
 def neighbour_pairs(x0, nrm, keep):
     tree = cKDTree(x0)
     pr = tree.query_pairs(1.5, output_type="ndarray")
-    ok = (np.sum(nrm[pr[:, 0]] * nrm[pr[:, 1]], 1) > 0.5) & keep[pr[:, 0]] & keep[pr[:, 1]]
+    ok = (
+        (np.sum(nrm[pr[:, 0]] * nrm[pr[:, 1]], 1) > 0.5)
+        & keep[pr[:, 0]]
+        & keep[pr[:, 1]]
+    )
     return pr[ok]
 
 
@@ -78,7 +86,7 @@ def swaps(pos, ns, pairs, vox, chunk=20000):
     by more than 90 deg from its offset at the roots (nan: never)."""
     first = np.full(len(pairs), np.nan)
     for a in range(0, len(pairs), chunk):
-        pr = pairs[a:a + chunk]
+        pr = pairs[a : a + chunk]
         m = np.minimum(ns[pr[:, 0]], ns[pr[:, 1]])
         P1 = pos[pr[:, 0]].astype(float) * vox
         P2 = pos[pr[:, 1]].astype(float) * vox
@@ -92,7 +100,7 @@ def swaps(pos, ns, pairs, vox, chunk=20000):
         valid[:, 0] = False
         flip = valid & (dot < 0)
         has = flip.any(1)
-        first[a:a + chunk][has] = np.argmax(flip[has], 1) * X.STEP_MM
+        first[a : a + chunk][has] = np.argmax(flip[has], 1) * X.STEP_MM
     return first
 
 
@@ -100,7 +108,7 @@ def agreement(pos, ns, nh, coh, ctx, vox, sel):
     """(c) angle (deg) between the tangent and the data's normal, and coherence, at cortex samples."""
     ang, cc = [], []
     for t in sel:
-        p = pos[t, :ns[t]].astype(float)
+        p = pos[t, : ns[t]].astype(float)
         if len(p) < 4:
             continue
         tg = np.gradient(p * vox, axis=0)
@@ -116,12 +124,12 @@ def agreement(pos, ns, nh, coh, ctx, vox, sel):
 def mean_along(vol, pos, ns, chunk=20000):
     out = np.full(len(ns), np.nan)
     for a in range(0, len(ns), chunk):
-        p = pos[a:a + chunk]
+        p = pos[a : a + chunk]
         ok = np.isfinite(p[..., 0])
         v = np.full(ok.shape, np.nan)
         v[ok] = ndi.map_coordinates(vol, p[ok].T.astype(float), order=1, mode="nearest")
         with np.errstate(invalid="ignore"):
-            out[a:a + chunk] = np.nanmean(v, 1)
+            out[a : a + chunk] = np.nanmean(v, 1)
     return out
 
 
@@ -131,7 +139,7 @@ def points_reached(P, pos, ns, cls, keep, vox):
     tree = cKDTree(P * vox)
     hit = set()
     for t in np.flatnonzero(keep & (cls == CT.CROSS)):
-        d, k = tree.query(pos[t, :ns[t]].astype(float) * vox)
+        d, k = tree.query(pos[t, : ns[t]].astype(float) * vox)
         i = int(np.argmin(d))
         if d[i] <= 0.3:
             hit.add(int(k[i]))
@@ -142,8 +150,13 @@ def binned(vals, x, bins):
     out = []
     for lo, hi in zip(bins[:-1], bins[1:]):
         m = (x >= lo) & (x < hi) & np.isfinite(vals)
-        out.append([int(m.sum()), round(float(np.median(vals[m])), 3) if m.sum() else None,
-                    round(float(np.percentile(vals[m], 90)), 3) if m.sum() else None])
+        out.append(
+            [
+                int(m.sum()),
+                round(float(np.median(vals[m])), 3) if m.sum() else None,
+                round(float(np.percentile(vals[m], 90)), 3) if m.sum() else None,
+            ]
+        )
     return out
 
 
@@ -160,7 +173,12 @@ def main():
     v, f, nrm = CT.white_mesh(B["wm"])
     tv = CT.pick_vertices(v, nrm)
     x0, d0 = v[tv], nrm[tv]
-    keep = B["dface"][tuple(np.clip(np.round(x0).astype(int), 0, np.array(labels.shape) - 1).T)] >= 2.0
+    keep = (
+        B["dface"][
+            tuple(np.clip(np.round(x0).astype(int), 0, np.array(labels.shape) - 1).T)
+        ]
+        >= 2.0
+    )
     k1, k2 = mesh_curvatures(v * vox, f, nrm, 1.0)
     H = ((k1 + k2) / 2)[tv]
     say(f"{A.site}: {len(tv):,} traces, {keep.sum():,} roots >= 2 mm from a face")
@@ -172,17 +190,35 @@ def main():
     pairs = neighbour_pairs(x0, d0, keep)
     rng = np.random.default_rng(0)
     sel = rng.choice(np.flatnonzero(keep), min(4000, keep.sum()), replace=False)
-    summary = dict(site=A.site, traces=int(len(tv)), kept=int(keep.sum()), pairs=int(len(pairs)),
-                   H_bins=[str(b) for b in HBINS], coh_bins=CBINS)
+    summary = dict(
+        site=A.site,
+        traces=int(len(tv)),
+        kept=int(keep.sum()),
+        pairs=int(len(pairs)),
+        H_bins=[str(b) for b in HBINS],
+        coh_bins=CBINS,
+    )
     arrays = dict(tv=tv, keep=keep, H=H, x0=x0, pairs=pairs)
     for tr in A.tracers:
         Tf, notes = CT.fields(B, labels, [tr], base=base)
         Tc = Tf[tr]
         pos1, ns1, out1 = CT.primary(tr, Tc, labels, B["dface"], x0, d0, vox, NMAX)
-        pos, ns, outc, tracer, cls, _, _ = CT.with_fallback(Pa, B, labels, x0, pos1, ns1, out1, NMAX)
+        pos, ns, outc, tracer, cls, _, _ = CT.with_fallback(
+            Pa, B, labels, x0, pos1, ns1, out1, NMAX
+        )
         del pos1
         say(f"{tr}: traced")
-        rt, rto = round_trip(base if tr == "blend" else Tc, labels, B["dface"], vox, pos, ns, outc, tracer, x0)
+        rt, rto = round_trip(
+            base if tr == "blend" else Tc,
+            labels,
+            B["dface"],
+            vox,
+            pos,
+            ns,
+            outc,
+            tracer,
+            x0,
+        )
         sw = swaps(pos, ns, pairs, vox)
         nsw = np.bincount(pairs[np.isfinite(sw)].ravel(), minlength=len(tv))
         ang, cc = agreement(pos, ns, nh, coh, ctx, vox, sel)
@@ -190,30 +226,72 @@ def main():
         say(f"{tr}: diagnostics done")
         k = keep
         row = dict(notes=notes)
-        row["classes"] = {CT.CLASS[c]: [int(np.sum(k & (cls == c) & (tracer == 0))), int(np.sum(k & (cls == c) & (tracer == 1)))]
-                          for c in CT.CLASS}
-        row["primary outcomes"] = {X.OUTCOME[o]: int(np.sum(k & (out1 == o))) for o in range(10) if np.sum(k & (out1 == o))}
+        row["classes"] = {
+            CT.CLASS[c]: [
+                int(np.sum(k & (cls == c) & (tracer == 0))),
+                int(np.sum(k & (cls == c) & (tracer == 1))),
+            ]
+            for c in CT.CLASS
+        }
+        row["primary outcomes"] = {
+            X.OUTCOME[o]: int(np.sum(k & (out1 == o)))
+            for o in range(10)
+            if np.sum(k & (out1 == o))
+        }
         okrt = k & np.isfinite(rt)
         row["round trip (mm) median, p90, n; returns not ending on WM"] = [
-            round(float(np.median(rt[okrt])), 3), round(float(np.percentile(rt[okrt], 90)), 3), int(okrt.sum()),
-            int(np.sum(k & (rto >= 0) & (rto != X.WM)))]
+            round(float(np.median(rt[okrt])), 3),
+            round(float(np.percentile(rt[okrt], 90)), 3),
+            int(okrt.sum()),
+            int(np.sum(k & (rto >= 0) & (rto != X.WM))),
+        ]
         row["pairs swapping, fraction; median depth of the first swap (mm)"] = [
-            round(float(np.mean(np.isfinite(sw))), 4), round(float(np.nanmedian(sw)), 2) if np.isfinite(sw).any() else None]
+            round(float(np.mean(np.isfinite(sw))), 4),
+            round(float(np.nanmedian(sw)), 2) if np.isfinite(sw).any() else None,
+        ]
         row["traces with any swap, fraction"] = round(float(np.mean(nsw[k] > 0)), 4)
-        row["tangent vs data normal (deg): median per coherence bin"] = binned(ang, cc, CBINS)
-        row["round trip by root curvature [n, median, p90]"] = binned(np.where(k, rt, np.nan), H, HBINS)
+        row["tangent vs data normal (deg): median per coherence bin"] = binned(
+            ang, cc, CBINS
+        )
+        row["round trip by root curvature [n, median, p90]"] = binned(
+            np.where(k, rt, np.nan), H, HBINS
+        )
         row["swapping traces by root curvature [n, fraction]"] = [
-            [int(np.sum(k & (H >= lo) & (H < hi))), round(float(np.mean(nsw[k & (H >= lo) & (H < hi)] > 0)), 4)
-             if np.sum(k & (H >= lo) & (H < hi)) else None] for lo, hi in zip(HBINS[:-1], HBINS[1:])]
+            [
+                int(np.sum(k & (H >= lo) & (H < hi))),
+                round(float(np.mean(nsw[k & (H >= lo) & (H < hi)] > 0)), 4)
+                if np.sum(k & (H >= lo) & (H < hi))
+                else None,
+            ]
+            for lo, hi in zip(HBINS[:-1], HBINS[1:])
+        ]
         row["failed by root curvature [n, fraction]"] = [
-            [int(np.sum(k & (H >= lo) & (H < hi))), round(float(np.mean(cls[k & (H >= lo) & (H < hi)] == CT.FAILED)), 3)
-             if np.sum(k & (H >= lo) & (H < hi)) else None] for lo, hi in zip(HBINS[:-1], HBINS[1:])]
-        row["round trip by mean coherence [n, median, p90]"] = binned(np.where(k, rt, np.nan), cmean, CBINS)
-        row["points reached by crossing traces"] = points_reached(P, pos, ns, cls, keep, vox)
+            [
+                int(np.sum(k & (H >= lo) & (H < hi))),
+                round(float(np.mean(cls[k & (H >= lo) & (H < hi)] == CT.FAILED)), 3)
+                if np.sum(k & (H >= lo) & (H < hi))
+                else None,
+            ]
+            for lo, hi in zip(HBINS[:-1], HBINS[1:])
+        ]
+        row["round trip by mean coherence [n, median, p90]"] = binned(
+            np.where(k, rt, np.nan), cmean, CBINS
+        )
+        row["points reached by crossing traces"] = points_reached(
+            P, pos, ns, cls, keep, vox
+        )
         summary[tr] = row
         print(json.dumps({tr: row}, indent=None)[:3000], flush=True)
-        for key, arr in (("cls", cls), ("tracer", tracer), ("out1", out1), ("rt", rt), ("nsw", nsw),
-                         ("sw", sw), ("cmean", cmean), ("L", (ns - 1) * X.STEP_MM)):
+        for key, arr in (
+            ("cls", cls),
+            ("tracer", tracer),
+            ("out1", out1),
+            ("rt", rt),
+            ("nsw", nsw),
+            ("sw", sw),
+            ("cmean", cmean),
+            ("L", (ns - 1) * X.STEP_MM),
+        ):
             arrays[f"{tr}:{key}"] = arr
         del pos, Tf, Tc
         gc.collect()
@@ -248,8 +326,15 @@ def figures(A, S, Z, tracers):
     rest = [d for d in range(3) if d != ax]
     disp = np.where(B["ctx"], B["disp"], np.nan)
     vmax = np.nanpercentile(np.abs(disp), 97)
-    rows = [("H", "root mean curvature (1/mm)")] + [(tr, f"{tr}: round trip (mm); x: swapping; ^: failed") for tr in tracers]
-    fig, axs = plt.subplots(len(rows), len(planes), figsize=(6.5 * len(planes), 6.2 * len(rows)), squeeze=False)
+    rows = [("H", "root mean curvature (1/mm)")] + [
+        (tr, f"{tr}: round trip (mm); x: swapping; ^: failed") for tr in tracers
+    ]
+    fig, axs = plt.subplots(
+        len(rows),
+        len(planes),
+        figsize=(6.5 * len(planes), 6.2 * len(rows)),
+        squeeze=False,
+    )
     for j, k in enumerate(planes):
         m = keep & (np.abs(x0[:, ax] - k) < 0.75)
         sl = np.take(disp, k, axis=ax)
@@ -257,14 +342,40 @@ def figures(A, S, Z, tracers):
             a = axs[i, j]
             a.imshow(sl.T, cmap="gray", origin="lower", vmin=-vmax, vmax=vmax)
             if tr == "H":
-                sc = a.scatter(x0[m, rest[0]], x0[m, rest[1]], c=H[m], s=6, cmap="coolwarm", vmin=-0.6, vmax=0.6)
+                sc = a.scatter(
+                    x0[m, rest[0]],
+                    x0[m, rest[1]],
+                    c=H[m],
+                    s=6,
+                    cmap="coolwarm",
+                    vmin=-0.6,
+                    vmax=0.6,
+                )
             else:
                 rt = Z[f"{tr}:rt"]
-                sc = a.scatter(x0[m, rest[0]], x0[m, rest[1]], c=rt[m], s=6, cmap="magma_r", vmin=0, vmax=0.8)
+                sc = a.scatter(
+                    x0[m, rest[0]],
+                    x0[m, rest[1]],
+                    c=rt[m],
+                    s=6,
+                    cmap="magma_r",
+                    vmin=0,
+                    vmax=0.8,
+                )
                 ms = m & (Z[f"{tr}:nsw"] > 0)
-                a.plot(x0[ms, rest[0]], x0[ms, rest[1]], "x", c="#30d5ff", ms=4, mew=0.8)
+                a.plot(
+                    x0[ms, rest[0]], x0[ms, rest[1]], "x", c="#30d5ff", ms=4, mew=0.8
+                )
                 mf = m & (Z[f"{tr}:cls"] == CT.FAILED)
-                a.plot(x0[mf, rest[0]], x0[mf, rest[1]], "^", mfc="none", mec="#1baf7a", ms=3, mew=0.6)
+                a.plot(
+                    x0[mf, rest[0]],
+                    x0[mf, rest[1]],
+                    "^",
+                    mfc="none",
+                    mec="#1baf7a",
+                    ms=3,
+                    mew=0.6,
+                )
             mp = np.abs(P[:, ax] - k) <= 2 if len(P) else np.zeros(0, bool)
             if len(P):
                 a.plot(P[mp, rest[0]], P[mp, rest[1]], "*", c="#ffd23f", ms=8)
@@ -288,7 +399,14 @@ def figures(A, S, Z, tracers):
             ff.append(np.mean(cls[m] == CT.FAILED) if m.any() else np.nan)
         for a, y in zip(axs, (med, swf, ff)):
             a.plot(centres, y, "o-", label=tr)
-    for a, t in zip(axs, ("round trip, median (mm)", "traces with a swap (fraction)", "failed (fraction)")):
+    for a, t in zip(
+        axs,
+        (
+            "round trip, median (mm)",
+            "traces with a swap (fraction)",
+            "failed (fraction)",
+        ),
+    ):
         a.set_xticks(centres)
         a.set_xticklabels(labels_, rotation=45, fontsize=8)
         a.set_xlabel("root mean curvature (1/mm; - fundus, + crown)")

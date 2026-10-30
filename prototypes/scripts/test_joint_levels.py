@@ -1,5 +1,5 @@
 """Tests of joint_levels' plumbing with exact answers.
-    nix develop --command uv run --with thinqpbo pytest -q prototypes/scripts/test_joint_levels.py
+nix develop --command uv run --with thinqpbo pytest -q prototypes/scripts/test_joint_levels.py
 """
 
 import sys
@@ -13,8 +13,15 @@ import joint_levels as JL  # noqa: E402
 
 def data(n, top, pairs=np.zeros((0, 2), int), s=0.0, w=1.0, m=200):
     P = len(pairs)
-    return JL.Data(step=0.04, ns=np.full(n, m), top=np.asarray(top, float), mu=np.zeros(n),
-                   pairs=np.asarray(pairs, int).reshape(-1, 2), S=np.full((P, m), s), W=np.full((P, m), w))
+    return JL.Data(
+        step=0.04,
+        ns=np.full(n, m),
+        top=np.asarray(top, float),
+        mu=np.zeros(n),
+        pairs=np.asarray(pairs, int).reshape(-1, 2),
+        S=np.full((P, m), s),
+        W=np.full((P, m), w),
+    )
 
 
 def test_window_recentres_to_an_anchor_outside_it():
@@ -22,7 +29,9 @@ def test_window_recentres_to_an_anchor_outside_it():
     walks it to the anchor."""
     D = data(1, [2.4])
     start = np.array([[0.53], [1.07], [1.6]])
-    z, cert, r, hist = JL.solve_pass(D, 0.08, start, np.full(start.shape, 0.32), recentre=6)
+    z, cert, r, hist = JL.solve_pass(
+        D, 0.08, start, np.full(start.shape, 0.32), recentre=6
+    )
     assert abs(z[-1, 0] - 2.4) <= 0.08 + 1e-9
     assert hist[-1]["edge_hits"] == 0
     assert np.all(np.diff(z[:, 0]) >= 0.1 - 1e-9)
@@ -42,7 +51,9 @@ def test_conservation_carries_a_shift():
 def test_tie_places_an_unanchored_pia():
     """Columns a (open, top 2.0) and b (no anchor), facing: a tie a + b = 4.6 mm puts b's pia at 2.6."""
     D = data(2, [2.0, np.nan])
-    D.ties = np.array([[0, 1]]); D.tie_L = np.array([4.6]); D.tie_w = np.array([1.0])
+    D.ties = np.array([[0, 1]])
+    D.tie_L = np.array([4.6])
+    D.tie_w = np.array([1.0])
     start = np.array([[0.67, 0.8], [1.33, 1.6], [2.0, 2.4]])
     z, cert, r, hist = JL.solve_pass(D, 0.04, start, np.full(start.shape, 0.6))
     assert abs(z[-1, 0] - 2.0) <= 0.04 + 1e-9
@@ -56,11 +67,20 @@ def test_recentring_never_raises_the_energy():
     n, m = 12, 200
     pairs = np.array([(i, i + 1) for i in range(n - 1)])
     top = np.where(rng.random(n) < 0.3, rng.uniform(1.8, 2.6, n), np.nan)
-    D = JL.Data(step=0.04, ns=np.full(n, m), top=top, mu=np.zeros(n), pairs=pairs,
-                S=rng.uniform(-0.15, 0.15, (len(pairs), m)), W=rng.uniform(0, 1, (len(pairs), m)))
+    D = JL.Data(
+        step=0.04,
+        ns=np.full(n, m),
+        top=top,
+        mu=np.zeros(n),
+        pairs=pairs,
+        S=rng.uniform(-0.15, 0.15, (len(pairs), m)),
+        W=rng.uniform(0, 1, (len(pairs), m)),
+    )
     D.c0 = np.full(n, 2.2)
     start = np.stack([t * np.full(n, 2.2) for t in JL.TAU])
-    z, cert, r, hist = JL.solve_pass(D, 0.04, start, np.full(start.shape, 0.12), recentre=15)
+    z, cert, r, hist = JL.solve_pass(
+        D, 0.04, start, np.full(start.shape, 0.12), recentre=15
+    )
     e = [h["energy"] for h in hist]
     assert all(e[i + 1] <= e[i] + 1e-9 for i in range(len(e) - 1))
 
@@ -80,8 +100,16 @@ def test_fill_recovers_a_known_warp_and_ignores_the_far_stack():
     def pattern(t):
         """A laminar pattern in relative depth (mm), as tests/test_flatten.py."""
         t = np.asarray(t, float)
-        c = [(0.3, 1.0, 0.10), (0.8, -1.2, 0.12), (1.3, 0.8, 0.10), (1.8, -0.9, 0.14), (2.4, 0.7, 0.12),
-             (3.0, -0.8, 0.12), (3.6, 0.9, 0.13), (4.3, -0.7, 0.12)]
+        c = [
+            (0.3, 1.0, 0.10),
+            (0.8, -1.2, 0.12),
+            (1.3, 0.8, 0.10),
+            (1.8, -0.9, 0.14),
+            (2.4, 0.7, 0.12),
+            (3.0, -0.8, 0.12),
+            (3.6, 0.9, 0.13),
+            (4.3, -0.7, 0.12),
+        ]
         return sum(a * np.exp(-0.5 * ((t - m) / s) ** 2) for m, a, s in c)
 
     nx, ny, step, m = 14, 10, 0.04, 200
@@ -96,22 +124,30 @@ def test_fill_recovers_a_known_warp_and_ignores_the_far_stack():
     F = np.zeros((2, n, m))
     for i in range(n):
         u = np.interp(zs, zt[i], uf[0], right=np.nan)
-        near = pattern(2.4 * u)  # the bank's own bands in tau (scaled to mm-like spacing)
-        far_u = (zs - t[i]) / (1.6 + 0.3 * y[i])  # the far bank, mirrored, another thickness
+        near = pattern(
+            2.4 * u
+        )  # the bank's own bands in tau (scaled to mm-like spacing)
+        far_u = (zs - t[i]) / (
+            1.6 + 0.3 * y[i]
+        )  # the far bank, mirrored, another thickness
         far = pattern(2.4 * (1 - far_u))
         f = np.where(np.isfinite(u), near, np.where(far_u <= 1, far, 0.0))
         F[:, i] = np.stack([f, 0.7 * f])
     pos = np.c_[np.repeat(np.arange(nx), ny), np.tile(np.arange(ny), nx)] * 0.16
     pairs = np.array(sorted(cKDTree(pos).query_pairs(0.25)))
     M_ = np.ones((n, m), bool)
-    s, ncc, en, va = FL.shifts(F[:, pairs[:, 0]], F[:, pairs[:, 1]], M_[pairs[:, 0]], M_[pairs[:, 1]], step)
+    s, ncc, en, va = FL.shifts(
+        F[:, pairs[:, 0]], F[:, pairs[:, 1]], M_[pairs[:, 0]], M_[pairs[:, 1]], step
+    )
     W = FL.pair_weights(ncc, en, va, np.median(en[va]))
     levels = np.stack([t * phi(np.full((1, 1), tt))[:, 0] for tt in JL.TAU])
     tg, z, info = JL.fill_warp(pairs, s, W, step, levels)
     # the true horizon each fitted depth lies on, per column; then its mean over columns
     u = np.stack([np.interp(z[i], zt[i], uf[0]) for i in range(n)])
     ubar = u.mean(0)
-    aligned = t[:, None] * phi(ubar[None])  # where the common horizon ubar lies on each column
+    aligned = t[:, None] * phi(
+        ubar[None]
+    )  # where the common horizon ubar lies on each column
     inner = (tg > 0.05) & (tg < 0.95)
     err = np.abs(z - aligned)[:, inner]
     assert np.median(err) < 0.01
@@ -133,9 +169,12 @@ def test_band_cost_places_its_level():
     D.warp_z = 2.0 * D.warp_tg[None]
     D.band_cost = [(-np.exp(-0.5 * ((tf * 2.0 - 1.0) / 0.08) ** 2))[None], None]
     start = np.array([[0.8], [2.0]])
-    z0, *_ = JL.solve_pass(D, 0.04, start, np.full(start.shape, 0.4),
-                           prm=JL.Params(w_band=0.0))
-    z1, *_ = JL.solve_pass(D, 0.04, start, np.full(start.shape, 0.4), prm=JL.Params(w_band=5.0))
+    z0, *_ = JL.solve_pass(
+        D, 0.04, start, np.full(start.shape, 0.4), prm=JL.Params(w_band=0.0)
+    )
+    z1, *_ = JL.solve_pass(
+        D, 0.04, start, np.full(start.shape, 0.4), prm=JL.Params(w_band=5.0)
+    )
     assert abs(z0[0, 0] - 0.8) <= 0.04 + 1e-9
     assert abs(z1[0, 0] - 1.0) <= 0.04 + 1e-9
 
@@ -167,7 +206,9 @@ def test_band_cost_vectorized_matches_the_loop():
     M0, _ = JL.build(D, 0.04, centre, half, JL.Params(w_band=0.0))
     for v in range(n):
         d = 0.04 * (o[0, v] + np.arange(M.K[v]))
-        ref = 0.7 * np.interp(np.interp(d, D.warp_z[v], D.warp_tg), D.band_tf, D.band_cost[0][v])
+        ref = 0.7 * np.interp(
+            np.interp(d, D.warp_z[v], D.warp_tg), D.band_tf, D.band_cost[0][v]
+        )
         assert np.max(np.abs((M.unary[v] - M0.unary[v]) - ref)) < 1e-12
 
 
@@ -175,7 +216,11 @@ def test_unconverged_pass_is_reported():
     """An anchor outside the window and no re-centring allowed: the pass says it did not converge."""
     D = data(1, [2.4])
     start = np.array([[0.53], [1.07], [1.6]])
-    z, cert, r, hist = JL.solve_pass(D, 0.08, start, np.full(start.shape, 0.32), recentre=0)
+    z, cert, r, hist = JL.solve_pass(
+        D, 0.08, start, np.full(start.shape, 0.32), recentre=0
+    )
     assert hist[-1]["converged"] is False
-    z, cert, r, hist = JL.solve_pass(D, 0.08, start, np.full(start.shape, 0.32), recentre=6)
+    z, cert, r, hist = JL.solve_pass(
+        D, 0.08, start, np.full(start.shape, 0.32), recentre=6
+    )
     assert hist[-1]["converged"] is True

@@ -4,9 +4,12 @@ where the continuum answer is only reached in the limit)."""
 import numpy as np
 import numpy.typing as npt
 import pytest
+from scipy.sparse import csr_matrix
 from scipy.spatial import ConvexHull, Delaunay
 
+from baillarger import mesh_graph as MG
 from baillarger.viewer import flatmap as FM
+from baillarger.viewer import inflation as IN
 
 type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.int64]
@@ -224,6 +227,19 @@ def test_flatten_packs_pieces_and_scales_to_area() -> None:
 # ------------------------------------------------------------- a patch round a vertex
 
 
+def graphs(v: Float, f: Int) -> tuple[csr_matrix, tuple[FM.Int, FM.Int]]:
+    """The mesh graph with the edges across neighbouring triangles, and the vertex ->
+    face table."""
+    return MG.edge_graph(v, f, 1.0), IN.vertex_faces(f, len(v))
+
+
+def edges_only(v: Float, f: Int) -> csr_matrix:
+    a, b = f.ravel(), np.roll(f, -1, axis=1).ravel()
+    G = csr_matrix((np.linalg.norm(v[a] - v[b], axis=1), (a, b)), shape=(len(v),) * 2)
+    out: csr_matrix = G.maximum(G.T).tocsr()
+    return out
+
+
 def grid_edge_distance(di: Int, dj: Int) -> Float:
     """Edge-path distance on grid() with unit spacing: its diagonals run (+1, +1)."""
     same = np.sign(di) * np.sign(dj) >= 0
@@ -235,6 +251,7 @@ def grid_edge_distance(di: Int, dj: Int) -> Float:
 
 
 def test_ball_on_a_flat_grid_has_the_expected_faces_and_distances() -> None:
+    # along the mesh edges alone (the graph's distances have a closed form)
     nx = ny = 21
     f = grid(nx, ny)
     ij = np.c_[np.repeat(np.arange(nx), ny), np.tile(np.arange(ny), nx)]
@@ -243,7 +260,8 @@ def test_ball_on_a_flat_grid_has_the_expected_faces_and_distances() -> None:
     v0 = i0 * ny + j0
     d = grid_edge_distance(ij[:, 0] - i0, ij[:, 1] - j0)
     want_f = f[(d[f] <= R).all(1)]
-    fp, orig, dist = FM.geodesic_patch(*FM.mesh_graph(v, f), f, v0, R)
+    vf = IN.vertex_faces(f, len(v))
+    fp, orig, dist = FM.geodesic_patch(edges_only(v, f), vf, f, v0, R)
     assert orig[0] == v0 and np.unique(orig).size == orig.size
     assert np.array_equal(np.sort(orig), np.unique(want_f))
     assert np.allclose(dist, d[orig], atol=1e-12)
@@ -262,7 +280,7 @@ def test_ball_keeps_only_v0s_piece() -> None:
     p = 4 * ny + 6
     v = np.vstack([v, v[p] + [0.3, 0.0, 1.0], v[p] + [0.0, 0.3, 1.0]])
     f = np.vstack([f, [p, nx * ny, nx * ny + 1]])
-    fp, orig, _ = FM.geodesic_patch(*FM.mesh_graph(v, f), f, 4 * ny + 4, 3.0)
+    fp, orig, _ = FM.geodesic_patch(*graphs(v, f), f, 4 * ny + 4, 3.0)
     assert p in orig and nx * ny not in orig and np.unique(orig).size == orig.size
     assert FM.topology(fp)["b"] == 1
 
@@ -285,7 +303,7 @@ def plane_mesh(seed: int, hole: bool = False) -> tuple[Float, Int, Float, int]:
 @pytest.mark.parametrize("hole", [False, True])
 def test_plane_patch_maps_isometrically(method: str, hole: bool) -> None:
     v, f, p, v0 = plane_mesh(3, hole)
-    out = FM.patch_flat_map(v, f, FM.mesh_graph(v, f), v0, 3.5, method)
+    out = FM.patch_flat_map(v, f, *graphs(v, f), v0, 3.5, method)
     assert out["boundary_loops"] == (2 if hole else 1)
     uv, q = out["uv"], p[out["orig"]]
     assert np.allclose(uv[0], 0, atol=1e-12)
@@ -314,7 +332,7 @@ def test_pinched_vertex_in_the_ball_gets_one_copy_per_fan() -> None:
     )
     f = np.delete(f, [k1, k2], axis=0)
     v0 = 5 * ny + 5
-    out = FM.patch_flat_map(v, f, FM.mesh_graph(v, f), v0, 3.5)
+    out = FM.patch_flat_map(v, f, *graphs(v, f), v0, 3.5)
     assert np.sum(out["orig"] == p) == 2
     assert np.max(np.abs(out["s1"] - 1)) < 1e-9 and np.max(np.abs(out["s2"] - 1)) < 1e-9
     assert np.all(out["signed_area"] > 0)

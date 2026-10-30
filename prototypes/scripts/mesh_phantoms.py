@@ -46,11 +46,20 @@ BAND = 2.5  # >= the ratio-3 stencil's reach along the normal (2.45 voxels)
 
 
 def phantoms():
-    return [M.ball(R=8.0), M.wavy(), M.plane(4.0), M.blade(w=1.5), M.blade(w=2.0), M.blade(w=3.0),
-            M.blade(w=4.0)]
+    return [
+        M.ball(R=8.0),
+        M.wavy(),
+        M.plane(4.0),
+        M.blade(w=1.5),
+        M.blade(w=2.0),
+        M.blade(w=3.0),
+        M.blade(w=4.0),
+    ]
 
 
-def surfaces(wm, sigmas=(0.5, 1.0, 1.5, 2.0), scales=(0.5, 1.0, 2.0, 3.0), taubin=(50,)):
+def surfaces(
+    wm, sigmas=(0.5, 1.0, 1.5, 2.0), scales=(0.5, 1.0, 2.0, 3.0), taubin=(50,)
+):
     """name -> (vertices, faces, normals) for every start surface. Normals: white_mesh's
     own; for the others the same 10 steps of normal smoothing along the edges."""
     out = {}
@@ -99,7 +108,12 @@ def surface_metrics(ph, v, f, n, curv=True):
         pos_abs_p95=pct(np.abs(tr.d[ok]), 95),
         normal_med=pct(ang[ok], 50),
         normal_p95=pct(ang[ok], 95),
-        normal_raw_med=pct(np.degrees(np.arccos(np.clip(np.sum(M.vertex_normals(v, f) * tr.n, 1), -1, 1)))[ok], 50),
+        normal_raw_med=pct(
+            np.degrees(
+                np.arccos(np.clip(np.sum(M.vertex_normals(v, f) * tr.n, 1), -1, 1))
+            )[ok],
+            50,
+        ),
         minangle_p5=pct(M.min_angles(v, f), 5),
         minangle_med=pct(M.min_angles(v, f), 50),
     )
@@ -125,9 +139,14 @@ def quadric_metrics(ph, wm):
         ok = away(ph, X) & away(ph, tr.foot)
         if sc == 0.32:
             ang = np.degrees(np.arccos(np.clip(np.sum(K["n"] * tr.n, 1), -1, 1)))
-            r.update(vertices=int(len(X)), pos_bias=float(np.mean(tr.d[ok])),
-                     pos_abs_med=pct(np.abs(tr.d[ok]), 50), pos_abs_p95=pct(np.abs(tr.d[ok]), 95),
-                     normal_med=pct(ang[ok], 50), normal_p95=pct(ang[ok], 95))
+            r.update(
+                vertices=int(len(X)),
+                pos_bias=float(np.mean(tr.d[ok])),
+                pos_abs_med=pct(np.abs(tr.d[ok]), 50),
+                pos_abs_p95=pct(np.abs(tr.d[ok]), 95),
+                normal_med=pct(ang[ok], 50),
+                normal_p95=pct(ang[ok], 95),
+            )
         e = 0.5 * (K["k1"] + K["k2"]) - 0.5 * (tr.k1 + tr.k2) / H
         r[f"H_err_med_{sc}"] = pct(np.abs(e[ok]), 50)
         r[f"H_err_p95_{sc}"] = pct(np.abs(e[ok]), 95)
@@ -156,9 +175,15 @@ def blade_metrics(ph, v, f, n, ctx, tr_grid):
         return out
     tv = ph.truth(v)
     okv = away(ph, v)
-    out["flipped"] = float(np.mean(np.sum(n[okv] * tv.n[okv], 1) < 0)) if okv.any() else float("nan")
-    out["side_bias_+"] = float(np.mean(tv.d[okv & (tv.side > 0)])) if okv.any() else float("nan")
-    out["side_bias_-"] = float(np.mean(tv.d[okv & (tv.side < 0)])) if okv.any() else float("nan")
+    out["flipped"] = (
+        float(np.mean(np.sum(n[okv] * tv.n[okv], 1) < 0)) if okv.any() else float("nan")
+    )
+    out["side_bias_+"] = (
+        float(np.mean(tv.d[okv & (tv.side > 0)])) if okv.any() else float("nan")
+    )
+    out["side_bias_-"] = (
+        float(np.mean(tv.d[okv & (tv.side < 0)])) if okv.any() else float("nan")
+    )
     out["self_intersections"] = int(intersecting_faces(v, f)[1]) if len(f) else 0
     return out
 
@@ -167,7 +192,9 @@ def section(v, f, axis, c):
     s = v[:, axis] - c
     segs = []
     S = s[f]
-    cross = (np.sign(S[:, 0]) != np.sign(S[:, 1])) | (np.sign(S[:, 1]) != np.sign(S[:, 2]))
+    cross = (np.sign(S[:, 0]) != np.sign(S[:, 1])) | (
+        np.sign(S[:, 1]) != np.sign(S[:, 2])
+    )
     for tri, st in zip(f[cross], S[cross], strict=True):
         pts = []
         for a, b in ((0, 1), (1, 2), (2, 0)):
@@ -196,31 +223,58 @@ def part_surface(res):
             rows[name] = r
             if not len(f):
                 continue
-            if ph.name == "wavy" and name in ("binary contour", "white_mesh s1", "twice 0.32mm"):
+            if ph.name == "wavy" and name in (
+                "binary contour",
+                "white_mesh s1",
+                "twice 0.32mm",
+            ):
                 curv_fig = curv_fig or []
                 k1, k2 = mesh_curvatures(v * H, f, n, 0.32)
                 loc = (v - ph.p["o"]) @ ph.p["Q"]
-                curv_fig.append((name, loc, 0.5 * (k1 + k2) - 0.5 * (tr.k1 + tr.k2) / H, ok))
+                curv_fig.append(
+                    (name, loc, 0.5 * (k1 + k2) - 0.5 * (tr.k1 + tr.k2) / H, ok)
+                )
         if ph.kind == "blade":
             blades_fig.append((ph, wm, S))
         res.setdefault("surface", {})[ph.name] = rows
         print(f"{ph.name}: {time.time() - t0:.1f} s", flush=True)
         for name, r in rows.items():
             if r.get("vertices", 1) == 0:
-                print(f"  {name:24s} no surface; " + (f"cover {r.get('cover_+', 0):.2f}/{r.get('cover_-', 0):.2f}" if "cover_+" in r else ""))
+                print(
+                    f"  {name:24s} no surface; "
+                    + (
+                        f"cover {r.get('cover_+', 0):.2f}/{r.get('cover_-', 0):.2f}"
+                        if "cover_+" in r
+                        else ""
+                    )
+                )
                 continue
             extra = ""
             if "cover_+" in r:
-                extra = (f" cover {r['cover_+']:.2f}/{r['cover_-']:.2f} flip {r['flipped']:.3f}"
-                         f" bias+ {r['side_bias_+']:+.2f} bias- {r['side_bias_-']:+.2f}")
-            print(f"  {name:24s} pos bias {r['pos_bias']:+.2f} |d| {r['pos_abs_med']:.2f}/{r['pos_abs_p95']:.2f}"
-                  f" nrm {r['normal_med']:.1f}/{r['normal_p95']:.1f} raw {r.get('normal_raw_med', float('nan')):.1f} H.32 {r['H_err_med_0.32']:.3f}/{r['H_err_p95_0.32']:.3f}"
-                  f" H.48 {r['H_err_med_0.48']:.3f}/{r['H_err_p95_0.48']:.3f} bias {r['H_bias_0.48']:+.3f}"
-                  f" X {r.get('self_intersections', '-')}{extra}", flush=True)
+                extra = (
+                    f" cover {r['cover_+']:.2f}/{r['cover_-']:.2f} flip {r['flipped']:.3f}"
+                    f" bias+ {r['side_bias_+']:+.2f} bias- {r['side_bias_-']:+.2f}"
+                )
+            print(
+                f"  {name:24s} pos bias {r['pos_bias']:+.2f} |d| {r['pos_abs_med']:.2f}/{r['pos_abs_p95']:.2f}"
+                f" nrm {r['normal_med']:.1f}/{r['normal_p95']:.1f} raw {r.get('normal_raw_med', float('nan')):.1f} H.32 {r['H_err_med_0.32']:.3f}/{r['H_err_p95_0.32']:.3f}"
+                f" H.48 {r['H_err_med_0.48']:.3f}/{r['H_err_p95_0.48']:.3f} bias {r['H_bias_0.48']:+.3f}"
+                f" X {r.get('self_intersections', '-')}{extra}",
+                flush=True,
+            )
     # figure: blade cross-sections
-    names = ["binary contour", "white_mesh s0.5", "white_mesh s1", "white_mesh s1.5", "white_mesh s2",
-             "twice 0.16mm", "twice 0.48mm"]
-    fig, axs = plt.subplots(len(blades_fig), len(names), figsize=(3.0 * len(names), 3.2 * len(blades_fig)))
+    names = [
+        "binary contour",
+        "white_mesh s0.5",
+        "white_mesh s1",
+        "white_mesh s1.5",
+        "white_mesh s2",
+        "twice 0.16mm",
+        "twice 0.48mm",
+    ]
+    fig, axs = plt.subplots(
+        len(blades_fig), len(names), figsize=(3.0 * len(names), 3.2 * len(blades_fig))
+    )
     for i, (ph, wm, S) in enumerate(blades_fig):
         zc = ph.shape[2] // 2
         for j, nm in enumerate(names):
@@ -232,25 +286,46 @@ def part_surface(res):
             # true sides
             g = ph.grid()[:, :, zc].reshape(-1, 3)
             dd = ph.truth(g).d.reshape(wm.shape[:2])
-            a.contour(np.arange(wm.shape[0]), np.arange(wm.shape[1]), dd.T, [0], colors="#2a78d6", linewidths=0.8)
+            a.contour(
+                np.arange(wm.shape[0]),
+                np.arange(wm.shape[1]),
+                dd.T,
+                [0],
+                colors="#2a78d6",
+                linewidths=0.8,
+            )
             c0 = np.array(ph.shape[:2]) // 2
             a.set_xlim(c0[0] - 14, c0[0] + 14)
             a.set_ylim(c0[1] - 14, c0[1] + 14)
-            a.set_xticks([]); a.set_yticks([])
+            a.set_xticks([])
+            a.set_yticks([])
             if i == 0:
                 a.set_title(nm, fontsize=10)
             if j == 0:
                 a.set_ylabel(ph.name)
-    fig.suptitle("Thin WM blades (grey: label; blue: true surface; red: start surface), plane z = centre", fontsize=12)
+    fig.suptitle(
+        "Thin WM blades (grey: label; blue: true surface; red: start surface), plane z = centre",
+        fontsize=12,
+    )
     fig.tight_layout()
     fig.savefig(f"{FIG}/mesh_phantom_blades.png", dpi=110)
     plt.close(fig)
     if curv_fig:
         fig, axs = plt.subplots(1, len(curv_fig), figsize=(5.2 * len(curv_fig), 4.6))
         for a, (nm, loc, e, ok) in zip(axs, curv_fig, strict=True):
-            sc = a.scatter(loc[ok, 0] * H, loc[ok, 1] * H, c=e[ok], s=2, cmap="RdBu_r", vmin=-0.4, vmax=0.4)
+            sc = a.scatter(
+                loc[ok, 0] * H,
+                loc[ok, 1] * H,
+                c=e[ok],
+                s=2,
+                cmap="RdBu_r",
+                vmin=-0.4,
+                vmax=0.4,
+            )
             a.set_title(f"{nm}: H error (1/mm), scale 0.32 mm", fontsize=10)
-            a.set_xlabel("u (mm)"); a.set_ylabel("v (mm)"); a.set_aspect("equal")
+            a.set_xlabel("u (mm)")
+            a.set_ylabel("v (mm)")
+            a.set_aspect("equal")
         fig.colorbar(sc, ax=axs, shrink=0.8)
         fig.savefig(f"{FIG}/mesh_phantom_curvature.png", dpi=110)
         plt.close(fig)
@@ -285,8 +360,16 @@ def run_case(ph, start, scale, ratio, wm1):
 
             s = O.setup(wm, ctx, patch=6)
             lab = s.patch.ravel()[k]
-        out = M.march_band(Mt, dom, seeds, np.zeros(k.size), np.zeros(k.size), X.reshape(-1, 3)[k], lab,
-                           spacing=h)
+        out = M.march_band(
+            Mt,
+            dom,
+            seeds,
+            np.zeros(k.size),
+            np.zeros(k.size),
+            X.reshape(-1, 3)[k],
+            lab,
+            spacing=h,
+        )
     else:
         if start == "true":
             closest = M.truth_closest(ph)
@@ -306,13 +389,19 @@ def run_case(ph, start, scale, ratio, wm1):
     dr = out.root[top] - foot[top]
     nn = nfield[top]
     dt = dr - np.sum(dr * nn, 1, keepdims=True) * nn
-    r = dict(n_top=int(top.sum()), reach=float(np.mean(np.isfinite(out.arrival[ctx]))),
-             arr_bias=float(np.median(ea)), arr_iqr=float(np.subtract(*np.percentile(ea, [75, 25]))),
-             arr_p95=pct(np.abs(ea), 95),
-             len_bias=float(np.median(el)), len_iqr=float(np.subtract(*np.percentile(el, [75, 25]))),
-             len_p95=pct(np.abs(el), 95),
-             root_med=pct(np.linalg.norm(dr, axis=1), 50), root_tan_med=pct(np.linalg.norm(dt, axis=1), 50),
-             root_tan_p95=pct(np.linalg.norm(dt, axis=1), 95))
+    r = dict(
+        n_top=int(top.sum()),
+        reach=float(np.mean(np.isfinite(out.arrival[ctx]))),
+        arr_bias=float(np.median(ea)),
+        arr_iqr=float(np.subtract(*np.percentile(ea, [75, 25]))),
+        arr_p95=pct(np.abs(ea), 95),
+        len_bias=float(np.median(el)),
+        len_iqr=float(np.subtract(*np.percentile(el, [75, 25]))),
+        len_p95=pct(np.abs(el), 95),
+        root_med=pct(np.linalg.norm(dr, axis=1), 50),
+        root_tan_med=pct(np.linalg.norm(dt, axis=1), 50),
+        root_tan_p95=pct(np.linalg.norm(dt, axis=1), 95),
+    )
     # the root map near the WM (within 1 mm): its jump per unit step between
     # 6-neighbours, and voxels with a neighbour whose root is > 1 mm away (Euclidean,
     # a lower bound on the distance along the surface): false collisions here,
@@ -347,8 +436,12 @@ def run_case(ph, start, scale, ratio, wm1):
         m = inner & (d > lo) & (d <= hi) & np.isfinite(dv)
         e = (dv[m] - true_div[m]) / H  # per mm
         r[f"div_{lo:g}_{hi:g}_bias"] = float(np.median(e)) if m.any() else float("nan")
-        r[f"div_{lo:g}_{hi:g}_iqr"] = float(np.subtract(*np.percentile(e, [75, 25]))) if m.any() else float("nan")
-        r[f"div_{lo:g}_{hi:g}_truth"] = float(np.median(true_div[m]) / H) if m.any() else float("nan")
+        r[f"div_{lo:g}_{hi:g}_iqr"] = (
+            float(np.subtract(*np.percentile(e, [75, 25]))) if m.any() else float("nan")
+        )
+        r[f"div_{lo:g}_{hi:g}_truth"] = (
+            float(np.median(true_div[m]) / H) if m.any() else float("nan")
+        )
     return r, (out, d, ctx, top)
 
 
@@ -358,12 +451,28 @@ def part_march(res):
     for ph in cases:
         wm1, ctx1, _ = ph.labels()
         S = surfaces(wm1, sigmas=(1.0, 2.0), scales=(1.0, 2.0, 3.0), taubin=())
-        only = os.environ.get("STARTS")  # e.g. "twice 0.32mm": run only these starts, keep the rest
-        want = only.split(",") if only else ["raw", "raw patches", "true", "binary contour", "white_mesh s1",
-                                             "white_mesh s2", "twice 0.16mm", "twice 0.32mm", "twice 0.48mm",
-                                             "implicit s0.5"]
+        only = os.environ.get(
+            "STARTS"
+        )  # e.g. "twice 0.32mm": run only these starts, keep the rest
+        want = (
+            only.split(",")
+            if only
+            else [
+                "raw",
+                "raw patches",
+                "true",
+                "binary contour",
+                "white_mesh s1",
+                "white_mesh s2",
+                "twice 0.16mm",
+                "twice 0.32mm",
+                "twice 0.48mm",
+                "implicit s0.5",
+            ]
+        )
         starts = [st for st in ("raw", "raw patches", "true") if st in want] + [
-            (nm, v, f) for nm, (v, f, _) in S.items() if nm in want and len(f)]
+            (nm, v, f) for nm, (v, f, _) in S.items() if nm in want and len(f)
+        ]
         if "implicit s0.5" in want:
             starts.append(("implicit s0.5", M.implicit_closest(wm1, 0.5), None))
         for ratio in (1.0, 3.0):
@@ -376,15 +485,24 @@ def part_march(res):
                         continue
                     t0 = time.time()
                     r, viz = run_case(ph, st, scale, ratio, wm1)
-                    res.setdefault("march", {}).setdefault(ph.name, {})[f"{nm} | ratio {ratio:g} | {scale}x"] = r
-                    print(f"{ph.name:12s} {nm:22s} r{ratio:g} {scale}x  arr {r['arr_bias']:+.3f} ({r['arr_iqr']:.3f}, {r['arr_p95']:.2f})"
-                          f"  len {r['len_bias']:+.3f} ({r['len_iqr']:.3f}, {r['len_p95']:.2f})"
-                          f"  root tan {r['root_tan_med']:.2f}/{r['root_tan_p95']:.2f} (|root| {r['root_med']:.2f})"
-                          f"  div1.5-3 {r['div_1.5_3_bias']:+.3f}/{r['div_1.5_3_iqr']:.3f} (true {r['div_1.5_3_truth']:.3f})"
-                          f"  div3-6 {r['div_3_6_bias']:+.3f}/{r['div_3_6_iqr']:.3f}  rootjump {r['rootjump_near_p95']:.2f}/{r['rootjump_near_p999']:.2f}"
-                          f"  falsecoll {r['false_coll_near']}/{r['false_coll_all']}  reach {r['reach']:.3f}  {time.time() - t0:.0f}s",
-                          flush=True)
-                    if ph.name == "wavy" and scale == 1 and ratio == 3.0 and nm in ("raw", "true", "twice 0.16mm"):
+                    res.setdefault("march", {}).setdefault(ph.name, {})[
+                        f"{nm} | ratio {ratio:g} | {scale}x"
+                    ] = r
+                    print(
+                        f"{ph.name:12s} {nm:22s} r{ratio:g} {scale}x  arr {r['arr_bias']:+.3f} ({r['arr_iqr']:.3f}, {r['arr_p95']:.2f})"
+                        f"  len {r['len_bias']:+.3f} ({r['len_iqr']:.3f}, {r['len_p95']:.2f})"
+                        f"  root tan {r['root_tan_med']:.2f}/{r['root_tan_p95']:.2f} (|root| {r['root_med']:.2f})"
+                        f"  div1.5-3 {r['div_1.5_3_bias']:+.3f}/{r['div_1.5_3_iqr']:.3f} (true {r['div_1.5_3_truth']:.3f})"
+                        f"  div3-6 {r['div_3_6_bias']:+.3f}/{r['div_3_6_iqr']:.3f}  rootjump {r['rootjump_near_p95']:.2f}/{r['rootjump_near_p999']:.2f}"
+                        f"  falsecoll {r['false_coll_near']}/{r['false_coll_all']}  reach {r['reach']:.3f}  {time.time() - t0:.0f}s",
+                        flush=True,
+                    )
+                    if (
+                        ph.name == "wavy"
+                        and scale == 1
+                        and ratio == 3.0
+                        and nm in ("raw", "true", "twice 0.16mm")
+                    ):
                         keepviz[nm] = viz
                     json.dump(res, open(OUT, "w"), indent=1)
     if keepviz and not os.environ.get("STARTS"):
@@ -398,7 +516,13 @@ def part_march(res):
             fig.colorbar(im, ax=a, shrink=0.7)
             dv = div_unit(np.where(np.isfinite(out.arrival), out.arrival, np.nan), 1)
             a = axs[1, j]
-            im = a.imshow(np.where(ctx, dv, np.nan)[:, y, :].T / H, origin="lower", cmap="PuOr", vmin=-1.5, vmax=1.5)
+            im = a.imshow(
+                np.where(ctx, dv, np.nan)[:, y, :].T / H,
+                origin="lower",
+                cmap="PuOr",
+                vmin=-1.5,
+                vmax=1.5,
+            )
             a.set_title(f"{nm}: div of unit grad (1/mm)", fontsize=10)
             fig.colorbar(im, ax=a, shrink=0.7)
         fig.tight_layout()
@@ -426,10 +550,20 @@ def tip_retraction(ph, v):
 
 def part_fin(res):
     fig, axs = None, None
-    names = ["binary contour", "white_mesh s0.5", "white_mesh s1", "white_mesh s1.5", "white_mesh s2",
-             "twice 0.16mm", "twice 0.32mm", "twice 0.48mm"]
+    names = [
+        "binary contour",
+        "white_mesh s0.5",
+        "white_mesh s1",
+        "white_mesh s1.5",
+        "white_mesh s2",
+        "twice 0.16mm",
+        "twice 0.32mm",
+        "twice 0.48mm",
+    ]
     fins = [M.fin(w=1.5), M.fin(w=2.0), M.fin(w=3.0), M.fin(w=4.0)]
-    fig, axs = plt.subplots(len(fins), len(names), figsize=(2.6 * len(names), 3.0 * len(fins)))
+    fig, axs = plt.subplots(
+        len(fins), len(names), figsize=(2.6 * len(names), 3.0 * len(fins))
+    )
     for i, ph in enumerate(fins):
         wm, ctx, trg = ph.labels()
         S = surfaces(wm, scales=(1.0, 2.0, 3.0), taubin=())
@@ -440,8 +574,11 @@ def part_fin(res):
             r["tip_retraction_med"] = float(np.median(tr_))
             r["tip_retraction_max"] = float(np.max(tr_))
             rows[name] = r
-            print(f"  {ph.name:8s} {name:22s} cover {r['cover_+']:.2f}/{r['cover_-']:.2f} X {r['self_intersections']}"
-                  f" tip retraction med {r['tip_retraction_med']:.2f} max {r['tip_retraction_max']:.2f} voxels", flush=True)
+            print(
+                f"  {ph.name:8s} {name:22s} cover {r['cover_+']:.2f}/{r['cover_-']:.2f} X {r['self_intersections']}"
+                f" tip retraction med {r['tip_retraction_med']:.2f} max {r['tip_retraction_max']:.2f} voxels",
+                flush=True,
+            )
         res.setdefault("fin", {})[ph.name] = rows
         # section across the blade (plane y' = const through the box centre): the
         # grid plane nearest it, x
@@ -451,20 +588,30 @@ def part_fin(res):
             a.imshow(wm[:, zc, :].T, origin="lower", cmap="Greys", vmin=0, vmax=2.5)
             g = ph.grid()[:, zc, :].reshape(-1, 3)
             dd = ph.truth(g).d.reshape(wm.shape[0], wm.shape[2])
-            a.contour(np.arange(wm.shape[0]), np.arange(wm.shape[2]), dd.T, [0], colors="#2a78d6", linewidths=0.8)
+            a.contour(
+                np.arange(wm.shape[0]),
+                np.arange(wm.shape[2]),
+                dd.T,
+                [0],
+                colors="#2a78d6",
+                linewidths=0.8,
+            )
             if len(S[nm][1]):
                 sg = section(S[nm][0], S[nm][1], 1, zc)
                 if len(sg):
                     a.add_collection(LineCollection(sg, colors="#e34948", lw=1.0))
             a.set_xlim(ph.shape[0] / 2 - 12, ph.shape[0] / 2 + 12)
             a.set_ylim(ph.shape[2] / 2 - 14, ph.shape[2] / 2 + 10)
-            a.set_xticks([]); a.set_yticks([])
+            a.set_xticks([])
+            a.set_yticks([])
             if i == 0:
                 a.set_title(nm, fontsize=9)
             if j == 0:
                 a.set_ylabel(ph.name)
-    fig.suptitle("Thin WM fins with a tip (grey: label; blue: true surface; red: start surface); plane y = centre",
-                 fontsize=11)
+    fig.suptitle(
+        "Thin WM fins with a tip (grey: label; blue: true surface; red: start surface); plane y = centre",
+        fontsize=11,
+    )
     fig.tight_layout()
     fig.savefig(f"{FIG}/mesh_phantom_fins.png", dpi=110)
     plt.close(fig)
@@ -476,8 +623,16 @@ def band_starts(wm):
     vf, ff = M.voxel_face_mesh(wm)
     out["voxel faces"] = (M.mesh_closest(vf, ff), None)
     S = surfaces(wm, scales=(1.0, 2.0, 3.0), taubin=())
-    for nm in ("binary contour", "white_mesh s0.5", "white_mesh s1", "white_mesh s1.5", "white_mesh s2",
-               "twice 0.16mm", "twice 0.32mm", "twice 0.48mm"):
+    for nm in (
+        "binary contour",
+        "white_mesh s0.5",
+        "white_mesh s1",
+        "white_mesh s1.5",
+        "white_mesh s2",
+        "twice 0.16mm",
+        "twice 0.32mm",
+        "twice 0.48mm",
+    ):
         v, f, _ = S[nm]
         out[nm] = (M.mesh_closest(v, f) if len(f) else None, (v, f))
     for sg in (0.5, 1.0):
@@ -501,7 +656,15 @@ def neighbour_jumps(mask, P, scale):
 
 
 def part_band(res):
-    cases = [M.ball(R=8.0), M.wavy(), M.plane(4.0), M.blade(w=1.5), M.blade(w=2.0), M.blade(w=3.0), M.fin(w=2.0)]
+    cases = [
+        M.ball(R=8.0),
+        M.wavy(),
+        M.plane(4.0),
+        M.blade(w=1.5),
+        M.blade(w=2.0),
+        M.blade(w=3.0),
+        M.fin(w=2.0),
+    ]
     for ph in cases:
         wm1, _, _ = ph.labels()
         starts = band_starts(wm1)
@@ -520,7 +683,9 @@ def part_band(res):
             omask = omask.reshape(shp)
             for nm, (cl, mesh) in starts.items():
                 if cl is None:
-                    res.setdefault("band", {}).setdefault(ph.name, {})[f"{nm} | {scale}x"] = dict(missing=True)
+                    res.setdefault("band", {}).setdefault(ph.name, {})[
+                        f"{nm} | {scale}x"
+                    ] = dict(missing=True)
                     print(f"  {ph.name:10s} {scale}x {nm:18s} no surface", flush=True)
                     continue
                 P, n = cl(X)
@@ -529,38 +694,67 @@ def part_band(res):
                 fe = P - ft
                 fet = fe - np.sum(fe * nt, 1, keepdims=True) * nt
                 clear = np.abs(dt) > 0.3
-                r = dict(n=int(len(X)), sd_bias=float(np.median(e)),
-                         sd_iqr=float(np.subtract(*np.percentile(e, [75, 25]))), sd_p95=pct(np.abs(e), 95),
-                         foot_med=pct(np.linalg.norm(fe, axis=1), 50), foot_p95=pct(np.linalg.norm(fe, axis=1), 95),
-                         foot_tan_med=pct(np.linalg.norm(fet, axis=1), 50),
-                         foot_tan_p95=pct(np.linalg.norm(fet, axis=1), 95),
-                         sign_err=float(np.mean(np.sign(de[clear]) != np.sign(dt[clear]))))
+                r = dict(
+                    n=int(len(X)),
+                    sd_bias=float(np.median(e)),
+                    sd_iqr=float(np.subtract(*np.percentile(e, [75, 25]))),
+                    sd_p95=pct(np.abs(e), 95),
+                    foot_med=pct(np.linalg.norm(fe, axis=1), 50),
+                    foot_p95=pct(np.linalg.norm(fe, axis=1), 95),
+                    foot_tan_med=pct(np.linalg.norm(fet, axis=1), 50),
+                    foot_tan_p95=pct(np.linalg.norm(fet, axis=1), 95),
+                    sign_err=float(np.mean(np.sign(de[clear]) != np.sign(dt[clear]))),
+                )
                 J = neighbour_jumps(omask, P[outside], scale)
-                r.update(jump_p50=pct(J, 50), jump_p95=pct(J, 95), jump_p999=pct(J, 99.9), jump_gt2=float(np.mean(J > 2)))
+                r.update(
+                    jump_p50=pct(J, 50),
+                    jump_p95=pct(J, 95),
+                    jump_p999=pct(J, 99.9),
+                    jump_gt2=float(np.mean(J > 2)),
+                )
                 if ph.kind in ("blade", "fin"):
                     two = outside & (np.abs(side) == 1)
                     ps = ph.truth(P[two]).side
                     r["wrong_side"] = float(np.mean(ps != side[two]))
                     inside = ~outside & (dt < -0.3)
-                    r["inside_sign_err"] = float(np.mean(de[inside] > 0)) if inside.any() else float("nan")
+                    r["inside_sign_err"] = (
+                        float(np.mean(de[inside] > 0)) if inside.any() else float("nan")
+                    )
                 if mesh is not None and scale == 1:
                     v, f = mesh
                     ma = M.min_angles(v, f)
                     ar = M.aspect_ratios(v, f)
                     da = M.dual_areas(v, f)
                     okv = away(ph, v)
-                    r.update(minangle_p5=pct(ma, 5), minangle_med=pct(ma, 50), aspect_p50=pct(ar, 50),
-                             aspect_p95=pct(ar, 95), aspect_max=pct(ar, 100),
-                             dual_cv=float(np.std(da[okv]) / np.mean(da[okv])))
-                res.setdefault("band", {}).setdefault(ph.name, {})[f"{nm} | {scale}x"] = r
-                extra = (f" wrong side {r['wrong_side']:.4f} inside sign {r['inside_sign_err']:.4f}"
-                         if "wrong_side" in r else "")
-                tq = (f" tri minang p5 {r['minangle_p5']:.1f} aspect p95 {r['aspect_p95']:.2f} dualCV {r['dual_cv']:.2f}"
-                      if "aspect_p95" in r else "")
-                print(f"  {ph.name:10s} {scale}x {nm:18s} sd {r['sd_bias']:+.3f} ({r['sd_iqr']:.3f}, p95 {r['sd_p95']:.3f})"
-                      f" foot {r['foot_med']:.3f}/{r['foot_p95']:.3f} tan {r['foot_tan_med']:.3f}/{r['foot_tan_p95']:.3f}"
-                      f" sign {r['sign_err']:.4f} jump p95 {r['jump_p95']:.2f} p99.9 {r['jump_p999']:.2f} >2 {r['jump_gt2']:.4f}"
-                      + extra + tq, flush=True)
+                    r.update(
+                        minangle_p5=pct(ma, 5),
+                        minangle_med=pct(ma, 50),
+                        aspect_p50=pct(ar, 50),
+                        aspect_p95=pct(ar, 95),
+                        aspect_max=pct(ar, 100),
+                        dual_cv=float(np.std(da[okv]) / np.mean(da[okv])),
+                    )
+                res.setdefault("band", {}).setdefault(ph.name, {})[
+                    f"{nm} | {scale}x"
+                ] = r
+                extra = (
+                    f" wrong side {r['wrong_side']:.4f} inside sign {r['inside_sign_err']:.4f}"
+                    if "wrong_side" in r
+                    else ""
+                )
+                tq = (
+                    f" tri minang p5 {r['minangle_p5']:.1f} aspect p95 {r['aspect_p95']:.2f} dualCV {r['dual_cv']:.2f}"
+                    if "aspect_p95" in r
+                    else ""
+                )
+                print(
+                    f"  {ph.name:10s} {scale}x {nm:18s} sd {r['sd_bias']:+.3f} ({r['sd_iqr']:.3f}, p95 {r['sd_p95']:.3f})"
+                    f" foot {r['foot_med']:.3f}/{r['foot_p95']:.3f} tan {r['foot_tan_med']:.3f}/{r['foot_tan_p95']:.3f}"
+                    f" sign {r['sign_err']:.4f} jump p95 {r['jump_p95']:.2f} p99.9 {r['jump_p999']:.2f} >2 {r['jump_gt2']:.4f}"
+                    + extra
+                    + tq,
+                    flush=True,
+                )
             print(f"{ph.name} {scale}x: {time.time() - t0:.0f} s", flush=True)
             json.dump(res, open(OUT, "w"), indent=1)
 

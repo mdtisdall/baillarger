@@ -1,5 +1,5 @@
 """Tests of edit_priority with exact answers.
-    nix develop --command uv run --with thinqpbo pytest -q prototypes/scripts/test_edit_priority.py
+nix develop --command uv run --with thinqpbo pytest -q prototypes/scripts/test_edit_priority.py
 """
 
 import itertools
@@ -24,16 +24,37 @@ def random_model(rng, n=5):
     unary = [np.round(rng.normal(size=int(k)), 3) for k in K]
     pairs = [(a, b) for a in range(n) for b in range(n) if a != b]
     pick = lambda m: [pairs[i] for i in rng.choice(len(pairs), m, replace=False)]  # noqa: E731
-    hard = [(ints([p[0] for p in pp]), ints([p[1] for p in pp]), ints([-2, -1]), ints([1, 3]))
-            for pp in [pick(2)]]
-    hinge = [(ints([p[0] for p in pp]), ints([p[1] for p in pp]), ints(rng.integers(-2, 3, 4)),
-              np.round(rng.uniform(0, 1.5, 4), 3)) for pp in [pick(4)]]
-    tie = [(ints([p[0] for p in pp]), ints([p[1] for p in pp]), ints(rng.integers(0, 6, 3)),
-            np.round(rng.uniform(0.2, 1.5, 3), 3)) for pp in [pick(3)]]
+    hard = [
+        (
+            ints([p[0] for p in pp]),
+            ints([p[1] for p in pp]),
+            ints([-2, -1]),
+            ints([1, 3]),
+        )
+        for pp in [pick(2)]
+    ]
+    hinge = [
+        (
+            ints([p[0] for p in pp]),
+            ints([p[1] for p in pp]),
+            ints(rng.integers(-2, 3, 4)),
+            np.round(rng.uniform(0, 1.5, 4), 3),
+        )
+        for pp in [pick(4)]
+    ]
+    tie = [
+        (
+            ints([p[0] for p in pp]),
+            ints([p[1] for p in pp]),
+            ints(rng.integers(0, 6, 3)),
+            np.round(rng.uniform(0.2, 1.5, 3), 3),
+        )
+        for pp in [pick(3)]
+    ]
     tp = pick(3)
     T = np.full((3, int(K.max()), int(K.max())), np.nan)
     for p_, (a, b) in enumerate(tp):
-        T[p_, :K[a], :K[b]] = np.round(rng.normal(size=(K[a], K[b])), 3)
+        T[p_, : K[a], : K[b]] = np.round(rng.normal(size=(K[a], K[b])), 3)
     table = [(ints([p[0] for p in tp]), ints([p[1] for p in tp]), T)]
     return WC.Model(K, o, unary, hard, hinge, tie, table)
 
@@ -76,10 +97,18 @@ def test_margins_on_a_joint_model():
     rng = np.random.default_rng(3)
     n, m = 6, 120
     pairs = np.array([(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (0, 2)])
-    D = JL.Data(step=0.04, ns=np.full(n, m), top=np.array([2.0, np.nan, 2.2, np.nan, 1.9, 2.1]),
-                mu=rng.normal(0, 0.1, n), pairs=pairs, S=rng.normal(0, 0.05, (len(pairs), m)),
-                W=rng.uniform(0, 1, (len(pairs), m)), ties=np.array([(1, 4)]), tie_L=np.array([4.1]),
-                tie_w=np.array([0.8]))
+    D = JL.Data(
+        step=0.04,
+        ns=np.full(n, m),
+        top=np.array([2.0, np.nan, 2.2, np.nan, 1.9, 2.1]),
+        mu=rng.normal(0, 0.1, n),
+        pairs=pairs,
+        S=rng.normal(0, 0.05, (len(pairs), m)),
+        W=rng.uniform(0, 1, (len(pairs), m)),
+        ties=np.array([(1, 4)]),
+        tie_L=np.array([4.1]),
+        tie_w=np.array([0.8]),
+    )
     D.c0 = np.full(n, 2.0)
     centre = np.stack([t * np.full(n, 2.0) for t in JL.TAU])
     M, _ = JL.build(D, 0.08, centre, np.full(centre.shape, 0.24))
