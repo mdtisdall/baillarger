@@ -4,7 +4,7 @@
 as stars. Built as the crest and traverse methods build T (extended, sign through tissue).
 
 Writes <figures>/crest_planes_<name>.png.
-Usage: crest_planes.py <figures dir> --name NAME --box I J K --points FILE [--wm-changes FILE]
+Usage: crest_planes.py <figures dir> --name NAME --box I J K --points FILE [--dseg FILE]
 """
 
 import argparse
@@ -19,7 +19,6 @@ import numpy as np
 
 from baillarger import column_traces as CT
 from baillarger import streamlines as S
-from baillarger.white import WMChanges
 
 
 def planes_of(P):
@@ -35,12 +34,12 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--box", type=int, nargs=3, required=True)
     ap.add_argument("--points", required=True)
-    ap.add_argument("--wm-changes")
+    ap.add_argument("--dseg", help="the corrected segmentation (python -m baillarger.white dseg)")
     A = ap.parse_args()
     lo = tuple(A.box)
     hi = tuple(a + 141 for a in lo)
-    ch = WMChanges.load(Path(A.wm_changes)) if A.wm_changes else None
-    t = CT.load_tissue(lo, hi, A.name, changes=ch)
+    dseg = Path(A.dseg) if A.dseg else None
+    t = CT.load_tissue(lo, hi, A.name, dseg=dseg)
     base = CT.base_tensor(t)
     T, _ = S.fitted_field(base, t.ctx, t.wm, t.vox, fluid=t.labels == 1, wm_band_mm=CT.WM_BAND_MM)
     noise, _ = S.step_noise(base, t.ctx, S.tissue_wm_direction(t.wm, t.ctx, t.vox), t.vox)

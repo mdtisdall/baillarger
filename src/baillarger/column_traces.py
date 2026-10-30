@@ -8,11 +8,11 @@ features and the depth horizons along these traces
 (prototypes/scripts/column_volume.py). Everything is 3D. Positions are voxel
 index coordinates of the box; vox the voxel size (mm); lengths in mm.
 
-1. Tissue (load_tissue, tissue): the rim labels of the box, with the WM
-   label of choice (the aseg's, or the handle-free label from
-   baillarger.white), optionally the pial-side label changes
-   (baillarger.pial_labels: cortex relabelled as fluid), the missing tissue
-   (baillarger.frame.missing_tissue), and echoes 2 and 3 with their trend
+1. Tissue (load_tissue, tissue): the rim labels of the box, from the aseg
+   or from the corrected segmentation (baillarger.white, whose cavity- and
+   handle-free WM mask is then the WM label), optionally the pial-side
+   label changes (baillarger.pial_labels: cortex relabelled as fluid), the
+   missing tissue (baillarger.frame.missing_tissue), and echoes 2 and 3 with their trend
    removed (log intensity minus its normalized convolution over the cortex
    at 4 voxels), zero outside the cortex. Labels: 0 cortex, 1 fluid, 2 WM,
    3 missing, 4 other.
@@ -22,8 +22,9 @@ index coordinates of the box; vox the voxel size (mm); lengths in mm.
    (baillarger.mesh_smoothing). The binary label keeps the surface on the
    label's own boundary. One root per voxel cell and normal side (dominant
    axis and sign): the vertex nearest the cell's centre, so that roots are
-   about a voxel apart. The handle-free label gives genus-0 pieces; the
-   aseg's (the default, as in the volumes built before) does not.
+   about a voxel apart. The corrected segmentation gives genus-0 pieces;
+   the aseg's WM label (the default, as in the volumes built before) does
+   not.
 3. Primary trace (baillarger.streamlines.trace), by TRACERS:
    - "current": the base structure tensor of the two echoes, from the root's
      first step.
@@ -122,7 +123,7 @@ from baillarger import streamlines as S
 from baillarger.data import Patch, load_box
 from baillarger.frame import mesh_curvatures, missing_tissue
 from baillarger.fronts import Fronts, march, riemann_from_direction
-from baillarger.white import WhiteMesh, WMChanges, white_matter_box, white_mesh_normals
+from baillarger.white import filled_labels, white_mesh_normals
 
 if TYPE_CHECKING:
     from baillarger.pial_labels import LabelChanges
@@ -242,16 +243,18 @@ def load_tissue(
     hi: tuple[int, int, int],
     name: str = "box",
     directory: Path | None = None,
-    changes: WMChanges | None = None,
+    dseg: Path | None = None,
     pial_changes: "LabelChanges | None" = None,
     reviewed_only: bool = False,
 ) -> Tissue:
-    """The box [lo, hi) of the full grid (0-based voxels): step 1. changes:
-    the handle-free WM label's changes (baillarger.white.wm_changes); None
-    keeps the aseg's WM label. pial_changes, reviewed_only: the pial-side label changes
+    """The box [lo, hi) of the full grid (0-based voxels): step 1. dseg: the
+    corrected segmentation (baillarger.white.write_wm_topo, on the aseg's
+    grid), read in place of the aseg, with its WM mask (filled_labels) as the
+    WM label; None keeps the aseg and its WM label. pial_changes,
+    reviewed_only: the pial-side label changes
     (baillarger.pial_labels.LabelChanges; see tissue)."""
-    p = load_box(lo, hi, name=name, directory=directory)
-    wm = None if changes is None else white_matter_box(lo, hi, changes, directory)
+    p = load_box(lo, hi, name=name, directory=directory, labels=dseg)
+    wm = None if dseg is None else np.isin(p.aseg, filled_labels(dseg))
     return tissue(p, wm, pial_changes, reviewed_only)
 
 
@@ -777,22 +780,15 @@ def trace_columns(
     tracer: str = "fitted_blend",
     method: str = "crest",
     bend_deg: float | None = None,
-    mesh: WhiteMesh | None = None,
 ) -> ColumnTraces:
-    """Steps 2-6 on a box. mesh: a saved white mesh of this box and WM label
-    (baillarger.white.WhiteMesh; ValueError if it is not) instead of making
-    it (white_mesh)."""
+    """Steps 2-6 on a box."""
     if tracer not in TRACERS:
         raise ValueError(f"tracer {tracer!r}: not one of {TRACERS}")
     if method not in METHODS:
         raise ValueError(f"method {method!r}: not one of {METHODS}")
     base = base_tensor(t)
     nh, coh = data_normal(base, t.ctx)
-    if mesh is None:
-        v, f, nrm = white_mesh(t.wm)
-    else:
-        mesh.check(t.patch.lo, t.patch.hi, t.wm)
-        v, f, nrm = mesh.v, mesh.f, mesh.normals
+    v, f, nrm = white_mesh(t.wm)
     tv = root_vertices(v, nrm)
     P = mesh_patches(v, f, t.vox)
     root_patch = P.of_vertex[tv]

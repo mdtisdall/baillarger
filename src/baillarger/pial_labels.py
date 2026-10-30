@@ -98,14 +98,14 @@ with_status, with_brush), not into the labels.
 Command line:
 
     python -m baillarger.pial_labels propose --out DIR --name NAME --lo X Y Z
-        --hi X Y Z [--wm-changes FILE] [--columns column_volume_<name>.npz]
-        [--mesh wm_mesh_<name>.npz]
+        --hi X Y Z [--dseg FILE] [--columns column_volume_<name>.npz]
 
 writes, in DIR: pial_labels_<NAME>.npz (the change file, every review cell
 accepted, proposed or rejected by step 7); .json (summary and the ranked
-cells); _labels.nii.gz (the box's rim labels with the WM changes and the
-best guess applied: 0 other, 1 outside, 2 WM, 3 cortex); _overlay.nii.gz
-(box grid; overlay's codes).
+cells); _labels.nii.gz (the box's rim labels, from the corrected
+segmentation with --dseg (baillarger.white), with the best guess applied:
+0 other, 1 outside, 2 WM, 3 cortex); _overlay.nii.gz (box grid; overlay's
+codes).
 """
 
 import argparse
@@ -127,7 +127,6 @@ from baillarger import mesh_graph as G
 from baillarger import streamlines as S
 from baillarger.data import RIM_CORTEX, RIM_OUTSIDE, RIM_WM, Box
 from baillarger.handles import kuhn_betti
-from baillarger.white import WhiteMesh, WMChanges
 
 type Bool = npt.NDArray[np.bool_]
 type F64 = npt.NDArray[np.float64]
@@ -660,20 +659,12 @@ def propose(
     pos: npt.ArrayLike | None = None,
     ns: npt.ArrayLike | None = None,
     alpha: float = ALPHA,
-    mesh: WhiteMesh | None = None,
 ) -> Proposal:
     """Steps 1-6 on a box (module docstring). pos, ns: a column volume's
-    traces (box voxel coordinates), for the columns each component affects.
-    mesh: a saved white mesh of this box and WM label (baillarger.white;
-    ValueError if it is not) instead of making it (CT.white_mesh)."""
-    if mesh is not None:
-        mesh.check(t.patch.lo, t.patch.hi, t.wm)
+    traces (box voxel coordinates), for the columns each component affects."""
     dk = darkness(t, alpha)
     base = CT.base_tensor(t)
-    if mesh is None:
-        v, f, nrm = CT.white_mesh(t.wm)
-    else:
-        v, f, nrm = mesh.v, mesh.f, mesh.normals
+    v, f, nrm = CT.white_mesh(t.wm)
     C = CT.fitted_crest(t, base, v, f, nrm)
     del base, v, f, nrm
     lab, n = ndi.label(dk.dark, _C26)
@@ -749,9 +740,6 @@ def propose(
         crest_voxels=int(C.crest.sum()),
         crest_voxels_without_component=int((C.crest & (around == 0)).sum()),
         traces=0 if pos is None else len(np.asarray(pos)),
-        white_mesh="made here"
-        if mesh is None
-        else dict(wm_sha256=mesh.wm_sha256, provenance=mesh.provenance),
     )
     ch = LabelChanges(
         lo=t.patch.lo,
@@ -823,24 +811,21 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--name", required=True)
     c.add_argument("--lo", required=True, type=int, nargs=3)
     c.add_argument("--hi", required=True, type=int, nargs=3)
-    c.add_argument("--wm-changes", type=Path)
-    c.add_argument("--columns", type=Path, help="column_volume_<name>.npz")
     c.add_argument(
-        "--mesh", type=Path, help="wm_mesh_<name>.npz (python -m baillarger.white mesh)"
+        "--dseg", type=Path, help="desc-wmtopo_dseg (python -m baillarger.white dseg)"
     )
+    c.add_argument("--columns", type=Path, help="column_volume_<name>.npz")
     c.add_argument("--alpha", type=float, default=ALPHA)
     a = ap.parse_args(argv)
     lo, hi = (a.lo[0], a.lo[1], a.lo[2]), (a.hi[0], a.hi[1], a.hi[2])
-    wm = WMChanges.load(a.wm_changes) if a.wm_changes else None
-    t = CT.load_tissue(lo, hi, a.name, changes=wm)
+    t = CT.load_tissue(lo, hi, a.name, dseg=a.dseg)
     pos = ns = None
     if a.columns:
         Z = np.load(a.columns)
         if not np.array_equal(Z["lo"], lo):
             raise SystemExit(f"{a.columns}: box corner {Z['lo']} is not {lo}")
         pos, ns = Z["pos"], Z["ns"]
-    mesh = WhiteMesh.load(a.mesh) if a.mesh else None
-    s = write(propose(t, pos, ns, a.alpha, mesh), t, a.out, a.name)
+    s = write(propose(t, pos, ns, a.alpha), t, a.out, a.name)
     print(json.dumps(dict(info=s["info"], by_status=s["by_status"]), indent=1))
 
 

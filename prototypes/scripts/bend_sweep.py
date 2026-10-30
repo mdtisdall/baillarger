@@ -1,6 +1,6 @@
 """Does the crest method depend on its bend threshold? The column traces of
 baillarger.column_traces (method "crest", fitted_blend) with BEND_DEG swept from 10 to 60 deg
-(within BEND_MM = 0.3 mm), on a site (the handle-free label with --wm-changes) or on the fold
+(within BEND_MM = 0.3 mm), on a site (the corrected segmentation's WM with --dseg) or on the fold
 phantoms at a site's features. Within a bank a column bends about a quarter of a degree per
 0.04 mm step, so any threshold well above that and below the bends at contacts should give the
 same columns; this measures how far that holds.
@@ -11,7 +11,7 @@ points crossed by crossing columns; on the phantoms, the share of the right clas
 and end errors (fold_eval.errors).
 
 Writes <work>/bend_sweep_<name>.json (sites) or <work>/bend_sweep_phantoms_<name>.json.
-Usage: bend_sweep.py <work dir> --name NAME (--box I J K [--points FILE] [--wm-changes FILE]
+Usage: bend_sweep.py <work dir> --name NAME (--box I J K [--points FILE] [--dseg FILE]
                      | --phantoms)
 """
 
@@ -27,7 +27,6 @@ from scipy.spatial import cKDTree
 from baillarger import column_traces as CT
 from baillarger import mesh_graph as G
 from baillarger import streamlines as S
-from baillarger.white import WMChanges
 
 ANGLES = (10.0, 20.0, 30.0, 45.0, 60.0)
 CLS = list(CT.CLASS)
@@ -87,11 +86,11 @@ def compare(runs, keep, vox):
 def site(A):
     lo = tuple(A.box)
     hi = tuple(a + 141 for a in lo)
-    changes = WMChanges.load(Path(A.wm_changes)) if A.wm_changes else None
-    t = CT.load_tissue(lo, hi, A.name, changes=changes)
-    say(f"{A.name}: WM {'handle-free' if changes else 'aseg'}")
+    dseg = Path(A.dseg) if A.dseg else None
+    t = CT.load_tissue(lo, hi, A.name, dseg=dseg)
+    say(f"{A.name}: WM {'handle-free' if dseg else 'aseg'}")
     runs, v, tv, keep = sweep(t.det, t.ctx, t.wm, t.labels, t.dface, t.vox)
-    res = dict(site=A.name, wm="handle-free" if changes else "aseg", roots=int(keep.sum()),
+    res = dict(site=A.name, wm="handle-free" if dseg else "aseg", roots=int(keep.sum()),
                by_angle=compare(runs, keep, t.vox))
     if A.points:
         Pts = np.array(json.load(open(A.points))["points_full0"], float) - np.array(lo)
@@ -136,7 +135,7 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--box", type=int, nargs=3)
     ap.add_argument("--points")
-    ap.add_argument("--wm-changes")
+    ap.add_argument("--dseg", help="the corrected segmentation (python -m baillarger.white dseg)")
     ap.add_argument("--phantoms", action="store_true")
     A = ap.parse_args()
     phantoms(A) if A.phantoms else site(A)

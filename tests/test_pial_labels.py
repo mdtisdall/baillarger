@@ -6,11 +6,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from test_white import read_labels, write_data
 
 from baillarger import column_traces as CT
 from baillarger import pial_labels as PL
 from baillarger import white
-from baillarger.data import RIM_CORTEX, RIM_OUTSIDE, Patch
+from baillarger.data import RIM_CORTEX, RIM_OUTSIDE, RIM_WM, Patch
 
 VOX = 0.16
 CORTEX, WM, FLUID = (900.0, 500.0, 300.0), (800.0, 400.0, 230.0), (45.0, 45.0, 45.0)
@@ -332,26 +333,18 @@ def test_relabelled_channel_removes_the_crest() -> None:
     assert C.crest[16:20, 4:20].sum() < 0.1 * before
 
 
-def test_a_saved_white_mesh_gives_the_same_proposal(tmp_path: Path) -> None:
-    """propose with the box's saved WhiteMesh gives the change file it gives
-    when it makes the mesh itself, records the mesh, and refuses a mesh of
-    another WM label."""
-    rim = slab_rim((32, 24, 40))
-    vessel = np.zeros(rim.shape, bool)
-    vessel[24:26, 11:13] = True
-    t = synthetic(rim, {1.0: vessel})
-    m = white.box_mesh(t.wm, t.patch.lo, t.patch.hi, t.patch.affine)
-    m.save(tmp_path / "m.npz")
-    m = white.WhiteMesh.load(tmp_path / "m.npz")
-    p0 = PL.propose(t)
-    p1 = PL.propose(t, mesh=m)
-    for k in ("voxels", "label", "component", "status"):
-        assert np.array_equal(getattr(p1.changes, k), getattr(p0.changes, k)), k
-    assert np.array_equal(p1.crest, p0.crest)
-    assert p0.changes.info["white_mesh"] == "made here"
-    assert p1.changes.info["white_mesh"]["wm_sha256"] == m.wm_sha256
-    other = t.wm.copy()
-    other[0, 0, 0] = not other[0, 0, 0]
-    m2 = white.box_mesh(other, t.patch.lo, t.patch.hi, t.patch.affine)
-    with pytest.raises(ValueError, match="WM label"):
-        PL.propose(t, mesh=m2)
+def test_the_command_reads_its_labels_from_a_dseg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """propose --dseg: the box's rim labels are the corrected segmentation's,
+    with its WM mask as WM (the tunnel's plug and the ventricle are WM)."""
+    _, p = write_data(tmp_path)
+    monkeypatch.setenv("BAILLARGER_DATA", str(tmp_path))
+    lo, hi = (5, 3, 2), (25, 25, 22)
+    out = tmp_path / "out"
+    argv = ["propose", "--out", str(out), "--name", "blk", "--dseg", str(p)]
+    PL.main(argv + ["--lo", *map(str, lo), "--hi", *map(str, hi)])
+    sl = tuple(slice(q, r) for q, r in zip(lo, hi, strict=True))
+    mask = np.isin(read_labels(p), white.filled_labels(p))[sl]
+    rim = read_labels(out / "pial_labels_blk_labels.nii.gz")
+    assert np.array_equal(rim == RIM_WM, mask)

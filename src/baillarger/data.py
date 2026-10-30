@@ -60,6 +60,7 @@ class Patch:
     echoes: npt.NDArray[np.float32]
     #: echo times (ms) of the three echoes
     echo_times_ms: tuple[float, float, float]
+    #: the labels: the aseg's, or those of load_box's labels
     aseg: npt.NDArray[np.int16]
     rim: npt.NDArray[np.int16]
     #: voxel to RAS (mm) of the crop: the full grid's affine moved to lo
@@ -133,12 +134,19 @@ def _load(path: Path) -> nib.nifti1.Nifti1Image:
 
 
 def load_box(
-    lo: Box, hi: Box, name: str = "box", directory: Path | None = None
+    lo: Box,
+    hi: Box,
+    name: str = "box",
+    directory: Path | None = None,
+    labels: Path | None = None,
 ) -> Patch:
     """Read the box [lo, hi) of the three echoes and the aseg, and make the
-    rim labels. Raises ValueError if the box is not inside the grid or the
-    images do not share one grid."""
-    paths = [echo_path(k, directory) for k in (1, 2, 3)] + [aseg_path(directory)]
+    rim labels. labels: a segmentation to read in place of the aseg (the
+    corrected segmentation, baillarger.white.write_wm_topo). Raises
+    ValueError if the box is not inside the grid or the images do not share
+    one grid."""
+    seg = aseg_path(directory) if labels is None else labels
+    paths = [echo_path(k, directory) for k in (1, 2, 3)] + [seg]
     imgs = [_load(p) for p in paths]
     ref = imgs[0]
     for p, im in zip(paths[1:], imgs[1:], strict=True):
