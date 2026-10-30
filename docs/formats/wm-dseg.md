@@ -35,6 +35,9 @@ or neither is refused). The WM mask is the voxels with a filled label:
 | R | 41 WM, 43 lateral ventricle, 49 thalamus, 50 caudate, 51 putamen, 52 pallidum, 192 corpus callosum |
 | L | 2 WM, 4 lateral ventricle, 10 thalamus, 11 caudate, 12 putamen, 13 pallidum, 192 corpus callosum |
 
+The hippocampus (53 / 17) is not filled: it is archicortex, whose laminar
+axis does not run out from the WM below it.
+
 1. Cavities of the mask (background components, Kuhn adjacency, that do not
    reach the border of the mask's bounding box plus 2 voxels) are filled.
 2. Handles are removed (`baillarger.handles.remove_handles`): each is cut or

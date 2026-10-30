@@ -26,7 +26,8 @@ applied, then applied again as its own transpose (they are symmetric); the first
 output is zero outside the volume. It stops when the largest mean change per iteration
 over a window of 25 iterations, at the voxels next to the boundary (they set the
 vertices), is below tol: tol 3e-6 leaves every vertex within about 1e-3 voxel of the
-fully converged solution (prototypes/scripts/antialias_profile.py; the plan).
+fully converged solution (prototypes/scripts/antialias_profile.py). Its cost at
+whole-brain scale, and the roadmap to a faster solver: docs/scaling.md.
 """
 
 import math

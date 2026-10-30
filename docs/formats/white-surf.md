@@ -56,6 +56,11 @@ Triangles are oriented so their normals point out of the WM. The normals are
 the area-weighted vertex normals smoothed along the mesh (10 steps,
 `baillarger.mesh_smoothing.smooth_normals`), out of the WM.
 
+The surface has no per-vertex cortex label: every vertex is a column root.
+Columns run out from the WM until they reach background (label 0) or a
+maximum length; what they pass through (cortex, hippocampus, fluid
+mislabelled as cortex) is left to later stages.
+
 ## The GIfTI files
 
 Each data array has `Encoding="ExternalFileBinary"`, `Endian="LittleEndian"`,
