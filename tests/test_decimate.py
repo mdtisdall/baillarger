@@ -194,3 +194,29 @@ def test_quadric_is_the_sum_of_squared_plane_distances() -> None:
         mine = np.any(f == k, axis=1)
         want = float(np.sum(area[mine] * d[mine] ** 2))
         assert D._cost(tuple(Q[k]), tuple(p)) == pytest.approx(want)
+
+
+@pytest.mark.parametrize("mesh", [sphere, torus, two_spheres, octahedron])
+@pytest.mark.parametrize(
+    ("eps", "block"), [(0.0, 1000.0), (0.3, 4.0), (0.3, 1000.0), (100.0, 9.0)]
+)
+def test_the_compiled_worker_equals_the_python_reference(
+    mesh: object, eps: float, block: float
+) -> None:
+    """Bit for bit: faces, the carried vertices and their order, the quadrics."""
+    v, f = mesh()  # type: ignore[operator]
+    M = D.Mesh(
+        v=v,
+        f=f,
+        Q=D.quadrics(v, f),
+        cptr=np.zeros(len(f) + 1, np.int64),
+        cids=np.zeros(0, np.int64),
+    )
+    for off in (0.0, 0.5):  # two passes, the second on carried points
+        a, sa = D.decimate_pass(M, eps, block, off, workers=1)
+        b, sb = D.decimate_pass(M, eps, block, off, workers=1, reference=True)
+        assert sa == sb
+        for x, y in ((a.f, b.f), (a.cptr, b.cptr), (a.cids, b.cids)):
+            np.testing.assert_array_equal(x, y)
+        assert np.array_equal(a.Q, b.Q)  # exactly, not within a tolerance
+        M = a
