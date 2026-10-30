@@ -50,6 +50,10 @@ passes on grids shifted by half a block). Its guarantees:
 - every vertex of the white surface is within `EpsMM` of the overview (world
   mm); `MaxDistanceMM` is the largest distance measured, from each removed
   vertex to the overview face that stands for it;
+- every face faces the way of the surface it stands for: its normal is at
+  less than 90 degrees to the sum of the white surface's normals (each
+  vertex's faces' cross products, summed) at its corners and at the true
+  vertices it stands for;
 - the overview's vertices are vertices of the white surface, unmoved: vertex
   k is true vertex `ids[k]`, and its coordinates are that vertex's float32
   coordinates in the white surface's file, bit for bit. The vertices are in
