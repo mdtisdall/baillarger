@@ -44,11 +44,20 @@ def edges(f: Faces) -> Int:
 
 
 def boundary_vertices(f: Faces, nv: int) -> Bool:
-    """The vertices on an edge with one face."""
-    e = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), 1)
-    key, cnt = np.unique(e[:, 0].astype(np.int64) * nv + e[:, 1], return_counts=True)
+    """The vertices on an edge with one face. One array of the faces' edges as
+    1-D keys, sorted in place: about 8 bytes per edge of the faces, so a large
+    mesh needs no pairs or copies."""
+    m = len(f)
+    key = np.empty(3 * m, np.int64)
+    for k, (i, j) in enumerate(((0, 1), (1, 2), (2, 0))):
+        a, c = f[:, i].astype(np.int64), f[:, j].astype(np.int64)
+        key[k * m : (k + 1) * m] = np.minimum(a, c) * nv + np.maximum(a, c)
+    key.sort()
     b = np.zeros(nv, bool)
-    once = key[cnt == 1]
+    if not key.size:
+        return b
+    step = key[1:] != key[:-1]
+    once = key[np.r_[True, step] & np.r_[step, True]]
     b[once // nv] = True
     b[once % nv] = True
     return b

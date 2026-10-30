@@ -220,3 +220,17 @@ def test_the_compiled_worker_equals_the_python_reference(
             np.testing.assert_array_equal(x, y)
         assert np.array_equal(a.Q, b.Q)  # exactly, not within a tolerance
         M = a
+
+
+def test_chunks_change_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Quadrics and the final distances in chunks of 7 give the same bits as in
+    one chunk; so does the whole decimation."""
+    v, f = torus()
+    q1 = D.quadrics(v, f)
+    a = D.decimate(v, f, eps=0.3, block=8.0, passes=2, workers=1, log=lambda s: None)
+    monkeypatch.setattr(D, "CHUNK", 7)
+    assert np.array_equal(D.quadrics(v, f), q1)
+    b = D.decimate(v, f, eps=0.3, block=8.0, passes=2, workers=1, log=lambda s: None)
+    for x, y in ((a.vertex_ids, b.vertex_ids), (a.faces, b.faces), (a.cids, b.cids)):
+        np.testing.assert_array_equal(x, y)
+    assert a.max_distance == b.max_distance
