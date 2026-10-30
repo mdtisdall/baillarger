@@ -12,7 +12,7 @@ field T on the same label. Per turn, over the last 0.6 mm before it (two turn wi
 
 Writes <work>/turn_cases_<name>.json and <figures>/turn_cases_<name>_*.png (examples: local
 slices of T and the data with the paths, for the categories asked).
-Usage: turn_cases.py <figures dir> <work dir> --name NAME --box I J K [--size N] [--wm-changes FILE]
+Usage: turn_cases.py <figures dir> <work dir> --name NAME --box I J K [--size N] [--dseg FILE]
 """
 
 import argparse
@@ -28,7 +28,6 @@ from scipy import ndimage as ndi
 
 from baillarger import column_traces as CT
 from baillarger import streamlines as S
-from baillarger.white import WMChanges
 
 WIN = 15  # samples: 0.6 mm
 
@@ -49,14 +48,14 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--box", type=int, nargs=3, required=True)
     ap.add_argument("--size", type=int, default=141)
-    ap.add_argument("--wm-changes")
+    ap.add_argument("--dseg", help="the corrected segmentation (python -m baillarger.white dseg)")
     ap.add_argument("--examples", type=int, default=6)
     A = ap.parse_args()
     Z = np.load(f"{A.work}/turn_diag_{A.name}.npz")
     lo = tuple(A.box)
     hi = tuple(a + A.size for a in lo)
-    changes = WMChanges.load(Path(A.wm_changes)) if A.wm_changes else None
-    t = CT.load_tissue(lo, hi, A.name, changes=changes)
+    dseg = Path(A.dseg) if A.dseg else None
+    t = CT.load_tissue(lo, hi, A.name, dseg=dseg)
     vox = t.vox
     base = CT.base_tensor(t)
     _, coh = CT.data_normal(base, t.ctx)

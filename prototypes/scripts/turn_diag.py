@@ -2,8 +2,8 @@
 profiles.md, *Column traces at folds*). A diagnostic, not a rule: views and rates, no thresholds
 that decide anything downstream.
 
-Everything is built fresh from the package, on the label given (the handle-free WM with
---wm-changes): the tissue, the white mesh and its roots, the fitted field T, the fitted_blend
+Everything is built fresh from the package, on the label given (the corrected segmentation's
+WM with --dseg): the tissue, the white mesh and its roots, the fitted field T, the fitted_blend
 primary traces (baillarger.column_traces, baillarger.streamlines), and the mesh patches with
 their distances along the white surface.
 
@@ -21,7 +21,7 @@ within the bank, interior.
 
 Writes <work>/turn_diag_<name>.json and .npz, <figures>/turn_diag_<name>_{rates,planes}.png.
 Usage: turn_diag.py <figures dir> <work dir> --name NAME --box I J K [--size N]
-                    [--wm-changes FILE] [--points FILE]
+                    [--dseg FILE] [--points FILE]
 """
 
 import argparse
@@ -40,7 +40,6 @@ from baillarger import column_traces as CT
 from baillarger import mesh_graph as G
 from baillarger import streamlines as S
 from baillarger.frame import mesh_curvatures
-from baillarger.white import WMChanges
 
 HBINS = [-np.inf, -0.6, -0.3, -0.15, -0.05, 0.05, 0.15, 0.3, 0.6, np.inf]
 CBINS = [0, 0.2, 0.4, 0.6, 0.8, 1.0001]
@@ -83,13 +82,13 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--box", type=int, nargs=3, required=True)
     ap.add_argument("--size", type=int, default=141)
-    ap.add_argument("--wm-changes")
+    ap.add_argument("--dseg", help="the corrected segmentation (python -m baillarger.white dseg)")
     ap.add_argument("--points")
     A = ap.parse_args()
     lo = tuple(A.box)
     hi = tuple(a + A.size for a in lo)
-    changes = WMChanges.load(Path(A.wm_changes)) if A.wm_changes else None
-    t = CT.load_tissue(lo, hi, A.name, changes=changes)
+    dseg = Path(A.dseg) if A.dseg else None
+    t = CT.load_tissue(lo, hi, A.name, dseg=dseg)
     vox = t.vox
     base = CT.base_tensor(t)
     _, coh = CT.data_normal(base, t.ctx)
@@ -98,7 +97,7 @@ def main():
     P = CT.mesh_patches(v, f, vox)
     T, info = S.fitted_field(base, t.ctx, t.wm, vox)
     del base
-    say(f"{A.name}: {len(tv):,} roots; WM {'handle-free' if changes else 'aseg'}; T {info}")
+    say(f"{A.name}: {len(tv):,} roots; WM {'handle-free' if dseg else 'aseg'}; T {info}")
     k1, k2 = mesh_curvatures(v * vox, f, nrm, 1.0)
     H = 0.5 * (k1 + k2)
     x0 = v[tv]
@@ -151,7 +150,7 @@ def main():
     cat[it] = cat_t
     kt = keep[it]
     summary = dict(
-        site=A.name, wm="handle-free" if changes else "aseg", roots=int(keep.sum()), T_solver=info,
+        site=A.name, wm="handle-free" if dseg else "aseg", roots=int(keep.sum()), T_solver=info,
         primary={S.OUTCOME[o]: int(np.sum(keep & (out == o))) for o in range(10) if np.sum(keep & (out == o))},
         turns=int(kt.sum()),
         turn_categories={c: int(np.sum(kt & (cat_t == i))) for i, c in enumerate(CATS)},
@@ -177,7 +176,7 @@ def main():
     category = np.full(len(tv), -1, np.int8)  # per root: the turn's category, -1 if it did not turn
     category[it] = cat_t
     np.savez_compressed(f"{A.work}/turn_diag_{A.name}.npz", lo=np.array(lo), vox=vox, step_mm=S.STEP_MM,
-                        wm_label="handle-free" if changes else "aseg", categories=np.array(CATS),
+                        wm_label="handle-free" if dseg else "aseg", categories=np.array(CATS),
                         outcomes=np.array(S.OUTCOME), v=v.astype(np.float32), f=f, nrm=nrm.astype(np.float32),
                         tv=tv, H=H[tv], k1=k1[tv], k2=k2[tv], keep=keep, out=out, ns=ns, coh_root=coh_root,
                         category=category, path_start=path_start, path_xyz=path_xyz,

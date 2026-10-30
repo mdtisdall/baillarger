@@ -16,8 +16,8 @@ fitted_blend primary (plan: reports/Crossing paths and contacts from laminar pro
 
 Primary traces only, no fallback: a trace that turns or reaches the length cap is a failure.
 Classes as baillarger.column_traces (open, crossing, own bank with the 5 mm rule on the mesh
-patches, failed). Everything is built fresh on the label given (the handle-free WM with
---wm-changes).
+patches, failed). Everything is built fresh on the label given (the corrected segmentation's
+WM with --dseg).
 
 Sites (--site NAME --box I J K --points FILE): per variant the primary outcomes and classes of
 the roots >= 2 mm from a box face; where A's turned roots go in each variant; the marked points
@@ -29,7 +29,7 @@ share of roots of the right class (open or crossing), and the path, end and cont
 Writes <work>/turn_experiment_<name>.json and, for variant E at the sites,
 <work>/turn_experiment_<name>_E_paths.npz (the paths, ragged as turn_diag.py).
 Usage: turn_experiment.py <work dir> --name NAME (--box I J K [--points FILE] | --phantoms)
-                          [--wm-changes FILE] [--noise 1.0]
+                          [--dseg FILE] [--noise 1.0]
 """
 
 import argparse
@@ -44,7 +44,6 @@ from scipy.spatial import cKDTree
 from baillarger import column_traces as CT
 from baillarger import mesh_graph as G
 from baillarger import streamlines as S
-from baillarger.white import WMChanges
 
 VARIANTS = {"A": (False, 60.0), "B": (True, 60.0), "C": (False, None), "D": (True, None), "E": (True, None)}
 CLS = list(CT.CLASS)
@@ -109,8 +108,8 @@ def counts(a, keep, names):
 def site(A):
     lo = tuple(A.box)
     hi = tuple(a + 141 for a in lo)
-    changes = WMChanges.load(Path(A.wm_changes)) if A.wm_changes else None
-    t = CT.load_tissue(lo, hi, A.name, changes=changes)
+    dseg = Path(A.dseg) if A.dseg else None
+    t = CT.load_tissue(lo, hi, A.name, dseg=dseg)
     v, f, nrm = CT.white_mesh(t.wm)
     tv = CT.root_vertices(v, nrm)
     q0 = np.clip(np.round(v[tv]).astype(int), 0, np.array(t.wm.shape) - 1)
@@ -118,7 +117,7 @@ def site(A):
     say(f"{A.name}: {len(tv):,} roots, {keep.sum():,} >= 2 mm from a face")
     R = fields(t.det, t.ctx, t.wm, t.labels, t.vox)
     V = run_variants(R, t.labels, t.dface, v, f, nrm, tv, t.vox)
-    res = dict(site=A.name, wm="handle-free" if changes else "aseg", roots=int(keep.sum()), variants={})
+    res = dict(site=A.name, wm="handle-free" if dseg else "aseg", roots=int(keep.sum()), variants={})
     turnedA = keep & (V["A"]["out"] == S.TURN)
     Pts = None
     if A.points:
@@ -202,7 +201,7 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--box", type=int, nargs=3)
     ap.add_argument("--points")
-    ap.add_argument("--wm-changes")
+    ap.add_argument("--dseg", help="the corrected segmentation (python -m baillarger.white dseg)")
     ap.add_argument("--phantoms", action="store_true")
     ap.add_argument("--noise", type=float, default=1.0)
     A = ap.parse_args()

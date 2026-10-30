@@ -6,12 +6,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from test_white import SHAPE, read_labels, write_data
 
 from baillarger import column_front as CF
 from baillarger import column_traces as CT
 from baillarger import streamlines as S
 from baillarger import white
-from baillarger.data import Patch
+from baillarger.data import ASEG_CORTEX, ASEG_WM, Patch
 
 VOX = 0.16
 
@@ -382,22 +383,30 @@ def test_normal_rays_see_no_meeting_beside_an_open_slot() -> None:
     assert np.all(R.cls[i] == CT.OPEN) and np.all(R.crest_at[i] < 0)
 
 
-def test_a_saved_white_mesh_gives_the_same_traces(tmp_path: Path) -> None:
-    """trace_columns with the box's saved WhiteMesh gives the traces it gives
-    when it makes the mesh itself, and refuses a mesh of another WM label."""
-    t = slab_tissue()
-    m = white.box_mesh(t.wm, t.patch.lo, t.patch.hi, t.patch.affine)
-    m.save(tmp_path / "m.npz")
-    m = white.WhiteMesh.load(tmp_path / "m.npz")
-    R0 = CT.trace_columns(t, "fitted_blend", "crest")
-    R1 = CT.trace_columns(t, "fitted_blend", "crest", mesh=m)
-    for k in ("v", "f", "nrm", "tv", "pos", "ns", "cls", "crest_at"):
-        assert np.array_equal(getattr(R1, k), getattr(R0, k), equal_nan=True), k
-    other = t.wm.copy()
-    other[6, 3, 3] = True
-    m2 = white.box_mesh(other, t.patch.lo, t.patch.hi, t.patch.affine)
-    with pytest.raises(ValueError, match="WM label"):
-        CT.trace_columns(t, "fitted_blend", "crest", mesh=m2)
+def test_load_tissue_reads_its_labels_from_a_dseg(tmp_path: Path) -> None:
+    """With dseg, a box's labels are the corrected segmentation's and its WM
+    is the corrected mask: the tunnel's plug and the ventricle are WM, the
+    cut across the slit is background, and the mesh has genus-0 pieces.
+    Without, the aseg's WM label, with its handles."""
+    a, p = write_data(tmp_path)
+    dseg = read_labels(p)
+    mask = np.isin(dseg, white.filled_labels(p))
+    t = CT.load_tissue((0, 0, 0), SHAPE, directory=tmp_path, dseg=p)
+    assert np.array_equal(t.patch.aseg, dseg)
+    assert np.array_equal(t.wm, mask) and np.array_equal(t.labels == 2, mask)
+    assert (mask & (a == ASEG_CORTEX)).sum() == 4  # the tunnel's plug
+    assert mask[11:13, 9:11, 8:10].all()  # the ventricle
+    cut = np.argwhere((a == ASEG_WM) & ~mask)
+    assert len(cut) == 1 and t.labels[tuple(cut[0])] == 1
+    v, f, _ = CT.white_mesh(t.wm)
+    assert [q["genus"] for q in white.mesh_pieces(v, f, t.patch.voxel_mm)] == [0, 0]
+    t0 = CT.load_tissue((0, 0, 0), SHAPE, directory=tmp_path)
+    assert np.array_equal(t0.patch.aseg, a) and np.array_equal(t0.wm, a == ASEG_WM)
+    # a box: the crop of the same labels
+    lo, hi = (5, 3, 2), (25, 25, 22)
+    sl = tuple(slice(q, r) for q, r in zip(lo, hi, strict=True))
+    tb = CT.load_tissue(lo, hi, directory=tmp_path, dseg=p)
+    assert np.array_equal(tb.patch.aseg, dseg[sl]) and np.array_equal(tb.wm, mask[sl])
 
 
 # ---------------------------------------------------------------- front
