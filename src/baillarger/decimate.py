@@ -31,6 +31,13 @@ read disjoint regions, so they run in parallel, and any order of them is one
 serial sequence of valid collapses with the same guarantees. The locked bands
 are reduced by the next pass, on the grid shifted by half a block. The result
 depends on the block grid; the guarantees do not.
+
+Each block runs compiled (decimate_block, numba). decimate_block_py is the same
+worker in Python, the reference: the two give the same result bit for bit (the same
+arithmetic in the same order, the faces round a vertex in increasing order), which
+the tests check. The compiled worker queues each collapse once per update, not once
+per vertex that it touches; a repeated entry would pop right after the first and
+change nothing.
 """
 
 import heapq
@@ -44,6 +51,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from baillarger._jit import njit
 from baillarger.mesh_smoothing import boundary_vertices
 
 type Float = npt.NDArray[np.float64]
@@ -170,9 +178,12 @@ class BlockResult:
     collapses: int
 
 
-def decimate_block(B: Block, eps: float) -> BlockResult:
+def decimate_block_py(B: Block, eps: float) -> BlockResult:
     """Collapse the block's edges whose ends are both unlocked, cheapest first,
-    while a collapse passes the three tests (module docstring)."""
+    while a collapse passes the three tests (module docstring). The reference,
+    in Python, for decimate_block: the faces round a vertex are taken in
+    increasing order, which decides the nearest new face of a point that is
+    equally near two, and the order of the points a face carries."""
     P: list[Vec] = [tuple(p) for p in B.P.tolist()]
     gid: list[int] = B.gids.tolist()
     locked: list[bool] = B.locked.tolist()
@@ -209,7 +220,8 @@ def decimate_block(B: Block, eps: float) -> BlockResult:
         return any(y in F[i] and z in F[i] for i in vf[x])
 
     def collapse(a: int, b: int) -> bool:
-        shared = [i for i in vf[a] if b in F[i]]
+        fa = sorted(vf[a])
+        shared = [i for i in fa if b in F[i]]
         if len(shared) != 2:
             return False
         opp = {x for i in shared for x in F[i]} - {a, b}
@@ -218,7 +230,7 @@ def decimate_block(B: Block, eps: float) -> BlockResult:
         c, d = opp
         if has_face(a, c, d) and has_face(b, c, d):
             return False
-        moved = [i for i in vf[a] if i not in shared]
+        moved = [i for i in fa if i not in shared]
         new: list[tuple[Vec, Vec, Vec]] = []
         for i in moved:
             old = [P[x] for x in F[i]]
@@ -228,7 +240,7 @@ def decimate_block(B: Block, eps: float) -> BlockResult:
             if _dot(n0, n1) <= 0:
                 return False
             new.append((tri[0], tri[1], tri[2]))
-        pts = [(gid[a], P[a])] + [p for i in vf[a] for p in carried[i]]
+        pts = [(gid[a], P[a])] + [p for i in fa for p in carried[i]]
         home: list[int] = []
         for _, p in pts:
             ds = [point_triangle_distance(p, *t) for t in new]
@@ -278,8 +290,456 @@ def decimate_block(B: Block, eps: float) -> BlockResult:
     )
 
 
-def _run_block(args: tuple[Block, float]) -> BlockResult:
-    return decimate_block(*args)
+# ---------------------------------------------------------------- one block, compiled
+# The same algorithm as decimate_block_py, on arrays, with the same arithmetic in
+# the same order, so it gives the same bits. The faces round a vertex are kept in
+# increasing order (vf, cnt); the points a face carries are a linked list of nodes
+# in the order they were given to it (head, tail, nxt). Pushes after a collapse are
+# deduplicated: a repeated entry pops right after the first and changes nothing.
+
+
+@njit(cache=True)
+def _nb_cost(Q: Float, a: int, p: Float, b: int) -> float:
+    x, y, z = p[b, 0], p[b, 1], p[b, 2]
+    q = Q[a]
+    out: float = (
+        q[0] * x * x
+        + 2 * (q[1] * x * y + q[2] * x * z + q[3] * x)
+        + q[4] * y * y
+        + 2 * (q[5] * y * z + q[6] * y)
+        + q[7] * z * z
+        + 2 * q[8] * z
+        + q[9]
+    )
+    return out
+
+
+@njit(cache=True)
+def _nb_pt(
+    px: float,
+    py: float,
+    pz: float,
+    ax: float,
+    ay: float,
+    az: float,
+    bx: float,
+    by: float,
+    bz: float,
+    cx: float,
+    cy: float,
+    cz: float,
+) -> float:
+    """point_triangle_distance on scalars."""
+    abx, aby, abz = bx - ax, by - ay, bz - az
+    acx, acy, acz = cx - ax, cy - ay, cz - az
+    apx, apy, apz = px - ax, py - ay, pz - az
+    d1 = abx * apx + aby * apy + abz * apz
+    d2 = acx * apx + acy * apy + acz * apz
+    if d1 <= 0 and d2 <= 0:
+        qx, qy, qz = ax, ay, az
+    else:
+        bpx, bpy, bpz = px - bx, py - by, pz - bz
+        d3 = abx * bpx + aby * bpy + abz * bpz
+        d4 = acx * bpx + acy * bpy + acz * bpz
+        cpx, cpy, cpz = px - cx, py - cy, pz - cz
+        d5 = abx * cpx + aby * cpy + abz * cpz
+        d6 = acx * cpx + acy * cpy + acz * cpz
+        vc, vb, va = d1 * d4 - d3 * d2, d5 * d2 - d1 * d6, d3 * d6 - d5 * d4
+        if d3 >= 0 and d4 <= d3:
+            qx, qy, qz = bx, by, bz
+        elif d6 >= 0 and d5 <= d6:
+            qx, qy, qz = cx, cy, cz
+        elif vc <= 0 and d1 >= 0 and d3 <= 0:
+            t = d1 / (d1 - d3)
+            qx, qy, qz = ax + t * abx, ay + t * aby, az + t * abz
+        elif vb <= 0 and d2 >= 0 and d6 <= 0:
+            t = d2 / (d2 - d6)
+            qx, qy, qz = ax + t * acx, ay + t * acy, az + t * acz
+        elif va <= 0 and d4 - d3 >= 0 and d5 - d6 >= 0:
+            t = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+            qx = bx + t * (cx - bx)
+            qy = by + t * (cy - by)
+            qz = bz + t * (cz - bz)
+        else:
+            s = 1.0 / (va + vb + vc)
+            v, w = vb * s, vc * s
+            qx = ax + v * abx + w * acx
+            qy = ay + v * aby + w * acy
+            qz = az + v * abz + w * acz
+    ex, ey, ez = px - qx, py - qy, pz - qz
+    return float(np.sqrt(ex * ex + ey * ey + ez * ez))
+
+
+@njit(cache=True)
+def _nb_nbrs(x: int, F: Int, vf: Int, cnt: Int) -> Int:
+    """The neighbours of vertex x (any order, each once)."""
+    out = np.empty(3 * cnt[x], np.int64)
+    k = 0
+    for j in range(cnt[x]):
+        for y in F[vf[x, j]]:
+            if y == x:
+                continue
+            seen = False
+            for t in range(k):
+                if out[t] == y:
+                    seen = True
+                    break
+            if not seen:
+                out[k] = y
+                k += 1
+    return out[:k]
+
+
+@njit(cache=True)
+def _nb_has(arr: Int, y: int) -> bool:
+    for t in range(arr.size):
+        if arr[t] == y:
+            return True
+    return False
+
+
+@njit(cache=True)
+def _nb_has_face(x: int, y: int, z: int, F: Int, vf: Int, cnt: Int) -> bool:
+    for j in range(cnt[x]):
+        t = F[vf[x, j]]
+        if (t[0] == y or t[1] == y or t[2] == y) and (
+            t[0] == z or t[1] == z or t[2] == z
+        ):
+            return True
+    return False
+
+
+@njit(cache=True)
+def _nb_remove(x: int, i: int, vf: Int, cnt: Int) -> None:
+    for j in range(cnt[x]):
+        if vf[x, j] == i:
+            for t in range(j, cnt[x] - 1):
+                vf[x, t] = vf[x, t + 1]
+            cnt[x] -= 1
+            return
+
+
+@njit(cache=True)
+def _nb_insert(x: int, i: int, vf: Int, cnt: Int) -> None:
+    j = cnt[x]
+    while j > 0 and vf[x, j - 1] > i:
+        vf[x, j] = vf[x, j - 1]
+        j -= 1
+    vf[x, j] = i
+    cnt[x] += 1
+
+
+@njit(cache=True)
+def _nb_collapse(
+    a: int,
+    b: int,
+    eps: float,
+    P: Float,
+    gid: Int,
+    F: Int,
+    alive: npt.NDArray[np.bool_],
+    vf: Int,
+    cnt: Int,
+    head: Int,
+    tail: Int,
+    nxt: Int,
+    node_g: Int,
+    node_p: Float,
+    nn: Int,
+) -> bool:
+    """collapse() of decimate_block_py: a into b if the three tests pass."""
+    na = cnt[a]
+    fa = vf[a, :na].copy()
+    shared = np.empty(na, np.int64)
+    ns = 0
+    for j in range(na):
+        t = F[fa[j]]
+        if t[0] == b or t[1] == b or t[2] == b:
+            shared[ns] = fa[j]
+            ns += 1
+    if ns != 2:
+        return False
+    opp = np.empty(6, np.int64)
+    no = 0
+    for j in range(2):
+        for y in F[shared[j]]:
+            if y != a and y != b and not _nb_has(opp[:no], y):
+                opp[no] = y
+                no += 1
+    if no != 2:
+        return False
+    Na, Nb = _nb_nbrs(a, F, vf, cnt), _nb_nbrs(b, F, vf, cnt)
+    common = 0
+    for y in Na:
+        if _nb_has(Nb, y):
+            if not _nb_has(opp[:2], y):
+                return False
+            common += 1
+    if common != 2:
+        return False
+    c, d = opp[0], opp[1]
+    if _nb_has_face(a, c, d, F, vf, cnt) and _nb_has_face(b, c, d, F, vf, cnt):
+        return False
+    moved = np.empty(na - 2, np.int64)
+    nm = 0
+    for j in range(na):
+        if fa[j] != shared[0] and fa[j] != shared[1]:
+            moved[nm] = fa[j]
+            nm += 1
+    tri = np.empty((nm, 3, 3))
+    for m in range(nm):
+        t = F[moved[m]]
+        o0, o1, o2 = P[t[0]], P[t[1]], P[t[2]]
+        for r in range(3):
+            src = b if t[r] == a else t[r]
+            tri[m, r, 0], tri[m, r, 1], tri[m, r, 2] = P[src, 0], P[src, 1], P[src, 2]
+        e1x, e1y, e1z = o1[0] - o0[0], o1[1] - o0[1], o1[2] - o0[2]
+        e2x, e2y, e2z = o2[0] - o0[0], o2[1] - o0[1], o2[2] - o0[2]
+        n0x, n0y, n0z = (
+            e1y * e2z - e1z * e2y,
+            e1z * e2x - e1x * e2z,
+            e1x * e2y - e1y * e2x,
+        )
+        T = tri[m]
+        f1x, f1y, f1z = T[1, 0] - T[0, 0], T[1, 1] - T[0, 1], T[1, 2] - T[0, 2]
+        f2x, f2y, f2z = T[2, 0] - T[0, 0], T[2, 1] - T[0, 1], T[2, 2] - T[0, 2]
+        n1x, n1y, n1z = (
+            f1y * f2z - f1z * f2y,
+            f1z * f2x - f1x * f2z,
+            f1x * f2y - f1y * f2x,
+        )
+        if n0x * n1x + n0y * n1y + n0z * n1z <= 0:
+            return False
+    # the points: a (a new node), then the nodes of a's faces in order
+    npts = 1
+    for j in range(na):
+        k = head[fa[j]]
+        while k >= 0:
+            npts += 1
+            k = nxt[k]
+    pts = np.empty(npts, np.int64)
+    pa = nn[0]
+    node_g[pa] = gid[a]
+    node_p[pa, 0], node_p[pa, 1], node_p[pa, 2] = P[a, 0], P[a, 1], P[a, 2]
+    pts[0] = pa
+    q = 1
+    for j in range(na):
+        k = head[fa[j]]
+        while k >= 0:
+            pts[q] = k
+            q += 1
+            k = nxt[k]
+    home = np.empty(npts, np.int64)
+    for q in range(npts):
+        p = node_p[pts[q]]
+        best, bk = 0.0, -1
+        for m in range(nm):
+            T = tri[m]
+            dm = _nb_pt(
+                p[0],
+                p[1],
+                p[2],
+                T[0, 0],
+                T[0, 1],
+                T[0, 2],
+                T[1, 0],
+                T[1, 1],
+                T[1, 2],
+                T[2, 0],
+                T[2, 1],
+                T[2, 2],
+            )
+            if bk < 0 or dm < best:
+                best, bk = dm, m
+        if best > eps:
+            return False
+        home[q] = bk
+    # commit
+    nn[0] += 1
+    for j in range(2):
+        i = shared[j]
+        alive[i] = False
+        for x in F[i]:
+            _nb_remove(x, i, vf, cnt)
+        head[i] = -1
+        tail[i] = -1
+    for m in range(nm):
+        i = moved[m]
+        for r in range(3):
+            if F[i, r] == a:
+                F[i, r] = b
+        _nb_insert(b, i, vf, cnt)
+        head[i] = -1
+        tail[i] = -1
+    for q in range(npts):
+        i, k = moved[home[q]], pts[q]
+        nxt[k] = -1
+        if head[i] < 0:
+            head[i] = k
+        else:
+            nxt[tail[i]] = k
+        tail[i] = k
+    cnt[a] = 0
+    return True
+
+
+@njit(cache=True)
+def _nb_grow(vf: Int, need: int) -> Int:
+    out = -np.ones((vf.shape[0], max(need, 2 * vf.shape[1])), np.int64)
+    out[:, : vf.shape[1]] = vf
+    return out
+
+
+@njit(cache=True)
+def _nb_block(
+    P: Float,
+    gid: Int,
+    locked: npt.NDArray[np.bool_],
+    Q0: Float,
+    F0: Int,
+    cptr: Int,
+    cids: Int,
+    cpos: Float,
+    eps: float,
+) -> tuple[Int, Float, Int, Int, int, int]:
+    """decimate_block on arrays. Returns faces kept, quadrics, the carried CSR,
+    the collapses and the pushes."""
+    n, m = P.shape[0], F0.shape[0]
+    F, Q = F0.copy(), Q0.copy()
+    alive = np.ones(m, np.bool_)
+    cnt = np.zeros(n, np.int64)
+    for i in range(m):
+        for x in F[i]:
+            cnt[x] += 1
+    vf = -np.ones((n, max(16, 2 * (cnt.max() if n else 0))), np.int64)
+    cnt[:] = 0
+    for i in range(m):
+        for x in F[i]:
+            vf[x, cnt[x]] = i
+            cnt[x] += 1
+    cap = cids.size + n
+    node_g = np.empty(cap, np.int64)
+    node_p = np.empty((cap, 3))
+    nxt = -np.ones(cap, np.int64)
+    head = -np.ones(m, np.int64)
+    tail = -np.ones(m, np.int64)
+    nn = np.zeros(1, np.int64)
+    for i in range(m):
+        for k in range(cptr[i], cptr[i + 1]):
+            j = nn[0]
+            nn[0] += 1
+            node_g[j] = cids[k]
+            node_p[j] = cpos[k]
+            if head[i] < 0:
+                head[i] = j
+            else:
+                nxt[tail[i]] = j
+            tail[i] = j
+    stamp = np.zeros(n, np.int64)
+    heap = [(0.0, 0, 0, 0, 0)]
+    heap.pop()
+    pushes = 0
+    for a in range(n):
+        if not locked[a]:
+            for b in _nb_nbrs(a, F, vf, cnt):
+                if not locked[b]:
+                    c = _nb_cost(Q, a, P, b) + _nb_cost(Q, b, P, b)
+                    heapq.heappush(heap, (c, a, b, stamp[a], stamp[b]))
+                    pushes += 1
+    ncol = 0
+    while len(heap):
+        _, a, b, sa, sb = heapq.heappop(heap)
+        if sa != stamp[a] or sb != stamp[b] or cnt[a] == 0:
+            continue
+        around = _nb_nbrs(a, F, vf, cnt)
+        if not _nb_has(around, b):
+            continue
+        if cnt[b] + cnt[a] > vf.shape[1]:
+            vf = _nb_grow(vf, cnt[b] + cnt[a])
+        if not _nb_collapse(
+            a, b, eps, P, gid, F, alive, vf, cnt, head, tail, nxt, node_g, node_p, nn
+        ):
+            continue
+        ncol += 1
+        for r in range(10):
+            Q[b, r] = Q[a, r] + Q[b, r]
+        changed = np.empty(around.size + 1, np.int64)
+        changed[: around.size] = around
+        changed[around.size] = b
+        for x in changed:
+            stamp[x] += 1
+        # every (x, y) and (y, x) for x changed, y its neighbour: each once
+        parts = []
+        for x in changed:
+            ys = _nb_nbrs(int(x), F, vf, cnt)
+            k2 = np.empty(2 * ys.size, np.int64)
+            k2[: ys.size] = x * n + ys
+            k2[ys.size :] = ys * n + x
+            parts.append(k2)
+        tot = 0
+        for k2 in parts:
+            tot += k2.size
+        keys = np.empty(tot, np.int64)
+        o = 0
+        for k2 in parts:
+            keys[o : o + k2.size] = k2
+            o += k2.size
+        keys = np.unique(keys)
+        for key in keys:
+            x, y = key // n, key % n
+            if not (locked[x] or locked[y]):
+                c = _nb_cost(Q, x, P, y) + _nb_cost(Q, y, P, y)
+                heapq.heappush(heap, (c, x, y, stamp[x], stamp[y]))
+                pushes += 1
+    nk = 0
+    for i in range(m):
+        if alive[i]:
+            nk += 1
+    Fk = np.empty((nk, 3), np.int64)
+    ptr = np.zeros(nk + 1, np.int64)
+    r = 0
+    for i in range(m):
+        if alive[i]:
+            Fk[r] = F[i]
+            k = head[i]
+            c2 = 0
+            while k >= 0:
+                c2 += 1
+                k = nxt[k]
+            ptr[r + 1] = ptr[r] + c2
+            r += 1
+    out_c = np.empty(ptr[nk], np.int64)
+    r = 0
+    for i in range(m):
+        if alive[i]:
+            k, o = head[i], ptr[r]
+            while k >= 0:
+                out_c[o] = node_g[k]
+                o += 1
+                k = nxt[k]
+            r += 1
+    return Fk, Q, ptr, out_c, ncol, pushes
+
+
+def decimate_block(B: Block, eps: float) -> BlockResult:
+    """decimate_block_py compiled (numba): the same result, bit for bit."""
+    F, Q, cptr, cids, n, _ = _nb_block(
+        np.ascontiguousarray(B.P, np.float64),
+        np.ascontiguousarray(B.gids, np.int64),
+        np.ascontiguousarray(B.locked, np.bool_),
+        np.ascontiguousarray(B.Q, np.float64),
+        np.ascontiguousarray(B.F, np.int64),
+        np.ascontiguousarray(B.cptr, np.int64),
+        np.ascontiguousarray(B.cids, np.int64),
+        np.ascontiguousarray(B.cpos, np.float64).reshape(-1, 3),
+        float(eps),
+    )
+    return BlockResult(F=F, Q=Q, cptr=cptr, cids=cids, collapses=int(n))
+
+
+def _run_block(args: tuple[Block, float, bool]) -> BlockResult:
+    B, eps, reference = args
+    return decimate_block_py(B, eps) if reference else decimate_block(B, eps)
 
 
 # ---------------------------------------------------------------- passes
@@ -320,10 +780,11 @@ def decimate_pass(
     offset: float = 0.0,
     origin: Float | None = None,
     workers: int = 1,
+    reference: bool = False,
 ) -> tuple[Mesh, dict[str, Any]]:
     """One pass: the blocks of the grid of side `block` (from origin, default
     the minimum of v, shifted by offset blocks), each decimated on its own,
-    in parallel with workers > 1."""
+    in parallel with workers > 1; reference: with the Python worker."""
     v, f = M.v, M.f
     o = v.min(0) if origin is None else np.asarray(origin, float)
     g = np.floor((v - o) / block + offset).astype(np.int64)
@@ -357,7 +818,7 @@ def decimate_pass(
                 cpos=v[cids],
             )
         )
-    args = [(b, eps) for b in jobs]
+    args = [(b, eps, reference) for b in jobs]
     if workers > 1 and len(jobs) > 1:
         with ProcessPoolExecutor(max_workers=workers) as ex:
             results = list(
@@ -457,6 +918,7 @@ def decimate(
     passes: int = 2,
     workers: int | None = None,
     log: Callable[[str], object] = print,
+    reference: bool = False,
 ) -> Decimated:
     """Decimate mesh (v, f) within eps (in v's units) on blocks of side
     `block`: `passes` passes, on the grid shifted by half a block in every
@@ -475,7 +937,7 @@ def decimate(
     out: list[dict[str, Any]] = []
     for k in range(passes):
         t0 = time.time()
-        M, s = decimate_pass(M, eps, block, 0.5 * (k % 2), origin, nw)
+        M, s = decimate_pass(M, eps, block, 0.5 * (k % 2), origin, nw, reference)
         s["seconds"] = round(time.time() - t0, 2)
         out.append(s)
         log(
