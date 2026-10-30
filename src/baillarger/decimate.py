@@ -38,13 +38,28 @@ arithmetic in the same order, the faces round a vertex in increasing order), whi
 the tests check. The compiled worker queues each collapse once per update, not once
 per vertex that it touches; a repeated entry would pop right after the first and
 change nothing.
+
+Memory: a pass makes its blocks one at a time and keeps a few in flight (twice the
+workers), folding each result in as it comes; a block returns the quadrics of the
+vertices it keeps only. The quadrics and the final distances are computed CHUNK at a
+time, in the same order, so the results are the same bits. What stays whole is the
+mesh's own arrays (positions, faces, quadrics) and its block and lock keys; a whole
+brain would need the first pass read block by block from the mesh's files.
 """
 
 import heapq
 import os
+import resource
+import sys
 import time
-from collections.abc import Callable, Sequence
-from concurrent.futures import ProcessPoolExecutor
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ProcessPoolExecutor,
+    as_completed,
+    wait,
+)
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -61,10 +76,13 @@ type Quad = tuple[float, ...]  # (xx, xy, xz, xw, yy, yz, yw, zz, zw, ww)
 
 
 # ---------------------------------------------------------------- geometry
-def quadrics(v: Float, f: Int) -> Float:
-    """Per vertex, the sum over its faces of area times the plane quadric
-    (n, d)(n, d)^T of the face's plane n.x + d = 0, as its 10 upper-triangle
-    entries (xx, xy, xz, xw, yy, yz, yw, zz, zw, ww)."""
+#: faces at a time in quadrics, and points at a time in carried_distances: the
+#: temporary arrays scale with this, not with the mesh
+CHUNK = 1 << 20
+
+
+def _face_quadrics(v: Float, f: Int) -> Float:
+    """(m, 10): each face's area times its plane quadric."""
     n = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
     a2 = np.linalg.norm(n, axis=1)
     ok = a2 > 0
@@ -73,10 +91,21 @@ def quadrics(v: Float, f: Int) -> Float:
     p = np.c_[u, -np.sum(u * v[f[:, 0]], axis=1)]  # (m, 4)
     w = a2 / 2
     iu = np.triu_indices(4)
-    K = w[:, None] * (p[:, iu[0]] * p[:, iu[1]])  # (m, 10)
+    K: Float = w[:, None] * (p[:, iu[0]] * p[:, iu[1]])
+    return K
+
+
+def quadrics(v: Float, f: Int) -> Float:
+    """Per vertex, the sum over its faces of area times the plane quadric
+    (n, d)(n, d)^T of the face's plane n.x + d = 0, as its 10 upper-triangle
+    entries (xx, xy, xz, xw, yy, yz, yw, zz, zw, ww). In chunks of faces, in
+    the same order of additions as one whole-mesh pass (each corner in turn,
+    faces in order), so the sums are the same bits."""
     Q = np.zeros((len(v), 10))
     for k in range(3):
-        np.add.at(Q, f[:, k], K)
+        for a in range(0, len(f), CHUNK):
+            fc = f[a : a + CHUNK]
+            np.add.at(Q, fc[:, k], _face_quadrics(v, fc))
     return Q
 
 
@@ -172,10 +201,11 @@ class Block:
 @dataclass
 class BlockResult:
     F: Int  # faces kept, indices into the block's gids
-    Q: Float  # quadrics of the block's vertices
+    Q: Float  # quadrics of the block's vertices (with qv: of those vertices)
     cptr: Int
     cids: Int
     collapses: int
+    qv: Int | None = None  # the vertices that Q is of (None: all)
 
 
 def decimate_block_py(B: Block, eps: float) -> BlockResult:
@@ -738,11 +768,37 @@ def decimate_block(B: Block, eps: float) -> BlockResult:
 
 
 def _run_block(args: tuple[Block, float, bool]) -> BlockResult:
+    """A block in a pass: its result with the quadrics of the vertices it keeps
+    only (a removed vertex's quadric is never read again)."""
     B, eps, reference = args
-    return decimate_block_py(B, eps) if reference else decimate_block(B, eps)
+    r = decimate_block_py(B, eps) if reference else decimate_block(B, eps)
+    qv = np.unique(r.F)
+    return BlockResult(
+        F=r.F, Q=r.Q[qv], cptr=r.cptr, cids=r.cids, collapses=r.collapses, qv=qv
+    )
 
 
 # ---------------------------------------------------------------- passes
+def _peak_gb() -> float:
+    """This process's peak resident memory so far, GB (as baillarger.timing, which
+    this module does not import: it brings PyTorch into every worker)."""
+    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return float(r) / (2**30 if sys.platform == "darwin" else 2**20)
+
+
+class _Laps:
+    """Each call logs the step that just ended: its time and the peak memory."""
+
+    def __init__(self, log: Callable[[str], object] | None) -> None:
+        self.log, self.t = log, time.time()
+
+    def __call__(self, name: str) -> None:
+        if self.log is not None:
+            now = time.time()
+            self.log(f"  {name:<22} {now - self.t:7.1f} s   peak {_peak_gb():5.1f} GB")
+            self.t = now
+
+
 def _csr_take(ptr: Int, data: Int, rows: Int) -> tuple[Int, Int]:
     """The rows `rows` of a CSR list (ptr, data), as a new CSR list."""
     lens = ptr[rows + 1] - ptr[rows]
@@ -781,10 +837,13 @@ def decimate_pass(
     origin: Float | None = None,
     workers: int = 1,
     reference: bool = False,
+    log: Callable[[str], object] | None = None,
 ) -> tuple[Mesh, dict[str, Any]]:
     """One pass: the blocks of the grid of side `block` (from origin, default
     the minimum of v, shifted by offset blocks), each decimated on its own,
-    in parallel with workers > 1; reference: with the Python worker."""
+    in parallel with workers > 1; reference: with the Python worker. log: each
+    step's time and peak memory."""
+    lap = _Laps(log)
     v, f = M.v, M.f
     o = v.min(0) if origin is None else np.asarray(origin, float)
     g = np.floor((v - o) / block + offset).astype(np.int64)
@@ -798,49 +857,73 @@ def decimate_pass(
     rows = np.flatnonzero(inb)
     order = rows[np.argsort(fk[rows, 0], kind="stable")]
     cuts = np.flatnonzero(np.diff(fk[order, 0])) + 1
-    jobs: list[Block] = []
+    lap("blocks and locks")
     kept = [np.flatnonzero(~inb)]
-    for idx in np.split(order, cuts) if len(order) else []:
-        gids, inv = np.unique(f[idx], return_inverse=True)
-        if locked[gids].all():
-            kept.append(idx)
-            continue
-        cptr, cids = _csr_take(M.cptr, M.cids, idx)
-        jobs.append(
-            Block(
-                gids=gids,
-                P=v[gids],
-                locked=locked[gids],
-                Q=M.Q[gids],
-                F=inv.reshape(-1, 3).astype(np.int64),
-                cptr=cptr,
-                cids=cids,
-                cpos=v[cids],
+
+    def blocks() -> Iterator[tuple[Int, Block]]:
+        """The blocks with an unlocked vertex, made one at a time; the others
+        are kept as they are."""
+        for idx in np.split(order, cuts) if len(order) else []:
+            gids, inv = np.unique(f[idx], return_inverse=True)
+            if locked[gids].all():
+                kept.append(idx)
+                continue
+            cptr, cids = _csr_take(M.cptr, M.cids, idx)
+            yield (
+                gids,
+                Block(
+                    gids=gids,
+                    P=v[gids],
+                    locked=locked[gids],
+                    Q=M.Q[gids],
+                    F=inv.reshape(-1, 3).astype(np.int64),
+                    cptr=cptr,
+                    cids=cids,
+                    cpos=v[cids],
+                ),
             )
-        )
-    args = [(b, eps, reference) for b in jobs]
-    if workers > 1 and len(jobs) > 1:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            results = list(
-                ex.map(_run_block, args, chunksize=max(1, len(jobs) // (4 * workers)))
-            )
-    else:
-        results = [_run_block(a) for a in args]
-    keep = np.sort(np.concatenate(kept))
+
+    # each block's result, by its place in the order (gids, result); the
+    # quadrics go into Q as results come, so that only a few blocks' data are
+    # held at once
+    out: dict[int, tuple[Int, BlockResult]] = {}
     Q = M.Q.copy()
-    for b, r in zip(jobs, results, strict=True):
-        Q[b.gids] = r.Q
-    f_new = np.concatenate(
-        [f[keep]] + [b.gids[r.F] for b, r in zip(jobs, results, strict=True)]
-    )
+
+    def fold(j: int, gids: Int, r: BlockResult) -> None:
+        Q[gids if r.qv is None else gids[r.qv]] = r.Q
+        out[j] = (
+            gids,
+            BlockResult(r.F, np.zeros((0, 10)), r.cptr, r.cids, r.collapses),
+        )
+
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            pending: dict[Future[BlockResult], tuple[int, Int]] = {}
+            for j, (gids, B) in enumerate(blocks()):
+                pending[ex.submit(_run_block, (B, eps, reference))] = (j, gids)
+                del B
+                while len(pending) >= 2 * workers:
+                    done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for fu in done:
+                        fold(*pending.pop(fu), fu.result())
+            for fu in as_completed(pending):
+                fold(*pending[fu], fu.result())
+    else:
+        for j, (gids, B) in enumerate(blocks()):
+            fold(j, gids, _run_block((B, eps, reference)))
+    lap("run blocks")
+    results = [out[j] for j in range(len(out))]
+    keep = np.sort(np.concatenate(kept))
+    f_new = np.concatenate([f[keep]] + [g[r.F] for g, r in results])
     cptr, cids = _csr_concat(
-        [_csr_take(M.cptr, M.cids, keep)] + [(r.cptr, r.cids) for r in results]
+        [_csr_take(M.cptr, M.cids, keep)] + [(r.cptr, r.cids) for _, r in results]
     )
+    lap("join")
     summary = dict(
-        blocks=len(jobs),
+        blocks=len(results),
         faces_before=len(f),
         faces_after=len(f_new),
-        collapses=sum(r.collapses for r in results),
+        collapses=sum(r.collapses for _, r in results),
         locked=int(locked.sum()),
     )
     return Mesh(v=v, f=f_new.astype(np.int64), Q=Q, cptr=cptr, cids=cids), summary
@@ -864,9 +947,15 @@ class Decimated:
 
 def carried_distances(v: Float, f: Int, cptr: Int, cids: Int) -> Float:
     """Per carried input vertex, its distance to the face (f, into v) that
-    carries it."""
+    carries it (CHUNK points at a time)."""
     face = np.repeat(np.arange(len(f)), np.diff(cptr))
-    return triangle_distances(v[cids], v[f[face, 0]], v[f[face, 1]], v[f[face, 2]])
+    out = np.empty(len(cids))
+    for a in range(0, len(cids), CHUNK):
+        fc, t = face[a : a + CHUNK], f[face[a : a + CHUNK]]
+        out[a : a + len(fc)] = triangle_distances(
+            v[cids[a : a + CHUNK]], v[t[:, 0]], v[t[:, 1]], v[t[:, 2]]
+        )
+    return out
 
 
 def triangle_distances(p: Float, a: Float, b: Float, c: Float) -> Float:
@@ -923,6 +1012,7 @@ def decimate(
     """Decimate mesh (v, f) within eps (in v's units) on blocks of side
     `block`: `passes` passes, on the grid shifted by half a block in every
     other pass, each with `workers` processes (default: the CPU count)."""
+    lap = _Laps(log)
     V = np.asarray(v, np.float64)
     Fa = np.asarray(f, np.int64)
     M = Mesh(
@@ -932,12 +1022,15 @@ def decimate(
         cptr=np.zeros(len(Fa) + 1, np.int64),
         cids=np.zeros(0, np.int64),
     )
+    lap("quadrics")
     nw = (os.cpu_count() or 1) if workers is None else workers
     origin = V.min(0)
     out: list[dict[str, Any]] = []
     for k in range(passes):
         t0 = time.time()
-        M, s = decimate_pass(M, eps, block, 0.5 * (k % 2), origin, nw, reference)
+        M, s = decimate_pass(
+            M, eps, block, 0.5 * (k % 2), origin, nw, reference, log=log
+        )
         s["seconds"] = round(time.time() - t0, 2)
         out.append(s)
         log(
@@ -945,8 +1038,10 @@ def decimate(
             f"{s['faces_before']:,} -> {s['faces_after']:,} faces "
             f"({s['seconds']} s)"
         )
+        lap.t = time.time()
     vid = np.unique(M.f)
     d = carried_distances(V, M.f, M.cptr, M.cids)
+    lap("distances")
     return Decimated(
         vertex_ids=vid,
         faces=np.searchsorted(vid, M.f).astype(np.int64),
