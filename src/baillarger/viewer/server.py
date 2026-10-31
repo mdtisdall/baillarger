@@ -33,8 +33,9 @@ Requests:
 - Labels only (no column volume; --labels): /meta and /echo2.nii.gz come from the
   review, and only the page, /events, /state and the label routes are served.
 - A white surface alone (--white, baillarger.viewer.white_view): /meta, /mesh,
-  /vertex, /snap and /white.gii come from its overview, and only those, the page,
-  /events and /state are served.
+  /vertex, /snap and /white.gii come from its overview; /white/echo<k>.nii.gz,
+  /white/surface.gii and /white/overlay.nii.gz?c=i,j,k are the volume pane's box
+  round voxel (i, j, k); only those, the page, /events and /state are served.
 - POST /state {from, patch}: merge patch into the state; every page gets
   {from, seq, patch}.
 - POST /filters/run {from, params}: start a filter (one at a time, in a thread) or
@@ -113,6 +114,15 @@ def round3(a: Any) -> list[float | None]:
 
 # the routes that need no column volume (labels-only mode serves these, /meta and
 # /echo2.nii.gz from the review)
+# a white surface's box round a voxel (?c=i,j,k): echoes, the true surface, the overlay
+BOX_ROUTES = {
+    "/white/echo1.nii.gz": "1",
+    "/white/echo2.nii.gz": "2",
+    "/white/echo3.nii.gz": "3",
+    "/white/surface.gii": "surface",
+    "/white/overlay.nii.gz": "overlay",
+}
+
 # the page and the shared state, which every mode serves and none computes
 PAGE = ("/", "/index.html", "/events", "/state")
 NO_SITE = (*PAGE, "/labels/list", "/labels.nii.gz")
@@ -234,6 +244,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(lambda: w.snap(mm_ or []))
             elif u.path == "/white.gii":
                 self.binary(w.white_bytes)
+            elif u.path in BOX_ROUTES:
+                cv = [int(x) for x in q.get("c", "0,0,0").split(",")]
+                if len(cv) != 3:
+                    self.send_error(400)
+                    return
+                kind = BOX_ROUTES[u.path]
+                if kind == "surface":
+                    self.binary(lambda: w.surface_bytes(cv))
+                elif kind == "overlay":
+                    self.binary(lambda: w.overlay_bytes(cv))
+                else:
+                    self.binary(lambda: w.echo_bytes(int(kind), cv))
             elif u.path not in PAGE and not u.path.startswith("/static/"):
                 self.send_error(404)
             if u.path not in PAGE and not u.path.startswith("/static/"):
