@@ -2,7 +2,7 @@
 
 SpecVersion `wm-dseg/1` (the corrected segmentation) and `wm-dseg-fixes/1`
 (the diagnostic image of the changes). Written by
-`python -m baillarger.white dseg ASEG [--edits EDITS] --out DERIV`
+`python -m baillarger.white dseg ASEG [--edits EDITS] [--fill-cost W] [--thicken-cuts R] [--thicken-fills R] [--trim-threads R] --out DERIV`
 (`baillarger.white.write_wm_topo`); the keys are enforced by
 `baillarger.white.DSEG_SPEC` and `FIXES_SPEC`, and `tests/test_bids.py` checks
 that the tables below list the same keys, types and requirements.
@@ -17,7 +17,7 @@ In the BIDS derivatives root `DERIV`, for an input with entities `sub` and
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.nii.gz` | The corrected segmentation: the input's grid, affine, header and data type |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.tsv` | `index` and `name` (FreeSurfer LUT) of every label in it |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.json` | Sidecar, `wm-dseg/1` |
-| `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.nii.gz` | uint8, the changed voxels: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit; 0 elsewhere. A manually edited voxel that the correction then changes shows the correction's value |
+| `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.nii.gz` | uint8, the changed voxels: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit, 5 cut widening, 6 fill thickening, 7 thread trim; 0 elsewhere. A manually edited voxel that the correction then changes shows the correction's value |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.tsv` | `index` and `name` of those values |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.json` | Sidecar, `wm-dseg-fixes/1` |
 
@@ -54,6 +54,23 @@ pieces as background; a fill of one piece can touch another and make a
 handle or a cavity of the union, so the command checks the Betti numbers and
 writes nothing if b1 or b2 is not 0.
 
+## Variations of the fixes
+
+For testing their effect, four options vary the correction; by default none
+is used and the correction is as above. Each is recorded in
+`TopologyOptions`, and each keeps the Betti numbers: they change voxels one
+simple point at a time, or a whole piece whose removal keeps the homology.
+
+| Option | Key | Default | What it does |
+|---|---|---|---|
+| `--fill-cost W` | `FillCost` | 1 | A handle fill's voxels count W times when the handle removal chooses between a cut and a fill: W > 1 favours cuts (the surface moves inward), W < 1 fills |
+| `--thicken-cuts R` | `ThickenCuts` | 0 | After the handle removal, mask voxels within R voxels (Euclidean) of a cut are removed, nearest first, where simple: the cut's gap widened (inward) |
+| `--thicken-fills R` | `ThickenFills` | 0 | Background voxels within R voxels of a fill are added, nearest first, where simple: the fill's plug thickened (outward, into what was outside the mask) |
+| `--trim-threads R` | `TrimThreads` | 0 | Then the mask's voxels outside its opening by a ball of radius R voxels (features thinner than about 2R + 1 voxels), taken in connected pieces, are removed when a piece hangs from the rest by one attachment; a thin piece joining two thick parts is kept whole, and a dangling thread keeps a stub at most R voxels long where the opening reaches past the surface |
+
+Widened, trimmed voxels are cuts and thickened voxels fills for the labels:
+they take the nearest outside label, and the WM label.
+
 ## Manual edits
 
 With `--edits`, the manual edits of the input in a `wm-edits/1` table
@@ -85,6 +102,10 @@ whole by the command, so an edit costs a `dseg` run.
 | `HandleCutVoxels` | integer | yes | Voxels cut from the mask (cuts and stranded voxels) |
 | `CutLabels` | object | yes | New label of the cut voxels (as a string): number of voxels |
 | `ManualVoxels` | integer | yes | Voxels changed by the manual edits (0 without `--edits`) |
+| `TopologyOptions` | object | yes | The variations used: `FillCost`, `ThickenCuts`, `ThickenFills`, `TrimThreads` (numbers; defaults 1, 0, 0, 0) |
+| `CutWideningVoxels` | integer | yes | Voxels cut from the mask by `ThickenCuts` |
+| `FillThickeningVoxels` | integer | yes | Voxels added to the mask by `ThickenFills` |
+| `ThreadTrimVoxels` | integer | yes | Voxels cut from the mask by `TrimThreads` |
 | `Moves` | array of objects | yes | Per manual answer with rows, then per handle move: `Kind` (`manual`, `cut`, `fill` or `stranded`), `Voxels` (count), `Centre` (0-based voxel of the grid), and for `manual` the `Answer` (its `Id`) |
 
 ## Sidecar keys: wm-dseg-fixes/1

@@ -73,6 +73,12 @@ Every step of every front is a simple point, so the object front stays a
 ball: the result has no handle by construction, whatever the order of the
 steps. The union of the components keeps that unless a fill of one component
 touches another (not checked here; baillarger.white.wm_topo checks it).
+
+Variations, for testing their effect (the dseg command's options): fill_cost
+weighs a fill's voxels against a cut's in the choice; after the removal,
+thicken widens a cut's gap or thickens a fill's plug by simple points, and
+trim_threads removes thin dangling protrusions whole. Each keeps the Betti
+numbers.
 """
 
 import itertools
@@ -358,10 +364,13 @@ def _walls(
     phase: npt.NDArray[np.uint8],
     offs: Int,
     mixed: bool = False,
+    fill_cost: float = 1.0,
 ) -> list[Int]:
     """Connected pieces (Kuhn adjacency, one phase, or both phases together
     when mixed) of the voxels u (sorted flat indices: the unclaimed voxels),
-    smallest first; ties: object walls first, then lowest index."""
+    cheapest first: an object wall (a cut) costs its voxels, a background wall
+    (a fill) fill_cost times its voxels; ties: object walls first, then lowest
+    index."""
     if not u.size:
         return []
     ph = phase[u]
@@ -378,7 +387,12 @@ def _walls(
     order = np.argsort(lab, kind="stable")
     cuts = np.flatnonzero(np.diff(lab[order])) + 1
     walls = np.split(u[order], cuts)
-    return sorted(walls, key=lambda w: (w.size, int(phase[w[0]] != _OBJ), int(w[0])))
+
+    def key(w: Int) -> tuple[float, int, int]:
+        bg = int(phase[w[0]] != _OBJ)
+        return (w.size * (fill_cost if bg else 1.0), bg, int(w[0]))
+
+    return sorted(walls, key=key)
 
 
 def _set_simple(state: npt.NDArray[np.uint8], front: int, p: Int) -> bool:
@@ -405,10 +419,12 @@ def _resolve_cluster(
     offs: Int,
     shape: tuple[int, ...],
     u: Int,
+    fill_cost: float = 1.0,
 ) -> Move | None | bool:
     """When no wall can be claimed voxel by voxel: claim the smallest set of
     unclaimed voxels that one front can take whole (_set_simple), by the front
-    that changes fewer voxels (ties: the background, a cut). The sets tried
+    that changes fewer voxels, a fill's counted fill_cost times (ties: the
+    background, a cut). The sets tried
     are the walls, the pairs of touching walls of opposite phase and the
     clusters (Kuhn-connected pieces of both phases; a ring of walls is one
     that no front can take whole). u: the unclaimed voxels (sorted flat
@@ -430,10 +446,14 @@ def _resolve_cluster(
     sets += [c for c in _walls(u, phase, offs, mixed=True) if len(c) > 1]
     for c in sorted(sets, key=lambda c: (c.size, int(c[0]))):
         n_obj = int((phase[c] == _OBJ).sum())
+        n_bg = c.size - n_obj
         options = sorted(
-            ((n_obj, _BG, _OBJ, "cut"), (c.size - n_obj, _OBJ, _BG, "fill"))
+            (
+                (float(n_obj), n_obj, _BG, _OBJ, "cut"),
+                (fill_cost * n_bg, n_bg, _OBJ, _BG, "fill"),
+            )
         )
-        for changed, front, lose, kind in options:
+        for _, changed, front, lose, kind in options:
             if _set_simple(s3, front, c):
                 state[c] = front
                 if not changed:
@@ -443,7 +463,7 @@ def _resolve_cluster(
     return False
 
 
-def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
+def _remove_one(obj: Bool, fill_cost: float = 1.0) -> tuple[Bool, list[Move]]:
     """remove_handles for an object with one component."""
     x = np.pad(obj, 2)
     if x.size >= 1 << _IDX_BITS:
@@ -482,7 +502,7 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
     moves: list[Move] = []
     while True:
         u = u[st[u] == _U]
-        walls = _walls(u, ph, offs)
+        walls = _walls(u, ph, offs, fill_cost=fill_cost)
         done = False
         for w in walls:
             own = int(ph[w[0]])
@@ -498,7 +518,7 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
             done = True
             break
         if not done:
-            m = _resolve_cluster(st, ph, offs, x.shape, u)
+            m = _resolve_cluster(st, ph, offs, x.shape, u, fill_cost)
             if m is False:
                 break
             if isinstance(m, Move):
@@ -521,11 +541,11 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
     return out[2:-2, 2:-2, 2:-2], moves
 
 
-def remove_handles(obj: npt.ArrayLike) -> HandleRemoval:
+def remove_handles(obj: npt.ArrayLike, fill_cost: float = 1.0) -> HandleRemoval:
     """Remove every handle of the object (3D bool) with the Kuhn adjacency,
     keeping its components and cavities: each handle is cut or filled,
-    whichever changes fewer voxels (module docstring). Outside the array is
-    background."""
+    whichever changes fewer voxels, a fill's voxels counted fill_cost times
+    (module docstring). Outside the array is background."""
     a = np.asarray(obj, bool)
     lab, n = ndi.label(a, kuhn_structure())
     out = np.zeros_like(a)
@@ -536,8 +556,119 @@ def remove_handles(obj: npt.ArrayLike) -> HandleRemoval:
         lo = np.array([max(t.start - 2, 0) for t in sl])
         hi = np.array([min(t.stop + 2, m) for t, m in zip(sl, a.shape, strict=True)])
         box = tuple(slice(int(p), int(q)) for p, q in zip(lo, hi, strict=True))
-        got, mv = _remove_one(lab[box] == k)
+        got, mv = _remove_one(lab[box] == k, fill_cost)
         out[box] |= got
         moves += [Move(m.kind, m.voxels + lo) for m in mv]
     stranded = sum(len(m.voxels) for m in moves if m.kind == "stranded")
     return HandleRemoval(out, moves, stranded)
+
+
+# ---------------------------------------------------------------- variations
+# Changes after the handles are removed, each made of simple points (or of sets
+# that keep the homology, _set_simple), so the Betti numbers stay as they are.
+
+
+@njit
+def _sweep(
+    state: npt.NDArray[np.uint8], cand: Int, offs: Int, simple: Bool, add: bool
+) -> int:
+    """Flip the voxels cand (flat indices, in order) of state (1 object, 0
+    background): add background voxels to the object (add) or remove object
+    voxels, each only when it is a simple point, sweeping in order until none
+    flips. Returns the number flipped."""
+    n = 0
+    want = 0 if add else 1
+    progress = True
+    while progress:
+        progress = False
+        for i in cand:
+            if state[i] != want:
+                continue
+            m = _link_mask(state, i, 1, offs)
+            if m != 0 and simple[m]:
+                state[i] = 1 - want
+                n += 1
+                progress = True
+    return n
+
+
+def thicken(obj: npt.ArrayLike, seeds: npt.ArrayLike, r: float, add: bool) -> Bool:
+    """The object (3D bool) with the background voxels (add) or the object
+    voxels within distance r (voxels, Euclidean) of the seeds (3D bool) made
+    object or background, one simple point at a time, nearest the seeds first
+    (ties: lowest index), as far as simple points allow; the seeds themselves
+    are not changed. So the topology is kept: a cut's gap widened (add False,
+    the cut's voxels as seeds), a fill's plug thickened (add True). Outside the
+    array is background and is not changed."""
+    a = np.asarray(obj, bool)
+    sd = np.asarray(seeds, bool)
+    if r <= 0 or not sd.any():
+        return a.copy()
+    d = ndi.distance_transform_edt(~sd)
+    near = (d <= r) & ~sd & (~a if add else a)
+    idx = np.flatnonzero(near)
+    idx = idx[np.argsort(d.ravel()[idx], kind="stable")]
+    state = np.pad(a, 1).astype(np.uint8)
+    pidx = np.ravel_multi_index(
+        tuple(c + 1 for c in np.unravel_index(idx, a.shape)), state.shape
+    ).astype(np.int64)
+    offs = _flat_offsets(state.shape)
+    flat = state.ravel()
+    _sweep(flat, pidx, offs, SIMPLE, add)
+    out: Bool = flat.reshape(state.shape)[1:-1, 1:-1, 1:-1].astype(bool)
+    return out
+
+
+def _flat_offsets(shape: tuple[int, ...]) -> Int:
+    return (
+        KUHN_OFFSETS[:, 0] * shape[1] * shape[2]
+        + KUHN_OFFSETS[:, 1] * shape[2]
+        + KUHN_OFFSETS[:, 2]
+    ).astype(np.int64)
+
+
+def trim_threads(obj: npt.ArrayLike, r: float) -> Bool:
+    """The object (3D bool) without its thin protrusions: the voxels outside
+    its opening by a ball of radius r (voxels: those no ball of radius r
+    inside the object covers, so features thinner than about 2r + 1 voxels),
+    taken in Kuhn-connected pieces, each removed whole when that keeps the
+    homology (_set_simple: a piece that hangs from the rest by one
+    attachment). A thin piece that joins two thick parts is kept whole, not
+    thinned; components with no part thicker than r are not changed. Outside
+    the array is background."""
+    a = np.asarray(obj, bool)
+    if r <= 0 or not a.any():
+        return a.copy()
+    p = np.pad(a, 2)  # room for _set_simple's box round a piece
+    core = ndi.distance_transform_edt(p) > r
+    if not core.any():
+        return a.copy()
+    opened = ndi.distance_transform_edt(~core) <= r
+    s = kuhn_structure()
+    comp, _ = ndi.label(p, s)
+    keep_comps = np.unique(comp[core])
+    thin = p & ~opened & np.isin(comp, keep_comps)
+    lab, n = ndi.label(thin, s)
+    if not n:
+        return a.copy()
+    state = np.where(p, _OBJ, _BG).astype(np.uint8)
+    flat = state.ravel()
+    offs = _flat_offsets(state.shape)
+    sizes = np.bincount(lab.ravel(), minlength=n + 1)
+    # single voxels: the simple-point test; pieces are not Kuhn-adjacent to each
+    # other, so each test sees none of the others' changes
+    one = np.flatnonzero((sizes[lab.ravel()] == 1) & (lab.ravel() > 0))
+    m = np.zeros(one.size, np.int64)
+    for k in range(14):
+        m |= (flat[one + offs[k]] == _OBJ).astype(np.int64) << k
+    flat[one[(m != 0) & SIMPLE[m]]] = _BG
+    for k, sl in enumerate(ndi.find_objects(lab), 1):
+        if sl is None or sizes[k] == 1:
+            continue
+        sub = lab[sl] == k
+        pts = np.stack(np.nonzero(sub), 1) + np.array([t.start for t in sl])
+        pf = np.ravel_multi_index(tuple(pts.T), state.shape).astype(np.int64)
+        if _set_simple(state, _BG, pf):
+            flat[pf] = _BG
+    out: Bool = state[2:-2, 2:-2, 2:-2] == _OBJ
+    return out

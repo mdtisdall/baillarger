@@ -40,6 +40,7 @@ that mesh wrote.
 """
 
 import argparse
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,7 +71,13 @@ from baillarger.bids import (
 from baillarger.blocks import EmbeddedSource, open_volume
 from baillarger.decimate import closest_points, csr_take, decimate, reorder
 from baillarger.gifti import DataArray, write_external
-from baillarger.handles import kuhn_betti, kuhn_structure, remove_handles
+from baillarger.handles import (
+    kuhn_betti,
+    kuhn_structure,
+    remove_handles,
+    thicken,
+    trim_threads,
+)
 from baillarger.mesh import (
     BLOCK,
     MeshBlocks,
@@ -123,7 +130,15 @@ LUT_NAMES = {
 
 #: values of the fixes image: a handle cut, a handle fill, a cavity fill, a
 #: manual edit (baillarger.wm_edits)
-FIXES = {1: "handle_cut", 2: "handle_fill", 3: "cavity_fill", 4: "manual_edit"}
+FIXES = {
+    1: "handle_cut",
+    2: "handle_fill",
+    3: "cavity_fill",
+    4: "manual_edit",
+    5: "cut_widening",
+    6: "fill_thickening",
+    7: "thread_trim",
+}
 
 #: docs/formats/wm-dseg.md
 DSEG_SPEC = SidecarSpec(
@@ -140,6 +155,10 @@ DSEG_SPEC = SidecarSpec(
         Key("HandleCutVoxels", "integer", True, "voxels cut from the mask"),
         Key("CutLabels", "object", True, "new label of the cut voxels: count"),
         Key("ManualVoxels", "integer", True, "voxels changed by manual edits"),
+        Key("TopologyOptions", "object", True, "the variations of the fixes"),
+        Key("CutWideningVoxels", "integer", True, "voxels cut by widening cuts"),
+        Key("FillThickeningVoxels", "integer", True, "voxels added thickening fills"),
+        Key("ThreadTrimVoxels", "integer", True, "voxels cut by trimming threads"),
         Key("Moves", "array of objects", True, "each manual edit and handle move"),
     ),
 )
@@ -229,8 +248,40 @@ class WMTopo:
     manual_voxels: int = 0
 
 
+@dataclass(frozen=True)
+class TopoOptions:
+    """Variations of the WM topology correction, for testing their effect (the
+    defaults are none): fill_cost weighs a handle fill's voxels against a
+    cut's when remove_handles chooses (baillarger.handles.remove_handles);
+    after it, thicken_cuts and thicken_fills widen each cut's gap and thicken
+    each fill's plug by up to that distance (voxels) by simple points
+    (baillarger.handles.thicken), and trim_threads removes the mask's thin
+    dangling protrusions, those outside its opening by a ball of that radius
+    (baillarger.handles.trim_threads)."""
+
+    fill_cost: float = 1.0
+    thicken_cuts: float = 0.0
+    thicken_fills: float = 0.0
+    trim_threads: float = 0.0
+
+    def to_json(self) -> dict[str, float]:
+        return dict(
+            FillCost=self.fill_cost,
+            ThickenCuts=self.thicken_cuts,
+            ThickenFills=self.thicken_fills,
+            TrimThreads=self.trim_threads,
+        )
+
+
+#: the correction without variations
+NO_OPTIONS = TopoOptions()
+
+
 def wm_topo(
-    aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike, edits: Edits | None = None
+    aseg: npt.ArrayLike,
+    voxel_mm: npt.ArrayLike,
+    edits: Edits | None = None,
+    options: TopoOptions = NO_OPTIONS,
 ) -> WMTopo:
     """The corrected segmentation of an aseg: the manual edits made first
     (baillarger.wm_edits.apply_edits; it raises ValueError for edits that do
@@ -238,7 +289,9 @@ def wm_topo(
     with its cavities filled and its handles removed
     (baillarger.handles.remove_handles). Cavity and handle fills become the
     WM label; each handle cut takes the label of the nearest voxel that is
-    outside the corrected mask and not a cut. The corrected segmentation's
+    outside the corrected mask and not a cut. The options (TopoOptions) vary
+    the fixes; the voxels they add are fills and those they remove cuts, for
+    the labels. The corrected segmentation's
     voxels with a filled label are exactly the corrected mask. Raises
     RuntimeError if that mask still has a handle or a cavity (b1 or b2 not 0),
     which a fill of one piece of the mask touching another can make."""
@@ -255,8 +308,12 @@ def wm_topo(
         np.flatnonzero(m.any(axis=tuple(j for j in range(3) if j != i)))
         for i in range(3)
     ]
-    lo = np.array([max(int(t[0]) - 2, 0) for t in nz])
-    hi = np.array([min(int(t[-1]) + 3, s) for t, s in zip(nz, m.shape, strict=True)])
+    reach = max(options.thicken_cuts, options.thicken_fills, options.trim_threads)
+    mg = 2 + math.ceil(reach)  # room for a fill thickened next to the box's edge
+    lo = np.array([max(int(t[0]) - mg, 0) for t in nz])
+    hi = np.array(
+        [min(int(t[-1]) + mg + 1, s) for t, s in zip(nz, m.shape, strict=True)]
+    )
     box = tuple(slice(int(p), int(q)) for p, q in zip(lo, hi, strict=True))
     x = np.ascontiguousarray(m[box])
     del m
@@ -266,9 +323,23 @@ def wm_topo(
     cav = cavities(x)
     x |= cav
     lap("cavities")
-    r = remove_handles(x)
+    r = remove_handles(x, options.fill_cost)
     obj = r.obj
     lap("handles")
+    cut0, fill0 = x & ~obj, obj & ~x
+    widened = thickened = trimmed = np.zeros_like(obj)
+    if options.thicken_cuts > 0:
+        o = thicken(obj, cut0, options.thicken_cuts, add=False)
+        widened, obj = obj & ~o, o
+        lap("widen cuts")
+    if options.thicken_fills > 0:
+        o = thicken(obj, fill0, options.thicken_fills, add=True)
+        thickened, obj = o & ~obj, o
+        lap("thicken fills")
+    if options.trim_threads > 0:
+        o = trim_threads(obj, options.trim_threads)
+        trimmed, obj = obj & ~o, o
+        lap("trim threads")
     cut, fill = x & ~obj, obj & ~x
     a = a0[box]
     labels = a.copy()
@@ -292,9 +363,12 @@ def wm_topo(
     if manual is not None:
         fixes[manual] = 4  # an edited voxel the correction then changes shows that
     fx = fixes[box]
-    fx[cut] = 1
-    fx[fill] = 2
+    fx[cut0] = 1
+    fx[fill0] = 2
     fx[cav] = 3
+    fx[widened] = 5
+    fx[thickened] = 6
+    fx[trimmed] = 7
     new, cnt = np.unique(labels[cut], return_counts=True)
     moves = []
     if edits is not None:
@@ -334,9 +408,15 @@ def _write_tsv(path: Path, names: dict[int, str]) -> None:
     path.write_text("index\tname\n" + rows)
 
 
-def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str, Path]:
+def write_wm_topo(
+    aseg: Path,
+    out: Path,
+    edits: Path | None = None,
+    options: TopoOptions = NO_OPTIONS,
+) -> dict[str, Path]:
     """The dseg command: wm_topo of the aseg at aseg, with the manual edits in
-    the table at edits (docs/formats/wm-edits.md) if given, written to the BIDS
+    the table at edits (docs/formats/wm-edits.md) if given and the variations
+    of the fixes in options, written to the BIDS
     derivatives root out (docs/formats/wm-dseg.md). Raises ValueError for edits
     made against another aseg, or that do not fit it. Returns the paths
     written, by role."""
@@ -353,7 +433,7 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
     lap = Laps()
     a = np.asarray(img.dataobj)
     lap("read")
-    t = wm_topo(a, vox, e)
+    t = wm_topo(a, vox, e, options)
     lap = Laps()
     dataset_description(out)
     p = dict(
@@ -393,6 +473,10 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
             HandleCutVoxels=int((t.fixes == 1).sum()),
             CutLabels={str(k): v for k, v in t.cut_labels.items()},
             ManualVoxels=t.manual_voxels,
+            TopologyOptions=options.to_json(),
+            CutWideningVoxels=int((t.fixes == 5).sum()),
+            FillThickeningVoxels=int((t.fixes == 6).sum()),
+            ThreadTrimVoxels=int((t.fixes == 7).sum()),
             Moves=t.moves,
         ),
     )
@@ -1016,6 +1100,21 @@ def main(argv: list[str] | None = None) -> None:
     d.add_argument(
         "--edits", type=Path, help="manual edits of the aseg (desc-wmedits_edits.tsv)"
     )
+    d.add_argument(
+        "--fill-cost", type=float, default=1.0, help="weight of a fill's voxels"
+    )
+    d.add_argument(
+        "--thicken-cuts", type=float, default=0.0, help="widen cuts by (voxels)"
+    )
+    d.add_argument(
+        "--thicken-fills", type=float, default=0.0, help="thicken fills by (voxels)"
+    )
+    d.add_argument(
+        "--trim-threads",
+        type=float,
+        default=0.0,
+        help="trim protrusions outside the opening by this radius (voxels)",
+    )
     d.add_argument("--out", required=True, type=Path, help="BIDS derivatives root")
     m = sub.add_parser("mesh", help="the white surface of a corrected segmentation")
     m.add_argument("dseg", type=Path, help="a desc-wmtopo_dseg (the dseg command)")
@@ -1039,7 +1138,8 @@ def main(argv: list[str] | None = None) -> None:
     o.add_argument("--workers", type=int, default=4, help="processes to decimate")
     a = ap.parse_args(argv)
     if a.cmd == "dseg":
-        for role, path in write_wm_topo(a.aseg, a.out, a.edits).items():
+        opts = TopoOptions(a.fill_cost, a.thicken_cuts, a.thicken_fills, a.trim_threads)
+        for role, path in write_wm_topo(a.aseg, a.out, a.edits, opts).items():
             print(f"{role}: {path}")
     elif a.cmd == "mesh":
         w = write_white_surface(a.dseg, a.out, a.block_cells, a.device)

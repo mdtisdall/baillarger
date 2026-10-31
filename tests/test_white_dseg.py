@@ -136,3 +136,33 @@ def test_the_dseg_command_writes_the_bids_files(tmp_path: Path) -> None:
     assert json.loads((anat / f"{fx}.json").read_text())["SpecVersion"] == (
         "wm-dseg-fixes/1"
     )
+
+
+def test_the_variations_keep_the_topology_and_are_recorded(tmp_path: Path) -> None:
+    a = synthetic_aseg()
+    # a fill weighed 100 times: the tunnel through the block is cut, not filled
+    t = white.wm_topo(a, VOX, options=white.TopoOptions(fill_cost=100.0))
+    assert t.betti_after == (2, 0, 0) and {m["Kind"] for m in t.moves} == {"cut"}
+    assert kuhn_betti(np.isin(t.dseg, FILLED)) == (2, 0, 0)
+    # every variation at once: still (2, 0, 0); each kind of change shows
+    opts = white.TopoOptions(thicken_cuts=1.0, thicken_fills=1.0, trim_threads=1.0)
+    t = white.wm_topo(a, VOX, options=opts)
+    assert t.betti_after == (2, 0, 0)
+    assert kuhn_betti(np.isin(t.dseg, FILLED)) == (2, 0, 0)
+    assert all((t.fixes == k).any() for k in (5, 6))
+    widened = t.fixes == 5
+    assert not np.isin(t.dseg[widened], FILLED).any()
+    assert (t.dseg[t.fixes == 6] == 41).all()
+    # recorded in the sidecar
+    src = tmp_path / "in" / "sub-T01_ses-S1_aseg.nii.gz"
+    src.parent.mkdir()
+    nib.save(nib.nifti1.Nifti1Image(a, np.diag([*VOX, 1.0])), src)
+    white.main(["dseg", str(src), "--out", str(tmp_path / "d"), "--thicken-cuts", "1"])
+    side = bids.read_sidecar(
+        tmp_path / "d/sub-T01/ses-S1/anat/sub-T01_ses-S1_desc-wmtopo_dseg.json",
+        white.DSEG_SPEC,
+    )
+    assert side["TopologyOptions"] == dict(
+        FillCost=1.0, ThickenCuts=1.0, ThickenFills=0.0, TrimThreads=0.0
+    )
+    assert side["CutWideningVoxels"] > 0 and side["FillThickeningVoxels"] == 0
