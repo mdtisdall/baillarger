@@ -1,7 +1,8 @@
-"""Decimation of a triangle mesh by blocks, in parallel, with three guarantees:
+"""Decimation of a triangle mesh by blocks, in parallel, with four guarantees:
 the topology is kept (manifold edges, components, genus), every input vertex
-stays within eps of the output surface, and the output's vertices are input
-vertices (they never move).
+stays within eps of the output surface, the output's vertices are input
+vertices (they never move), and every face it makes faces the way of the input
+surface it stands for.
 
 Half-edge collapses: a vertex a is merged into a neighbour b, which keeps its
 position. They are taken cheapest first by quadric error (Garland & Heckbert
@@ -19,6 +20,14 @@ input faces merged into it). A collapse is made only if all hold:
    vertices removed in its region: a collapse gathers a and the points of the
    faces around a and gives each to its nearest new face. So every input
    vertex is an output vertex or within eps of the face that carries it.
+4. Orientation: each face the collapse makes has a normal at less than 90
+   degrees to the input surface it stands for: the sum of the input normals
+   (normals: faces' cross products, summed per vertex) of its corners and of
+   the input vertices it would carry. Test 2 alone compares a face with its
+   last state only, so a face can turn over in several steps of less than 90
+   degrees each (on the hemisphere white surface, 1,027 of 194,132 faces of
+   its overview did); this test compares with the input, which does not
+   change.
 
 A rejected collapse is tried again when the region around a or b changes.
 
@@ -95,6 +104,20 @@ def _face_quadrics(v: Float, f: Int) -> Float:
     return K
 
 
+def normals(v: Float, f: Int) -> Float:
+    """Per vertex, the sum of its faces' normals times twice their areas (the
+    cross products of their edges): the input surface's direction there,
+    which the decimation's faces must keep (CHUNK faces at a time, each corner
+    in turn, faces in order)."""
+    N = np.zeros((len(v), 3))
+    for k in range(3):
+        for a in range(0, len(f), CHUNK):
+            fc = f[a : a + CHUNK]
+            n = np.cross(v[fc[:, 1]] - v[fc[:, 0]], v[fc[:, 2]] - v[fc[:, 0]])
+            np.add.at(N, fc[:, k], n)
+    return N
+
+
 def quadrics(v: Float, f: Int) -> Float:
     """Per vertex, the sum over its faces of area times the plane quadric
     (n, d)(n, d)^T of the face's plane n.x + d = 0, as its 10 upper-triangle
@@ -120,6 +143,10 @@ def _cost(q: Quad, p: Vec) -> float:
         + 2 * q[8] * z
         + q[9]
     )
+
+
+def _add(a: Vec, b: Vec) -> Vec:
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
 
 
 def _sub(a: Vec, b: Vec) -> Vec:
@@ -184,9 +211,9 @@ def point_triangle_distance(p: Vec, a: Vec, b: Vec, c: Vec) -> float:
 @dataclass
 class Block:
     """One block's part of a pass: its faces (indices into gids) and their
-    vertices (global ids gids, positions P, locked, quadrics Q), and per face
-    the input vertices it carries (CSR: cptr, cids, and their positions
-    cpos)."""
+    vertices (global ids gids, positions P, input normals N, locked, quadrics
+    Q), and per face the input vertices it carries (CSR: cptr, cids, and their
+    positions cpos and input normals cnrm)."""
 
     gids: Int
     P: Float
@@ -196,6 +223,8 @@ class Block:
     cptr: Int
     cids: Int
     cpos: Float
+    N: Float
+    cnrm: Float
 
 
 @dataclass
@@ -222,8 +251,11 @@ def decimate_block_py(B: Block, eps: float) -> BlockResult:
     ptr: list[int] = B.cptr.tolist()
     cid: list[int] = B.cids.tolist()
     cpos: list[Vec] = [tuple(p) for p in B.cpos.tolist()]
-    carried: list[list[tuple[int, Vec]]] = [
-        [(cid[k], cpos[k]) for k in range(ptr[i], ptr[i + 1])] for i in range(len(F))
+    N: list[Vec] = [tuple(p) for p in B.N.tolist()]
+    cn: list[Vec] = [tuple(p) for p in B.cnrm.tolist()]
+    carried: list[list[tuple[int, Vec, Vec]]] = [
+        [(cid[k], cpos[k], cn[k]) for k in range(ptr[i], ptr[i + 1])]
+        for i in range(len(F))
     ]
     alive = [True] * len(F)
     vf: list[set[int]] = [set() for _ in P]
@@ -262,6 +294,7 @@ def decimate_block_py(B: Block, eps: float) -> BlockResult:
             return False
         moved = [i for i in fa if i not in shared]
         new: list[tuple[Vec, Vec, Vec]] = []
+        n1s: list[Vec] = []
         for i in moved:
             old = [P[x] for x in F[i]]
             tri = [P[b] if x == a else P[x] for x in F[i]]
@@ -270,14 +303,28 @@ def decimate_block_py(B: Block, eps: float) -> BlockResult:
             if _dot(n0, n1) <= 0:
                 return False
             new.append((tri[0], tri[1], tri[2]))
-        pts = [(gid[a], P[a])] + [p for i in fa for p in carried[i]]
+            n1s.append(n1)
+        pts = [(gid[a], P[a], N[a])] + [p for i in fa for p in carried[i]]
         home: list[int] = []
-        for _, p in pts:
+        for _, p, _ in pts:
             ds = [point_triangle_distance(p, *t) for t in new]
             k = min(range(len(ds)), key=ds.__getitem__)
             if ds[k] > eps:
                 return False
             home.append(k)
+        # each new face faces the way of the input surface it stands for: its
+        # corners' and its carried vertices' input normals, summed
+        S: list[Vec] = []
+        for i in moved:
+            s3: Vec = (0.0, 0.0, 0.0)
+            for x in F[i]:
+                s3 = _add(s3, N[b if x == a else x])
+            S.append(s3)
+        for (_, _, nq), k in zip(pts, home, strict=True):
+            S[k] = _add(S[k], nq)
+        for m in range(len(moved)):
+            if _dot(n1s[m], S[m]) <= 0:
+                return False
         for i in shared:
             alive[i] = False
             for x in F[i]:
@@ -287,8 +334,8 @@ def decimate_block_py(B: Block, eps: float) -> BlockResult:
             F[i] = [b if x == a else x for x in F[i]]
             vf[b].add(i)
             carried[i] = []
-        for (g, p), k in zip(pts, home, strict=True):
-            carried[moved[k]].append((g, p))
+        for (g, p, nq), k in zip(pts, home, strict=True):
+            carried[moved[k]].append((g, p, nq))
         vf[a] = set()
         return True
 
@@ -315,7 +362,7 @@ def decimate_block_py(B: Block, eps: float) -> BlockResult:
         F=np.array([F[i] for i in keep], np.int64).reshape(-1, 3),
         Q=np.array(Q, float).reshape(-1, 10),
         cptr=np.r_[0, np.cumsum(counts)].astype(np.int64),
-        cids=np.array([g for i in keep for g, _ in carried[i]], np.int64),
+        cids=np.array([g for i in keep for g, *_ in carried[i]], np.int64),
         collapses=n,
     )
 
@@ -476,8 +523,10 @@ def _nb_collapse(
     node_g: Int,
     node_p: Float,
     nn: Int,
+    N: Float,
+    node_n: Float,
 ) -> bool:
-    """collapse() of decimate_block_py: a into b if the three tests pass."""
+    """collapse() of decimate_block_py: a into b if the tests pass."""
     na = cnt[a]
     fa = vf[a, :na].copy()
     shared = np.empty(na, np.int64)
@@ -517,6 +566,7 @@ def _nb_collapse(
             moved[nm] = fa[j]
             nm += 1
     tri = np.empty((nm, 3, 3))
+    n1 = np.empty((nm, 3))
     for m in range(nm):
         t = F[moved[m]]
         o0, o1, o2 = P[t[0]], P[t[1]], P[t[2]]
@@ -540,6 +590,7 @@ def _nb_collapse(
         )
         if n0x * n1x + n0y * n1y + n0z * n1z <= 0:
             return False
+        n1[m, 0], n1[m, 1], n1[m, 2] = n1x, n1y, n1z
     # the points: a (a new node), then the nodes of a's faces in order
     npts = 1
     for j in range(na):
@@ -551,6 +602,7 @@ def _nb_collapse(
     pa = nn[0]
     node_g[pa] = gid[a]
     node_p[pa, 0], node_p[pa, 1], node_p[pa, 2] = P[a, 0], P[a, 1], P[a, 2]
+    node_n[pa, 0], node_n[pa, 1], node_n[pa, 2] = N[a, 0], N[a, 1], N[a, 2]
     pts[0] = pa
     q = 1
     for j in range(na):
@@ -584,6 +636,24 @@ def _nb_collapse(
         if best > eps:
             return False
         home[q] = bk
+    # each new face faces the way of the input surface it stands for (the same
+    # sums, in the same order, as decimate_block_py)
+    S = np.zeros((nm, 3))
+    for m in range(nm):
+        t = F[moved[m]]
+        for r in range(3):
+            src = b if t[r] == a else t[r]
+            S[m, 0] = S[m, 0] + N[src, 0]
+            S[m, 1] = S[m, 1] + N[src, 1]
+            S[m, 2] = S[m, 2] + N[src, 2]
+    for q in range(npts):
+        m, k = home[q], pts[q]
+        S[m, 0] = S[m, 0] + node_n[k, 0]
+        S[m, 1] = S[m, 1] + node_n[k, 1]
+        S[m, 2] = S[m, 2] + node_n[k, 2]
+    for m in range(nm):
+        if n1[m, 0] * S[m, 0] + n1[m, 1] * S[m, 1] + n1[m, 2] * S[m, 2] <= 0:
+            return False
     # commit
     nn[0] += 1
     for j in range(2):
@@ -631,6 +701,8 @@ def _nb_block(
     cids: Int,
     cpos: Float,
     eps: float,
+    N: Float,
+    cnrm: Float,
 ) -> tuple[Int, Float, Int, Int, int, int]:
     """decimate_block on arrays. Returns faces kept, quadrics, the carried CSR,
     the collapses and the pushes."""
@@ -650,6 +722,7 @@ def _nb_block(
     cap = cids.size + n
     node_g = np.empty(cap, np.int64)
     node_p = np.empty((cap, 3))
+    node_n = np.empty((cap, 3))
     nxt = -np.ones(cap, np.int64)
     head = -np.ones(m, np.int64)
     tail = -np.ones(m, np.int64)
@@ -660,6 +733,7 @@ def _nb_block(
             nn[0] += 1
             node_g[j] = cids[k]
             node_p[j] = cpos[k]
+            node_n[j] = cnrm[k]
             if head[i] < 0:
                 head[i] = j
             else:
@@ -687,7 +761,23 @@ def _nb_block(
         if cnt[b] + cnt[a] > vf.shape[1]:
             vf = _nb_grow(vf, cnt[b] + cnt[a])
         if not _nb_collapse(
-            a, b, eps, P, gid, F, alive, vf, cnt, head, tail, nxt, node_g, node_p, nn
+            a,
+            b,
+            eps,
+            P,
+            gid,
+            F,
+            alive,
+            vf,
+            cnt,
+            head,
+            tail,
+            nxt,
+            node_g,
+            node_p,
+            nn,
+            N,
+            node_n,
         ):
             continue
         ncol += 1
@@ -763,6 +853,8 @@ def decimate_block(B: Block, eps: float) -> BlockResult:
         np.ascontiguousarray(B.cids, np.int64),
         np.ascontiguousarray(B.cpos, np.float64).reshape(-1, 3),
         float(eps),
+        np.ascontiguousarray(B.N, np.float64).reshape(-1, 3),
+        np.ascontiguousarray(B.cnrm, np.float64).reshape(-1, 3),
     )
     return BlockResult(F=F, Q=Q, cptr=cptr, cids=cids, collapses=int(n))
 
@@ -818,15 +910,16 @@ def _csr_concat(parts: Sequence[tuple[Int, Int]]) -> tuple[Int, Int]:
 
 @dataclass
 class Mesh:
-    """A mesh during decimation: input positions v (never changed), faces f
-    (into v), quadrics Q per input vertex, and per face the input vertices it
-    carries (cptr, cids)."""
+    """A mesh during decimation: input positions v and input normals N (never
+    changed), faces f (into v), quadrics Q per input vertex, and per face the
+    input vertices it carries (cptr, cids)."""
 
     v: Float
     f: Int
     Q: Float
     cptr: Int
     cids: Int
+    N: Float
 
 
 def decimate_pass(
@@ -880,6 +973,8 @@ def decimate_pass(
                     cptr=cptr,
                     cids=cids,
                     cpos=v[cids],
+                    N=M.N[gids],
+                    cnrm=M.N[cids],
                 ),
             )
 
@@ -926,7 +1021,8 @@ def decimate_pass(
         collapses=sum(r.collapses for _, r in results),
         locked=int(locked.sum()),
     )
-    return Mesh(v=v, f=f_new.astype(np.int64), Q=Q, cptr=cptr, cids=cids), summary
+    M2 = Mesh(v=v, f=f_new.astype(np.int64), Q=Q, cptr=cptr, cids=cids, N=M.N)
+    return M2, summary
 
 
 # ---------------------------------------------------------------- whole run
@@ -1021,8 +1117,9 @@ def decimate(
         Q=quadrics(V, Fa),
         cptr=np.zeros(len(Fa) + 1, np.int64),
         cids=np.zeros(0, np.int64),
+        N=normals(V, Fa),
     )
-    lap("quadrics")
+    lap("quadrics and normals")
     nw = (os.cpu_count() or 1) if workers is None else workers
     origin = V.min(0)
     out: list[dict[str, Any]] = []

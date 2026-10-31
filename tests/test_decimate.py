@@ -109,13 +109,36 @@ def test_large_eps_keeps_the_genus() -> None:
     assert len(out.vertex_ids) >= 7  # the smallest triangulated torus
 
 
-def test_octahedron_goes_down_to_a_tetrahedron_and_stops() -> None:
-    v, f = octahedron()
+def tent() -> tuple[Float, Int]:
+    """A tetrahedron with one face raised slightly at its middle (vertex 4)."""
+    v = np.array(
+        [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1 / 3, 1 / 3, -0.05]], float
+    )
+    # outward: base 0 2 1 split round 4, sides 0 1 3, 1 2 3, 2 0 3
+    f = np.array([[0, 2, 4], [2, 1, 4], [1, 0, 4], [0, 1, 3], [1, 2, 3], [2, 0, 3]])
+    return v, f
+
+
+def test_a_tent_goes_down_to_a_tetrahedron_and_stops() -> None:
+    """The raised vertex goes; the tetrahedron left cannot be collapsed (the
+    link condition)."""
+    v, f = tent()
     out = D.decimate(
         v, f, eps=10.0, block=100.0, passes=1, workers=1, log=lambda s: None
     )
     check(v, f, out, 10.0)
     assert len(out.faces) == 4 and len(out.vertex_ids) == 4
+    assert (surface_cosines(v, f, out) > 0).all()
+
+
+def test_the_octahedron_is_kept_whole() -> None:
+    """Any collapse of a regular octahedron leaves a face at 90 degrees to the
+    surface it stands for, so none is made."""
+    v, f = octahedron()
+    out = D.decimate(
+        v, f, eps=10.0, block=100.0, passes=1, workers=1, log=lambda s: None
+    )
+    assert len(out.faces) == 8
 
 
 def test_eps_zero_removes_only_vertices_on_the_output() -> None:
@@ -143,6 +166,7 @@ def test_a_pass_keeps_locked_vertices() -> None:
         Q=D.quadrics(v, f),
         cptr=np.zeros(len(f) + 1, np.int64),
         cids=np.zeros(0, np.int64),
+        N=D.normals(v, f),
     )
     M2, s = D.decimate_pass(M, 0.5, block, 0.0, o, workers=1)
     assert s["collapses"] > 0
@@ -211,6 +235,7 @@ def test_the_compiled_worker_equals_the_python_reference(
         Q=D.quadrics(v, f),
         cptr=np.zeros(len(f) + 1, np.int64),
         cids=np.zeros(0, np.int64),
+        N=D.normals(v, f),
     )
     for off in (0.0, 0.5):  # two passes, the second on carried points
         a, sa = D.decimate_pass(M, eps, block, off, workers=1)
@@ -234,3 +259,39 @@ def test_chunks_change_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     for x, y in ((a.vertex_ids, b.vertex_ids), (a.faces, b.faces), (a.cids, b.cids)):
         np.testing.assert_array_equal(x, y)
     assert a.max_distance == b.max_distance
+
+
+def surface_cosines(v: Float, f: Int, out: D.Decimated) -> Float:
+    vn = np.zeros_like(v)
+    nf = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
+    for k in range(3):
+        np.add.at(vn, f[:, k], nf)
+    f0 = out.vertex_ids[out.faces]
+    S = vn[f0[:, 0]] + vn[f0[:, 1]] + vn[f0[:, 2]]
+    np.add.at(S, np.repeat(np.arange(len(f0)), np.diff(out.cptr)), vn[out.cids])
+    n = np.cross(v[f0[:, 1]] - v[f0[:, 0]], v[f0[:, 2]] - v[f0[:, 0]])
+    out_: Float = np.sum(n * S, 1) / (
+        np.linalg.norm(n, axis=1) * np.linalg.norm(S, axis=1)
+    )
+    return out_
+
+
+def staircase() -> tuple[Float, Int]:
+    """A closed surface like the real white mesh at small scale: marching
+    tetrahedra of a binary mask (a ball with bumps), so flat facets and steps."""
+    X, Y, Z = grid(34)
+    r = np.sqrt((X - 16.3) ** 2 + (Y - 16.6) ** 2 + (Z - 16.2) ** 2)
+    a = np.arctan2(Y - 16.6, X - 16.3)
+    mask = r < 11 + 2.5 * np.sin(3 * a) * np.cos(0.4 * Z)
+    v, f = marching_tetrahedra(mask.astype(float), 0.5)
+    return v * 0.16, f
+
+
+@pytest.mark.parametrize("eps", [0.05, 0.1, 0.2])
+def test_no_output_face_faces_away_from_the_surface_it_stands_for(eps: float) -> None:
+    """On a staircase like the real data, every output face points the same
+    way as the input surface it stands for."""
+    v, f = staircase()
+    out = D.decimate(v, f, eps=eps, block=1.5, passes=2, workers=1, log=lambda s: None)
+    cos = surface_cosines(v, f, out)
+    assert np.sum(cos <= 0) == 0, f"{np.sum(cos <= 0)} of {len(cos)} faces flipped"
