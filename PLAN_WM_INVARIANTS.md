@@ -37,8 +37,10 @@ and on R, and the site count checks it only afterwards, by proxy.
 
 M is the corrected mask, A the input mask (the filled labels after the manual
 edits). Each voxel outside A has a side, from its input label: **GM** (the
-cortex label: 42 right, 3 left) or **other** (everything else not filled:
-background 0, hippocampus, amygdala, ...).
+cortex label only: 42 right, 3 left) or **other** (everything else not
+filled: background 0, hippocampus, amygdala, ...). Hippocampus and amygdala
+are other: the mask may grow into them. Some of the aseg's cortex is water
+mislabelled as cortex; the invariant follows the label.
 
 1. **Topology (hard).** M's Betti numbers (Kuhn adjacency) are (b0, 0, 0).
 2. **No growth into GM (hard).** M takes no GM voxel: M \ A has no voxel
@@ -138,9 +140,6 @@ cortex). #83 is closed when this lands, its table kept here.
 - **r and g.** For example 0.25 mm each (about 1.5 voxels at 160 µm, so
   features and gaps of at least 3 voxels). The hemisphere runs set them,
   from the exceptions and the area lost, not from the site count alone.
-- **What counts as GM.** The cortex label only, or also hippocampus and
-  amygdala? Some of the aseg's cortex is water mislabelled as cortex; the
-  invariant follows the label.
 - **The other side.** At WM against fluid, remove (inward) or thicken
   (outward) a thin feature, or close a narrow gap? Removing only is simpler
   and treats both sides alike; thickening keeps more of the WM.
