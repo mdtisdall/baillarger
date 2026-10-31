@@ -2,7 +2,7 @@
 
 SpecVersion `wm-dseg/1` (the corrected segmentation) and `wm-dseg-fixes/1`
 (the diagnostic image of the changes). Written by
-`python -m baillarger.white dseg ASEG --out DERIV`
+`python -m baillarger.white dseg ASEG [--edits EDITS] --out DERIV`
 (`baillarger.white.write_wm_topo`); the keys are enforced by
 `baillarger.white.DSEG_SPEC` and `FIXES_SPEC`, and `tests/test_bids.py` checks
 that the tables below list the same keys, types and requirements.
@@ -17,7 +17,7 @@ In the BIDS derivatives root `DERIV`, for an input with entities `sub` and
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.nii.gz` | The corrected segmentation: the input's grid, affine, header and data type |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.tsv` | `index` and `name` (FreeSurfer LUT) of every label in it |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.json` | Sidecar, `wm-dseg/1` |
-| `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.nii.gz` | uint8, the changed voxels: 1 handle cut, 2 handle fill, 3 cavity fill; 0 elsewhere |
+| `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.nii.gz` | uint8, the changed voxels: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit; 0 elsewhere. A manually edited voxel that the correction then changes shows the correction's value |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.tsv` | `index` and `name` of those values |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.json` | Sidecar, `wm-dseg-fixes/1` |
 
@@ -54,15 +54,17 @@ pieces as background; a fill of one piece can touch another and make a
 handle or a cavity of the union, so the command checks the Betti numbers and
 writes nothing if b1 or b2 is not 0.
 
-## Planned: manual edits
+## Manual edits
 
-Not in `wm-dseg/1`. An editor's changes will be kept in a sparse edits
-file (per voxel: the old and new label, and when), which `dseg` takes as a
-second source, listed in `Sources` with its SHA-256, and applies with the
-automatic corrections, recorded as moves of kind `manual`; this spec will
-change to allow it. Until then `Sources` holds the input segmentation only.
-The derivative stays written whole by the command, so an edit costs a
-`dseg` run, not a rewrite by hand.
+With `--edits`, the manual edits of the input in a `wm-edits/1` table
+(`docs/formats/wm-edits.md`) are made first, and the correction above runs on
+the edited segmentation: the filled labels, the mask and `BettiBefore` are
+those of the edited input, so no edit can leave a handle or a cavity. `dseg`
+refuses edits made against another input (their `SourcesSHA256`) or that do
+not fit it (a voxel without its `old` label). The edits table and its sidecar
+are listed in `Sources`; each answer with rows is a move of kind `manual`.
+The input segmentation is never changed, and the derivative stays written
+whole by the command, so an edit costs a `dseg` run.
 
 ## Sidecar keys: wm-dseg/1
 
@@ -70,7 +72,7 @@ The derivative stays written whole by the command, so an edit costs a
 |---|---|---|---|
 | `SpecVersion` | string | yes | `wm-dseg/1` |
 | `Description` | string | yes | What the file is |
-| `Sources` | array of strings | yes | The input segmentation (absolute path) |
+| `Sources` | array of strings | yes | The input segmentation, then with `--edits` the edits table and its sidecar (absolute paths) |
 | `SourcesSHA256` | object | yes | SHA-256 of each source, by path |
 | `Provenance` | object | yes | `Created` (ISO 8601), `Function`, `Version` (baillarger), `Commit`, `Dirty` |
 | `Hemisphere` | string | yes | `R` or `L` |
@@ -82,7 +84,8 @@ The derivative stays written whole by the command, so an edit costs a
 | `HandleFillVoxels` | integer | yes | Voxels set to `WMLabel` by handle fills |
 | `HandleCutVoxels` | integer | yes | Voxels cut from the mask (cuts and stranded voxels) |
 | `CutLabels` | object | yes | New label of the cut voxels (as a string): number of voxels |
-| `Moves` | array of objects | yes | Per handle move: `Kind` (`cut`, `fill` or `stranded`), `Voxels` (count), `Centre` (0-based voxel of the grid) |
+| `ManualVoxels` | integer | yes | Voxels changed by the manual edits (0 without `--edits`) |
+| `Moves` | array of objects | yes | Per manual answer with rows, then per handle move: `Kind` (`manual`, `cut`, `fill` or `stranded`), `Voxels` (count), `Centre` (0-based voxel of the grid), and for `manual` the `Answer` (its `Id`) |
 
 ## Sidecar keys: wm-dseg-fixes/1
 
@@ -90,6 +93,6 @@ The derivative stays written whole by the command, so an edit costs a
 |---|---|---|---|
 | `SpecVersion` | string | yes | `wm-dseg-fixes/1` |
 | `Description` | string | yes | What the file is |
-| `Sources` | array of strings | yes | The input segmentation (absolute path) |
+| `Sources` | array of strings | yes | As in `wm-dseg/1` |
 | `SourcesSHA256` | object | yes | SHA-256 of each source, by path |
 | `Provenance` | object | yes | As in `wm-dseg/1` |

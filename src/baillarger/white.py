@@ -22,14 +22,16 @@ column traces start from.
 
 The command line:
 
-    python -m baillarger.white dseg ASEG --out DERIVATIVES
+    python -m baillarger.white dseg ASEG [--edits EDITS] --out DERIVATIVES
     python -m baillarger.white mesh DSEG --out DERIVATIVES [--block-cells N]
         [--device DEVICE] [--overview-eps MM] [--workers N]
     python -m baillarger.white overview SURF [--eps MM] [--workers N]
 
 dseg writes the corrected segmentation (desc-wmtopo_dseg) and the changed
 voxels (desc-wmtopofixes_dseg), with their .tsv and .json sidecars
-(docs/formats/wm-dseg.md). mesh writes the white surface of a corrected
+(docs/formats/wm-dseg.md); EDITS, manual edits of the aseg
+(desc-wmedits_edits.tsv, baillarger.wm_edits), are made before the automatic
+correction. mesh writes the white surface of a corrected
 segmentation as GIfTI, with its normals, edge keys and block index
 (docs/formats/white-surf.md), then its overview (write_white_overview): the
 surface decimated for viewing, as an ordinary GIfTI with embedded data
@@ -78,6 +80,7 @@ from baillarger.mesh import (
 )
 from baillarger.mesh_torch import MeshOps
 from baillarger.timing import Laps, log, log_to_stderr
+from baillarger.wm_edits import Edits, apply_edits, read_edits, sources_match
 
 type Bool = npt.NDArray[np.bool_]
 type Betti = tuple[int, int, int]
@@ -118,8 +121,9 @@ LUT_NAMES = {
     192: "Corpus_Callosum",
 }
 
-#: values of the fixes image: a handle cut, a handle fill, a cavity fill
-FIXES = {1: "handle_cut", 2: "handle_fill", 3: "cavity_fill"}
+#: values of the fixes image: a handle cut, a handle fill, a cavity fill, a
+#: manual edit (baillarger.wm_edits)
+FIXES = {1: "handle_cut", 2: "handle_fill", 3: "cavity_fill", 4: "manual_edit"}
 
 #: docs/formats/wm-dseg.md
 DSEG_SPEC = SidecarSpec(
@@ -135,7 +139,8 @@ DSEG_SPEC = SidecarSpec(
         Key("HandleFillVoxels", "integer", True, "voxels set to WM: handle fills"),
         Key("HandleCutVoxels", "integer", True, "voxels cut from the mask"),
         Key("CutLabels", "object", True, "new label of the cut voxels: count"),
-        Key("Moves", "array of objects", True, "each handle move"),
+        Key("ManualVoxels", "integer", True, "voxels changed by manual edits"),
+        Key("Moves", "array of objects", True, "each manual edit and handle move"),
     ),
 )
 #: docs/formats/wm-dseg.md
@@ -217,12 +222,19 @@ class WMTopo:
     betti_after: Betti
     #: label: count, for the cut voxels
     cut_labels: dict[int, int]
-    #: per handle move: Kind, Voxels, Centre (0-based voxel of the grid)
+    #: per manual edit (Answer: its Id) and handle move: Kind, Voxels, Centre
+    #: (0-based voxel of the grid)
     moves: list[dict[str, Any]]
+    #: voxels changed by the manual edits
+    manual_voxels: int = 0
 
 
-def wm_topo(aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike) -> WMTopo:
-    """The corrected segmentation of an aseg: the mask of its FILLED_LABELS,
+def wm_topo(
+    aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike, edits: Edits | None = None
+) -> WMTopo:
+    """The corrected segmentation of an aseg: the manual edits made first
+    (baillarger.wm_edits.apply_edits; it raises ValueError for edits that do
+    not fit the aseg), then the mask of its FILLED_LABELS,
     with its cavities filled and its handles removed
     (baillarger.handles.remove_handles). Cavity and handle fills become the
     WM label; each handle cut takes the label of the nearest voxel that is
@@ -232,6 +244,10 @@ def wm_topo(aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike) -> WMTopo:
     which a fill of one piece of the mask touching another can make."""
     lap = Laps()
     a0 = np.asarray(aseg)
+    manual = None
+    if edits is not None:
+        a0, manual = apply_edits(a0, edits)
+        lap("manual edits")
     hemi = hemisphere(a0)
     filled, wm_label = FILLED_LABELS[hemi], WM_LABEL[hemi]
     m = np.isin(a0, filled)
@@ -273,12 +289,27 @@ def wm_topo(aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike) -> WMTopo:
     dseg = a0.copy()
     dseg[box] = labels
     fixes = np.zeros(a0.shape, np.uint8)
+    if manual is not None:
+        fixes[manual] = 4  # an edited voxel the correction then changes shows that
     fx = fixes[box]
     fx[cut] = 1
     fx[fill] = 2
     fx[cav] = 3
     new, cnt = np.unique(labels[cut], return_counts=True)
-    moves = [
+    moves = []
+    if edits is not None:
+        for ans in edits.answers:
+            v = edits.voxels[edits.answer == ans.id]
+            if len(v):
+                moves.append(
+                    dict(
+                        Kind="manual",
+                        Voxels=len(v),
+                        Centre=np.round(v.mean(0)).astype(int).tolist(),
+                        Answer=ans.id,
+                    )
+                )
+    moves += [
         dict(
             Kind=mv.kind,
             Voxels=len(mv.voxels),
@@ -294,6 +325,7 @@ def wm_topo(aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike) -> WMTopo:
         after,
         {int(k): int(c) for k, c in zip(new, cnt, strict=True)},
         moves,
+        0 if manual is None else int(manual.sum()),
     )
 
 
@@ -302,19 +334,26 @@ def _write_tsv(path: Path, names: dict[int, str]) -> None:
     path.write_text("index\tname\n" + rows)
 
 
-def write_wm_topo(aseg: Path, out: Path) -> dict[str, Path]:
-    """The dseg command: wm_topo of the aseg at aseg, written to the BIDS
-    derivatives root out (docs/formats/wm-dseg.md). Returns the paths
+def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str, Path]:
+    """The dseg command: wm_topo of the aseg at aseg, with the manual edits in
+    the table at edits (docs/formats/wm-edits.md) if given, written to the BIDS
+    derivatives root out (docs/formats/wm-dseg.md). Raises ValueError for edits
+    made against another aseg, or that do not fit it. Returns the paths
     written, by role."""
     img = nib.load(aseg)
     if not isinstance(img, nib.nifti1.Nifti1Image):
         raise ValueError(f"{aseg.name}: not a NIfTI-1 image")
     ents = entities(aseg)
     vox = tuple(float(z) for z in img.header.get_zooms()[:3])
+    e = None
+    if edits is not None:
+        e, side = read_edits(edits)
+        if not sources_match(side, aseg):
+            raise ValueError(f"{edits.name}: the edits are not against {aseg.name}")
     lap = Laps()
     a = np.asarray(img.dataobj)
     lap("read")
-    t = wm_topo(a, vox)
+    t = wm_topo(a, vox, e)
     lap = Laps()
     dataset_description(out)
     p = dict(
@@ -333,7 +372,7 @@ def write_wm_topo(aseg: Path, out: Path) -> dict[str, Path]:
     )
     _write_tsv(p["fixes"].with_name(p["fixes"].name.replace(".nii.gz", ".tsv")), FIXES)
     lap("write")
-    src = sources(aseg)
+    src = sources(aseg) if edits is None else sources(aseg, edits, sidecar_path(edits))
     prov = provenance("baillarger.white.write_wm_topo")
     write_sidecar(
         sidecar_path(p["dseg"]),
@@ -353,6 +392,7 @@ def write_wm_topo(aseg: Path, out: Path) -> dict[str, Path]:
             HandleFillVoxels=int((t.fixes == 2).sum()),
             HandleCutVoxels=int((t.fixes == 1).sum()),
             CutLabels={str(k): v for k, v in t.cut_labels.items()},
+            ManualVoxels=t.manual_voxels,
             Moves=t.moves,
         ),
     )
@@ -362,7 +402,7 @@ def write_wm_topo(aseg: Path, out: Path) -> dict[str, Path]:
         dict(
             SpecVersion=FIXES_SPEC.version,
             Description="The voxels that the WM topology correction changed: "
-            "1 handle cut, 2 handle fill, 3 cavity fill.",
+            "1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit.",
             **src,
             Provenance=prov,
         ),
@@ -973,6 +1013,9 @@ def main(argv: list[str] | None = None) -> None:
         "dseg", help="the segmentation with a cavity- and handle-free WM mask"
     )
     d.add_argument("aseg", type=Path, help="a BIDS-named segmentation (NIfTI)")
+    d.add_argument(
+        "--edits", type=Path, help="manual edits of the aseg (desc-wmedits_edits.tsv)"
+    )
     d.add_argument("--out", required=True, type=Path, help="BIDS derivatives root")
     m = sub.add_parser("mesh", help="the white surface of a corrected segmentation")
     m.add_argument("dseg", type=Path, help="a desc-wmtopo_dseg (the dseg command)")
@@ -996,7 +1039,7 @@ def main(argv: list[str] | None = None) -> None:
     o.add_argument("--workers", type=int, default=4, help="processes to decimate")
     a = ap.parse_args(argv)
     if a.cmd == "dseg":
-        for role, path in write_wm_topo(a.aseg, a.out).items():
+        for role, path in write_wm_topo(a.aseg, a.out, a.edits).items():
             print(f"{role}: {path}")
     elif a.cmd == "mesh":
         w = write_white_surface(a.dseg, a.out, a.block_cells, a.device)
