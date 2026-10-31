@@ -212,6 +212,10 @@ function connect() {
 // true white surface, with the shown trace there: the sections, the streamlines, the markers)
 async function setSelection(sel, frame) {
   SELN = sel; FRAME = frame;
+  if (META?.surface_only && sel && NV.nv) {
+    if (!inBox(sel.voxel)) await loadWhiteBox(sel.voxel);
+    CROSS = sel.world_mm; moveVolumeCrosshair(sel.world_mm);
+  }
   showSelectionMarker();
   if (sel && sel.trace !== null) await showTrace(sel.trace);
   else { CUR = null; SEC = null; clearSections(); drawMap(); draw3d();
@@ -473,15 +477,35 @@ $("level").onchange = async () => { await loadMesh(+$("level").value, false); dr
 
 // ---------------------------------------------------------------- volume pane (NiiVue, world mm)
 const NV = { nv: null, tracts: [], points: null, pia: null, over: [], axes: [] };
+// a white surface alone: the volume pane shows a box round voxel WB.c (the server's BOX each way)
+const WB = { c: null };
+const WBCOL = { R: [0, 255, 255, 64, 64], G: [0, 149, 59, 220, 140], B: [0, 0, 48, 80, 255], A: [0, 90, 255, 255, 255], I: [0, 1, 2, 3, 4],
+                labels: ["", "WM mask", "handle cut", "handle fill", "cavity fill"] };
+async function loadWhiteBox(c) {
+  const nv = NV.nv, q = `c=${c.join(",")}`, tag = c.join("_"), k = $("vecho").value;
+  WB.c = c;
+  await nv.loadVolumes([{ url: `/white/echo${k}.nii.gz?${q}`, name: `echo${k}_${tag}.nii.gz`, colormap: "gray" },
+                        { url: `/white/overlay.nii.gz?${q}`, name: `overlay_${tag}.nii.gz`, opacity: +$("vlabop").value }]);
+  nv.volumes[1].setColormapLabel(WBCOL);
+  await nv.loadMeshes([{ url: `/white/surface.gii?${q}`, name: `surface_${tag}.gii`, rgba255: [255, 210, 63, 255] }]);
+  nv.setMeshProperty(nv.meshes[0].id, "visible", $("vwhite").checked);
+  nv.updateGLVolume();
+  if (SELN) showSelectionMarker();
+  log(`volume pane: box round voxel ${c.join(", ")}`);
+}
+function inBox(v) { return WB.c && v.every((x, a) => Math.abs(x - WB.c[a]) <= META.box.half - 12); }
 async function initVolume() {
   const nv = new Niivue({ backColor: [0.05, 0.055, 0.065, 1], show3Dcrosshair: true, crosshairColor: [1, 0.2, 0.8, 1],
                           isColorbar: false, multiplanarShowRender: SHOW_RENDER.ALWAYS, multiplanarLayout: 2 /* grid */,
                           meshThicknessOn2D: 0.4 });
   NV.nv = nv; await nv.attachTo("nv");
   const t0 = performance.now();
-  await nv.loadVolumes([{ url: "/echo2.nii.gz", colormap: "gray" }]);
-  if (!META.labels_only)
-    await nv.loadMeshes([{ url: "/white.gii", rgba255: [210, 210, 214, 255] }, { url: "/gm.gii", rgba255: [140, 200, 255, 255], opacity: 0.25 }]);
+  if (META.surface_only) await loadWhiteBox(META.box.centre);
+  else {
+    await nv.loadVolumes([{ url: "/echo2.nii.gz", colormap: "gray" }]);
+    if (!META.labels_only)
+      await nv.loadMeshes([{ url: "/white.gii", rgba255: [210, 210, 214, 255] }, { url: "/gm.gii", rgba255: [140, 200, 255, 255], opacity: 0.25 }]);
+  }
   await nv.setVolumeRenderIllumination(-1);   // the 3D tile shows the three slices, so the meshes inside stay visible
   setView();
   nv.onLocationChange = d => {
@@ -741,12 +765,16 @@ $("lacc").onclick = () => decide("accepted"); $("lrej").onclick = () => decide("
 $("lnext").onclick = () => step(1); $("lprev").onclick = () => step(-1);
 $("lfilter").onchange = drawLabels;
 $("vecho").onchange = async () => {   // the background: echo 1, 2 or 3, under the overlay
+  if (META.surface_only) { await loadWhiteBox(WB.c); return; }
   const nv = NV.nv, old = nv.volumes[0], k = $("vecho").value;
   await nv.addVolumeFromUrl({ url: `/labels/echo${k}.nii.gz`, name: `echo${k}.nii.gz`, colormap: "gray" });
   nv.setVolume(nv.volumes[nv.volumes.length - 1], 0); nv.removeVolume(old); nv.updateGLVolume();
   log(`volume pane: echo ${k}`);
 };
-$("vlabop").oninput = () => { if (LAB.vol) { LAB.vol.opacity = +$("vlabop").value; NV.nv.updateGLVolume(); } };
+$("vlabop").oninput = () => {
+  const vol = META.surface_only ? NV.nv?.volumes[1] : LAB.vol;
+  if (vol) { vol.opacity = +$("vlabop").value; NV.nv.updateGLVolume(); }
+};
 document.addEventListener("keydown", e => {
   if (!LAB.on || e.target.tagName === "SELECT" || e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey) return;
   const k = { j: () => step(1), k: () => step(-1), a: () => decide("accepted"), r: () => decide("rejected"), u: () => decide("proposed") }[e.key];
@@ -765,9 +793,12 @@ window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections
     $("fbar").style.display = "none";
     $("rotbar").style.display = "none";
     $("newwin").style.display = "none";
-  } else if (META.surface_only) {   // a white surface alone: its overview in the surface pane
-    PANES = ["surface"]; layout();
-    for (const id of ["layer", "half", "dmax", "radius", "panesel"]) $(id).closest("label").style.display = "none";
+  } else if (META.surface_only) {   // a white surface alone: its overview, and the volume pane on a box
+    PANES = ["volume", "surface"]; layout();
+    for (const id of ["layer", "half", "dmax", "radius", "panesel", "vgm", "vfrom", "vto", "vover", "vpts", "vaxes", "brush", "bradius"])
+      $(id).closest("label").style.display = "none";
+    $("vlab").style.display = "";
+    $("vkey").textContent = "overlay: WM mask (orange) · handle cut (red) · handle fill (green) · cavity fill (blue); the box follows the WM selection";
     $("fbar").style.display = "none";
     $("rotbar").style.display = "none";
     const o = META.overview;
