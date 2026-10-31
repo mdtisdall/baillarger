@@ -387,6 +387,8 @@ def test_reorder_keeps_each_face_with_its_carried_vertices() -> None:
     o = np.random.default_rng(2).permutation(len(out.faces))
     r = D.reorder(out, o)
     np.testing.assert_array_equal(r.faces, out.faces[o])
+    assert r.repairs == out.repairs and r.passes == out.passes
+    np.testing.assert_array_equal(r.pinned, out.pinned)
     for new, old in ((0, o[0]), (7, o[7]), (len(o) - 1, o[-1])):
         a = r.cids[r.cptr[new] : r.cptr[new + 1]]
         b = out.cids[out.cptr[old] : out.cptr[old + 1]]

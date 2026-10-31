@@ -84,6 +84,8 @@ def test_the_files_and_the_guarantees(surf: Path) -> None:
         best = np.minimum(best, D.triangle_distances(v, a, b, c))
     assert best.max() <= EPS + 1e-6
     assert side["MaxDistanceMM"] <= side["EpsMM"] == EPS
+    # the repair rounds are recorded; the last has no faces intersecting
+    assert side["Repairs"] and side["Repairs"][-1]["intersecting_faces"] == 0
 
 
 def test_the_reader_and_its_check(surf: Path, tmp_path: Path) -> None:

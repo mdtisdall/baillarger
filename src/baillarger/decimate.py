@@ -1189,6 +1189,8 @@ def reorder(D: Decimated, order: npt.ArrayLike) -> Decimated:
         cids=cids,
         max_distance=D.max_distance,
         passes=D.passes,
+        repairs=D.repairs,
+        pinned=D.pinned,
     )
 
 
