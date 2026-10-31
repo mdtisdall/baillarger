@@ -405,10 +405,12 @@ def _resolve_cluster(
     offs: Int,
     shape: tuple[int, ...],
     u: Int,
+    nofill: Bool | None = None,
 ) -> Move | None | bool:
     """When no wall can be claimed voxel by voxel: claim the smallest set of
     unclaimed voxels that one front can take whole (_set_simple), by the front
-    that changes fewer voxels (ties: the background, a cut). The sets tried
+    that changes fewer voxels (ties: the background, a cut); a fill that would
+    take a voxel of nofill (flat, the size of state) is not tried. The sets tried
     are the walls, the pairs of touching walls of opposite phase and the
     clusters (Kuhn-connected pieces of both phases; a ring of walls is one
     that no front can take whole). u: the unclaimed voxels (sorted flat
@@ -434,6 +436,12 @@ def _resolve_cluster(
             ((n_obj, _BG, _OBJ, "cut"), (c.size - n_obj, _OBJ, _BG, "fill"))
         )
         for changed, front, lose, kind in options:
+            if (
+                kind == "fill"
+                and nofill is not None
+                and nofill[c[phase[c] == _BG]].any()
+            ):
+                continue
             if _set_simple(s3, front, c):
                 state[c] = front
                 if not changed:
@@ -443,9 +451,10 @@ def _resolve_cluster(
     return False
 
 
-def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
+def _remove_one(obj: Bool, nofill: Bool | None = None) -> tuple[Bool, list[Move]]:
     """remove_handles for an object with one component."""
     x = np.pad(obj, 2)
+    forb = None if nofill is None else np.pad(nofill, 2).ravel()
     if x.size >= 1 << _IDX_BITS:
         raise ValueError("array too large for the heap keys")
     s = kuhn_structure()
@@ -487,6 +496,8 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
         for w in walls:
             own = int(ph[w[0]])
             other = _BG if own == _OBJ else _OBJ
+            if own == _BG and forb is not None and forb[w].any():
+                continue  # a fill may not take these voxels
             got = np.array([i for i in w if st[i] == _U], np.int64)
             if not _claim(st, w, other, offs, SIMPLE):
                 continue
@@ -498,7 +509,7 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
             done = True
             break
         if not done:
-            m = _resolve_cluster(st, ph, offs, x.shape, u)
+            m = _resolve_cluster(st, ph, offs, x.shape, u, forb)
             if m is False:
                 break
             if isinstance(m, Move):
@@ -521,11 +532,15 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
     return out[2:-2, 2:-2, 2:-2], moves
 
 
-def remove_handles(obj: npt.ArrayLike) -> HandleRemoval:
+def remove_handles(
+    obj: npt.ArrayLike, nofill: npt.ArrayLike | None = None
+) -> HandleRemoval:
     """Remove every handle of the object (3D bool) with the Kuhn adjacency,
     keeping its components and cavities: each handle is cut or filled,
-    whichever changes fewer voxels (module docstring). Outside the array is
-    background."""
+    whichever changes fewer voxels (module docstring). A fill never takes a
+    voxel of nofill (3D bool, the object's shape): a handle whose fill would
+    is cut. Outside the array is background."""
+    nf = None if nofill is None else np.asarray(nofill, bool)
     a = np.asarray(obj, bool)
     lab, n = ndi.label(a, kuhn_structure())
     out = np.zeros_like(a)
@@ -536,8 +551,130 @@ def remove_handles(obj: npt.ArrayLike) -> HandleRemoval:
         lo = np.array([max(t.start - 2, 0) for t in sl])
         hi = np.array([min(t.stop + 2, m) for t, m in zip(sl, a.shape, strict=True)])
         box = tuple(slice(int(p), int(q)) for p, q in zip(lo, hi, strict=True))
-        got, mv = _remove_one(lab[box] == k)
+        got, mv = _remove_one(lab[box] == k, None if nf is None else nf[box])
         out[box] |= got
         moves += [Move(m.kind, m.voxels + lo) for m in mv]
     stranded = sum(len(m.voxels) for m in moves if m.kind == "stranded")
     return HandleRemoval(out, moves, stranded)
+
+
+# ---------------------------------------------------------------- thickness, gaps
+
+
+@dataclass(frozen=True)
+class Opening:
+    """The result of open_thin: the object, the voxels removed, and the
+    pieces left that violate the thickness or the gap and cannot be removed
+    whole without changing the topology: kind 'thin', 'gap' or 'thin+gap',
+    and voxels (n, 3)."""
+
+    obj: Bool
+    removed: Bool
+    exceptions: list[Move]
+    passes: int
+
+
+def _opening(a: Bool, r: float, sampling: tuple[float, float, float]) -> Bool:
+    """The opening of a (3D bool) by a ball of radius r (in the units of
+    sampling, the voxel size): the voxels that lie in a ball of radius r
+    inside a."""
+    core = ndi.distance_transform_edt(a, sampling=sampling) > r
+    if not core.any():
+        return np.zeros_like(a)
+    out: Bool = ndi.distance_transform_edt(~core, sampling=sampling) <= r
+    return out
+
+
+def open_thin(
+    obj: npt.ArrayLike,
+    r: float,
+    g: float,
+    sampling: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    max_passes: int = 100,
+) -> Opening:
+    """Remove the object's (3D bool) thin parts and widen its narrow gaps,
+    keeping its topology: a voxel violates the thickness when no ball of
+    radius r (in the units of sampling, the voxel size; voxels by default)
+    inside the object holds it, and the gap when it is within
+    g of a background voxel that no ball of radius g in the background holds.
+    The violating voxels, in Kuhn-connected pieces, are removed a piece at a
+    time, each whole and only when that keeps the homology (_set_simple; a
+    single voxel: a simple point); pieces are not adjacent, so a pass does not
+    depend on their order. Passes repeat until one removes nothing, since a
+    removal changes what violates. A piece that cannot be removed whole is
+    left as it is (not thinned) and listed. Components with no part thicker
+    than r are not touched. Only removes: the object never grows. Outside the
+    array is background."""
+    a = np.asarray(obj, bool)
+    pad = 2  # room for _set_simple's box round a piece
+    p = np.pad(a, pad)
+    s = kuhn_structure()
+    offs = _flat_offsets(p.shape)
+    exceptions: list[Move] = []
+    passes = 0
+    while passes < max_passes:
+        passes += 1
+        thin = np.zeros_like(p)
+        if r > 0:
+            thin = p & ~_opening(p, r, sampling)
+            comp, _ = ndi.label(p, s)
+            core = ndi.distance_transform_edt(p, sampling=sampling) > r
+            core_comps = np.unique(comp[core])
+            thin &= np.isin(comp, core_comps[core_comps > 0])
+            del comp
+        gap = np.zeros_like(p)
+        if g > 0:
+            narrow = ~p & ~_opening(~p, g, sampling)
+            if narrow.any():
+                gap = p & (ndi.distance_transform_edt(~narrow, sampling=sampling) <= g)
+        cand = thin | gap
+        lab, n = ndi.label(cand, s)
+        if not n:
+            exceptions = []
+            break
+        state = np.where(p, _OBJ, _BG).astype(np.uint8)
+        flat = state.ravel()
+        sizes = np.bincount(lab.ravel(), minlength=n + 1)
+        removed = np.zeros(n + 1, bool)
+        one = np.flatnonzero((sizes[lab.ravel()] == 1) & (lab.ravel() > 0))
+        m = np.zeros(one.size, np.int64)
+        for k in range(14):
+            m |= (flat[one + offs[k]] == _OBJ).astype(np.int64) << k
+        ok = (m != 0) & SIMPLE[m]
+        flat[one[ok]] = _BG
+        removed[lab.ravel()[one[ok]]] = True
+        for k, sl in enumerate(ndi.find_objects(lab), 1):
+            if sl is None or sizes[k] == 1:
+                continue
+            pts = np.stack(np.nonzero(lab[sl] == k), 1) + np.array(
+                [t.start for t in sl]
+            )
+            pf = np.ravel_multi_index(tuple(pts.T), state.shape).astype(np.int64)
+            if _set_simple(state, _BG, pf):
+                flat[pf] = _BG
+                removed[k] = True
+        p = state == _OBJ
+        if not removed[1:].any():
+            for k, sl in enumerate(ndi.find_objects(lab), 1):
+                if sl is None:
+                    continue
+                sub = lab[sl] == k
+                kind = "+".join(
+                    name
+                    for name, mask in (("thin", thin[sl]), ("gap", gap[sl]))
+                    if (sub & mask).any()
+                )
+                vox = np.stack(np.nonzero(sub), 1) + np.array([t.start for t in sl])
+                exceptions.append(Move(kind, vox - pad))
+            break
+    out = p[pad:-pad, pad:-pad, pad:-pad]
+    return Opening(out, a & ~out, exceptions, passes)
+
+
+def _flat_offsets(shape: tuple[int, ...]) -> Int:
+    """The flat-index offsets of the 14 Kuhn neighbours in an array of shape."""
+    return (
+        KUHN_OFFSETS[:, 0] * shape[1] * shape[2]
+        + KUHN_OFFSETS[:, 1] * shape[2]
+        + KUHN_OFFSETS[:, 2]
+    ).astype(np.int64)

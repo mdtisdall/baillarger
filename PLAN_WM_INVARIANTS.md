@@ -46,7 +46,7 @@ mislabelled as cortex; the invariant follows the label.
 2. **No growth into GM (hard).** M takes no GM voxel: M \ A has no voxel
    with the GM label. Where WM meets cortex, the mask only moves inward (a
    column root inside the WM is safe; one in the cortex is not). Where WM
-   meets anything else, it may move outward.
+   meets anything else, it may move in either direction.
 3. **Thickness.** Every voxel of M lies in a ball of radius r (mm) inside M:
    M is its own opening by that ball. No WM feature is thinner than about
    2r.
@@ -82,9 +82,10 @@ check of `wm_topo` stays.
   is not allowed: a background wall holding GM voxels cannot be filled, so
   that handle is cut. This replaces the single fill cost of #83 by a cost
   per voxel: other voxels count once, GM voxels cannot be taken. A cavity is
-  filled (its voxels are on the other side; on the example hemisphere every
-  cavity voxel is background, label 0); a cavity holding GM is opened by a
-  channel cut through the WM to the outside instead.
+  filled (on the example hemisphere every cavity voxel is background, label
+  0). A cavity holding GM is a serious error that needs a person: `dseg`
+  refuses and lists each one (size, centre), to be resolved by a manual edit
+  and a rerun.
 - **3 and 4: a homotopic opening, inward.** Repeat until nothing changes:
   find the voxels of M outside its opening by r, and those within g of a
   gap narrower than 2g; take them in connected pieces, thinnest first; remove
@@ -93,11 +94,13 @@ check of `wm_topo` stays.
   across makes it worse), and becomes an exception. Removing only, this
   keeps 1 and 2 by construction; and its result does not depend on the order
   of the pieces within a pass, since pieces are not adjacent.
-- **On the other side, outward where it helps.** Where a violation of 3 or 4
-  is at WM next to non-GM voxels, adding voxels (simple points, never GM) is
-  allowed as well as removing: a thin WM blade against fluid may be thickened
-  rather than removed. Whether to use it, and which of the two to prefer
-  there, is open (below).
+- **On the other side, either direction.** Where a violation of 3 or 4 is
+  at WM next to non-GM voxels, adding voxels (simple points, never GM) is
+  allowed as well as removing: a thin WM blade against fluid may be
+  thickened rather than removed, and of the two the one that changes fewer
+  voxels is taken (invariant 5). The first version removes only, which is
+  allowed on both sides; the outward choice is added and compared on the
+  hemisphere after it.
 
 ## What the example hemisphere's fixes take now
 
@@ -116,8 +119,9 @@ cavity fills stay as they are.
 
 - Exact shapes: a handle whose fill would take cortex is cut, and one whose
   fill takes background is filled when that is smaller; a cavity of
-  background is filled, one holding cortex is opened by a channel; a thread
-  in cortex is removed; a one-voxel cut's gap is widened to at least 2g; a
+  background is filled; a thread
+  in cortex is removed; a cavity holding cortex is refused and listed; a
+  one-voxel cut's gap is widened to at least 2g; a
   thin bridge is kept whole and listed as an exception; a thin blade against
   fluid (if outward is used there).
 - Properties on random objects with random GM and other labels: 1 and 2
@@ -137,14 +141,12 @@ cortex). #83 is closed when this lands, its table kept here.
 
 ## Open
 
-- **r and g.** For example 0.25 mm each (about 1.5 voxels at 160 µm, so
-  features and gaps of at least 3 voxels). The hemisphere runs set them,
-  from the exceptions and the area lost, not from the site count alone.
-- **The other side.** At WM against fluid, remove (inward) or thicken
-  (outward) a thin feature, or close a narrow gap? Removing only is simpler
-  and treats both sides alike; thickening keeps more of the WM.
-- **Cavities holding cortex.** None on the example hemisphere; a channel cut
-  is the rule above, a fill into cortex would break 2.
+- **r and g.** `dseg --thickness-mm R --gap-mm G` (0: off); a range is run
+  on the hemisphere and the default set from the exceptions and the area
+  lost, not from the site count alone. r has a floor of about 1.5 voxels:
+  below it the voxel staircase itself breaks the invariant (with r = 1
+  voxel a cube's edges are all 'thin' and a ball loses 24 voxels; with 1.5 a
+  cube loses only its 8 corners and a ball nothing; with 1.8 neither).
 - **Where the opening runs.** Over the whole mask (thin aseg threads
   included, as trimmed threads did: about 41,000 voxels at R = 1, much of it
   single-voxel bumps and corners), or only near the fixes. The invariant

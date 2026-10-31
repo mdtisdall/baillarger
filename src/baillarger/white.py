@@ -40,7 +40,7 @@ that mesh wrote.
 """
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +70,7 @@ from baillarger.bids import (
 from baillarger.blocks import EmbeddedSource, open_volume
 from baillarger.decimate import closest_points, csr_take, decimate, reorder
 from baillarger.gifti import DataArray, write_external
-from baillarger.handles import kuhn_betti, kuhn_structure, remove_handles
+from baillarger.handles import kuhn_betti, kuhn_structure, open_thin, remove_handles
 from baillarger.mesh import (
     BLOCK,
     MeshBlocks,
@@ -96,6 +96,8 @@ type Int = npt.NDArray[np.int64]
 #: WM below it.
 FILLED_LABELS = {"R": (41, 43, 49, 50, 51, 52, 192), "L": (2, 4, 10, 11, 12, 13, 192)}
 WM_LABEL = {"R": 41, "L": 2}
+#: the cortex (GM) label of each hemisphere
+GM_LABEL = {"R": 42, "L": 3}
 
 #: FreeSurfer LUT names of the labels the corrected segmentation's .tsv lists
 LUT_NAMES = {
@@ -123,7 +125,14 @@ LUT_NAMES = {
 
 #: values of the fixes image: a handle cut, a handle fill, a cavity fill, a
 #: manual edit (baillarger.wm_edits)
-FIXES = {1: "handle_cut", 2: "handle_fill", 3: "cavity_fill", 4: "manual_edit"}
+FIXES = {
+    1: "handle_cut",
+    2: "handle_fill",
+    3: "cavity_fill",
+    4: "manual_edit",
+    5: "opening",
+    6: "exception",
+}
 
 #: docs/formats/wm-dseg.md
 DSEG_SPEC = SidecarSpec(
@@ -140,6 +149,11 @@ DSEG_SPEC = SidecarSpec(
         Key("HandleCutVoxels", "integer", True, "voxels cut from the mask"),
         Key("CutLabels", "object", True, "new label of the cut voxels: count"),
         Key("ManualVoxels", "integer", True, "voxels changed by manual edits"),
+        Key("Invariants", "object", True, "NoGMFills, ThicknessMM, GapMM"),
+        Key("OpeningVoxels", "integer", True, "voxels removed for thickness, gaps"),
+        Key("OpeningPasses", "integer", True, "passes of the opening"),
+        Key("Exceptions", "integer", True, "pieces where thickness or gap fail"),
+        Key("ExceptionsFile", "string", True, "the exceptions table (name)"),
         Key("Moves", "array of objects", True, "each manual edit and handle move"),
     ),
 )
@@ -227,10 +241,42 @@ class WMTopo:
     moves: list[dict[str, Any]]
     #: voxels changed by the manual edits
     manual_voxels: int = 0
+    #: voxels removed by the opening for thickness and gaps
+    opening_voxels: int = 0
+    opening_passes: int = 0
+    #: per exception: Kind (thin, gap, thin+gap), Voxels, Centre (0-based voxel)
+    exceptions: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Invariants:
+    """The invariants the corrected WM mask is made to hold beyond its
+    topology (docs/formats/wm-dseg.md; off by default): no handle fill takes
+    a cortex voxel (no_gm_fills), every mask voxel lies in a ball of radius
+    thickness_mm inside the mask, and no gap between WM surfaces is narrower
+    than about 2 gap_mm (baillarger.handles.open_thin); 0 turns one off."""
+
+    no_gm_fills: bool = False
+    thickness_mm: float = 0.0
+    gap_mm: float = 0.0
+
+    def to_json(self) -> dict[str, Any]:
+        return dict(
+            NoGMFills=self.no_gm_fills,
+            ThicknessMM=self.thickness_mm,
+            GapMM=self.gap_mm,
+        )
+
+
+#: no invariants beyond the topology
+NO_INVARIANTS = Invariants()
 
 
 def wm_topo(
-    aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike, edits: Edits | None = None
+    aseg: npt.ArrayLike,
+    voxel_mm: npt.ArrayLike,
+    edits: Edits | None = None,
+    invariants: Invariants = NO_INVARIANTS,
 ) -> WMTopo:
     """The corrected segmentation of an aseg: the manual edits made first
     (baillarger.wm_edits.apply_edits; it raises ValueError for edits that do
@@ -238,7 +284,12 @@ def wm_topo(
     with its cavities filled and its handles removed
     (baillarger.handles.remove_handles). Cavity and handle fills become the
     WM label; each handle cut takes the label of the nearest voxel that is
-    outside the corrected mask and not a cut. The corrected segmentation's
+    outside the corrected mask and not a cut. With invariants, no handle fill
+    takes a cortex voxel (that handle is cut; a cavity holding cortex raises
+    ValueError), and then the mask's thin parts and the WM next to its narrow
+    gaps are removed where that keeps the topology (baillarger.handles.
+    open_thin; removed voxels are relabelled as cuts), the rest listed as
+    exceptions. The corrected segmentation's
     voxels with a filled label are exactly the corrected mask. Raises
     RuntimeError if that mask still has a handle or a cavity (b1 or b2 not 0),
     which a fill of one piece of the mask touching another can make."""
@@ -264,13 +315,54 @@ def wm_topo(
     before = kuhn_betti(x)
     lap("Betti before")
     cav = cavities(x)
+    a = a0[box]
+    nofill = None
+    if invariants.no_gm_fills:
+        nofill = a == GM_LABEL[hemi]
+        if (cav & nofill).any():
+            # a pocket of cortex enclosed by WM: neither filling it (growth into
+            # cortex) nor leaving it (a cavity) is right; a person resolves it
+            pl, n = ndi.label(cav, kuhn_structure())
+            where = [
+                (int(c), np.round(np.argwhere(pl == k).mean(0) + lo).astype(int))
+                for k in np.unique(pl[cav & nofill])
+                for c in [(pl == k).sum()]
+            ]
+            raise ValueError(
+                f"cavities of the WM mask hold cortex ({len(where)}; voxels, centre): "
+                + "; ".join(f"{c}, {ctr.tolist()}" for c, ctr in where)
+                + ". Filling them would grow the WM into cortex: resolve each "
+                "by a manual edit (--edits), then run dseg again"
+            )
     x |= cav
     lap("cavities")
-    r = remove_handles(x)
+    r = remove_handles(x, nofill)
     obj = r.obj
     lap("handles")
+    vox = tuple(float(v) for v in np.asarray(voxel_mm, float))
+    opened = np.zeros_like(obj)
+    exceptions: list[dict[str, Any]] = []
+    passes = 0
+    exc_vox: list[npt.NDArray[np.intp]] = []
+    if invariants.thickness_mm > 0 or invariants.gap_mm > 0:
+        o = open_thin(
+            obj,
+            invariants.thickness_mm,
+            invariants.gap_mm,
+            sampling=(vox[0], vox[1], vox[2]),
+        )
+        opened, obj, passes = o.removed, o.obj, o.passes
+        exceptions = [
+            dict(
+                Kind=mv.kind,
+                Voxels=len(mv.voxels),
+                Centre=np.round(mv.voxels.mean(0) + lo).astype(int).tolist(),
+            )
+            for mv in o.exceptions
+        ]
+        exc_vox = [mv.voxels for mv in o.exceptions]
+        lap("opening")
     cut, fill = x & ~obj, obj & ~x
-    a = a0[box]
     labels = a.copy()
     labels[cav | fill] = wm_label
     relabel_cuts(labels, cut, ~obj & ~cut, voxel_mm)
@@ -295,6 +387,11 @@ def wm_topo(
     fx[cut] = 1
     fx[fill] = 2
     fx[cav] = 3
+    fx[opened] = 5
+    for v in exc_vox:
+        e = fx[tuple(v.T)]
+        e[e == 0] = 6  # an exception voxel some fix changed shows the fix
+        fx[tuple(v.T)] = e
     new, cnt = np.unique(labels[cut], return_counts=True)
     moves = []
     if edits is not None:
@@ -326,6 +423,9 @@ def wm_topo(
         {int(k): int(c) for k, c in zip(new, cnt, strict=True)},
         moves,
         0 if manual is None else int(manual.sum()),
+        int(opened.sum()),
+        passes,
+        exceptions,
     )
 
 
@@ -334,7 +434,12 @@ def _write_tsv(path: Path, names: dict[int, str]) -> None:
     path.write_text("index\tname\n" + rows)
 
 
-def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str, Path]:
+def write_wm_topo(
+    aseg: Path,
+    out: Path,
+    edits: Path | None = None,
+    invariants: Invariants = NO_INVARIANTS,
+) -> dict[str, Path]:
     """The dseg command: wm_topo of the aseg at aseg, with the manual edits in
     the table at edits (docs/formats/wm-edits.md) if given, written to the BIDS
     derivatives root out (docs/formats/wm-dseg.md). Raises ValueError for edits
@@ -353,7 +458,7 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
     lap = Laps()
     a = np.asarray(img.dataobj)
     lap("read")
-    t = wm_topo(a, vox, e)
+    t = wm_topo(a, vox, e, invariants)
     lap = Laps()
     dataset_description(out)
     p = dict(
@@ -371,6 +476,12 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
         {k: LUT_NAMES.get(k, f"label-{k}") for k in present},
     )
     _write_tsv(p["fixes"].with_name(p["fixes"].name.replace(".nii.gz", ".tsv")), FIXES)
+    p["exceptions"] = derivative_path(out, ents, "exceptions", ".tsv", desc="wmtopo")
+    rows = "".join(
+        f"{k}\t{x['Kind']}\t{x['Voxels']}\t" + "\t".join(map(str, x["Centre"])) + "\n"
+        for k, x in enumerate(t.exceptions, 1)
+    )
+    p["exceptions"].write_text("index\tkind\tvoxels\ti\tj\tk\n" + rows)
     lap("write")
     src = sources(aseg) if edits is None else sources(aseg, edits, sidecar_path(edits))
     prov = provenance("baillarger.white.write_wm_topo")
@@ -393,6 +504,11 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
             HandleCutVoxels=int((t.fixes == 1).sum()),
             CutLabels={str(k): v for k, v in t.cut_labels.items()},
             ManualVoxels=t.manual_voxels,
+            Invariants=invariants.to_json(),
+            OpeningVoxels=t.opening_voxels,
+            OpeningPasses=t.opening_passes,
+            Exceptions=len(t.exceptions),
+            ExceptionsFile=p["exceptions"].name,
             Moves=t.moves,
         ),
     )
@@ -402,7 +518,8 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
         dict(
             SpecVersion=FIXES_SPEC.version,
             Description="The voxels that the WM topology correction changed: "
-            "1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit.",
+            "1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit, "
+            "5 opening (thin or next to a narrow gap), 6 exception.",
             **src,
             Provenance=prov,
         ),
@@ -1016,6 +1133,15 @@ def main(argv: list[str] | None = None) -> None:
     d.add_argument(
         "--edits", type=Path, help="manual edits of the aseg (desc-wmedits_edits.tsv)"
     )
+    d.add_argument(
+        "--no-gm-fills", action="store_true", help="no handle fill takes cortex"
+    )
+    d.add_argument(
+        "--thickness-mm", type=float, default=0.0, help="minimum WM thickness radius"
+    )
+    d.add_argument(
+        "--gap-mm", type=float, default=0.0, help="minimum gap radius between WM"
+    )
     d.add_argument("--out", required=True, type=Path, help="BIDS derivatives root")
     m = sub.add_parser("mesh", help="the white surface of a corrected segmentation")
     m.add_argument("dseg", type=Path, help="a desc-wmtopo_dseg (the dseg command)")
@@ -1039,7 +1165,8 @@ def main(argv: list[str] | None = None) -> None:
     o.add_argument("--workers", type=int, default=4, help="processes to decimate")
     a = ap.parse_args(argv)
     if a.cmd == "dseg":
-        for role, path in write_wm_topo(a.aseg, a.out, a.edits).items():
+        inv = Invariants(a.no_gm_fills, a.thickness_mm, a.gap_mm)
+        for role, path in write_wm_topo(a.aseg, a.out, a.edits, inv).items():
             print(f"{role}: {path}")
     elif a.cmd == "mesh":
         w = write_white_surface(a.dseg, a.out, a.block_cells, a.device)

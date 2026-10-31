@@ -2,7 +2,7 @@
 
 SpecVersion `wm-dseg/1` (the corrected segmentation) and `wm-dseg-fixes/1`
 (the diagnostic image of the changes). Written by
-`python -m baillarger.white dseg ASEG [--edits EDITS] --out DERIV`
+`python -m baillarger.white dseg ASEG [--edits EDITS] [--no-gm-fills] [--thickness-mm R] [--gap-mm G] --out DERIV`
 (`baillarger.white.write_wm_topo`); the keys are enforced by
 `baillarger.white.DSEG_SPEC` and `FIXES_SPEC`, and `tests/test_bids.py` checks
 that the tables below list the same keys, types and requirements.
@@ -17,9 +17,10 @@ In the BIDS derivatives root `DERIV`, for an input with entities `sub` and
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.nii.gz` | The corrected segmentation: the input's grid, affine, header and data type |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.tsv` | `index` and `name` (FreeSurfer LUT) of every label in it |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.json` | Sidecar, `wm-dseg/1` |
-| `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.nii.gz` | uint8, the changed voxels: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit; 0 elsewhere. A manually edited voxel that the correction then changes shows the correction's value |
+| `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.nii.gz` | uint8, the changed voxels: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit, 5 opening (removed: thin, or next to a narrow gap), 6 exception (kept, though thin or next to a narrow gap); 0 elsewhere. A manually edited voxel that the correction then changes shows the correction's value |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.tsv` | `index` and `name` of those values |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.json` | Sidecar, `wm-dseg-fixes/1` |
+| `sub-<sub>_ses-<ses>_desc-wmtopo_exceptions.tsv` | The exceptions (below): `index`, `kind`, `voxels`, and the centre `i`, `j`, `k` (0-based voxel); only the header without the invariants |
 
 `DERIV/dataset_description.json` (`DatasetType` `derivative`) is written if
 it is not there. BIDS's `desc` entity and `dseg` suffix are standard; the
@@ -54,6 +55,31 @@ pieces as background; a fill of one piece can touch another and make a
 handle or a cavity of the union, so the command checks the Betti numbers and
 writes nothing if b1 or b2 is not 0.
 
+## Invariants
+
+Beyond the topology, three invariants can be asked for (off by default):
+
+- `--no-gm-fills`: no handle fill takes a cortex voxel (label 42 right, 3
+  left; hippocampus, amygdala and the rest are not cortex). A handle whose
+  fill would is cut. Where WM meets cortex, the mask then only moves
+  inward; elsewhere it may move either way. A cavity of the mask that holds
+  cortex is a serious error that a person resolves: `dseg` refuses, listing
+  each such cavity's size and centre, to be fixed by a manual edit
+  (`--edits`) and a rerun.
+- `--thickness-mm R`: every voxel of the mask lies in a ball of radius R
+  (mm) inside the mask.
+- `--gap-mm G`: no mask voxel is within G of a voxel outside the mask that
+  no ball of radius G outside the mask holds (a gap narrower than about 2G
+  between WM surfaces).
+
+The last two are met by removing voxels (`baillarger.handles.open_thin`): the
+voxels that break them, in connected pieces, each removed whole when that
+keeps the topology, in passes until one removes nothing. A piece that
+cannot be removed whole (a thin bridge between two thick parts) is kept as
+it is, not thinned, and listed as an **exception** in the exceptions table.
+Removed voxels take labels as cuts do. R has a floor of about 1.5 voxels:
+below it the voxel staircase itself breaks the invariant.
+
 ## Manual edits
 
 With `--edits`, the manual edits of the input in a `wm-edits/1` table
@@ -85,6 +111,11 @@ whole by the command, so an edit costs a `dseg` run.
 | `HandleCutVoxels` | integer | yes | Voxels cut from the mask (cuts and stranded voxels) |
 | `CutLabels` | object | yes | New label of the cut voxels (as a string): number of voxels |
 | `ManualVoxels` | integer | yes | Voxels changed by the manual edits (0 without `--edits`) |
+| `Invariants` | object | yes | `NoGMFills` (boolean), `ThicknessMM`, `GapMM` (numbers, 0: off) |
+| `OpeningVoxels` | integer | yes | Voxels removed for the thickness and the gap |
+| `OpeningPasses` | integer | yes | Passes the opening took (0 when off) |
+| `Exceptions` | integer | yes | Pieces kept though they break the thickness or the gap |
+| `ExceptionsFile` | string | yes | The name of the exceptions table, in the same directory |
 | `Moves` | array of objects | yes | Per manual answer with rows, then per handle move: `Kind` (`manual`, `cut`, `fill` or `stranded`), `Voxels` (count), `Centre` (0-based voxel of the grid), and for `manual` the `Answer` (its `Id`) |
 
 ## Sidecar keys: wm-dseg-fixes/1

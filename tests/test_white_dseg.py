@@ -136,3 +136,41 @@ def test_the_dseg_command_writes_the_bids_files(tmp_path: Path) -> None:
     assert json.loads((anat / f"{fx}.json").read_text())["SpecVersion"] == (
         "wm-dseg-fixes/1"
     )
+
+
+def test_the_invariants_turn_cortex_fills_into_cuts_and_widen_gaps(
+    tmp_path: Path,
+) -> None:
+    a = synthetic_aseg()
+    # the enclosed pocket is cortex: filling it would grow the WM into cortex
+    with pytest.raises(
+        ValueError, match=r"hold cortex \(1; voxels, centre\): 8, \[20, 10, 12\]"
+    ):
+        white.wm_topo(a, VOX, invariants=white.Invariants(no_gm_fills=True))
+    a[19:21, 9:11, 12:14] = 0  # the pocket as background: it may be filled
+    # the tunnel through the block is cortex (a fill of 4): it is cut instead
+    t = white.wm_topo(a, VOX, invariants=white.Invariants(no_gm_fills=True))
+    assert t.betti_after == (2, 0, 0) and {m["Kind"] for m in t.moves} == {"cut"}
+    assert not (t.dseg[a == 42] == 41).any()  # no cortex voxel became WM
+    inv = white.Invariants(no_gm_fills=True, thickness_mm=0.3, gap_mm=0.3)
+    t = white.wm_topo(a, VOX, invariants=inv)
+    assert t.betti_after == (2, 0, 0)
+    assert kuhn_betti(np.isin(t.dseg, FILLED)) == (2, 0, 0)
+    assert t.opening_voxels == (t.fixes == 5).sum() > 0
+    assert not np.isin(t.dseg[t.fixes == 5], FILLED).any()
+    src = tmp_path / "in" / "sub-T01_ses-S1_aseg.nii.gz"
+    src.parent.mkdir()
+    nib.save(nib.nifti1.Nifti1Image(a, np.diag([*VOX, 1.0])), src)
+    out = tmp_path / "d"
+    white.main(
+        ["dseg", str(src), "--out", str(out), "--no-gm-fills", "--gap-mm", "0.3"]
+    )
+    anat = out / "sub-T01" / "ses-S1" / "anat"
+    side = bids.read_sidecar(
+        anat / "sub-T01_ses-S1_desc-wmtopo_dseg.json", white.DSEG_SPEC
+    )
+    assert side["Invariants"] == dict(NoGMFills=True, ThicknessMM=0.0, GapMM=0.3)
+    assert side["OpeningVoxels"] > 0
+    rows = (anat / side["ExceptionsFile"]).read_text().splitlines()
+    assert rows[0] == "index\tkind\tvoxels\ti\tj\tk"
+    assert len(rows) == 1 + side["Exceptions"]
