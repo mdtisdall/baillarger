@@ -143,11 +143,37 @@ The example right hemisphere (grid 700 × 384 × 1148 at 0.16 mm, WM box
 
 At 50 µm the whole brain's surface files would be about 20 GB.
 
+## Before a whole brain
+
+No stage runs on a whole brain at 50 µm until these are done, in this order.
+The hemisphere `dseg` peaks at about 22 GB; the same whole-array `dseg` on a
+whole brain would be on the order of a terabyte.
+
+1. The midline cut. The corpus callosum joins the two hemispheres' filled
+   masks, so a whole brain needs a cut (FreeSurfer's cutting planes) before
+   `dseg`.
+2. `dseg` in blocks. Connected components in blocks with a merge; the Betti
+   numbers from the Euler characteristic as a sum over blocks; the cavity fill
+   from the blocked components. Handle removal
+   (`baillarger.handles.remove_handles`) is the hard part: it grows fronts
+   through one global priority queue (in one piece, about 43 GB). Its blocked
+   form, "find the handles globally, fix each in a local box", needs a design
+   and a prototype first.
+3. NIfTI-Zarr volumes, together with item 2 and not before. Until then
+   nothing reads a volume block by block; the standard is still a draft
+   (nifti-zarr-py 1.0.0rc6); and ITK-SNAP and Freeview cannot open it, so an
+   export to `.nii.gz` for hemisphere-size volumes comes with it. The layout
+   is in "Rules for a scaled stage" (chunks of `BlockCells` a side, Morton
+   order, read through `blocks.open_volume`). The `dseg` writes its store
+   directly, with no conversion; the aseg and the FLASH echoes get a
+   conversion step.
+4. The faster antialiasing solver (GPU roadmap, item 1).
+
+The overview's decimation (under Open) is not on this list: it is not the
+first limit.
+
 ## Open
 
-- Whole brains: the corpus callosum joins the two hemispheres' filled masks,
-  so a whole brain needs a midline cut (FreeSurfer's cutting planes) before
-  `dseg`.
 - Normals are ill-conditioned where a thin blade's two sides partly cancel in
   the normal smoothing (the averaged normal keeps as little as 0.56 of its
   length, against 0.9998 typically): there a rounding difference can turn the
