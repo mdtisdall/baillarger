@@ -166,7 +166,9 @@ whole brain would be on the order of a terabyte.
    is in "Rules for a scaled stage" (chunks of `BlockCells` a side, Morton
    order, read through `blocks.open_volume`). The `dseg` writes its store
    directly, with no conversion; the aseg and the FLASH echoes get a
-   conversion step.
+   conversion step. The viewer's own volume pane already asks for bricks at
+   levels of detail (`baillarger.viewer.bricks.BrickSource`); the store's
+   multi-resolution chunks take the place of its in-memory pyramid.
 4. The faster antialiasing solver (GPU roadmap, item 1).
 
 The overview's decimation (under Open) is not on this list: it is not the
