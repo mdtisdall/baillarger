@@ -12,8 +12,8 @@ import numpy as np
 import pytest
 from nibabel.gifti.gifti import GiftiImage
 
+from baillarger import bids, white
 from baillarger import decimate as D
-from baillarger import white
 from baillarger.mesh import topology
 
 AFF = np.array([[0.2, 0, 0, -3.0], [0, 0.16, 0, 2.0], [0, 0, 0.2, 5.0], [0, 0, 0, 1.0]])
@@ -52,6 +52,11 @@ def true_mesh(surf: Path) -> tuple[np.ndarray, np.ndarray]:
 def test_the_files_and_the_guarantees(surf: Path) -> None:
     p = white.overview_paths(surf)
     assert all(x.exists() for x in p.values())
+    assert (
+        p["carry"]
+        .with_name(p["carry"].name.removesuffix(".func.gii") + ".dat")
+        .exists()
+    )
     side = json.loads(p["sidecar"].read_text())
     white.OVERVIEW_SPEC.check(side)
     # ordinary GIfTI: embedded data, read by nibabel with nothing special
@@ -79,6 +84,8 @@ def test_the_files_and_the_guarantees(surf: Path) -> None:
         best = np.minimum(best, D.triangle_distances(v, a, b, c))
     assert best.max() <= EPS + 1e-6
     assert side["MaxDistanceMM"] <= side["EpsMM"] == EPS
+    # the repair rounds are recorded; the last has no faces intersecting
+    assert side["Repairs"] and side["Repairs"][-1]["intersecting_faces"] == 0
 
 
 def test_the_reader_and_its_check(surf: Path, tmp_path: Path) -> None:
@@ -112,3 +119,55 @@ def test_the_overview_command_writes_the_same_overview(
     np.testing.assert_array_equal(a.f, b.f)
     np.testing.assert_array_equal(a.vertex_ids, b.vertex_ids)
     np.testing.assert_array_equal(a.v, b.v)
+
+
+def test_the_carried_vertices(surf: Path) -> None:
+    """Each true vertex is an overview vertex or carried by exactly one face, in
+    the stated order; their closest points rebuild at the carried distances,
+    whose largest is MaxDistanceMM exactly."""
+    p = white.overview_paths(surf)
+    ov = white.WhiteOverview.load(p["overview"])
+    side = ov.sidecar
+    tv, _ = true_mesh(surf)
+    n = len(tv)
+    assert (
+        side["Carried"]
+        == side["TrueVertices"] - side["Vertices"]
+        == len(ov.carried_ids)
+    )
+    dat = p["carry"].with_name(p["carry"].name.removesuffix(".func.gii") + ".dat")
+    assert side["DataSHA256"] == {dat.name: bids.file_sha256(dat)}
+    assert (
+        ov.ptr[0] == 0
+        and ov.ptr[-1] == len(ov.carried_ids)
+        and len(ov.ptr) == len(ov.f) + 1
+    )
+    every = np.sort(np.r_[ov.vertex_ids, np.asarray(ov.carried_ids)])
+    np.testing.assert_array_equal(every, np.arange(n))
+    # faces by their sorted true vertices; carried vertices increasing in a face
+    key = np.sort(ov.vertex_ids[ov.f], 1)
+    assert np.all(np.lexsort((key[:, 2], key[:, 1], key[:, 0])) == np.arange(len(key)))
+    ids, fc = ov.carried(np.arange(len(ov.f)))
+    same = fc[1:] == fc[:-1]
+    assert np.all(np.diff(ids)[same] > 0)
+    # closest points on the carrying faces
+    pts = white.surface_points(surf)
+    ids2, fc2, b0, b1, b2, d = ov.carry(np.arange(len(ov.f)), pts)
+    np.testing.assert_array_equal(ids2, ids)
+    np.testing.assert_array_equal(fc2, fc)
+    assert d.max() == side["MaxDistanceMM"] and d.max() <= EPS
+    t = ov.vertex_ids[ov.f[fc]]
+    corners = [np.asarray(pts[t[:, k]], np.float64) for k in range(3)]
+    q = b0[:, None] * corners[0] + b1[:, None] * corners[1] + b2[:, None] * corners[2]
+    dist = np.linalg.norm(np.asarray(pts[ids], np.float64) - q, axis=1)
+    np.testing.assert_allclose(dist, d, atol=1e-6 * np.abs(corners[0]).max())
+
+
+def test_a_patch_reads_its_own_faces(surf: Path) -> None:
+    ov = white.WhiteOverview.load(white.overview_paths(surf)["overview"])
+    patch = np.array([3, 0, 17, len(ov.f) - 1])
+    ids, fc = ov.carried(patch)
+    for k in patch:
+        np.testing.assert_array_equal(
+            ids[fc == k], np.asarray(ov.carried_ids[ov.ptr[k] : ov.ptr[k + 1]])
+        )
