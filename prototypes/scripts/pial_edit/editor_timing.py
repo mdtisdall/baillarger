@@ -42,11 +42,15 @@ def main() -> None:
     cand = np.flatnonzero(ok & np.isfinite(t0))
     for r in rng.choice(cand, 10, replace=False):
         sgn = rng.choice([-1, 1])
-        x = s.P.point_at(s.cols, np.array([t0[r] + sgn * rng.uniform(0.1, 0.4) / h]), np.array([r]))[0]
+        x = s.P.point_at(
+            s.cols, np.array([t0[r] + sgn * rng.uniform(0.1, 0.4) / h]), np.array([r])
+        )[0]
         if np.isfinite(x).all():
             ed.add("top", s.to_mm(x).tolist())
             side.append("above" if sgn > 0 else "below")
-    for r in rng.choice(np.flatnonzero(ok & (kinds == s.P.TOP_RIDGE)), 5, replace=False):
+    for r in rng.choice(
+        np.flatnonzero(ok & (kinds == s.P.TOP_RIDGE)), 5, replace=False
+    ):
         x = s.P.point_at(s.cols, np.array([s.cols.ridge_s[r]]), np.array([r]))[0]
         ed.add("contact", s.to_mm(x).tolist())
         side.append("ridge")
@@ -62,8 +66,16 @@ def main() -> None:
         return ed.pos.copy()
 
     p1 = remesh("remesh")
-    res["points"] = [dict(kind=p["kind"], where=w, fallback=p["fallback"], miss_mm=p["miss_mm"], sides=p["sides"])
-                     for p, w in zip(ed.points, side)]
+    res["points"] = [
+        dict(
+            kind=p["kind"],
+            where=w,
+            fallback=p["fallback"],
+            miss_mm=p["miss_mm"],
+            sides=p["sides"],
+        )
+        for p, w in zip(ed.points, side)
+    ]
     p2 = remesh("remesh again")
     res["again_max_diff_voxels"] = float(np.nanmax(np.abs(p2 - p1)))
     keep = [dict(kind=p["kind"], mm=p["mm"]) for p in ed.points]
@@ -88,7 +100,9 @@ def main() -> None:
     remesh("base onepass_equal")
     ed.set_base("label")
     p4 = remesh("base label")
-    res["after_range_and_base_round_trip_max_diff_voxels"] = float(np.nanmax(np.abs(p4 - p1)))
+    res["after_range_and_base_round_trip_max_diff_voxels"] = float(
+        np.nanmax(np.abs(p4 - p1))
+    )
     res["peak_gb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e9, 2)
     Path(out).write_text(json.dumps(res, indent=1))
     print(json.dumps({k: v for k, v in res.items() if k != "points"}, indent=1))

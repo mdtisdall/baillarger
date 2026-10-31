@@ -36,7 +36,9 @@ def setup(name, p, miss):
     rim, vox = p.rim, p.voxel_mm
     k = P1[2]
     lo = np.array([min(P1[0], P2[0]) - 30, min(P1[1], P2[1]) - 30, k - 30]).clip(0)
-    hi = np.minimum(np.array([max(P1[0], P2[0]) + 31, max(P1[1], P2[1]) + 31, k + 31]), rim.shape)
+    hi = np.minimum(
+        np.array([max(P1[0], P2[0]) + 31, max(P1[1], P2[1]) + 31, k + 31]), rim.shape
+    )
     box = tuple(slice(a, b) for a, b in zip(lo, hi))
     rb, missb = rim[box], miss[box]
     ctx = (rb == 3) & ~missb
@@ -57,10 +59,24 @@ def setup(name, p, miss):
     div = sum(np.gradient(n1n[..., a], vox[a], axis=a) for a in range(3))
     div = np.clip(np.where((agree > 0.8) & (Tf > 0.3) & ctx, div, 0.0), -2, 2)
     kk = k - lo[2]
-    path = F.boundary_path(shell[:, :, kk], (P1[0] - lo[0], P1[1] - lo[1]), (P2[0] - lo[0], P2[1] - lo[1]))
+    path = F.boundary_path(
+        shell[:, :, kk], (P1[0] - lo[0], P1[1] - lo[1]), (P2[0] - lo[0], P2[1] - lo[1])
+    )
     arc = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(path, axis=0).T))]) * vox[0]
-    return dict(rb=rb, ctx=ctx, disp=disp, Tf=Tf, g=[g[..., a] for a in range(3)], div=div,
-                path=path, arc=arc, kk=kk, vox=np.array(vox), wm=wm, shell=shell)
+    return dict(
+        rb=rb,
+        ctx=ctx,
+        disp=disp,
+        Tf=Tf,
+        g=[g[..., a] for a in range(3)],
+        div=div,
+        path=path,
+        arc=arc,
+        kk=kk,
+        vox=np.array(vox),
+        wm=wm,
+        shell=shell,
+    )
 
 
 def walk(D, x, sign, stop):
@@ -137,8 +153,17 @@ def main():
     fus, fev = [], []
     for i, j in D["path"]:
         x = np.array([i, j, D["kk"]], float)
-        x = x + 1.0 * np.array([F.interp(c, x) for c in D["g"]]) / (np.linalg.norm([F.interp(c, x) for c in D["g"]]) + 1e-12)
-        pts, st = walk(D, x, +1, lambda vv, t, pr: "fluid" if D["rb"][vv] == 1 else ("ridge" if t < pr - 1e-3 else None))
+        x = x + 1.0 * np.array([F.interp(c, x) for c in D["g"]]) / (
+            np.linalg.norm([F.interp(c, x) for c in D["g"]]) + 1e-12
+        )
+        pts, st = walk(
+            D,
+            x,
+            +1,
+            lambda vv, t, pr: (
+                "fluid" if D["rb"][vv] == 1 else ("ridge" if t < pr - 1e-3 else None)
+            ),
+        )
         if st != "fluid":
             continue
         s, e, dv = profile(D, pts)
@@ -147,11 +172,14 @@ def main():
         if k_ is None:
             continue
         v, _ = vol(s, dv)
-        fus.append(s[k_] / s[-1]); fev.append(v[k_] / v[-1])
+        fus.append(s[k_] / s[-1])
+        fev.append(v[k_] / v[-1])
     fus, fev = np.array(fus), np.array(fev)
-    print(f"calibration (open V1, {len(fus)} columns): stria fraction distance {np.median(fus):.3f} "
-          f"(IQR {np.subtract(*np.percentile(fus, [75, 25])):.3f}), equivolume {np.median(fev):.3f} "
-          f"(IQR {np.subtract(*np.percentile(fev, [75, 25])):.3f})")
+    print(
+        f"calibration (open V1, {len(fus)} columns): stria fraction distance {np.median(fus):.3f} "
+        f"(IQR {np.subtract(*np.percentile(fus, [75, 25])):.3f}), equivolume {np.median(fev):.3f} "
+        f"(IQR {np.subtract(*np.percentile(fev, [75, 25])):.3f})"
+    )
     f_us, f_ev = np.median(fus), np.median(fev)
 
     # ---- 2. fused stretch
@@ -160,18 +188,39 @@ def main():
     paths = []
     for c, (i, j) in enumerate(D["path"]):
         x = np.array([i, j, D["kk"]], float)
-        x = x + 1.0 * np.array([F.interp(cc, x) for cc in D["g"]]) / (np.linalg.norm([F.interp(cc, x) for cc in D["g"]]) + 1e-12)
-        up, st = walk(D, x, +1, lambda vv, t, pr: "fluid" if D["rb"][vv] == 1 else ("ridge" if t < pr - 1e-3 else None))
+        x = x + 1.0 * np.array([F.interp(cc, x) for cc in D["g"]]) / (
+            np.linalg.norm([F.interp(cc, x) for cc in D["g"]]) + 1e-12
+        )
+        up, st = walk(
+            D,
+            x,
+            +1,
+            lambda vv, t, pr: (
+                "fluid" if D["rb"][vv] == 1 else ("ridge" if t < pr - 1e-3 else None)
+            ),
+        )
         if st != "ridge":
-            rows.append(None); paths.append(None); continue
+            rows.append(None)
+            paths.append(None)
+            continue
         # cross the crest first: keep the incoming direction for 0.4 mm, so the descent
         # starts on bank B's slope, then descend without ever turning back towards A
-        din = up[-1] - up[-2]; din /= np.linalg.norm(din) + 1e-12
+        din = up[-1] - up[-2]
+        din /= np.linalg.norm(din) + 1e-12
         xc = up[-1] + din * (0.4 / 0.16)
-        down, st2 = walk_dir(D, xc, din, lambda vv, t, pr: "WM" if D["wm"][vv] else ("fluid" if D["rb"][vv] == 1 else None))
+        down, st2 = walk_dir(
+            D,
+            xc,
+            din,
+            lambda vv, t, pr: (
+                "WM" if D["wm"][vv] else ("fluid" if D["rb"][vv] == 1 else None)
+            ),
+        )
         down = np.vstack([up[-1:], down])
         if st2 != "WM":
-            rows.append(None); paths.append(None); continue
+            rows.append(None)
+            paths.append(None)
+            continue
         pts = np.vstack([up, down[1:]])
         s, e, dv = profile(D, pts)
         s = s + 0.16
@@ -183,7 +232,9 @@ def main():
         mB = (sB >= 0.5) & (sB <= 1.6)
         kB = np.flatnonzero(mB)[np.argmin(e[mB])] if mB.any() else None
         if kA is None or kB is None or s[kB] <= s[kA] + 1.0:
-            rows.append(None); paths.append(pts); continue
+            rows.append(None)
+            paths.append(pts)
+            continue
         mid = (s > s[kA] + 0.5) & (s < s[kB] - 0.5)
         kc = np.flatnonzero(mid)[np.argmin(e[mid])] if mid.any() else None
         # bank A: own u up to the ridge, frozen beyond
@@ -200,23 +251,55 @@ def main():
         topB_ev = L - np.interp(tgtB, vB, sb) if tgtB <= vB[-1] else np.nan
         topA_us = s[kA] / f_us
         topB_us = L - (L - s[kB]) / f_us
-        rows.append(dict(L=L, ridge=sr, sA=s[kA], sB=s[kB], contact=s[kc] if kc is not None else np.nan,
-                         cdark=e[kc] if kc is not None else np.nan, topA_ev=topA_ev, topB_ev=topB_ev,
-                         topA_us=topA_us, topB_us=topB_us, s=s, e=e))
+        rows.append(
+            dict(
+                L=L,
+                ridge=sr,
+                sA=s[kA],
+                sB=s[kB],
+                contact=s[kc] if kc is not None else np.nan,
+                cdark=e[kc] if kc is not None else np.nan,
+                topA_ev=topA_ev,
+                topB_ev=topB_ev,
+                topA_us=topA_us,
+                topB_us=topB_us,
+                s=s,
+                e=e,
+            )
+        )
         paths.append(pts)
 
     ok = [r for r in rows if r is not None]
-    print(f"fused: {len(ok)} of {len(rows)} columns give WM-to-WM paths with both strias")
+    print(
+        f"fused: {len(ok)} of {len(rows)} columns give WM-to-WM paths with both strias"
+    )
     if not ok:
         return
-    keys = ["L", "ridge", "sA", "sB", "contact", "topA_ev", "topB_ev", "topA_us", "topB_us"]
+    keys = [
+        "L",
+        "ridge",
+        "sA",
+        "sB",
+        "contact",
+        "topA_ev",
+        "topB_ev",
+        "topA_us",
+        "topB_us",
+    ]
     A = {k_: np.array([r[k_] for r in ok]) for k_ in keys}
-    for nm, (a_, b_) in {"equivolume": ("topA_ev", "topB_ev"), "distance": ("topA_us", "topB_us")}.items():
-        print(f"  {nm}: A's predicted top - contact median {np.nanmedian(A[a_] - A['contact']):+.2f} mm, "
-              f"B's {np.nanmedian(A[b_] - A['contact']):+.2f} mm; gap between the two predictions "
-              f"median {np.nanmedian(A[b_] - A[a_]):+.2f} mm")
-    print(f"  midline (ridge) - contact median {np.nanmedian(A['ridge'] - A['contact']):+.2f} mm; "
-          f"WM-to-WM length median {np.median(A['L']):.2f} mm")
+    for nm, (a_, b_) in {
+        "equivolume": ("topA_ev", "topB_ev"),
+        "distance": ("topA_us", "topB_us"),
+    }.items():
+        print(
+            f"  {nm}: A's predicted top - contact median {np.nanmedian(A[a_] - A['contact']):+.2f} mm, "
+            f"B's {np.nanmedian(A[b_] - A['contact']):+.2f} mm; gap between the two predictions "
+            f"median {np.nanmedian(A[b_] - A[a_]):+.2f} mm"
+        )
+    print(
+        f"  midline (ridge) - contact median {np.nanmedian(A['ridge'] - A['contact']):+.2f} mm; "
+        f"WM-to-WM length median {np.median(A['L']):.2f} mm"
+    )
 
     # ---- figure
     idx = [c for c, r in enumerate(rows) if r is not None]
@@ -228,23 +311,54 @@ def main():
         q = np.arange(nb) * 0.08 + 0.04
         okq = q <= r["s"][-1]
         img[okq, c] = np.interp(q[okq], r["s"], r["e"])
-    fig, axs = plt.subplots(1, 3, figsize=(24, 8), gridspec_kw={"width_ratios": [1, 1.5, 1.5]})
+    fig, axs = plt.subplots(
+        1, 3, figsize=(24, 8), gridspec_kw={"width_ratios": [1, 1.5, 1.5]}
+    )
     a = axs[0]
     kk = D["kk"]
     v = np.nanpercentile(np.abs(D["disp"][D["ctx"]]), 98)
-    a.imshow(np.where(D["ctx"][:, :, kk], D["disp"][:, :, kk], np.nan).T, origin="lower", cmap="gray", vmin=-v, vmax=v)
-    a.contour(D["shell"][:, :, kk].T.astype(float), levels=[0.5], colors="y", linewidths=0.7)
+    a.imshow(
+        np.where(D["ctx"][:, :, kk], D["disp"][:, :, kk], np.nan).T,
+        origin="lower",
+        cmap="gray",
+        vmin=-v,
+        vmax=v,
+    )
+    a.contour(
+        D["shell"][:, :, kk].T.astype(float), levels=[0.5], colors="y", linewidths=0.7
+    )
     for pt in paths:
         if pt is not None:
             a.plot(pt[:, 0], pt[:, 1], "c-", lw=0.6)
     pa = D["path"]
-    a.set_xlim(pa[:, 0].min() - 20, pa[:, 0].max() + 25); a.set_ylim(pa[:, 1].min() - 15, pa[:, 1].max() + 15)
-    a.set_title("WM-to-WM paths (3D, projected): up grad T to the ridge,\nthen down bank B's own columns")
-    for ax_, (nm, a_, b_) in zip(axs[1:], (("equivolume", "topA_ev", "topB_ev"), ("distance", "topA_us", "topB_us"))):
-        ax_.imshow(img, origin="lower", aspect="auto", cmap="gray", vmin=-v, vmax=v,
-                   extent=[0, arc[-1], 0, nb * 0.08])
+    a.set_xlim(pa[:, 0].min() - 20, pa[:, 0].max() + 25)
+    a.set_ylim(pa[:, 1].min() - 15, pa[:, 1].max() + 15)
+    a.set_title(
+        "WM-to-WM paths (3D, projected): up grad T to the ridge,\nthen down bank B's own columns"
+    )
+    for ax_, (nm, a_, b_) in zip(
+        axs[1:],
+        (("equivolume", "topA_ev", "topB_ev"), ("distance", "topA_us", "topB_us")),
+    ):
+        ax_.imshow(
+            img,
+            origin="lower",
+            aspect="auto",
+            cmap="gray",
+            vmin=-v,
+            vmax=v,
+            extent=[0, arc[-1], 0, nb * 0.08],
+        )
         xs = arc[idx]
-        ax_.plot(xs, A["contact"], "o", mfc="none", mec="c", ms=7, label="observed contact (darkest point)")
+        ax_.plot(
+            xs,
+            A["contact"],
+            "o",
+            mfc="none",
+            mec="c",
+            ms=7,
+            label="observed contact (darkest point)",
+        )
         ax_.plot(xs, A[a_], "v", c="#4a90d9", ms=6, label="bank A's predicted top")
         ax_.plot(xs, A[b_], "^", c="#e8913a", ms=6, label="bank B's predicted top")
         ax_.plot(xs, A["ridge"], "_", c="w", ms=12, mew=2, label="midline (ridge)")
@@ -252,11 +366,16 @@ def main():
         ax_.plot(xs, A["sB"], ".", c="#e8913a", ms=5, label="bank B's stria")
         ax_.set_xlabel("position along bank A's WM boundary (mm)")
         ax_.set_ylabel("distance from bank A's WM along the path (mm)")
-        ax_.set_title(f"{nm}: each bank's top predicted from its stria (fraction "
-                      f"{f_ev if nm == 'equivolume' else f_us:.2f} from open V1)")
+        ax_.set_title(
+            f"{nm}: each bank's top predicted from its stria (fraction "
+            f"{f_ev if nm == 'equivolume' else f_us:.2f} from open V1)"
+        )
         ax_.legend(loc="upper right", fontsize=8)
-    fig.suptitle("Fused stretch, V1V2 k = 27 (computed in 3D): echo 2 (trend removed) along WM-to-WM paths; "
-                 "do the tops predicted from each bank's stria meet at the dark contact?", fontsize=14)
+    fig.suptitle(
+        "Fused stretch, V1V2 k = 27 (computed in 3D): echo 2 (trend removed) along WM-to-WM paths; "
+        "do the tops predicted from each bank's stria meet at the dark contact?",
+        fontsize=14,
+    )
     fig.tight_layout()
     fig.savefig(f"{S}/cheap_test.png", dpi=100)
     print("wrote", f"{S}/cheap_test.png")

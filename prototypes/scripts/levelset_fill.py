@@ -44,10 +44,18 @@ type Int = npt.NDArray[np.int64]
 
 LENGTH, VOLUME = 0, 1
 FREE, CLAIMABLE, ACCEPTED, BLOCKED = 0, 1, 2, 3
-A_MIN = 0.05  # floor on the cross-section ratio a (focal points of concave white surface)
+A_MIN = (
+    0.05  # floor on the cross-section ratio a (focal points of concave white surface)
+)
 
 _OFF26 = np.array(
-    [(a, b, c) for a in (-1, 0, 1) for b in (-1, 0, 1) for c in (-1, 0, 1) if (a, b, c) != (0, 0, 0)],
+    [
+        (a, b, c)
+        for a in (-1, 0, 1)
+        for b in (-1, 0, 1)
+        for c in (-1, 0, 1)
+        if (a, b, c) != (0, 0, 0)
+    ],
     np.int64,
 )
 
@@ -146,7 +154,27 @@ def _upwind(xi, xj, xk, dx, shape, state, d):
 
 
 @njit(cache=True)
-def _candidate(x, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, out_f, out_v, excl, by_s=False):
+def _candidate(
+    x,
+    shape,
+    state,
+    n,
+    coh,
+    tau,
+    s,
+    w,
+    la,
+    D,
+    b,
+    R,
+    d,
+    mode,
+    lamin,
+    out_f,
+    out_v,
+    excl,
+    by_s=False,
+):
     """Best candidate for x over its two sides by the semi-Lagrangian step, leaving out the side whose
     direction agrees with excl (zeros: none). out_f: tau, s, w, la, D, b, blend, capped; out_v: R (0:3)
     and d (3:6). Returns tau (inf if none). by_s: choose between the sides by s, not tau (phase 1:
@@ -193,7 +221,9 @@ def _candidate(x, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, 
                 if abs(np.linalg.det(Mr)) > 1e-6:
                     sol = np.linalg.solve(Mr, rhs)
                     gg = sol[1:]
-                    if _dot(gg, nxs) > 0:  # the front's normal points the way this side moves
+                    if (
+                        _dot(gg, nxs) > 0
+                    ):  # the front's normal points the way this side moves
                         g = gg
             dx = _unit(cx * nxs + (1.0 - cx) * _unit(g))
         else:
@@ -263,16 +293,38 @@ def _candidate(x, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, 
 
 
 @njit(cache=True)
-def _phase2(x, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, gf, gv, of, ov):
+def _phase2(
+    x, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, gf, gv, of, ov
+):
     """Phase 2: the candidate of x's phase-1 side is phase 1's own values (so nothing there depends on
     the budgets' order), offered when x has an accepted neighbour on that side; the other side's
     candidate is the semi-Lagrangian step. Returns the smaller, with of / ov set to it."""
     ny, nz = shape[1], shape[2]
     gd = gv[x, 3:6].copy()
     if _dot(gd, gd) < 0.5:  # phase 1 did not reach x
-        return _candidate(x, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, of, ov,
-                          np.zeros(3))
-    tx = _candidate(x, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, of, ov, gd)
+        return _candidate(
+            x,
+            shape,
+            state,
+            n,
+            coh,
+            tau,
+            s,
+            w,
+            la,
+            D,
+            b,
+            R,
+            d,
+            mode,
+            lamin,
+            of,
+            ov,
+            np.zeros(3),
+        )
+    tx = _candidate(
+        x, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, of, ov, gd
+    )
     found = False
     for a in range(-1, 2):
         for bb in range(-1, 2):
@@ -292,8 +344,31 @@ def _phase2(x, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, gf,
 
 
 @njit(cache=True)
-def _march(shape, state, obj, n, coh, tau, s, w, la, D, b, R, d, blend, capped, mode, lamin, tau_stop,
-           topo, order_s, use_geo, gf, gv):
+def _march(
+    shape,
+    state,
+    obj,
+    n,
+    coh,
+    tau,
+    s,
+    w,
+    la,
+    D,
+    b,
+    R,
+    d,
+    blend,
+    capped,
+    mode,
+    lamin,
+    tau_stop,
+    topo,
+    order_s,
+    use_geo,
+    gf,
+    gv,
+):
     """order_s: order the heap by s (phase 1, the geometry) instead of tau. use_geo: phase 2, with
     phase 1's candidate values gf (tau, s, w, la, D, b, blend, capped) and gv (R, d) per voxel."""
     N = state.size
@@ -330,10 +405,49 @@ def _march(shape, state, obj, n, coh, tau, s, w, la, D, b, R, d, blend, capped, 
                 y = x + o
                 if state[y] == CLAIMABLE and ctau[y] == np.inf:
                     if use_geo:
-                        t = _phase2(y, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, gf, gv, of, ov)
+                        t = _phase2(
+                            y,
+                            shape,
+                            state,
+                            n,
+                            coh,
+                            tau,
+                            s,
+                            w,
+                            la,
+                            D,
+                            b,
+                            R,
+                            d,
+                            mode,
+                            lamin,
+                            gf,
+                            gv,
+                            of,
+                            ov,
+                        )
                     else:
-                        t = _candidate(y, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, of, ov,
-                                       np.zeros(3), order_s)
+                        t = _candidate(
+                            y,
+                            shape,
+                            state,
+                            n,
+                            coh,
+                            tau,
+                            s,
+                            w,
+                            la,
+                            D,
+                            b,
+                            R,
+                            d,
+                            mode,
+                            lamin,
+                            of,
+                            ov,
+                            np.zeros(3),
+                            order_s,
+                        )
                     if t < np.inf:
                         ctau[y] = t
                         cf[y] = of
@@ -342,7 +456,9 @@ def _march(shape, state, obj, n, coh, tau, s, w, la, D, b, R, d, blend, capped, 
     nblock = 0
     while len(heap) > 0:
         key, x = heapq.heappop(heap)
-        if (state[x] != CLAIMABLE and state[x] != BLOCKED) or key != (cf[x, 1] if order_s else ctau[x]):
+        if (state[x] != CLAIMABLE and state[x] != BLOCKED) or key != (
+            cf[x, 1] if order_s else ctau[x]
+        ):
             continue
         if ctau[x] > tau_stop:
             continue
@@ -371,11 +487,52 @@ def _march(shape, state, obj, n, coh, tau, s, w, la, D, b, R, d, blend, capped, 
             y = x + o
             if state[y] == CLAIMABLE or state[y] == BLOCKED:
                 if use_geo:
-                    tn = _phase2(y, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, gf, gv, of, ov)
+                    tn = _phase2(
+                        y,
+                        shape,
+                        state,
+                        n,
+                        coh,
+                        tau,
+                        s,
+                        w,
+                        la,
+                        D,
+                        b,
+                        R,
+                        d,
+                        mode,
+                        lamin,
+                        gf,
+                        gv,
+                        of,
+                        ov,
+                    )
                 else:
-                    tn = _candidate(y, shape, state, n, coh, tau, s, w, la, D, b, R, d, mode, lamin, of, ov,
-                                    np.zeros(3), order_s)
-                if tn < np.inf and (tn != ctau[y] or state[y] == BLOCKED or of[1] != cf[y, 1]):
+                    tn = _candidate(
+                        y,
+                        shape,
+                        state,
+                        n,
+                        coh,
+                        tau,
+                        s,
+                        w,
+                        la,
+                        D,
+                        b,
+                        R,
+                        d,
+                        mode,
+                        lamin,
+                        of,
+                        ov,
+                        np.zeros(3),
+                        order_s,
+                    )
+                if tn < np.inf and (
+                    tn != ctau[y] or state[y] == BLOCKED or of[1] != cf[y, 1]
+                ):
                     ctau[y] = tn
                     cf[y] = of
                     cv[y] = ov
@@ -387,7 +544,9 @@ def _march(shape, state, obj, n, coh, tau, s, w, la, D, b, R, d, blend, capped, 
 class Fill:
     shape: tuple[int, int, int]
     mode: int
-    state: npt.NDArray[np.int8]  # FREE, CLAIMABLE (never reached), ACCEPTED, BLOCKED (topology)
+    state: npt.NDArray[
+        np.int8
+    ]  # FREE, CLAIMABLE (never reached), ACCEPTED, BLOCKED (topology)
     tau: Float
     s: Float
     w: Float
@@ -441,20 +600,52 @@ def march(
         state[P:-P, P:-P, P:-P][cortex] = CLAIMABLE
         state[P:-P, P:-P, P:-P][band] = ACCEPTED
         obj = pad((wm | band).astype(np.uint8))
-        o = dict(tau=np.full(N, np.nan), s=np.full(N, np.nan), w=np.full(N, np.nan), la=np.full(N, np.nan),
-                 D=np.full(N, np.nan), b=np.full(N, np.nan), R=np.full((N, 3), np.nan), d=np.zeros((N, 3)),
-                 blend=np.zeros(N), capped=np.zeros(N, np.bool_))
+        o = dict(
+            tau=np.full(N, np.nan),
+            s=np.full(N, np.nan),
+            w=np.full(N, np.nan),
+            la=np.full(N, np.nan),
+            D=np.full(N, np.nan),
+            b=np.full(N, np.nan),
+            R=np.full((N, 3), np.nan),
+            d=np.zeros((N, 3)),
+            blend=np.zeros(N),
+            capped=np.zeros(N, np.bool_),
+        )
         o["s"][bm] = pad(phi.astype(float)).ravel()[bm]
         o["b"][bm] = pad(budget.astype(float)).ravel()[bm]
         o["R"][bm] = pad(foot.astype(float)).reshape(-1, 3)[bm] + P
         o["d"][bm] = pad(normal.astype(float)).reshape(-1, 3)[bm]
-        nn[bm] = o["d"][bm]  # in the start band the layer normal is the surface normal (no data normal in WM)
+        nn[bm] = o["d"][
+            bm
+        ]  # in the start band the layer normal is the surface normal (no data normal in WM)
         st = state.ravel()
         use = gf is not None
-        nb, _ = _march(np.array(ps, np.int64), st, obj, nn, cc, o["tau"], o["s"], o["w"], o["la"], o["D"], o["b"],
-                       o["R"], o["d"], o["blend"], o["capped"], mode, float(np.log(a_min)),
-                       float(np.inf if order_s else tau_stop), bool(topology), order_s, use,
-                       gf if use else np.zeros((1, 8)), gv if use else np.zeros((1, 6)))
+        nb, _ = _march(
+            np.array(ps, np.int64),
+            st,
+            obj,
+            nn,
+            cc,
+            o["tau"],
+            o["s"],
+            o["w"],
+            o["la"],
+            o["D"],
+            o["b"],
+            o["R"],
+            o["d"],
+            o["blend"],
+            o["capped"],
+            mode,
+            float(np.log(a_min)),
+            float(np.inf if order_s else tau_stop),
+            bool(topology),
+            order_s,
+            use,
+            gf if use else np.zeros((1, 8)),
+            gv if use else np.zeros((1, 6)),
+        )
         o["state"] = st
         o["nblock"] = nb
         return o
@@ -465,17 +656,35 @@ def march(
     # as PDE problems, piece 3). Ordering a single march by tau let the budgets change the paths where
     # the direction is noisy (test_low_coherence_paths_do_not_depend_on_budgets).
     g = one(True, None, None)
-    gf = np.stack([g["tau"], g["s"], g["w"], g["la"], g["D"], g["b"], g["blend"], g["capped"].astype(float)], 1)
+    gf = np.stack(
+        [
+            g["tau"],
+            g["s"],
+            g["w"],
+            g["la"],
+            g["D"],
+            g["b"],
+            g["blend"],
+            g["capped"].astype(float),
+        ],
+        1,
+    )
     gv = np.concatenate([g["R"], g["d"]], 1)
     gf[~np.isfinite(gf)] = 0.0
     gv[~np.isfinite(gv)] = 0.0
     gv[g["state"] != ACCEPTED, 3:] = 0.0
     o = one(False, np.ascontiguousarray(gf), np.ascontiguousarray(gv))
-    state, tau, s, w, la, D, b, R, d, blend, capped = (o[k] for k in ("state", "tau", "s", "w", "la", "D", "b", "R",
-                                                                         "d", "blend", "capped"))
+    state, tau, s, w, la, D, b, R, d, blend, capped = (
+        o[k]
+        for k in ("state", "tau", "s", "w", "la", "D", "b", "R", "d", "blend", "capped")
+    )
     nblock = o["nblock"]
     # voxels whose phase-2 owner differs from phase 1's (the budgets moved the seam over them)
-    moved = (o["state"] == ACCEPTED) & (g["state"] == ACCEPTED) & (np.sum(o["d"] * g["d"], 1) <= 0)
+    moved = (
+        (o["state"] == ACCEPTED)
+        & (g["state"] == ACCEPTED)
+        & (np.sum(o["d"] * g["d"], 1) <= 0)
+    )
     nrelaxed = 0
     state = state.reshape(ps)
 
@@ -483,9 +692,25 @@ def march(
         x = x.reshape(ps + ((k,) if k else ()))
         return x[P:-P, P:-P, P:-P].copy()
 
-    fill = Fill(shape, mode, crop(state), crop(tau), crop(s), crop(w), np.exp(crop(la)), crop(D), crop(b),
-                crop(R, 3) - P, crop(d, 3), crop(blend), crop(capped), band.copy(), cortex.copy(), int(nblock),
-                int(nrelaxed))
+    fill = Fill(
+        shape,
+        mode,
+        crop(state),
+        crop(tau),
+        crop(s),
+        crop(w),
+        np.exp(crop(la)),
+        crop(D),
+        crop(b),
+        crop(R, 3) - P,
+        crop(d, 3),
+        crop(blend),
+        crop(capped),
+        band.copy(),
+        cortex.copy(),
+        int(nblock),
+        int(nrelaxed),
+    )
     fill.moved = crop(moved)
     return fill
 
@@ -538,7 +763,7 @@ def seams(f: Fill, cortex_only: bool = True) -> Seam:
         both = ok[tuple(sl_p)] & ok[tuple(sl_q)]
         idx = np.nonzero(both)
         p = np.ravel_multi_index(idx, shape)
-        q = p + int(np.prod(shape[ax + 1:]))
+        q = p + int(np.prod(shape[ax + 1 :]))
         # the seam is where the march's own sign agreement (d_x . d_y > 0) refuses to interpolate: d . d <= 0,
         # so fronts meeting at exactly 90 degrees count (with < 0 they were missed: test_wedge_seam_at_90)
         opp = np.sum(dd[p] * dd[q], 1) <= 0
@@ -562,11 +787,29 @@ def seams(f: Fill, cortex_only: bool = True) -> Seam:
     clipped = bad | (t < 0) | (t > 1)
     t = np.clip(t, 0, 1)
     pos = np.stack(np.unravel_index(p, shape), -1) + t[:, None] * e
-    ang = np.degrees(np.arccos(np.clip(-np.sum(dd[p] * dd[q], 1), -1, 1)))  # 0 = head-on
+    ang = np.degrees(
+        np.arccos(np.clip(-np.sum(dd[p] * dd[q], 1), -1, 1))
+    )  # 0 = head-on
     Rf = f.R.reshape(-1, 3)
-    return Seam(p, q, ax, t, clipped, pos, tau[p] + t * gp, tau[q] + (1 - t) * gq,
-                s[p] + t * cp, s[q] + (1 - t) * cq, w[p] + t * cp * a[p], w[q] + (1 - t) * cq * a[q],
-                180.0 - ang, f.b.ravel()[p], f.b.ravel()[q], Rf[p], Rf[q])
+    return Seam(
+        p,
+        q,
+        ax,
+        t,
+        clipped,
+        pos,
+        tau[p] + t * gp,
+        tau[q] + (1 - t) * gq,
+        s[p] + t * cp,
+        s[q] + (1 - t) * cq,
+        w[p] + t * cp * a[p],
+        w[q] + (1 - t) * cq * a[q],
+        180.0 - ang,
+        f.b.ravel()[p],
+        f.b.ravel()[q],
+        Rf[p],
+        Rf[q],
+    )
 
 
 def seam_class(sm: Seam, lo: float = 0.8, hi: float = 1.25) -> npt.NDArray[np.int8]:
@@ -621,8 +864,13 @@ def tops(f: Fill, fluid: Bool, exclude: Bool | None = None) -> Tops:
     t = np.isfinite(best)
     idx = np.flatnonzero(t.ravel())
     ds = best.ravel()[idx]
-    return Tops(idx, f.R.reshape(-1, 3)[idx], f.s.ravel()[idx] + ds, f.w.ravel()[idx] + f.a.ravel()[idx] * ds,
-                stp.reshape(-1, 3)[idx])
+    return Tops(
+        idx,
+        f.R.reshape(-1, 3)[idx],
+        f.s.ravel()[idx] + ds,
+        f.w.ravel()[idx] + f.a.ravel()[idx] * ds,
+        stp.reshape(-1, 3)[idx],
+    )
 
 
 def a_from_R(f: Fill) -> Float:
@@ -644,21 +892,33 @@ def a_from_R(f: Fill) -> Float:
         fwd[s0] = diff
         bwd[s1] = diff
         both = np.isfinite(fwd[..., 0]) & np.isfinite(bwd[..., 0])
-        g = np.where(both[..., None], 0.5 * (fwd + bwd), np.where(np.isfinite(fwd), fwd, bwd))
+        g = np.where(
+            both[..., None], 0.5 * (fwd + bwd), np.where(np.isfinite(fwd), fwd, bwd)
+        )
         G[..., :, k] = g
     # basis of the plane perpendicular to d
-    ref = np.where(np.abs(d[..., :1]) < 0.9, np.array([1.0, 0, 0]), np.array([0, 1.0, 0]))
+    ref = np.where(
+        np.abs(d[..., :1]) < 0.9, np.array([1.0, 0, 0]), np.array([0, 1.0, 0])
+    )
     e1 = np.cross(d, ref)
     e1 /= np.linalg.norm(e1, axis=-1, keepdims=True) + 1e-12
     e2 = np.cross(d, e1)
     j1 = np.einsum("...ij,...j->...i", G, e1)
     j2 = np.einsum("...ij,...j->...i", G, e2)
     J = np.linalg.norm(np.cross(j1, j2), axis=-1)
-    out = np.where(ok & np.isfinite(J) & (J > 1e-9), 1.0 / np.where(J > 1e-9, J, 1.0), np.nan)
+    out = np.where(
+        ok & np.isfinite(J) & (J > 1e-9), 1.0 / np.where(J > 1e-9, J, 1.0), np.nan
+    )
     return out
 
 
-def coverage(f: Fill, wm: Bool, fluid: Bool, face: Bool | None = None, missing: Bool | None = None) -> dict:
+def coverage(
+    f: Fill,
+    wm: Bool,
+    fluid: Bool,
+    face: Bool | None = None,
+    missing: Bool | None = None,
+) -> dict:
     """Coverage of the cortex and the unclaimed connected pieces (26-connected) by cause: no
     connection to the WM; blocked by the topology test; touching a box face or missing tissue (cut
     off); otherwise left by sign agreement."""
@@ -666,11 +926,20 @@ def coverage(f: Fill, wm: Bool, fluid: Bool, face: Bool | None = None, missing: 
     got = claimed(f) & ctx
     un = ctx & ~got
     lab, npc = ndi.label(un, np.ones((3, 3, 3)))
-    out = dict(cortex=int(ctx.sum()), claimed=int(got.sum()), fraction=float(got.sum() / max(ctx.sum(), 1)),
-               pieces=int(npc))
+    out = dict(
+        cortex=int(ctx.sum()),
+        claimed=int(got.sum()),
+        fraction=float(got.sum() / max(ctx.sum(), 1)),
+        pieces=int(npc),
+    )
     if npc == 0:
-        out.update(no_wm=0, topology=0, face_or_missing=0, sign=0, voxels=dict(no_wm=0, topology=0,
-                                                                               face_or_missing=0, sign=0))
+        out.update(
+            no_wm=0,
+            topology=0,
+            face_or_missing=0,
+            sign=0,
+            voxels=dict(no_wm=0, topology=0, face_or_missing=0, sign=0),
+        )
         return out
     # cortex components that touch WM at all
     cl, _ = ndi.label(ctx, np.ones((3, 3, 3)))

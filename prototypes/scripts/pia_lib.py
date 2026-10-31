@@ -33,7 +33,11 @@ def min_surface(D, pairs, lo, hi):
     def arcs(a, b, cap):
         R.append(np.asarray(a).ravel().astype(np.int32))
         C.append(np.asarray(b).ravel().astype(np.int32))
-        V.append(np.broadcast_to(np.int64(cap) if np.isscalar(cap) else cap, np.asarray(a).ravel().shape).ravel())
+        V.append(
+            np.broadcast_to(
+                np.int64(cap) if np.isscalar(cap) else cap, np.asarray(a).ravel().shape
+            ).ravel()
+        )
 
     # every column's bottom is in the closed set
     arcs(np.full(n, s), node[:, 0], INF)
@@ -41,7 +45,7 @@ def min_surface(D, pairs, lo, hi):
     arcs(node[:, 1:], node[:, :-1], INF)
     # c_w >= c_v + lo: (v, k) -> (w, k + lo); c_v >= c_w - hi: (w, k) -> (v, k - hi)
     k = np.arange(K)
-    for (a, b, off) in ((pairs[:, 0], pairs[:, 1], lo), (pairs[:, 1], pairs[:, 0], -hi)):
+    for a, b, off in ((pairs[:, 0], pairs[:, 1], lo), (pairs[:, 1], pairs[:, 0], -hi)):
         j = k[None] + np.asarray(off)[:, None]  # (P, K) target label on b
         src = node[a][:, :]
         inside = (j >= 1) & (j <= K - 1)
@@ -63,7 +67,7 @@ def min_surface(D, pairs, lo, hi):
     reach = breadth_first_order(resid, s, directed=True, return_predecessors=False)
     S = np.zeros(n * K + 2, bool)
     S[reach] = True
-    inS = S[:n * K].reshape(n, K)
+    inS = S[: n * K].reshape(n, K)
     return K - 1 - np.argmax(inS[:, ::-1], axis=1)
 
 
@@ -86,7 +90,11 @@ def min_surfaces(grids, costs, cons):
         a = np.asarray(a).ravel()
         R.append(a.astype(np.int32))
         C.append(np.asarray(b).ravel().astype(np.int32))
-        V.append(np.full(a.size, cap, np.int64) if np.isscalar(cap) else np.asarray(cap, np.int64).ravel())
+        V.append(
+            np.full(a.size, cap, np.int64)
+            if np.isscalar(cap)
+            else np.asarray(cap, np.int64).ravel()
+        )
 
     for D in costs:
         Di = np.round(np.asarray(D, float) * SCALE).astype(np.int64)
@@ -103,8 +111,13 @@ def min_surfaces(grids, costs, cons):
         lo, hi = np.asarray(lo, float), np.asarray(hi, float)
         # depth_b >= depth_a + lo: (a, k) -> (b, first j with gb[j] >= ga[k] + lo)
         # depth_a >= depth_b - hi: (b, k) -> (a, first j with ga[j] >= gb[k] - hi)
-        for (A_, B_, gA, gB, ia_, ib_, x) in ((sa, sb, ga, gb, ia, ib, lo), (sb, sa, gb, ga, ib, ia, -hi)):
-            j = np.searchsorted(gB, gA[None, :] + x[:, None] - 1e-9, side="left")  # (P, K_A)
+        for A_, B_, gA, gB, ia_, ib_, x in (
+            (sa, sb, ga, gb, ia, ib, lo),
+            (sb, sa, gb, ga, ib, ia, -hi),
+        ):
+            j = np.searchsorted(
+                gB, gA[None, :] + x[:, None] - 1e-9, side="left"
+            )  # (P, K_A)
             src = node[A_][ia_]  # (P, K_A)
             inside = (j >= 1) & (j <= len(gB) - 1)
             pi, ki = np.nonzero(inside)
@@ -133,23 +146,29 @@ def min_surfaces(grids, costs, cons):
     S[reach] = True
     out = []
     for i, k in enumerate(Ks):
-        inS = S[off[i]:off[i + 1]].reshape(n, k)
+        inS = S[off[i] : off[i + 1]].reshape(n, k)
         out.append(k - 1 - np.argmax(inS[:, ::-1], axis=1))
     return out
 
 
 def snap_out(lo, hi, h):
     """Widen [lo, hi] (mm) outward to multiples of the grid step h."""
-    return np.floor(np.asarray(lo) / h + 1e-9) * h, np.ceil(np.asarray(hi) / h - 1e-9) * h
+    return np.floor(np.asarray(lo) / h + 1e-9) * h, np.ceil(
+        np.asarray(hi) / h - 1e-9
+    ) * h
 
 
 def bound_labels(dmu, gd, step):
     """lo, hi label offsets of c_w - c_v from |(c_w - mu_w) - (c_v - mu_v)| <= g d, with
     dmu = mu_w - mu_v and gd = g d (mm). Rounded outward (never tighter than the bound)."""
-    return np.floor((dmu - gd) / step).astype(np.int64), np.ceil((dmu + gd) / step).astype(np.int64)
+    return np.floor((dmu - gd) / step).astype(np.int64), np.ceil(
+        (dmu + gd) / step
+    ).astype(np.int64)
 
 
 def anchor_penalty(depths, top, dmu, gd, big):
     """Cost (len(depths),) of each depth for a trace next to an open trace whose top is `top`:
     0 inside [top + dmu - gd, top + dmu + gd] (mm), `big` outside."""
-    return np.where((depths >= top + dmu - gd - 1e-9) & (depths <= top + dmu + gd + 1e-9), 0.0, big)
+    return np.where(
+        (depths >= top + dmu - gd - 1e-9) & (depths <= top + dmu + gd + 1e-9), 0.0, big
+    )

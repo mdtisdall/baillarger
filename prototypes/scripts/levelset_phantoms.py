@@ -85,7 +85,9 @@ def project(curve: Float, cid, pts: Float) -> tuple[Float, Float, Float]:
         ok &= cid[k] == cid[j]
         a, b = curve[j], curve[k]
         ab = b - a
-        t = np.clip(np.sum((pts - a) * ab, 1) / np.maximum(np.sum(ab * ab, 1), 1e-18), 0, 1)
+        t = np.clip(
+            np.sum((pts - a) * ab, 1) / np.maximum(np.sum(ab * ab, 1), 1e-18), 0, 1
+        )
         q = a + t[:, None] * ab
         dq = np.linalg.norm(pts - q, axis=1)
         better = ok & (dq < best)
@@ -106,8 +108,17 @@ def g_from_mask2d(m: Bool):
     return g
 
 
-def extruded(name: str, g, ny: int, nx: int, nz: int, cortex2d: Bool, fluid2d: Bool, extra=None,
-             band_wm: float = BAND_WM) -> Phantom:
+def extruded(
+    name: str,
+    g,
+    ny: int,
+    nx: int,
+    nz: int,
+    cortex2d: Bool,
+    fluid2d: Bool,
+    extra=None,
+    band_wm: float = BAND_WM,
+) -> Phantom:
     """Phantom from g (> 0 in WM) on an (nx, nz) cross-section extruded along y (ny voxels)."""
     X, Z = np.meshgrid(np.arange(nx), np.arange(nz), indexing="ij")
     wm2 = g(X.astype(float), Z.astype(float)) > 0
@@ -166,7 +177,9 @@ def visible_foot(pts, sgn, dist, fp, j, curve, cn, tree, fluid2: Bool):
         jj = np.argsort(dd)
         dd = dd[jj]
         ok = np.zeros(len(jj), bool)
-        for c0 in range(0, len(jj), 2000):  # nearest first, stop at the first visible chunk
+        for c0 in range(
+            0, len(jj), 2000
+        ):  # nearest first, stop at the first visible chunk
             sl = slice(c0, c0 + 2000)
             ok[sl] = ~blocked(np.repeat(pts[i][None], len(jj[sl]), 0), curve[jj[sl]])
             if ok[sl].any():
@@ -180,10 +193,16 @@ def visible_foot(pts, sgn, dist, fp, j, curve, cn, tree, fluid2: Bool):
     return d_out, fp_out, n_out
 
 
-def finish(name, wm, cortex, fluid, phi, foot, normal, extra, band_wm: float = BAND_WM) -> Phantom:
-    near = ndi.binary_dilation(cortex, np.ones((3, 3, 3)), iterations=int(np.ceil(band_wm)))
+def finish(
+    name, wm, cortex, fluid, phi, foot, normal, extra, band_wm: float = BAND_WM
+) -> Phantom:
+    near = ndi.binary_dilation(
+        cortex, np.ones((3, 3, 3)), iterations=int(np.ceil(band_wm))
+    )
     band = (wm & near & (phi >= -band_wm)) | (cortex & (phi < 1.0))
-    return Phantom(name, wm, cortex, fluid, band, phi, foot, normal, normal.copy(), extra)
+    return Phantom(
+        name, wm, cortex, fluid, band, phi, foot, normal, normal.copy(), extra
+    )
 
 
 # ------------------------------------------------------------------ shapes
@@ -206,7 +225,16 @@ def cylinder(r0: float = 10.0, r1: float = 26.0, ny: int = 8) -> Phantom:
     g = lambda X, Z: r0 - np.hypot(X - c, Z - c)  # noqa: E731
     X, Z = np.meshgrid(np.arange(nx), np.arange(nz), indexing="ij")
     r = np.hypot(X - c, Z - c)
-    return extruded("cylinder", g, ny, nx, nz, (r >= r0) & (r < r1), r >= r1, dict(r0=r0, r1=r1, c=c))
+    return extruded(
+        "cylinder",
+        g,
+        ny,
+        nx,
+        nz,
+        (r >= r0) & (r < r1),
+        r >= r1,
+        dict(r0=r0, r1=r1, c=c),
+    )
 
 
 def sphere(r0: float = 10.0, r1: float = 26.0) -> Phantom:
@@ -237,17 +265,27 @@ def p4() -> Phantom:
     from baillarger import phantoms
 
     rim, _, e = phantoms.p4_kissing_dark_line()
-    return from_rim("P4", rim, dict(known=25.5, region=e["patch_mask"].any(0), split=26))
+    return from_rim(
+        "P4", rim, dict(known=25.5, region=e["patch_mask"].any(0), split=26)
+    )
 
 
 def p8() -> Phantom:
     from baillarger import phantoms
 
     rim, _, e, known, _ = phantoms.p8_natural_contact()
-    return from_rim("P8", rim, dict(known=float(known), region=e["patch_mask"].any(0), split=known))
+    return from_rim(
+        "P8", rim, dict(known=float(known), region=e["patch_mask"].any(0), split=known)
+    )
 
 
-def wedge(theta_deg: float, mu_a: float = 12.0, mu_b: float = 18.0, ny: int = 6, z0: float = 5.0) -> Phantom:
+def wedge(
+    theta_deg: float,
+    mu_a: float = 12.0,
+    mu_b: float = 18.0,
+    ny: int = 6,
+    z0: float = 5.0,
+) -> Phantom:
     """Two banks on the walls of a V (opening angle theta, apex at (cx, z0), opening upward), cortex
     where min(d_A / mu_A, d_B / mu_B) <= 1, fluid in the rest of the V, WM outside. The exact seam is
     the plane d_A / mu_A = d_B / mu_B through the apex (constant normals on each wall). extra holds both
@@ -256,7 +294,9 @@ def wedge(theta_deg: float, mu_a: float = 12.0, mu_b: float = 18.0, ny: int = 6,
     h = np.radians(theta_deg) / 2
     nA = np.array([np.cos(h), np.sin(h)])
     nB = np.array([-np.cos(h), np.sin(h)])
-    aa = np.arctan2(np.sin(2 * h), mu_b / mu_a + np.cos(2 * h))  # seam angle from wall A
+    aa = np.arctan2(
+        np.sin(2 * h), mu_b / mu_a + np.cos(2 * h)
+    )  # seam angle from wall A
     L = mu_a / np.sin(aa)  # apex to where the seam reaches tau = 1
     nz = int(z0 + 1.15 * L + 6)
     half = (nz - z0) * np.tan(h) + max(mu_a, mu_b) / np.cos(h) + 4
@@ -276,8 +316,16 @@ def wedge(theta_deg: float, mu_a: float = 12.0, mu_b: float = 18.0, ny: int = 6,
     inside = (dA > 0) & (dB > 0)
     ctx = inside & (np.minimum(dA / mu_a, dB / mu_b) <= 1)
     flu = inside & ~ctx
-    ph = extruded(f"wedge{int(theta_deg)}", g, ny, nx, nz, ctx, flu,
-                  dict(theta=theta_deg, mu_a=mu_a, mu_b=mu_b, cx=cx, z0=z0, nA=nA, nB=nB, L=L))
+    ph = extruded(
+        f"wedge{int(theta_deg)}",
+        g,
+        ny,
+        nx,
+        nz,
+        ctx,
+        flu,
+        dict(theta=theta_deg, mu_a=mu_a, mu_b=mu_b, cx=cx, z0=z0, nA=nA, nB=nB, L=L),
+    )
     ext = lambda a: np.broadcast_to(a[:, None], (nx, ny, nz)).copy()  # noqa: E731
     ph.extra["dA"], ph.extra["dB"] = ext(dA), ext(dB)
     return ph
@@ -322,13 +370,23 @@ def u_slab(R: float, t: float = 16.0, ny: int = 8) -> Phantom:
         return np.where(ins, 0.0, best)
 
     g = lambda X, Z: np.minimum(wd(X, Z) - R, (ztop - 0.5) - Z)  # noqa: E731
-    ph0 = extruded("tmp", g, 1, nx, nz, np.zeros((nx, nz), bool), np.zeros((nx, nz), bool))
+    ph0 = extruded(
+        "tmp", g, 1, nx, nz, np.zeros((nx, nz), bool), np.zeros((nx, nz), bool)
+    )
     phi2 = ph0.phi[:, 0, :]
     wm2 = ph0.wm[:, 0, :]
     ctx = ~wm2 & (phi2 <= t)
     hmax = (t - R) / np.sin(alpha) if R < t else 0.0
-    return extruded(f"uslab_R{int(R)}", g, ny, nx, nz, ctx, ~wm2 & ~ctx,
-                    dict(cx=cx, zo=zo, zmax=zo + hmax, R=R, t=t))
+    return extruded(
+        f"uslab_R{int(R)}",
+        g,
+        ny,
+        nx,
+        nz,
+        ctx,
+        ~wm2 & ~ctx,
+        dict(cx=cx, zo=zo, zmax=zo + hmax, R=R, t=t),
+    )
 
 
 def omega(tl: float = 12.0, tr: float = 18.0, ny: int = 8) -> Phantom:
@@ -356,8 +414,16 @@ def omega(tl: float = 12.0, tr: float = 18.0, ny: int = 8) -> Phantom:
     zneck = zc + np.sqrt(rc**2 - 15.0**2)
     zz = np.arange(nz)
     region = np.broadcast_to(((zz > zneck + 1) & (zz < ztop))[None, :], (ny, nz))
-    return extruded("omega", g, ny, nx, nz, ctx, ~wm2 & ~ctx,
-                    dict(cx=cx, known=cx - 3.5, region=region, tl=tl, tr=tr))
+    return extruded(
+        "omega",
+        g,
+        ny,
+        nx,
+        nz,
+        ctx,
+        ~wm2 & ~ctx,
+        dict(cx=cx, known=cx - 3.5, region=region, tl=tl, tr=tr),
+    )
 
 
 def blade(t: float = 12.0, ny: int = 8) -> Phantom:
@@ -365,14 +431,22 @@ def blade(t: float = 12.0, ny: int = 8) -> Phantom:
     the box to ztip, with cortex t on both sides and over its tip; fluid beyond."""
     nx, nz = 2 * int(t) + 12, 60
     cx, ztip = nx // 2, 40
-    g = lambda X, Z: np.minimum(np.minimum(X - (cx - 1.5), (cx + 0.5) - X), (ztip - 0.5) - Z)  # noqa: E731
-    ph0 = extruded("tmp", g, 1, nx, nz, np.zeros((nx, nz), bool), np.zeros((nx, nz), bool))
+    g = lambda X, Z: np.minimum(
+        np.minimum(X - (cx - 1.5), (cx + 0.5) - X), (ztip - 0.5) - Z
+    )  # noqa: E731
+    ph0 = extruded(
+        "tmp", g, 1, nx, nz, np.zeros((nx, nz), bool), np.zeros((nx, nz), bool)
+    )
     phi2, wm2 = ph0.phi[:, 0, :], ph0.wm[:, 0, :]
     ctx = ~wm2 & (phi2 <= t)
-    return extruded("blade", g, ny, nx, nz, ctx, ~wm2 & ~ctx, dict(cx=cx, ztip=ztip, mid=cx - 0.5))
+    return extruded(
+        "blade", g, ny, nx, nz, ctx, ~wm2 & ~ctx, dict(cx=cx, ztip=ztip, mid=cx - 0.5)
+    )
 
 
-def tilted_slab(deg: float = 30.0, t: float = 12.0, band_wm: float = BAND_WM, ny: int = 6) -> Phantom:
+def tilted_slab(
+    deg: float = 30.0, t: float = 12.0, band_wm: float = BAND_WM, ny: int = 6
+) -> Phantom:
     """A flat white surface tilted deg about y: WM below the plane through (nx/2, z0) with normal
     (-sin, cos), cortex 0 < phi <= t above it, fluid beyond."""
     nx, nz, z0 = 60, 50, 18.3
@@ -385,11 +459,22 @@ def tilted_slab(deg: float = 30.0, t: float = 12.0, band_wm: float = BAND_WM, ny
 
     X, Z = np.meshgrid(np.arange(nx), np.arange(nz), indexing="ij")
     d = -g(X.astype(float), Z.astype(float))
-    return extruded(f"tilted{int(deg)}", g, ny, nx, nz, (d > 0) & (d <= t), d > t,
-                    dict(nrm=nrm, cx=cx, z0=z0, t=t), band_wm=band_wm)
+    return extruded(
+        f"tilted{int(deg)}",
+        g,
+        ny,
+        nx,
+        nz,
+        (d > 0) & (d <= t),
+        d > t,
+        dict(nrm=nrm, cx=cx, z0=z0, t=t),
+        band_wm=band_wm,
+    )
 
 
-def plane3d(normal=(1.0, 1.0, 1.0), t: float = 12.0, band_wm: float = BAND_WM, n: int = 40) -> Phantom:
+def plane3d(
+    normal=(1.0, 1.0, 1.0), t: float = 12.0, band_wm: float = BAND_WM, n: int = 40
+) -> Phantom:
     """A flat white surface with any normal (analytic; not extruded): WM where (x - c).nu < 0, cortex
     0 < phi <= t, fluid beyond."""
     nu = np.asarray(normal, float)
@@ -400,4 +485,6 @@ def plane3d(normal=(1.0, 1.0, 1.0), t: float = 12.0, band_wm: float = BAND_WM, n
     wm, cortex, fluid = phi < 0, (phi >= 0) & (phi <= t), phi > t
     foot = X - phi[..., None] * nu
     normal_ = np.broadcast_to(nu, X.shape).copy()
-    return finish("plane3d", wm, cortex, fluid, phi, foot, normal_, dict(nu=nu, c=c), band_wm)
+    return finish(
+        "plane3d", wm, cortex, fluid, phi, foot, normal_, dict(nu=nu, c=c), band_wm
+    )

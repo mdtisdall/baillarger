@@ -58,7 +58,15 @@ from baillarger.fronts.march import _heap_pop, _heap_push, _reverse, _stencils
 from baillarger.fronts.selling import selling
 from baillarger.mesh import marching_tetrahedra
 from baillarger.mesh_smoothing import (  # noqa: F401  (the package's, re-exported)
-    boundary_vertices, edges, gauss_steps, relax, smooth_normals, twice, umbrella, vertex_normals)
+    boundary_vertices,
+    edges,
+    gauss_steps,
+    relax,
+    smooth_normals,
+    twice,
+    umbrella,
+    vertex_normals,
+)
 
 type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.int64]
@@ -118,7 +126,12 @@ class Phantom:
     def _h(self, u, v):
         """Graph height and derivatives (h, hu, hv, huu, huv, hvv) in local coordinates."""
         p = self.p
-        z0, A, lam, tilt = p["z0"], p.get("A", 0.0), p.get("lam", 1.0), p.get("tilt", 0.0)
+        z0, A, lam, tilt = (
+            p["z0"],
+            p.get("A", 0.0),
+            p.get("lam", 1.0),
+            p.get("tilt", 0.0),
+        )
         w = 2 * np.pi / lam
         cu, su, cv, sv = np.cos(w * u), np.sin(w * u), np.cos(w * v), np.sin(w * v)
         h = z0 + A * cu * cv + tilt * v
@@ -171,7 +184,9 @@ class Phantom:
         tr, dt = S11 + S22, S11 * S22 - S12 * S21
         disc = np.sqrt(np.maximum(tr * tr / 4 - dt, 0))
         e_lo, e_hi = tr / 2 - disc, tr / 2 + disc
-        return Truth(d, o + footl @ Q.T, nl @ Q.T, -e_lo, -e_hi, np.zeros(len(X), np.int64))
+        return Truth(
+            d, o + footl @ Q.T, nl @ Q.T, -e_lo, -e_hi, np.zeros(len(X), np.int64)
+        )
 
     def _blade(self, X) -> Truth:
         Q, o, w = self.p["Q"], self.p["o"], self.p["w"]
@@ -182,7 +197,11 @@ class Phantom:
         _, j = cKDTree(np.c_[a * np.sin(k * gt), gt]).query(L[:, :2])
         t = gt[j]
         for _ in range(40):
-            c, c1, c2 = a * np.sin(k * t), a * k * np.cos(k * t), -a * k * k * np.sin(k * t)
+            c, c1, c2 = (
+                a * np.sin(k * t),
+                a * k * np.cos(k * t),
+                -a * k * k * np.sin(k * t),
+            )
             gx, gy = c - L[:, 0], t - L[:, 1]
             F1 = gx * c1 + gy
             F2 = c1 * c1 + 1 + gx * c2
@@ -202,7 +221,9 @@ class Phantom:
         kap = np.where(side > 0, kc / (1 + kc * w / 2), -kc / (1 - kc * w / 2))
         nl = side[:, None] * nc
         z = np.zeros_like(kap)
-        return Truth(d, o + footl @ Q.T, nl @ Q.T, np.maximum(kap, z), np.minimum(kap, z), side)
+        return Truth(
+            d, o + footl @ Q.T, nl @ Q.T, np.maximum(kap, z), np.minimum(kap, z), side
+        )
 
     def _fin(self, X) -> Truth:
         """A blade of thickness w (centre x' = a sin(2 pi y' / lam)) on a base (WM below
@@ -210,7 +231,13 @@ class Phantom:
         round the tip line). Distance: the smaller of the blade's and the base's (exact
         outside the WM; the concave junction is a crease, and the tip's curvature
         ignores the centre curve's own bend)."""
-        Q, o, w, ztip, zb = self.p["Q"], self.p["o"], self.p["w"], self.p["ztip"], self.p["zbase"]
+        Q, o, w, ztip, zb = (
+            self.p["Q"],
+            self.p["o"],
+            self.p["w"],
+            self.p["ztip"],
+            self.p["zbase"],
+        )
         tb = self._blade(X)
         L = (X - o) @ Q
         zt = L[:, 2]
@@ -271,22 +298,34 @@ def plane(tilt_deg=4.0, T=15.0, n=64) -> Phantom:
     """A plane tilted tilt_deg from the grid's z axis about x: long terraces."""
     Q = np.eye(3)
     o = np.array([0.0, n / 2, n / 2 - T / 2 + 0.29])
-    return Phantom(f"plane_{tilt_deg:g}deg", (n, n, n), T, "graph",
-                   dict(Q=Q, o=o, z0=0.0, tilt=np.tan(np.radians(tilt_deg))))
+    return Phantom(
+        f"plane_{tilt_deg:g}deg",
+        (n, n, n),
+        T,
+        "graph",
+        dict(Q=Q, o=o, z0=0.0, tilt=np.tan(np.radians(tilt_deg))),
+    )
 
 
 def fin(w=2.0, height=12.0, a=2.0, lam=48.0, T=12.0, n=64, deg=20.0) -> Phantom:
     Q = rotation((2, 1, 3), deg)
     o = np.full(3, n / 2) + np.array([0.21, -0.33, 0.12])
     zb = -height / 2 - 4
-    return Phantom(f"fin_w{w:g}", (n, n, n), T, "fin",
-                   dict(Q=Q, o=o, w=w, a=a, lam=lam, zbase=zb, ztip=zb + height))
+    return Phantom(
+        f"fin_w{w:g}",
+        (n, n, n),
+        T,
+        "fin",
+        dict(Q=Q, o=o, w=w, a=a, lam=lam, zbase=zb, ztip=zb + height),
+    )
 
 
 def blade(w=3.0, a=2.0, lam=48.0, T=12.0, n=64, deg=25.0) -> Phantom:
     Q = rotation((2, 1, 3), deg)
     o = np.full(3, n / 2) + np.array([0.21, -0.33, 0.12])
-    return Phantom(f"blade_w{w:g}", (n, n, n), T, "blade", dict(Q=Q, o=o, w=w, a=a, lam=lam))
+    return Phantom(
+        f"blade_w{w:g}", (n, n, n), T, "blade", dict(Q=Q, o=o, w=w, a=a, lam=lam)
+    )
 
 
 # ------------------------------------------------------------------ meshes
@@ -295,7 +334,11 @@ def blade(w=3.0, a=2.0, lam=48.0, T=12.0, n=64, deg=25.0) -> Phantom:
 def contour(wm: Bool, sigma: float) -> tuple[Float, Int]:
     """Marching tetrahedra at 0.5 of the label smoothed by sigma voxels; faces
     oriented outward (out of the WM)."""
-    F = ndi.gaussian_filter(wm.astype(np.float64), sigma) if sigma > 0 else wm.astype(np.float64)
+    F = (
+        ndi.gaussian_filter(wm.astype(np.float64), sigma)
+        if sigma > 0
+        else wm.astype(np.float64)
+    )
     v, f = marching_tetrahedra(F, 0.5)
     return v, f[:, [0, 2, 1]].copy()  # marching_tetrahedra points into the WM
 
@@ -305,7 +348,9 @@ def _umbrella(v: Float, f: Int):
     return A, deg, edges(f)
 
 
-def taubin(v: Float, f: Int, iters: int, lam: float = 0.6307, mu: float = -0.6732) -> Float:
+def taubin(
+    v: Float, f: Int, iters: int, lam: float = 0.6307, mu: float = -0.6732
+) -> Float:
     """Taubin lambda|mu smoothing, umbrella Laplacian, with Taubin's standard pass
     band (k_PB = 1/lam + 1/mu = 0.1). Its gain exceeds 1 inside the pass band, by
     a factor 1 + lam mu k (k - k_PB) per pair, which compounds over iterations: a pass
@@ -327,7 +372,9 @@ def min_angles(v: Float, f: Int) -> Float:
     out = []
     for k in range(3):
         a, b = P[:, (k + 1) % 3] - P[:, k], P[:, (k + 2) % 3] - P[:, k]
-        c = np.sum(a * b, 1) / (np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1) + 1e-30)
+        c = np.sum(a * b, 1) / (
+            np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1) + 1e-30
+        )
         out.append(np.degrees(np.arccos(np.clip(c, -1, 1))))
     return np.min(out, 0)
 
@@ -362,7 +409,11 @@ def _closest_on_tri(p, a, b, c):
         m = (va <= 0) & ((d4 - d3) >= 0) & ((d5 - d6) >= 0)  # edge bc
         t = (d4 - d3) / ((d4 - d3) + (d5 - d6))
         bary[m] = np.stack([0 * t, 1 - t, t], 1)[m]
-    for m, k in (((d1 <= 0) & (d2 <= 0), 0), ((d3 >= 0) & (d4 <= d3), 1), ((d6 >= 0) & (d5 <= d6), 2)):
+    for m, k in (
+        ((d1 <= 0) & (d2 <= 0), 0),
+        ((d3 >= 0) & (d4 <= d3), 1),
+        ((d6 >= 0) & (d5 <= d6), 2),
+    ):
         e = np.zeros(3)
         e[k] = 1
         bary[m] = e
@@ -381,10 +432,14 @@ def pseudonormals(v: Float, f: Int):
     vn = np.zeros_like(v)
     for k in range(3):
         a, b = v[f[:, (k + 1) % 3]] - v[f[:, k]], v[f[:, (k + 2) % 3]] - v[f[:, k]]
-        c = np.sum(a * b, 1) / (np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1) + 1e-30)
+        c = np.sum(a * b, 1) / (
+            np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1) + 1e-30
+        )
         np.add.at(vn, f[:, k], np.arccos(np.clip(c, -1, 1))[:, None] * fn)
     nv = len(v)
-    key = np.stack([np.minimum(f, np.roll(f, -1, 1)) * nv + np.maximum(f, np.roll(f, -1, 1))], 0)[0]
+    key = np.stack(
+        [np.minimum(f, np.roll(f, -1, 1)) * nv + np.maximum(f, np.roll(f, -1, 1))], 0
+    )[0]
     uk, inv = np.unique(key.ravel(), return_inverse=True)
     en_u = np.zeros((len(uk), 3))
     np.add.at(en_u, inv, np.repeat(fn, 3, 0))
@@ -439,7 +494,9 @@ def closest_on_mesh(v: Float, f: Int, X: Float, k: int = 8, chunk: int = 20000):
     nz = Bc > 1e-12
     cnt = nz.sum(1)
     pn = fn[F].copy()
-    e2 = cnt == 2  # on edge k = the corner not used, edges (k+1, k+2) -> index (k+1) % 3
+    e2 = (
+        cnt == 2
+    )  # on edge k = the corner not used, edges (k+1, k+2) -> index (k+1) % 3
     if e2.any():
         zero = np.argmin(nz[e2], 1)
         pn[e2] = en[F[e2], (zero + 1) % 3]
@@ -460,8 +517,25 @@ def closest_on_mesh(v: Float, f: Int, X: Float, k: int = 8, chunk: int = 20000):
 
 
 @njit
-def _update_r(q, lab, rhs, nbr, offsets, weights, accepted, arrival, label, length, root,
-              spacing, wv, wr, wo, ws, wi):
+def _update_r(
+    q,
+    lab,
+    rhs,
+    nbr,
+    offsets,
+    weights,
+    accepted,
+    arrival,
+    label,
+    length,
+    root,
+    spacing,
+    wv,
+    wr,
+    wo,
+    ws,
+    wi,
+):
     """baillarger.fronts.march._update, also carrying the root position."""
     k = 0
     for i in range(6):
@@ -534,7 +608,9 @@ def _update_r(q, lab, rhs, nbr, offsets, weights, accepted, arrival, label, leng
         rx += g * root[wi[j], 0]
         ry += g * root[wi[j], 1]
         rz += g * root[wi[j], 2]
-    speed = np.sqrt((fx * spacing[0]) ** 2 + (fy * spacing[1]) ** 2 + (fz * spacing[2]) ** 2)
+    speed = np.sqrt(
+        (fx * spacing[0]) ** 2 + (fy * spacing[1]) ** 2 + (fz * spacing[2]) ** 2
+    )
     if tot > 0.0:
         s = (s + speed) / tot
         rx /= tot
@@ -549,8 +625,20 @@ def _update_r(q, lab, rhs, nbr, offsets, weights, accepted, arrival, label, leng
 
 
 @njit
-def _march_band(nbr, count, rev, offsets, weights, seeds, seed_labels, seed_t, seed_s, seed_r,
-                spacing, rhs):
+def _march_band(
+    nbr,
+    count,
+    rev,
+    offsets,
+    weights,
+    seeds,
+    seed_labels,
+    seed_t,
+    seed_s,
+    seed_r,
+    spacing,
+    rhs,
+):
     m = nbr.shape[0]
     arrival = np.full(m, _INF)
     label = np.full(m, -1, dtype=np.int64)
@@ -601,8 +689,25 @@ def _march_band(nbr, count, rev, offsets, weights, seeds, seed_labels, seed_t, s
             q = rev[e]
             if accepted[q] or fixed[q]:
                 continue
-            u, s, rx, ry, rz = _update_r(q, lab, rhs[lab], nbr, offsets, weights, accepted, arrival,
-                                         label, length, root, spacing, wv, wr, wo, ws, wi)
+            u, s, rx, ry, rz = _update_r(
+                q,
+                lab,
+                rhs[lab],
+                nbr,
+                offsets,
+                weights,
+                accepted,
+                arrival,
+                label,
+                length,
+                root,
+                spacing,
+                wv,
+                wr,
+                wo,
+                ws,
+                wi,
+            )
             if u == _INF:
                 continue
             if u < t1[q]:
@@ -624,8 +729,16 @@ class Band:
     root: Float  # (..., 3) root position, in the coordinates the seeds gave
 
 
-def march_band(metric, mask: Bool, seeds: Bool, seed_t, seed_s, seed_r, seed_lab=None,
-               spacing=(1.0, 1.0, 1.0)) -> Band:
+def march_band(
+    metric,
+    mask: Bool,
+    seeds: Bool,
+    seed_t,
+    seed_s,
+    seed_r,
+    seed_lab=None,
+    spacing=(1.0, 1.0, 1.0),
+) -> Band:
     """Fast marching (the package's scheme) from frozen seed voxels with their own
     arrival, arc length and root. seeds: boolean, in the mask; seed_* in
     np.flatnonzero(seeds) order. Labels compete as in march (rhs 1)."""
@@ -646,11 +759,26 @@ def march_band(metric, mask: Bool, seeds: Bool, seed_t, seed_s, seed_r, seed_lab
     count, rev = _reverse(nbr)
     sc = np.flatnonzero(seeds.ravel())
     assert np.all(mask.ravel()[sc]), "a seed lies outside the mask"
-    lab = np.zeros(sc.size, np.int64) if seed_lab is None else np.asarray(seed_lab, np.int64)
+    lab = (
+        np.zeros(sc.size, np.int64)
+        if seed_lab is None
+        else np.asarray(seed_lab, np.int64)
+    )
     nl = int(lab.max()) + 1 if lab.size else 1
-    a, lb, ln, rt = _march_band(nbr, count, rev, off, w, ids[sc], lab, np.asarray(seed_t, float),
-                                np.asarray(seed_s, float), np.ascontiguousarray(seed_r, float), h,
-                                np.ones(nl))
+    a, lb, ln, rt = _march_band(
+        nbr,
+        count,
+        rev,
+        off,
+        w,
+        ids[sc],
+        lab,
+        np.asarray(seed_t, float),
+        np.asarray(seed_s, float),
+        np.ascontiguousarray(seed_r, float),
+        h,
+        np.ones(nl),
+    )
 
     def full(x, fill):
         out = np.full((mask.size,) + x.shape[1:], fill, dtype=x.dtype)
@@ -677,8 +805,15 @@ def band_seeds(points: Float, P: Float, n: Float, D: Float | None):
     return t, np.linalg.norm(points - foot, axis=1) * np.sign(s), foot
 
 
-def surface_seeds(ctx: Bool, wm: Bool, X: Float, closest, D: Float | None = None,
-                  band: float = 1.0, scale: int = 1):
+def surface_seeds(
+    ctx: Bool,
+    wm: Bool,
+    X: Float,
+    closest,
+    D: Float | None = None,
+    band: float = 1.0,
+    scale: int = 1,
+):
     """Seeds for a surface start on a grid of spacing 1/scale: cortex voxels within
     `band` (1x voxels) of the surface, and every cortex voxel 6-adjacent to the WM
     label. X: the grid's points (..., 3) in 1x voxel units. closest(points) returns
@@ -701,6 +836,7 @@ def mesh_closest(v: Float, f: Int):
     def closest(pts):
         P, _, n = closest_on_mesh(v, f, pts)
         return P, n
+
     return closest
 
 
@@ -708,6 +844,7 @@ def truth_closest(ph: Phantom):
     def closest(pts):
         tr = ph.truth(pts)
         return tr.foot, tr.n
+
     return closest
 
 
@@ -807,7 +944,9 @@ def voxel_face_mesh(wm: Bool) -> tuple[Float, Int]:
             ctr[:, a] += 0.5 * sgn
             eb, ec = np.zeros(3), np.zeros(3)
             eb[b], ec[c] = 0.5, 0.5
-            q = np.stack([ctr - eb - ec, ctr + eb - ec, ctr + eb + ec, ctr - eb + ec], 1)
+            q = np.stack(
+                [ctr - eb - ec, ctr + eb - ec, ctr + eb + ec, ctr - eb + ec], 1
+            )
             if sgn < 0:
                 q = q[:, ::-1]
             quads.append(q)
@@ -821,7 +960,9 @@ def voxel_face_mesh(wm: Bool) -> tuple[Float, Int]:
 def aspect_ratios(v: Float, f: Int) -> Float:
     """Longest edge x perimeter / (4 sqrt 3 area): 1 for an equilateral triangle."""
     P = v[f]
-    e = np.stack([np.linalg.norm(P[:, (k + 1) % 3] - P[:, k], axis=1) for k in range(3)], 1)
+    e = np.stack(
+        [np.linalg.norm(P[:, (k + 1) % 3] - P[:, k], axis=1) for k in range(3)], 1
+    )
     area = 0.5 * np.linalg.norm(np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0]), axis=1)
     return e.max(1) * e.sum(1) / (4 * np.sqrt(3) * np.maximum(area, 1e-30))
 

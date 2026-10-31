@@ -21,7 +21,9 @@ def band_profile(depth_from_top, t):
     """A laminar profile as a function of depth below the top (mm): a bright superficial band
     (0-0.3 mm) and a dark stria at 60 % of the depth from the top."""
     d = np.asarray(depth_from_top, float)
-    return 1.0 * np.exp(-0.5 * ((d - 0.15) / 0.1) ** 2) - 1.2 * np.exp(-0.5 * ((d - 0.6 * t) / 0.12) ** 2)
+    return 1.0 * np.exp(-0.5 * ((d - 0.15) / 0.1) ** 2) - 1.2 * np.exp(
+        -0.5 * ((d - 0.6 * t) / 0.12) ** 2
+    )
 
 
 def apposed_slabs(tA, tB, n=(0, 40, 40)):
@@ -45,6 +47,7 @@ def apposed_slabs(tA, tB, n=(0, 40, 40)):
 
 # ---------------------------------------------------------------- depth maps
 
+
 @pytest.mark.parametrize("kind", ["linear", "top"])
 def test_depth_map_ends(kind):
     for t in (1.5, 2.4, 3.3):
@@ -57,11 +60,14 @@ def test_depth_map_ends(kind):
 def test_top_anchored_keeps_the_top_absolute():
     t0 = 2.4
     for t in (2.0, 3.3):
-        s = np.array([t - 0.5, t - 1.0])  # 0.5 and 1.0 mm below the top, inside a = 1.2 mm
+        s = np.array(
+            [t - 0.5, t - 1.0]
+        )  # 0.5 and 1.0 mm below the top, inside a = 1.2 mm
         assert X.depth_map(s, t, t0, "top") == pytest.approx(t0 - np.array([0.5, 1.0]))
 
 
 # ---------------------------------------------------------------- tracer and profile
+
 
 def test_trace_crosses_a_contact_and_ends_on_both_WM():
     tA, tB = 2.0, 3.0
@@ -95,8 +101,13 @@ def test_trace_stops_at_fluid_face_and_length():
     assert out[0] == X.FLUID
     _, out = X.trace(Tc, lab, dface, x0, np.array([[-1.0, 0, 0]]), VOX, lmax=1.0)
     assert out[0] == X.LENGTH
-    _, out = X.trace(Tc, lab, dface, np.array([[10.0, 15.0, 5.0]]), np.array([[0.0, 0.0, -1.0]]), VOX)
-    assert out[0] in (X.FACE, X.TURN)  # the normal is along axis 0: a path started across it turns
+    _, out = X.trace(
+        Tc, lab, dface, np.array([[10.0, 15.0, 5.0]]), np.array([[0.0, 0.0, -1.0]]), VOX
+    )
+    assert out[0] in (
+        X.FACE,
+        X.TURN,
+    )  # the normal is along axis 0: a path started across it turns
 
 
 def test_profile_masked_average():
@@ -111,11 +122,14 @@ def test_profile_masked_average():
 
 # ---------------------------------------------------------------- templates and split
 
+
 def synthetic_columns(t_list, noise, rng):
     out = []
     for t in t_list:
         s = np.arange(0, t + 1e-9, X.STEP_MM)
-        out.append(np.array([band_profile(t - s, t) + noise * rng.standard_normal(s.size)]))
+        out.append(
+            np.array([band_profile(t - s, t) + noise * rng.standard_normal(s.size)])
+        )
     return out
 
 
@@ -148,7 +162,9 @@ def model_columns(t_list, kind, noise, rng):
     for t in t_list:
         s = np.arange(0, t + 1e-9, X.STEP_MM)
         r = X.depth_map(s, t, T0, kind)
-        out.append(np.array([band_profile(T0 - r, T0) + noise * rng.standard_normal(s.size)]))
+        out.append(
+            np.array([band_profile(T0 - r, T0) + noise * rng.standard_normal(s.size)])
+        )
     return out
 
 
@@ -186,8 +202,11 @@ def test_profile_likelihood_finds_the_split_and_is_calibrated(kind):
 def test_flat_profile_returns_the_pairwise_posterior():
     rng = np.random.default_rng(2)
     t = rng.uniform(2.0, 3.0, 30)
-    cols = [np.zeros((1, int(ti / X.STEP_MM) + 1)) + 0.1 * rng.standard_normal((1, int(ti / X.STEP_MM) + 1))
-            for ti in t]
+    cols = [
+        np.zeros((1, int(ti / X.STEP_MM) + 1))
+        + 0.1 * rng.standard_normal((1, int(ti / X.STEP_MM) + 1))
+        for ti in t
+    ]
     tpl = X.build_template(cols, t, "linear")
     tpl.med[:] = 0.0
     tpl.sd[:] = 0.1
@@ -218,11 +237,14 @@ def test_symmetry_and_darkest_on_a_mirrored_profile():
 
 # ---------------------------------------------------------------- the column volume
 
+
 def test_trace_array_classes_and_lengths():
     tA, tB = 2.0, 3.0
     lab, img, c, (wa, wb) = apposed_slabs(tA, tB)
     lab_open = lab.copy()
-    lab_open[int(np.ceil(c)) + 2:][lab[int(np.ceil(c)) + 2:] == 0] = 1  # bank B replaced by fluid
+    lab_open[int(np.ceil(c)) + 2 :][lab[int(np.ceil(c)) + 2 :] == 0] = (
+        1  # bank B replaced by fluid
+    )
     Tc = tensor(img, (lab == 0).astype(float))
     dface = np.full(lab.shape, 99.0)
     y = np.linspace(8, 30, 6)
@@ -232,7 +254,9 @@ def test_trace_array_classes_and_lengths():
     assert np.all(out == X.WM)
     L = (ns - 1) * X.STEP_MM
     assert np.allclose(L, tA + tB, atol=0.06)
-    assert np.all(np.isnan(pos[np.arange(6), ns])) and np.all(np.isfinite(pos[np.arange(6), ns - 1]))
+    assert np.all(np.isnan(pos[np.arange(6), ns])) and np.all(
+        np.isfinite(pos[np.arange(6), ns - 1])
+    )
     pos, ns, out = X.trace_array(Tc, lab_open, dface, x0, d0, VOX, 200)
     assert np.all(out == X.FLUID)
 
@@ -256,8 +280,13 @@ def test_sample_traces_and_order_along():
     pos = np.full((2, 5, 3), np.nan, np.float32)
     pos[0, :3] = [[1, 2, 2], [2.5, 2, 2], [4, 2, 2]]
     s = X.sample_traces([img], pos)[0]
-    assert np.allclose(s[0, :3], [1, 2.5, 4]) and np.all(np.isnan(s[0, 3:])) and np.all(np.isnan(s[1]))
+    assert (
+        np.allclose(s[0, :3], [1, 2.5, 4])
+        and np.all(np.isnan(s[0, 3:]))
+        and np.all(np.isnan(s[1]))
+    )
     from scipy.sparse import diags
+
     n = 7
     g = diags([np.ones(n - 1), np.ones(n - 1)], [1, -1]).tocsr()
     perm = np.array([3, 0, 6, 1, 5, 2, 4])
@@ -273,7 +302,11 @@ def test_exp_chart_plane_and_cylinder():
     c = X.exp_chart(x, np.zeros(3), [0, 0, 1.0], d)
     # a plane: the chart is the plane itself up to a rotation
     assert np.allclose(np.linalg.norm(c, axis=1), d)
-    assert np.allclose(np.linalg.norm(c[:, None] - c[None], axis=2), np.linalg.norm(x[:, None] - x[None], axis=2), atol=1e-9)
+    assert np.allclose(
+        np.linalg.norm(c[:, None] - c[None], axis=2),
+        np.linalg.norm(x[:, None] - x[None], axis=2),
+        atol=1e-9,
+    )
     # a cylinder of radius 2 about the y axis, x0 on top: geodesic distance along the circumference
     th = np.linspace(-1.0, 1.0, 21)
     x = np.c_[2 * np.sin(th), np.zeros(21), 2 * np.cos(th)]

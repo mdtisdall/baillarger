@@ -24,8 +24,17 @@ from baillarger import column_traces as CT
 
 def tissue_of(B):
     """A column_traces.Tissue from a phantom (its patch is not used by the tracing)."""
-    return CT.Tissue(patch=None, vox=np.asarray(B["vox"], float), rim=B["rim"], miss=B["miss"],
-                     ctx=B["ctx"], wm=B["wm"], det=B["det"], dface=B["dface"], labels=B["labels"])
+    return CT.Tissue(
+        patch=None,
+        vox=np.asarray(B["vox"], float),
+        rim=B["rim"],
+        miss=B["miss"],
+        ctx=B["ctx"],
+        wm=B["wm"],
+        det=B["det"],
+        dface=B["dface"],
+        labels=B["labels"],
+    )
 
 
 def main():
@@ -51,8 +60,12 @@ def main():
                 meet_crest=round(float(np.mean(R.crest_at[k] >= 0)), 3),
                 path_err_p50_p90=np.nanpercentile(emax[k], [50, 90]).round(3).tolist(),
                 end_err_p50_p90=np.nanpercentile(eend[k], [50, 90]).round(3).tolist(),
-                contact_err_p50_p90=(np.nanpercentile(econ[k], [50, 90]).round(3).tolist()
-                                     if np.isfinite(econ[k]).any() else None))
+                contact_err_p50_p90=(
+                    np.nanpercentile(econ[k], [50, 90]).round(3).tolist()
+                    if np.isfinite(econ[k]).any()
+                    else None
+                ),
+            )
             print(pname, m, json.dumps(row[m]), flush=True)
         out[pname] = row
     json.dump(out, open(f"{A.work}/methods_phantoms_{A.site}.json", "w"), indent=1)

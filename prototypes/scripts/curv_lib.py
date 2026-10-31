@@ -40,8 +40,19 @@ def load(lo, hi, name="box"):
     mb = ctx.astype(float)
     e = {i: np.log(np.maximum(p.echoes[..., i].astype(float), 1.0)) for i in (1, 2)}
     det = {i: (L - F.mconv(L, mb, F.SHP)) * mb for i, L in e.items()}
-    return dict(p=p, lo=np.array(lo), rim=rim, vox=np.array(vox), miss=miss, ctx=ctx, wm=wm,
-                shell=shell, det=det, disp=det[1], dface=face_dist(rim.shape, vox))
+    return dict(
+        p=p,
+        lo=np.array(lo),
+        rim=rim,
+        vox=np.array(vox),
+        miss=miss,
+        ctx=ctx,
+        wm=wm,
+        shell=shell,
+        det=det,
+        disp=det[1],
+        dface=face_dist(rim.shape, vox),
+    )
 
 
 def wm_faces(wm, vox):
@@ -51,15 +62,21 @@ def wm_faces(wm, vox):
     for a in range(3):
         for sgn in (-1, 1):
             nb = np.ones_like(wm)  # outside the box counts as WM (not exposed)
-            src = [slice(None)] * 3; dst = [slice(None)] * 3
+            src = [slice(None)] * 3
+            dst = [slice(None)] * 3
             if sgn > 0:
-                src[a] = slice(1, None); dst[a] = slice(0, -1)
+                src[a] = slice(1, None)
+                dst[a] = slice(0, -1)
             else:
-                src[a] = slice(0, -1); dst[a] = slice(1, None)
+                src[a] = slice(0, -1)
+                dst[a] = slice(1, None)
             nb[tuple(dst)] = wm[tuple(src)]
             v = np.argwhere(wm & ~nb)
-            e = np.zeros(3); e[a] = sgn
-            cs.append((v + 0.5 * e) * vox); ns.append(np.repeat(e[None], len(v), 0)); vs.append(v)
+            e = np.zeros(3)
+            e[a] = sgn
+            cs.append((v + 0.5 * e) * vox)
+            ns.append(np.repeat(e[None], len(v), 0))
+            vs.append(v)
     return np.concatenate(cs), np.concatenate(ns), np.concatenate(vs)
 
 
@@ -75,24 +92,36 @@ def curvature(B, sig_mm, chunk=3000):
     wm, vox = B["wm"], B["vox"]
     fc, fn, fv = wm_faces(wm, vox)
     pts = np.argwhere(B["shell"])
-    idx = -np.ones(wm.shape, np.int64); idx[tuple(pts.T)] = np.arange(len(pts))
+    idx = -np.ones(wm.shape, np.int64)
+    idx[tuple(pts.T)] = np.arange(len(pts))
     own = idx[tuple(fv.T)]
     ok = own >= 0
     cnt = np.bincount(own[ok], minlength=len(pts)).astype(float)
-    c0 = np.stack([np.bincount(own[ok], fc[ok, a], len(pts)) for a in range(3)], 1) / np.maximum(cnt, 1)[:, None]
+    c0 = (
+        np.stack([np.bincount(own[ok], fc[ok, a], len(pts)) for a in range(3)], 1)
+        / np.maximum(cnt, 1)[:, None]
+    )
     n0 = np.stack([np.bincount(own[ok], fn[ok, a], len(pts)) for a in range(3)], 1)
     bare = cnt == 0  # shell voxels exposed only diagonally: centre on the voxel
     c0[bare] = pts[bare] * vox
     tree = cKDTree(fc)
-    k = int(min(len(fc), max(60, 1.6 * np.pi * (2.5 * sig_mm) ** 2 / (vox[0] * vox[1]) * 1.6)))
-    k1 = np.zeros(len(pts)); k2 = np.zeros(len(pts)); nout = np.zeros((len(pts), 3))
+    k = int(
+        min(
+            len(fc),
+            max(60, 1.6 * np.pi * (2.5 * sig_mm) ** 2 / (vox[0] * vox[1]) * 1.6),
+        )
+    )
+    k1 = np.zeros(len(pts))
+    k2 = np.zeros(len(pts))
+    nout = np.zeros((len(pts), 3))
     for s0 in range(0, len(pts), chunk):
         sl = slice(s0, min(s0 + chunk, len(pts)))
         c, n = c0[sl], n0[sl]
         d, j = tree.query(c, k=k, distance_upper_bound=3.0 * sig_mm)
         valid = np.isfinite(d)
         j = np.where(valid, j, 0)
-        P = fc[j] - c[:, None]; N = fn[j]
+        P = fc[j] - c[:, None]
+        N = fn[j]
         w = np.where(valid, np.exp(-0.5 * (d / sig_mm) ** 2), 0.0)
         bad = np.linalg.norm(n, axis=1) < 1e-9
         n = np.where(bad[:, None], (w[..., None] * N).sum(1), n)
@@ -103,16 +132,24 @@ def curvature(B, sig_mm, chunk=3000):
         n = n / (np.linalg.norm(n, axis=1, keepdims=True) + 1e-12)
         same = (N * n[:, None]).sum(-1) > 0.0
         ww = w * same
-        ref = np.where(np.abs(n[:, :1]) < 0.9, np.array([[1.0, 0, 0]]), np.array([[0, 1.0, 0]]))
-        e1 = np.cross(n, ref); e1 /= np.linalg.norm(e1, axis=1, keepdims=True)
+        ref = np.where(
+            np.abs(n[:, :1]) < 0.9, np.array([[1.0, 0, 0]]), np.array([[0, 1.0, 0]])
+        )
+        e1 = np.cross(n, ref)
+        e1 /= np.linalg.norm(e1, axis=1, keepdims=True)
         e2 = np.cross(n, e1)
-        x = (P * e1[:, None]).sum(-1); y = (P * e2[:, None]).sum(-1); h = (P * n[:, None]).sum(-1)
+        x = (P * e1[:, None]).sum(-1)
+        y = (P * e2[:, None]).sum(-1)
+        h = (P * n[:, None]).sum(-1)
         Xd = np.stack([x * x, x * y, y * y, x, y, np.ones_like(x)], -1)
         A = np.einsum("nk,nki,nkj->nij", ww, Xd, Xd) + 1e-6 * np.eye(6)
         b = np.einsum("nk,nki,nk->ni", ww, Xd, h)
         q = np.linalg.solve(A, b[..., None])[..., 0]
         hx, hy = q[:, 3], q[:, 4]
-        Hs = np.stack([np.stack([2 * q[:, 0], q[:, 1]], 1), np.stack([q[:, 1], 2 * q[:, 2]], 1)], 1)
+        Hs = np.stack(
+            [np.stack([2 * q[:, 0], q[:, 1]], 1), np.stack([q[:, 1], 2 * q[:, 2]], 1)],
+            1,
+        )
         gvec = np.stack([hx, hy], 1)
         I = np.eye(2)[None] + gvec[:, :, None] * gvec[:, None, :]
         II = Hs / np.sqrt(1 + hx**2 + hy**2)[:, None, None]
@@ -128,29 +165,44 @@ def curvature_sd(B, sig):
     """(Superseded: mixes the two sides of thin WM blades.) kappa_1, kappa_2 from the signed WM
     distance smoothed by sig voxels."""
     wm, vox = B["wm"], B["vox"]
-    sd = ndi.distance_transform_edt(~wm, sampling=vox) - ndi.distance_transform_edt(wm, sampling=vox)
+    sd = ndi.distance_transform_edt(~wm, sampling=vox) - ndi.distance_transform_edt(
+        wm, sampling=vox
+    )
     ords1 = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
     g = [ndi.gaussian_filter(sd, sig, order=o) / vox[a] for a, o in enumerate(ords1)]
     pairs = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
     H = []
     for a, b in pairs:
-        o = [0, 0, 0]; o[a] += 1; o[b] += 1
+        o = [0, 0, 0]
+        o[a] += 1
+        o[b] += 1
         H.append(ndi.gaussian_filter(sd, sig, order=tuple(o)) / (vox[a] * vox[b]))
     sds = ndi.gaussian_filter(sd, sig)
     pts = np.argwhere(B["shell"]).astype(float)
     at = lambda f, x: ndi.map_coordinates(f, x.T, order=1, mode="nearest")
     gx = np.stack([at(c, pts) for c in g], 1)
     n = gx / (np.linalg.norm(gx, axis=1, keepdims=True) + 1e-12)
-    x0 = pts - (at(sds, pts) / np.linalg.norm(gx, axis=1))[:, None] * n / vox  # onto the zero level
+    x0 = (
+        pts - (at(sds, pts) / np.linalg.norm(gx, axis=1))[:, None] * n / vox
+    )  # onto the zero level
     gx = np.stack([at(c, x0) for c in g], 1)
     gn = np.linalg.norm(gx, axis=1)
     n = gx / (gn[:, None] + 1e-12)
     h = np.stack([at(c, x0) for c in H], 1)
-    M = np.stack([np.stack([h[:, 0], h[:, 1], h[:, 2]], 1), np.stack([h[:, 1], h[:, 3], h[:, 4]], 1),
-                  np.stack([h[:, 2], h[:, 4], h[:, 5]], 1)], 1)
+    M = np.stack(
+        [
+            np.stack([h[:, 0], h[:, 1], h[:, 2]], 1),
+            np.stack([h[:, 1], h[:, 3], h[:, 4]], 1),
+            np.stack([h[:, 2], h[:, 4], h[:, 5]], 1),
+        ],
+        1,
+    )
     # tangent basis
-    ref = np.where(np.abs(n[:, :1]) < 0.9, np.array([[1.0, 0, 0]]), np.array([[0, 1.0, 0]]))
-    e1 = np.cross(n, ref); e1 /= np.linalg.norm(e1, axis=1, keepdims=True)
+    ref = np.where(
+        np.abs(n[:, :1]) < 0.9, np.array([[1.0, 0, 0]]), np.array([[0, 1.0, 0]])
+    )
+    e1 = np.cross(n, ref)
+    e1 /= np.linalg.norm(e1, axis=1, keepdims=True)
     e2 = np.cross(n, e1)
     E = np.stack([e1, e2], 2)  # (N, 3, 2)
     S = np.einsum("nia,nij,njb->nab", E, M, E) / gn[:, None, None]
@@ -161,11 +213,19 @@ def curvature_sd(B, sig):
 def tensor_normal(B):
     mb = B["ctx"].astype(float)
     Tc = F.tensor(B["det"][1], mb) + F.tensor(B["det"][2], mb)
-    Mt = np.stack([np.stack([Tc[0], Tc[1], Tc[2]], -1), np.stack([Tc[1], Tc[3], Tc[4]], -1),
-                   np.stack([Tc[2], Tc[4], Tc[5]], -1)], -2)
+    Mt = np.stack(
+        [
+            np.stack([Tc[0], Tc[1], Tc[2]], -1),
+            np.stack([Tc[1], Tc[3], Tc[4]], -1),
+            np.stack([Tc[2], Tc[4], Tc[5]], -1),
+        ],
+        -2,
+    )
     w_, V = np.linalg.eigh(Mt)
     nh = V[..., :, 2]
-    coh = np.clip((w_[..., 2] - w_[..., 1]) / np.maximum(w_[..., 2] + w_[..., 1], 1e-12), 0, 1)
+    coh = np.clip(
+        (w_[..., 2] - w_[..., 1]) / np.maximum(w_[..., 2] + w_[..., 1], 1e-12), 0, 1
+    )
     return nh, np.where(B["ctx"], coh, 0.0)
 
 
@@ -182,7 +242,8 @@ def fit_all_wm(B, dom_ctx=None):
     d_wm = ndi.distance_transform_edt(~B["wm"], sampling=vox)
     g = np.stack(np.gradient(ndi.gaussian_filter(d_wm, 1.0), *vox), -1)
     gh = g / (np.linalg.norm(g, axis=-1, keepdims=True) + 1e-12)
-    sgn = np.sign((nh * gh).sum(-1)); sgn[sgn == 0] = 1
+    sgn = np.sign((nh * gh).sum(-1))
+    sgn[sgn == 0] = 1
     dirv = coh[..., None] * nh * sgn[..., None] + LAM * gh
     dirv /= np.linalg.norm(dirv, axis=-1, keepdims=True) + 1e-12
     T, info = solve_field(dom, fixed, [dirv[..., a] for a in range(3)], tuple(vox))
@@ -194,7 +255,14 @@ def fit_all_wm(B, dom_ctx=None):
     n1n = n1s / (np.linalg.norm(n1s, axis=-1, keepdims=True) + 1e-12)
     div = sum(np.gradient(n1n[..., a], vox[a], axis=a) for a in range(3))
     div = np.clip(np.where((agree > 0.8) & (Tf > 0.3) & ctx, div, 0.0), -2, 2)
-    return dict(T=T, Tf=Tf, g=np.stack([gT[..., a] for a in range(3)], 0), div=div, coh=coh, info=info)
+    return dict(
+        T=T,
+        Tf=Tf,
+        g=np.stack([gT[..., a] for a in range(3)], 0),
+        div=div,
+        coh=coh,
+        info=info,
+    )
 
 
 def trace(B, Fd, seed, lmax=6.0):
@@ -241,7 +309,7 @@ def column(B, Fd, pts, k1, k2, freeze_after=None):
     e = ndi.gaussian_filter1d(ndi.map_coordinates(B["disp"], pts.T, order=1), 1.5)
     dv = ndi.map_coordinates(Fd["div"], pts.T, order=1)
     if freeze_after is not None:
-        dv[freeze_after + 1:] = 0.0
+        dv[freeze_after + 1 :] = 0.0
     ds = np.diff(s, prepend=0.0)
     u = np.cumsum(dv * ds)
     v_div = np.cumsum(np.exp(u) * ds)

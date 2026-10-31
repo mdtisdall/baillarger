@@ -50,15 +50,32 @@ def load(work, tag, log=print):
         W = np.zeros_like(S)
         EN, NC, VA = np.zeros_like(S), np.zeros_like(S), np.zeros(S.shape, bool)
         for a0 in range(0, len(pr), 20000):
-            p = pr[a0:a0 + 20000]
-            s_, ncc, en, va = FL.shifts(F[:, p[:, 0]], F[:, p[:, 1]], M_[p[:, 0]], M_[p[:, 1]], STEP)
-            S[a0:a0 + 20000], NC[a0:a0 + 20000], EN[a0:a0 + 20000], VA[a0:a0 + 20000] = s_, ncc, en, va
+            p = pr[a0 : a0 + 20000]
+            s_, ncc, en, va = FL.shifts(
+                F[:, p[:, 0]], F[:, p[:, 1]], M_[p[:, 0]], M_[p[:, 1]], STEP
+            )
+            (
+                S[a0 : a0 + 20000],
+                NC[a0 : a0 + 20000],
+                EN[a0 : a0 + 20000],
+                VA[a0 : a0 + 20000],
+            ) = s_, ncc, en, va
         W[:] = FL.pair_weights(NC, EN, VA, float(np.median(EN[VA])))
         tL, tw = ties_of(Z, sub, J["ties"], radius_of(tag))
         np.savez_compressed(cache, S=S, W=W, tie_L=tL, tie_w=tw)
         log(f"edit_data: rebuilt shifts for {len(pr):,} pairs -> {cache}")
-    D = JL.Data(step=STEP, ns=Z["ns"][sub], top=J["top"], mu=Q["mu"][sub], pairs=pr, S=S, W=W,
-                ties=J["ties"], tie_L=tL, tie_w=tw)
+    D = JL.Data(
+        step=STEP,
+        ns=Z["ns"][sub],
+        top=J["top"],
+        mu=Q["mu"][sub],
+        pairs=pr,
+        S=S,
+        W=W,
+        ties=J["ties"],
+        tie_L=tL,
+        tie_w=tw,
+    )
     D.tau = JL.TAU
     D.c0 = J["z"][-1].copy() if re.search(r"_r\d+$", tag) else J["c0"]
     return D, J, Z
@@ -83,7 +100,9 @@ def ties_of(Z, sub, saved, radius):
         if d <= radius:
             dot = float(nr[sub[j]] @ nr[t])
             if dot < -0.3 and j != i:
-                ties.append((i, j)); tL.append(float(far_wm[t])); tw.append(-dot)
+                ties.append((i, j))
+                tL.append(float(far_wm[t]))
+                tw.append(-dot)
     ties = np.array(ties, int).reshape(-1, 2)
     assert np.array_equal(ties, saved), "rebuilt ties differ from the saved ones"
     return np.array(tL), np.array(tw)
@@ -98,7 +117,7 @@ def point_traces(Z, sub, P=None, within=0.3):
     tree = cKDTree((P * vox).astype(float))
     hit = [([], []) for _ in range(len(P))]
     for i, t in enumerate(sub):
-        d, k = tree.query(pos[t, :ns[t]].astype(float) * vox)
+        d, k = tree.query(pos[t, : ns[t]].astype(float) * vox)
         j = int(np.argmin(d))
         if d[j] <= within:
             hit[int(k[j])][0].append(i)
@@ -108,7 +127,9 @@ def point_traces(Z, sub, P=None, within=0.3):
 
 def point_errors(pia, hits):
     """Per point: median |pia - point depth| over its traces (nan where none), as joint_site.score."""
-    return np.array([np.median(np.abs(pia[i] - d)) if i.size else np.nan for i, d in hits])
+    return np.array(
+        [np.median(np.abs(pia[i] - d)) if i.size else np.nan for i, d in hits]
+    )
 
 
 if __name__ == "__main__":
@@ -126,5 +147,11 @@ if __name__ == "__main__":
     M, o = JL.build(D, 0.04, z, np.where(cert, 0.16, 0.48))
     lab = np.round(z.ravel() / 0.04).astype(int) - np.asarray(M.o)
     js = json.load(open(f"{work}/joint_{tag}.json"))
-    print(dict(tag=tag, seconds=round(time.time() - t0, 1), energy_here=round(WC.energy(M, lab), 4),
-               energy_saved_fine=round(js["history"][-1]["energy"], 4)))
+    print(
+        dict(
+            tag=tag,
+            seconds=round(time.time() - t0, 1),
+            energy_here=round(WC.energy(M, lab), 4),
+            energy_saved_fine=round(js["history"][-1]["energy"], 4),
+        )
+    )

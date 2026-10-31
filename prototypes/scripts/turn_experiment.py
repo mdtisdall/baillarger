@@ -45,7 +45,13 @@ from baillarger import column_traces as CT
 from baillarger import mesh_graph as G
 from baillarger import streamlines as S
 
-VARIANTS = {"A": (False, 60.0), "B": (True, 60.0), "C": (False, None), "D": (True, None), "E": (True, None)}
+VARIANTS = {
+    "A": (False, 60.0),
+    "B": (True, 60.0),
+    "C": (False, None),
+    "D": (True, None),
+    "E": (True, None),
+}
 CLS = list(CT.CLASS)
 T0 = time.time()
 
@@ -73,7 +79,7 @@ def cut_bounces(pos, ns, oc, T, nrm0, vox):
         Ta = S.sample(T, pos[idx])
         j = np.nanargmax(np.where(np.isfinite(Ta), Ta, -np.inf), 1)
         for i, m in zip(idx, j):
-            pos[i, m + 1:] = np.nan
+            pos[i, m + 1 :] = np.nan
             ns[i] = m + 1
         oc[idx] = S.CONTACT
     return idx.size
@@ -85,10 +91,21 @@ def run_variants(R, labels, dface, v, f, nrm, tv, vox):
     x0 = v[tv]
     out = {}
     for name, (ext, turn) in VARIANTS.items():
-        pos, ns, oc = S.trace(R[ext], labels, dface, x0, nrm[tv], vox, CT.NMAX, CT.BLEND_MM,
-                              turn_deg=180.0 if turn is None else turn)
+        pos, ns, oc = S.trace(
+            R[ext],
+            labels,
+            dface,
+            x0,
+            nrm[tv],
+            vox,
+            CT.NMAX,
+            CT.BLEND_MM,
+            turn_deg=180.0 if turn is None else turn,
+        )
         if name == "E":
-            say(f"  variant E: {cut_bounces(pos, ns, oc, R['T'], nrm[tv], vox):,} traces cut at T's maximum")
+            say(
+                f"  variant E: {cut_bounces(pos, ns, oc, R['T'], nrm[tv], vox):,} traces cut at T's maximum"
+            )
         k = np.arange(len(tv))
         endp = pos[k, ns - 1].astype(float)
         last = endp - pos[k, np.maximum(ns - 2, 0)]
@@ -96,13 +113,23 @@ def run_variants(R, labels, dface, v, f, nrm, tv, vox):
         end_patch = P.of_vertex[G.crossing_vertex(v, nrm, endp, last, vox)]
         cls = CT.classify(oc, P.D[P.of_vertex[tv], end_patch])
         out[name] = dict(pos=pos, ns=ns, out=oc, cls=cls)
-        say(f"  variant {name}: " + ", ".join(f"{S.OUTCOME[o]} {np.sum(oc == o):,}" for o in range(10)
-                                                if np.sum(oc == o)))
+        say(
+            f"  variant {name}: "
+            + ", ".join(
+                f"{S.OUTCOME[o]} {np.sum(oc == o):,}"
+                for o in range(10)
+                if np.sum(oc == o)
+            )
+        )
     return out
 
 
 def counts(a, keep, names):
-    return {names[i]: int(np.sum(keep & (a == i))) for i in range(len(names)) if np.sum(keep & (a == i))}
+    return {
+        names[i]: int(np.sum(keep & (a == i)))
+        for i in range(len(names))
+        if np.sum(keep & (a == i))
+    }
 
 
 def site(A):
@@ -117,46 +144,84 @@ def site(A):
     say(f"{A.name}: {len(tv):,} roots, {keep.sum():,} >= 2 mm from a face")
     R = fields(t.det, t.ctx, t.wm, t.labels, t.vox)
     V = run_variants(R, t.labels, t.dface, v, f, nrm, tv, t.vox)
-    res = dict(site=A.name, wm="handle-free" if dseg else "aseg", roots=int(keep.sum()), variants={})
+    res = dict(
+        site=A.name,
+        wm="handle-free" if dseg else "aseg",
+        roots=int(keep.sum()),
+        variants={},
+    )
     turnedA = keep & (V["A"]["out"] == S.TURN)
     Pts = None
     if A.points:
         Pts = np.array(json.load(open(A.points))["points_full0"], float) - np.array(lo)
         Pts = Pts[np.all((Pts >= 0) & (Pts < 141), 1)]
     for name, d in V.items():
-        r = dict(outcomes=counts(d["out"], keep, list(S.OUTCOME)), classes=counts(d["cls"], keep, CLS),
-                 A_turned_now=counts(d["cls"], turnedA, CLS))
+        r = dict(
+            outcomes=counts(d["out"], keep, list(S.OUTCOME)),
+            classes=counts(d["cls"], keep, CLS),
+            A_turned_now=counts(d["cls"], turnedA, CLS),
+        )
         k_ = np.arange(len(tv))
-        d_end = (d["pos"][k_, d["ns"] - 1] - d["pos"][k_, np.maximum(d["ns"] - 2, 0)]).astype(float)
+        d_end = (
+            d["pos"][k_, d["ns"] - 1] - d["pos"][k_, np.maximum(d["ns"] - 2, 0)]
+        ).astype(float)
         fwd = (d_end * nrm[tv]).sum(1) > 0
-        r["own bank, entering the WM heading on (not back)"] = int(np.sum(keep & (d["cls"] == CT.OWN) & fwd))
+        r["own bank, entering the WM heading on (not back)"] = int(
+            np.sum(keep & (d["cls"] == CT.OWN) & fwd)
+        )
         if Pts is not None:
             ic = np.flatnonzero(keep & (d["cls"] == CT.CROSS))
             tree = cKDTree(Pts * t.vox)
             hit = set()
             for i in ic:
-                dd, j = tree.query(d["pos"][i, :d["ns"][i]].astype(float) * t.vox)
+                dd, j = tree.query(d["pos"][i, : d["ns"][i]].astype(float) * t.vox)
                 hit.update(j[dd <= 0.3].tolist())
-            r["marked points crossed (of %d)" % len(Pts)] = sorted(int(j) + 1 for j in hit)
+            r["marked points crossed (of %d)" % len(Pts)] = sorted(
+                int(j) + 1 for j in hit
+            )
         if name != "A":
             same = keep & (V["A"]["out"] != S.TURN) & (d["out"] == V["A"]["out"])
             dev = []
             for i in np.flatnonzero(same)[:20000]:
                 n_ = min(V["A"]["ns"][i], d["ns"][i])
-                dev.append(np.max(np.linalg.norm((V["A"]["pos"][i, :n_] - d["pos"][i, :n_]) * t.vox, axis=1)))
+                dev.append(
+                    np.max(
+                        np.linalg.norm(
+                            (V["A"]["pos"][i, :n_] - d["pos"][i, :n_]) * t.vox, axis=1
+                        )
+                    )
+                )
             r["max distance from A's path where A did not turn (mm) p50/p90/p99"] = (
-                np.percentile(dev, [50, 90, 99]).round(3).tolist() if dev else None)
+                np.percentile(dev, [50, 90, 99]).round(3).tolist() if dev else None
+            )
         res["variants"][name] = r
     json.dump(res, open(f"{A.work}/turn_experiment_{A.name}.json", "w"), indent=1)
     print(json.dumps(res, indent=1))
     d = V["E"]
     starts = np.r_[0, np.cumsum(d["ns"])].astype(np.int64)
-    xyz = np.concatenate([d["pos"][i, :d["ns"][i]] for i in range(len(tv))]).astype(np.float32)
-    np.savez_compressed(f"{A.work}/turn_experiment_{A.name}_E_paths.npz", lo=np.array(lo), vox=t.vox,
-                        step_mm=S.STEP_MM, v=v.astype(np.float32), f=f, nrm=nrm.astype(np.float32), tv=tv,
-                        keep=keep, out=d["out"], cls=d["cls"], ns=d["ns"], out_A=V["A"]["out"],
-                        cls_A=V["A"]["cls"], path_start=starts, path_xyz=xyz, classes=np.array(CLS),
-                        outcomes=np.array(S.OUTCOME))
+    xyz = np.concatenate([d["pos"][i, : d["ns"][i]] for i in range(len(tv))]).astype(
+        np.float32
+    )
+    np.savez_compressed(
+        f"{A.work}/turn_experiment_{A.name}_E_paths.npz",
+        lo=np.array(lo),
+        vox=t.vox,
+        step_mm=S.STEP_MM,
+        v=v.astype(np.float32),
+        f=f,
+        nrm=nrm.astype(np.float32),
+        tv=tv,
+        keep=keep,
+        out=d["out"],
+        cls=d["cls"],
+        ns=d["ns"],
+        out_A=V["A"]["out"],
+        cls_A=V["A"]["cls"],
+        path_start=starts,
+        path_xyz=xyz,
+        classes=np.array(CLS),
+        outcomes=np.array(S.OUTCOME),
+    )
 
 
 def phantoms(A):
@@ -171,7 +236,14 @@ def phantoms(A):
         v, f, nrm = CT.white_mesh(B["wm"])
         tv = CT.root_vertices(v, nrm)
         x0 = v[tv]
-        keep = B["dface"][tuple(np.clip(np.round(x0).astype(int), 0, np.array(labels.shape) - 1).T)] >= 2.0
+        keep = (
+            B["dface"][
+                tuple(
+                    np.clip(np.round(x0).astype(int), 0, np.array(labels.shape) - 1).T
+                )
+            ]
+            >= 2.0
+        )
         truth = fold.column(x0)
         tc = FE.true_class(truth)
         say(f"{pname}: {keep.sum()} roots")
@@ -187,12 +259,23 @@ def phantoms(A):
                 to_contact=round(float(np.mean(d["cls"][k] == CT.TOCONTACT)), 3),
                 path_err_p50_p90=np.nanpercentile(emax[k], [50, 90]).round(3).tolist(),
                 end_err_p50_p90=np.nanpercentile(eend[k], [50, 90]).round(3).tolist(),
-                contact_err_p50_p90=(np.nanpercentile(econ[k], [50, 90]).round(3).tolist()
-                                     if np.isfinite(econ[k]).any() else None))
+                contact_err_p50_p90=(
+                    np.nanpercentile(econ[k], [50, 90]).round(3).tolist()
+                    if np.isfinite(econ[k]).any()
+                    else None
+                ),
+            )
         res["phantoms"][pname] = row
-        say("  " + "; ".join(f"{n} right {r['right_class']}, failed {r['failed']}, path {r['path_err_p50_p90']}"
-                             for n, r in row.items()))
-    json.dump(res, open(f"{A.work}/turn_experiment_phantoms_{A.name}.json", "w"), indent=1)
+        say(
+            "  "
+            + "; ".join(
+                f"{n} right {r['right_class']}, failed {r['failed']}, path {r['path_err_p50_p90']}"
+                for n, r in row.items()
+            )
+        )
+    json.dump(
+        res, open(f"{A.work}/turn_experiment_phantoms_{A.name}.json", "w"), indent=1
+    )
 
 
 def main():
@@ -201,7 +284,9 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--box", type=int, nargs=3)
     ap.add_argument("--points")
-    ap.add_argument("--dseg", help="the corrected segmentation (python -m baillarger.white dseg)")
+    ap.add_argument(
+        "--dseg", help="the corrected segmentation (python -m baillarger.white dseg)"
+    )
     ap.add_argument("--phantoms", action="store_true")
     ap.add_argument("--noise", type=float, default=1.0)
     A = ap.parse_args()

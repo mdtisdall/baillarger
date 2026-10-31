@@ -54,7 +54,9 @@ def run(name, pt, out):
     ctx = (rim == 3) & ~missing_tissue(rim, p.flash, vox)
     m = ctx.astype(np.float64)
     inner = ndi.binary_erosion(ctx, iterations=MARGIN)
-    logs = {e: np.log(np.maximum(p.echoes[..., e].astype(np.float64), 1.0)) for e in (1, 2)}
+    logs = {
+        e: np.log(np.maximum(p.echoes[..., e].astype(np.float64), 1.0)) for e in (1, 2)
+    }
     det = {e: (L - mconv(L, m, SHP)) * m for e, L in logs.items()}
     d_wm = ndi.distance_transform_edt(rim != 2, sampling=vox)
     d_fl = ndi.distance_transform_edt(rim != 1, sampling=vox)
@@ -92,11 +94,15 @@ def run(name, pt, out):
         dev = np.full(inner_b.shape, np.nan)
         dev[idx] = np.degrees(np.arccos(np.clip(np.abs((gn * n3).sum(1)), 0, 1)))
         res[key] = (ang[off], nn[off], dev[off])
-        print(f"   deviation from boundary-geometry normal: median {np.median(dev[idx]):.1f} deg, "
-              f">20 deg: {np.mean(dev[idx] > 20):.0%}")
+        print(
+            f"   deviation from boundary-geometry normal: median {np.median(dev[idx]):.1f} deg, "
+            f">20 deg: {np.mean(dev[idx] > 20):.0%}"
+        )
         a = ang[idx]
-        print(f"{name} {key}: interior voxels in box {a.size:,}; angle <10: "
-              f"{np.mean(a < 10):.0%}, <20: {np.mean(a < 20):.0%}, median {np.median(a):.1f} deg")
+        print(
+            f"{name} {key}: interior voxels in box {a.size:,}; angle <10: "
+            f"{np.mean(a < 10):.0%}, <20: {np.mean(a < 20):.0%}, median {np.median(a):.1f} deg"
+        )
 
     img3 = logs[2][sub]
     det3 = det[2][sub]
@@ -106,9 +112,12 @@ def run(name, pt, out):
     names = ["i", "j", "k"]
     fig, axs = plt.subplots(3, 4, figsize=(18, 13.5))
     for r, (ax, sl) in enumerate(planes):
+
         def show(a, x, **kw):
             a.imshow(np.asarray(x[sl]).T, origin="lower", interpolation="nearest", **kw)
-            a.set_xticks([]); a.set_yticks([])
+            a.set_xticks([])
+            a.set_yticks([])
+
         im = img3[sl]
         v = np.percentile(im[ctx_s[sl]], [1, 99]) if ctx_s[sl].any() else (None, None)
         show(axs[r, 0], img3, cmap="gray", vmin=v[0], vmax=v[1])
@@ -119,10 +128,19 @@ def run(name, pt, out):
         show(axs[r, 2], img3, cmap="gray", vmin=v[0], vmax=v[1], alpha=0.5)
         show(axs[r, 2], ang, cmap=cmap, norm=norm, alpha=0.85)
         show(axs[r, 3], img3, cmap="gray", vmin=v[0], vmax=v[1], alpha=0.5)
-        hm = axs[r, 3].imshow(dev[sl].T, origin="lower", interpolation="nearest",
-                              cmap="magma_r", vmin=0, vmax=40, alpha=0.9)
+        hm = axs[r, 3].imshow(
+            dev[sl].T,
+            origin="lower",
+            interpolation="nearest",
+            cmap="magma_r",
+            vmin=0,
+            vmax=40,
+            alpha=0.9,
+        )
         if r == 0:
-            fig.colorbar(hm, ax=axs[:, 3], shrink=0.4, label="degrees from boundary geometry")
+            fig.colorbar(
+                hm, ax=axs[:, 3], shrink=0.4, label="degrees from boundary geometry"
+            )
         inplane = [d_ for d_ in range(3) if d_ != ax]
         segs, cols = [], []
         a2, n2d = ang[sl], nn[sl]
@@ -140,20 +158,31 @@ def run(name, pt, out):
         xl, yl = axs[r, 2].get_xlim(), axs[r, 2].get_ylim()
         axs[r, 2].add_collection(LineCollection(segs, colors="k", linewidths=2.2))
         axs[r, 2].add_collection(LineCollection(segs, colors=cols, linewidths=1.2))
-        axs[r, 2].set_xlim(xl); axs[r, 2].set_ylim(yl)
+        axs[r, 2].set_xlim(xl)
+        axs[r, 2].set_ylim(yl)
         axs[r, 0].set_ylabel(f"slice {names[ax]} = {pt[ax]}", fontsize=12)
         for c in range(4):
             xl, yl = axs[r, c].get_xlim(), axs[r, c].get_ylim()
-            axs[r, c].plot(*(np.array([pt[d_] - lo[d_] for d_ in inplane])), "c+", ms=12, mew=2)
-            axs[r, c].set_xlim(xl); axs[r, c].set_ylim(yl)
-    titles = ["echo 3 (log)", "echo 3, trend removed",
-              "echo 2 vs 3 agreement + layer strokes", "data normal vs boundary geometry"]
+            axs[r, c].plot(
+                *(np.array([pt[d_] - lo[d_] for d_ in inplane])), "c+", ms=12, mew=2
+            )
+            axs[r, c].set_xlim(xl)
+            axs[r, c].set_ylim(yl)
+    titles = [
+        "echo 3 (log)",
+        "echo 3, trend removed",
+        "echo 2 vs 3 agreement + layer strokes",
+        "data normal vs boundary geometry",
+    ]
     for c, t in enumerate(titles):
         axs[0, c].set_title(t, fontsize=13)
-    fig.suptitle(f"{name}: layer-normal agreement between echo 2 and echo 3 "
-                 f"(green < 10°, yellow 10–20°, red > 20°; cyan + = review point; "
-                 f"{W * 2 * 0.16:.0f} mm field)", fontsize=14)
-    
+    fig.suptitle(
+        f"{name}: layer-normal agreement between echo 2 and echo 3 "
+        f"(green < 10°, yellow 10–20°, red > 20°; cyan + = review point; "
+        f"{W * 2 * 0.16:.0f} mm field)",
+        fontsize=14,
+    )
+
     fig.savefig(out, dpi=110)
     print("wrote", out)
 

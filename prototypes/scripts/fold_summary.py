@@ -15,8 +15,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 FIG, WORK = sys.argv[1:3]
-COL = {"current": "#e34948", "laplace": "#2a78d6", "fitted": "#30d5ff", "fitted_blend": "#ff2bd6",
-       "multiscale": "#1baf7a", "blend": "#c79a00", "perbank": "#9b59b6"}
+COL = {
+    "current": "#e34948",
+    "laplace": "#2a78d6",
+    "fitted": "#30d5ff",
+    "fitted_blend": "#ff2bd6",
+    "multiscale": "#1baf7a",
+    "blend": "#c79a00",
+    "perbank": "#9b59b6",
+}
 
 fig, axs = plt.subplots(2, 2, figsize=(18, 9))
 for j, site in enumerate(("V1V2_banks", "M1S1")):
@@ -36,10 +43,15 @@ for j, site in enumerate(("V1V2_banks", "M1S1")):
         a.set_xticks(np.arange(len(phs)))
         a.set_xticklabels(phs, fontsize=8)
     axs[0, j].set_ylim(0, 1)
-    axs[0, j].set_title(f"{site} features, measured noise: primary traces of the right class", fontsize=10)
+    axs[0, j].set_title(
+        f"{site} features, measured noise: primary traces of the right class",
+        fontsize=10,
+    )
     axs[1, j].set_ylim(0, 1.2)
-    axs[1, j].set_title("largest distance from the true column (mm), with fallback: median (solid), p90 (light)",
-                        fontsize=10)
+    axs[1, j].set_title(
+        "largest distance from the true column (mm), with fallback: median (solid), p90 (light)",
+        fontsize=10,
+    )
 axs[0, 0].legend(fontsize=8, ncol=4)
 fig.tight_layout()
 fig.savefig(f"{FIG}/fold_summary.png", dpi=72)

@@ -41,22 +41,36 @@ def run(name: str) -> None:
     gphi = np.stack(np.gradient(phi), -1)
     nrm = gphi / (np.linalg.norm(gphi, axis=-1, keepdims=True) + 1e-12)
 
-    logs = [np.log(np.maximum(p.echoes[..., e].astype(np.float64), 1.0)) for e in range(3)]
+    logs = [
+        np.log(np.maximum(p.echoes[..., e].astype(np.float64), 1.0)) for e in range(3)
+    ]
     idx = np.nonzero(interior)
-    print(f"\n=== {name}: interior voxels {idx[0].size:,} "
-          f"(cortex {ctx.sum():,}); t median {np.median(t[interior]):.2f} mm")
+    print(
+        f"\n=== {name}: interior voxels {idx[0].size:,} "
+        f"(cortex {ctx.sum():,}); t median {np.median(t[interior]):.2f} mm"
+    )
 
     tb = [(0, 2.5), (2.5, 3.2), (3.2, 5.0)]
     rb = [(0.15, 0.4), (0.4, 0.65), (0.65, 0.9)]
     for sd in (0.7, 1.0, 1.5):
-        g = [np.stack([ndi.gaussian_filter(L, sd, order=o) for o in
-                       ((1, 0, 0), (0, 1, 0), (0, 0, 1))], -1) for L in logs]
+        g = [
+            np.stack(
+                [
+                    ndi.gaussian_filter(L, sd, order=o)
+                    for o in ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+                ],
+                -1,
+            )
+            for L in logs
+        ]
         comps = {}
         for i in range(3):
             for j in range(i, 3):
                 acc = np.zeros(rim.shape)
                 for a, b in ((0, 1), (0, 2), (1, 2)):
-                    acc += 0.5 * (g[a][..., i] * g[b][..., j] + g[b][..., i] * g[a][..., j])
+                    acc += 0.5 * (
+                        g[a][..., i] * g[b][..., j] + g[b][..., i] * g[a][..., j]
+                    )
                 comps[i, j] = ndi.gaussian_filter(acc / 3.0, SI)[idx]
         n_pts = idx[0].size
         S = np.empty((n_pts, 3, 3))
@@ -71,8 +85,13 @@ def run(name: str) -> None:
         cosang = np.abs(np.einsum("ij,ij->i", e1, nrm[idx]))
         ang = np.degrees(np.arccos(np.clip(cosang, 0, 1)))
         tt, rr = t[idx], r[idx]
-        print(f"-- derivative scale {sd} vox: l2/l1 median [angle e1 vs normal, median deg] (n)")
-        print("   t (mm) \\ r      " + "  ".join(f"{a:.2f}-{b:.2f}".ljust(20) for a, b in rb))
+        print(
+            f"-- derivative scale {sd} vox: l2/l1 median [angle e1 vs normal, median deg] (n)"
+        )
+        print(
+            "   t (mm) \\ r      "
+            + "  ".join(f"{a:.2f}-{b:.2f}".ljust(20) for a, b in rb)
+        )
         for ta, tb_ in tb:
             row = []
             for ra, rb_ in rb:
@@ -80,7 +99,11 @@ def run(name: str) -> None:
                 if m.sum() < 200:
                     row.append("-".ljust(20))
                     continue
-                row.append(f"{np.nanmedian(lin[m]):.2f} [{np.median(ang[m]):4.1f}] ({m.sum()//1000}k)".ljust(20))
+                row.append(
+                    f"{np.nanmedian(lin[m]):.2f} [{np.median(ang[m]):4.1f}] ({m.sum() // 1000}k)".ljust(
+                        20
+                    )
+                )
             print(f"   {ta:.1f}-{tb_:.1f}       " + "  ".join(row))
         del g, comps, S, V
 

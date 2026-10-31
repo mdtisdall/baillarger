@@ -73,7 +73,11 @@ def sample(f, field, p, dcur):
                 q = tuple(q)
                 if f.state[q] != L.ACCEPTED or not f.cortex[q] or f.d[q] @ dcur <= 0:
                     continue
-                wt = (fr[0] if a else 1 - fr[0]) * (fr[1] if b else 1 - fr[1]) * (fr[2] if c else 1 - fr[2])
+                wt = (
+                    (fr[0] if a else 1 - fr[0])
+                    * (fr[1] if b else 1 - fr[1])
+                    * (fr[2] if c else 1 - fr[2])
+                )
                 tot += wt
                 acc += wt * field[q]
                 dacc += wt * f.d[q]
@@ -105,12 +109,25 @@ def trace(F, fV, fLn, start, n0, disp):
         TL.append(tl)
         TV.append(tv)
         E.append(ndi.map_coordinates(disp, p[:, None], order=1)[0])
-        dmin = min(dmin, F.dface[tuple(np.clip(np.round(p).astype(int), 0, np.array(F.wm.shape) - 1))])
+        dmin = min(
+            dmin,
+            F.dface[
+                tuple(np.clip(np.round(p).astype(int), 0, np.array(F.wm.shape) - 1))
+            ],
+        )
         dn = dv / (np.linalg.norm(dv) + 1e-12)
         p = p + STEP * dn
         s += STEP * h
         dcur = dn
-    return np.array(S), np.array(W), np.array(TL), np.array(TV), np.array(E), status, dmin
+    return (
+        np.array(S),
+        np.array(W),
+        np.array(TL),
+        np.array(TV),
+        np.array(E),
+        status,
+        dmin,
+    )
 
 
 def main():
@@ -149,33 +166,61 @@ def main():
         if not m.any():
             continue
         ks = np.flatnonzero(m)[np.argmin(e[m])]
-        rows.append(dict(Hm=float(Hm), s_top=float(S[-1]), w_top=float(W[-1]), fr_s=float(S[ks] / S[-1]),
-                         fr_w=float(W[ks] / W[-1]), tau_len=float(TL[ks]), tau_vol=float(TV[ks]),
-                         dface=float(min(dmin, F.dface[tuple(r)]))))
+        rows.append(
+            dict(
+                Hm=float(Hm),
+                s_top=float(S[-1]),
+                w_top=float(W[-1]),
+                fr_s=float(S[ks] / S[-1]),
+                fr_w=float(W[ks] / W[-1]),
+                tau_len=float(TL[ks]),
+                tau_vol=float(TV[ks]),
+                dface=float(min(dmin, F.dface[tuple(r)])),
+            )
+        )
     rows = [r for r in rows if r["dface"] >= 2.0]  # as ev_closed.usable
     h_ = np.array([r["Hm"] for r in rows])
     out = dict(columns=len(rows), roots=len(roots))
-    for key, lab in (("fr_s", "own top, distance s / s_top"), ("fr_w", "own top, volume w / w_top"),
-                     ("tau_len", "pass tau, length form (posterior)"), ("tau_vol", "pass tau, volume form (posterior)")):
+    for key, lab in (
+        ("fr_s", "own top, distance s / s_top"),
+        ("fr_w", "own top, volume w / w_top"),
+        ("tau_len", "pass tau, length form (posterior)"),
+        ("tau_vol", "pass tau, volume form (posterior)"),
+    ):
         v = np.array([r[key] for r in rows])
         ok = np.isfinite(v)
         q = np.percentile(v[ok], [25, 50, 75])
-        out[key] = dict(label=lab, median=float(q[1]), iqr=float(q[2] - q[0]),
-                        rho=float(spearmanr(h_[ok], v[ok]).statistic), n=int(ok.sum()))
-        LF.log(f"   {lab:38s} median {q[1]:.3f}  IQR {q[2] - q[0]:.3f}  rho(Hm) {out[key]['rho']:+.2f}  (n {ok.sum()})")
+        out[key] = dict(
+            label=lab,
+            median=float(q[1]),
+            iqr=float(q[2] - q[0]),
+            rho=float(spearmanr(h_[ok], v[ok]).statistic),
+            n=int(ok.sum()),
+        )
+        LF.log(
+            f"   {lab:38s} median {q[1]:.3f}  IQR {q[2] - q[0]:.3f}  rho(Hm) {out[key]['rho']:+.2f}  (n {ok.sum()})"
+        )
     st = np.array([r["s_top"] for r in rows])
-    out["s_top"] = dict(median=float(np.median(st)), rho=float(spearmanr(h_, st).statistic))
+    out["s_top"] = dict(
+        median=float(np.median(st)), rho=float(spearmanr(h_, st).statistic)
+    )
     json.dump(dict(out, rows=rows), open(f"{work}/levelset_openV1.json", "w"), indent=1)
     fig, axs = plt.subplots(1, 4, figsize=(17, 4), sharey=True)
     for a, key in zip(axs, ("fr_s", "fr_w", "tau_len", "tau_vol")):
         v = np.array([r[key] for r in rows])
         a.plot(h_, v, ".", ms=3, color="#2a78d6")
-        a.set_title(f"{out[key]['label']}\nmedian {out[key]['median']:.3f}, IQR {out[key]['iqr']:.3f}, "
-                    f"rho {out[key]['rho']:+.2f}", fontsize=9)
+        a.set_title(
+            f"{out[key]['label']}\nmedian {out[key]['median']:.3f}, IQR {out[key]['iqr']:.3f}, "
+            f"rho {out[key]['rho']:+.2f}",
+            fontsize=9,
+        )
         a.set_xlabel("root mean curvature Hm (/mm, 0.48 mm)")
     axs[0].set_ylabel("stria depth")
-    fig.suptitle(f"Open V1 (finding 10's roots and stria), {len(rows)} open columns along the level set's d; "
-                 "finding 10: distance 0.435, rho +0.63", fontsize=10)
+    fig.suptitle(
+        f"Open V1 (finding 10's roots and stria), {len(rows)} open columns along the level set's d; "
+        "finding 10: distance 0.435, rho +0.63",
+        fontsize=10,
+    )
     fig.tight_layout()
     fig.savefig(f"{fig_dir}/levelset_openV1.png", dpi=110)
 

@@ -30,8 +30,12 @@ def field(B, vox):
     m = B["ctx"].astype(float)
     base = S.structure_tensor(B["det"][1], m) + S.structure_tensor(B["det"][2], m)
     labels = B["labels"]
-    T, _ = S.fitted_field(base, B["ctx"], B["wm"], vox, fluid=labels == 1, wm_band_mm=CT.WM_BAND_MM)
-    noise, sigma2 = S.step_noise(base, B["ctx"], S.signed_wm_direction(B["wm"], vox), vox)
+    T, _ = S.fitted_field(
+        base, B["ctx"], B["wm"], vox, fluid=labels == 1, wm_band_mm=CT.WM_BAND_MM
+    )
+    noise, sigma2 = S.step_noise(
+        base, B["ctx"], S.signed_wm_direction(B["wm"], vox), vox
+    )
     return T, noise, sigma2
 
 
@@ -60,7 +64,11 @@ def main():
         v, f, nrm = CT.white_mesh(Bn["wm"])
         kappa = CT.level_set_concavity(v, f, nrm, Tn, Bn["ctx"], vox)
         sds = Bn["noise_sd"]
-        sds = [sds[k] for k in sorted(sds)] if isinstance(sds, dict) else list(np.atleast_1d(sds))
+        sds = (
+            [sds[k] for k in sorted(sds)]
+            if isinstance(sds, dict)
+            else list(np.atleast_1d(sds))
+        )
         dT = Tn - Tc
         inner = Bn["ctx"] & (Bn["dface"] >= 2.0)
         steps, pred = [], []
@@ -76,10 +84,16 @@ def main():
         bins = []
         for lo, hi in zip(q[:-1], q[1:]):
             mm = (pred >= lo) & (pred <= hi)
-            bins.append(dict(predicted_mm=round(float(np.median(pred[mm])), 5),
-                             actual_sd_mm=round(float(np.std(steps[mm])), 5),
-                             ratio=round(float(np.std(steps[mm]) / np.median(pred[mm])), 2)))
-        free = S.fitted_free(Bn["ctx"], Bn["wm"], vox, fluid=Bn["labels"] == 1, wm_band_mm=CT.WM_BAND_MM)
+            bins.append(
+                dict(
+                    predicted_mm=round(float(np.median(pred[mm])), 5),
+                    actual_sd_mm=round(float(np.std(steps[mm])), 5),
+                    ratio=round(float(np.std(steps[mm]) / np.median(pred[mm])), 2),
+                )
+            )
+        free = S.fitted_free(
+            Bn["ctx"], Bn["wm"], vox, fluid=Bn["labels"] == 1, wm_band_mm=CT.WM_BAND_MM
+        )
         cn = S.crest_voxels(Tn, Bn["ctx"], noise, kappa, vox, free=free)
         cc = S.crest_voxels(Tc, Bc["ctx"], noise, kappa, vox, free=free)
         on_contact = None
@@ -89,18 +103,29 @@ def main():
             rc = np.linalg.norm(Yc - fold.foot(Yc), axis=1)
             open_ = fold.in_open(Yc)
             on_contact = dict(
-                within_1_5_voxel_of_true_contact=round(float(np.mean(np.abs(rc - fold.p["Rc"]) <= 1.5 * FP.H)), 3),
-                in_open_sector=round(float(np.mean(open_)), 3))
-        d_to_clean = ndi.distance_transform_edt(~cc) if cc.any() else np.full(cn.shape, np.inf)
+                within_1_5_voxel_of_true_contact=round(
+                    float(np.mean(np.abs(rc - fold.p["Rc"]) <= 1.5 * FP.H)), 3
+                ),
+                in_open_sector=round(float(np.mean(open_)), 3),
+            )
+        d_to_clean = (
+            ndi.distance_transform_edt(~cc) if cc.any() else np.full(cn.shape, np.inf)
+        )
         dn = d_to_clean[cn & inner]
         out[pname] = dict(
-            gradient_noise_power=dict(from_smallest_eigenvalue=sigma2, from_known_noise=gradient_power(sds),
-                                      smallest_eigenvalue_noise_free=sigma2_clean),
+            gradient_noise_power=dict(
+                from_smallest_eigenvalue=sigma2,
+                from_known_noise=gradient_power(sds),
+                smallest_eigenvalue_noise_free=sigma2_clean,
+            ),
             step_noise_by_predicted_quartile=bins,
             crest_share_noisy=round(float(cn[inner].mean()), 5),
             kiss_crest_location=on_contact,
             crest_share_clean=round(float(cc[inner].mean()), 5),
-            noisy_crest_within_1_5_voxel_of_clean_crest=(round(float(np.mean(dn <= 1.5)), 3) if dn.size else None))
+            noisy_crest_within_1_5_voxel_of_clean_crest=(
+                round(float(np.mean(dn <= 1.5)), 3) if dn.size else None
+            ),
+        )
         print(pname, json.dumps(out[pname]), flush=True)
     json.dump(out, open(f"{A.work}/crest_noise_{A.name}.json", "w"), indent=1)
 

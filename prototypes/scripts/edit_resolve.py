@@ -48,10 +48,23 @@ def restrict(D, T):
     loc = -np.ones(D.ns.size, int)
     loc[T] = np.arange(T.size)
     pk = (loc[D.pairs[:, 0]] >= 0) & (loc[D.pairs[:, 1]] >= 0)
-    tk = (loc[D.ties[:, 0]] >= 0) & (loc[D.ties[:, 1]] >= 0) if D.ties.size else np.zeros(0, bool)
-    S = JL.Data(step=D.step, ns=D.ns[T], top=D.top[T], mu=D.mu[T], pairs=loc[D.pairs[pk]].reshape(-1, 2),
-                S=D.S[pk], W=D.W[pk], ties=loc[D.ties[tk]].reshape(-1, 2) if D.ties.size else D.ties,
-                tie_L=D.tie_L[tk] if D.ties.size else D.tie_L, tie_w=D.tie_w[tk] if D.ties.size else D.tie_w)
+    tk = (
+        (loc[D.ties[:, 0]] >= 0) & (loc[D.ties[:, 1]] >= 0)
+        if D.ties.size
+        else np.zeros(0, bool)
+    )
+    S = JL.Data(
+        step=D.step,
+        ns=D.ns[T],
+        top=D.top[T],
+        mu=D.mu[T],
+        pairs=loc[D.pairs[pk]].reshape(-1, 2),
+        S=D.S[pk],
+        W=D.W[pk],
+        ties=loc[D.ties[tk]].reshape(-1, 2) if D.ties.size else D.ties,
+        tie_L=D.tie_L[tk] if D.ties.size else D.tie_L,
+        tie_w=D.tie_w[tk] if D.ties.size else D.tie_w,
+    )
     S.c0 = D.c0[T]
     S.tau = D.tau
     return S
@@ -68,8 +81,18 @@ def ring_of(D, free):
     return ring & ~free
 
 
-def local_solve(D, z, free, h=0.04, half=0.48, prm=JL.Params(), edits=None, w_edit=W_EDIT, recentre=3,
-                log=None):
+def local_solve(
+    D,
+    z,
+    free,
+    h=0.04,
+    half=0.48,
+    prm=JL.Params(),
+    edits=None,
+    w_edit=W_EDIT,
+    recentre=3,
+    log=None,
+):
     """z: (L, n) current levels (mm, on the h grid); free: (n,) traces to solve; edits: {trace:
     target pia (mm)}, every edit made so far (those on free traces enter; the others are fixed
     anyway). Returns the new levels (L, n) and info."""
@@ -103,17 +126,29 @@ def local_solve(D, z, free, h=0.04, half=0.48, prm=JL.Params(), edits=None, w_ed
         lab[fv] = r.labels
         zs = h * (np.asarray(M.o) + lab).reshape(L, nT)
         hits = JL.edge_hits(M, lab).reshape(L, nT) & fr[None]
-        hist.append(dict(edge_hits=int(hits.sum()), certified=float(np.mean(r.certified)), free_vars=int(fv.size)))
+        hist.append(
+            dict(
+                edge_hits=int(hits.sum()),
+                certified=float(np.mean(r.certified)),
+                free_vars=int(fv.size),
+            )
+        )
         if log:
-            log(f"local: try {it}: {fv.size:,} free variables, certified {np.mean(r.certified):.1%}, "
-                f"edge hits {int(hits.sum())}")
+            log(
+                f"local: try {it}: {fv.size:,} free variables, certified {np.mean(r.certified):.1%}, "
+                f"edge hits {int(hits.sum())}"
+            )
         if not hits.any():
             break
         centre = np.where(hits, zs, centre)
     out = z.copy()
     out[:, T[fr]] = zs[:, fr]
-    return out, dict(free_traces=int(fr.sum()), ring_traces=int((~fr).sum()), seconds=time.time() - t0,
-                     tries=hist)
+    return out, dict(
+        free_traces=int(fr.sum()),
+        ring_traces=int((~fr).sum()),
+        seconds=time.time() - t0,
+        tries=hist,
+    )
 
 
 def edits_of(hits, p):
@@ -137,20 +172,27 @@ def main(work, tag, draws=3, ks=(3, 6, 12), Rs=(1.0, 2.0, 4.0), h=0.04):
     hits = ED.point_traces(Z, sub)
     pts = np.array([p for p in range(len(hits)) if hits[p][0].size])
     err0 = ED.point_errors(z0[-1], hits)
-    signed = lambda pia, ps: round(float(np.median([np.median(pia[hits[q][0]] - hits[q][1]) for q in ps])), 3)  # noqa: E731
+    signed = lambda pia, ps: round(
+        float(np.median([np.median(pia[hits[q][0]] - hits[q][1]) for q in ps])), 3
+    )  # noqa: E731
     say(f"{len(pts)} scored points; saved pia: median {np.nanmedian(err0[pts]):.3f} mm")
     runs = []
     for dr in range(draws):
         order = np.random.default_rng(dr).permutation(pts)
-        held = order[max(ks):]
-        base = dict(draw=dr, k=0, held_out=[int(p + 1) for p in held],
-                    held_median=round(float(np.median(err0[held])), 3),
-                    held_over_0p3=int(np.sum(err0[held] > 0.3)), held_signed_median=signed(z0[-1], held))
+        held = order[max(ks) :]
+        base = dict(
+            draw=dr,
+            k=0,
+            held_out=[int(p + 1) for p in held],
+            held_median=round(float(np.median(err0[held])), 3),
+            held_over_0p3=int(np.sum(err0[held] > 0.3)),
+            held_signed_median=signed(z0[-1], held),
+        )
         for R in Rs:
             runs.append(dict(base, R=R))
             z = z0.copy()
             times, free_n, made = [], [], {}
-            for j, p in enumerate(order[:max(ks)]):
+            for j, p in enumerate(order[: max(ks)]):
                 ed = edits_of(hits, p)
                 made.update(ed)
                 seeds = np.array(list(ed), int)
@@ -160,25 +202,48 @@ def main(work, tag, draws=3, ks=(3, 6, 12), Rs=(1.0, 2.0, 4.0), h=0.04):
                 free_n.append(info["free_traces"])
                 if j + 1 in ks:
                     e = ED.point_errors(z[-1], hits)
-                    seeded = order[:j + 1]
+                    seeded = order[: j + 1]
                     rest = np.setdiff1d(pts, seeded)
-                    runs.append(dict(draw=dr, k=j + 1, R=R, held_median=round(float(np.median(e[held])), 3),
-                                     held_over_0p3=int(np.sum(e[held] > 0.3)),
-                                     held_signed_median=signed(z[-1], held),
-                                     all_unseeded_median=round(float(np.median(e[rest])), 3),
-                                     seeded_median=round(float(np.median(e[seeded])), 3),
-                                     held_changed=int(np.sum(np.abs(e[held] - err0[held]) > 1e-9)),
-                                     held_per_point={int(q + 1): [round(float(err0[q]), 2), round(float(e[q]), 2)]
-                                                     for q in held},
-                                     seconds_per_edit_median=round(float(np.median(times)), 2),
-                                     seconds_per_edit_max=round(float(np.max(times)), 2),
-                                     free_traces_median=int(np.median(free_n))))
-                    say(f"draw {dr} R {R} k {j + 1}: held-out median {runs[-1]['held_median']} "
+                    runs.append(
+                        dict(
+                            draw=dr,
+                            k=j + 1,
+                            R=R,
+                            held_median=round(float(np.median(e[held])), 3),
+                            held_over_0p3=int(np.sum(e[held] > 0.3)),
+                            held_signed_median=signed(z[-1], held),
+                            all_unseeded_median=round(float(np.median(e[rest])), 3),
+                            seeded_median=round(float(np.median(e[seeded])), 3),
+                            held_changed=int(
+                                np.sum(np.abs(e[held] - err0[held]) > 1e-9)
+                            ),
+                            held_per_point={
+                                int(q + 1): [
+                                    round(float(err0[q]), 2),
+                                    round(float(e[q]), 2),
+                                ]
+                                for q in held
+                            },
+                            seconds_per_edit_median=round(float(np.median(times)), 2),
+                            seconds_per_edit_max=round(float(np.max(times)), 2),
+                            free_traces_median=int(np.median(free_n)),
+                        )
+                    )
+                    say(
+                        f"draw {dr} R {R} k {j + 1}: held-out median {runs[-1]['held_median']} "
                         f"(saved {base['held_median']}), over 0.3: {runs[-1]['held_over_0p3']} "
                         f"(saved {base['held_over_0p3']}); {np.median(times):.1f} s/edit, "
-                        f"{int(np.median(free_n))} free traces")
-    out = dict(tag=tag, w_edit_per_mm=W_EDIT, h=h, half=0.48, points=int(len(pts)), runs=runs,
-               seconds=round(time.time() - t0, 1))
+                        f"{int(np.median(free_n))} free traces"
+                    )
+    out = dict(
+        tag=tag,
+        w_edit_per_mm=W_EDIT,
+        h=h,
+        half=0.48,
+        points=int(len(pts)),
+        runs=runs,
+        seconds=round(time.time() - t0, 1),
+    )
     json.dump(out, open(f"{work}/edit_reach_{tag}.json", "w"), indent=1)
 
 

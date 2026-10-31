@@ -196,8 +196,13 @@ def ball_case():
 
 @pytest.mark.parametrize(
     ("mu_a", "mu_b", "law"),
-    [(10.0, 10.0, "ratio"), (12.0, 18.0, "ratio"), (9.0, 23.0, "ratio"),
-     (12.0, 18.0, "const"), (14.0, 20.0, "const")],
+    [
+        (10.0, 10.0, "ratio"),
+        (12.0, 18.0, "ratio"),
+        (9.0, 23.0, "ratio"),
+        (12.0, 18.0, "const"),
+        (14.0, 20.0, "const"),
+    ],
 )
 def test_contact_position_between_plates(mu_a: float, mu_b: float, law: str) -> None:
     """Two plates, L = 33 between seed centres, cortex between: the contact is
@@ -281,7 +286,9 @@ def curved_case():
     cortex that meets between them and fluid elsewhere."""
     n = 36
     g = np.stack(np.meshgrid(*[np.arange(n)] * 3, indexing="ij"), -1).astype(float)
-    wm = (np.linalg.norm(g - np.array([17.5, 17.5, 24.0]), axis=-1) <= 6) | (g[..., 2] < 6)
+    wm = (np.linalg.norm(g - np.array([17.5, 17.5, 24.0]), axis=-1) <= 6) | (
+        g[..., 2] < 6
+    )
     cortex = ~wm & (ndi.distance_transform_edt(~wm) <= 9)
     return wm, cortex
 

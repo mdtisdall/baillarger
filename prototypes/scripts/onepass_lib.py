@@ -80,7 +80,9 @@ class Setup:
     sflat: Int  # flat index of each seed (compact id order)
 
 
-def setup(wm: Bool, cortex: Bool, patch: int = 6, direction: Float | None = None) -> Setup:
+def setup(
+    wm: Bool, cortex: Bool, patch: int = 6, direction: Float | None = None
+) -> Setup:
     """Seeds, domain, distance direction, and root patches."""
     near_ctx = ndi.binary_dilation(cortex, ndi.generate_binary_structure(3, 1))
     seeds = wm & near_ctx
@@ -119,8 +121,19 @@ def setup(wm: Bool, cortex: Bool, patch: int = 6, direction: Float | None = None
     pos = np.stack(np.unravel_index(sflat, seeds.shape), -1)
     centre = pos[rep].astype(float)
     return Setup(
-        wm, cortex, seeds, domain, edt, direction, pid, npatch, adjacent, centre,
-        graph, rep, sflat,
+        wm,
+        cortex,
+        seeds,
+        domain,
+        edt,
+        direction,
+        pid,
+        npatch,
+        adjacent,
+        centre,
+        graph,
+        rep,
+        sflat,
     )
 
 
@@ -182,7 +195,9 @@ def run(
     )
 
 
-def distance(f: Fronts, lab: Int, u: Float, mu: Float | None, sigma: Float | None) -> Float:
+def distance(
+    f: Fronts, lab: Int, u: Float, mu: Float | None, sigma: Float | None
+) -> Float:
     """Metric distance d = mu + sigma u for arrival u of label lab."""
     if mu is None or sigma is None:
         return u
@@ -313,16 +328,30 @@ def open_thickness(
                 sl_a = [slice(None)] * 3
                 sl_b = [slice(None)] * 3
                 if sg == 1:
-                    sl_v[ax], sl_a[ax], sl_b[ax] = slice(1, n - 1), slice(2, n), slice(0, n - 2)
+                    sl_v[ax], sl_a[ax], sl_b[ax] = (
+                        slice(1, n - 1),
+                        slice(2, n),
+                        slice(0, n - 2),
+                    )
                 else:
-                    sl_v[ax], sl_a[ax], sl_b[ax] = slice(1, n - 1), slice(0, n - 2), slice(2, n)
+                    sl_v[ax], sl_a[ax], sl_b[ax] = (
+                        slice(1, n - 1),
+                        slice(0, n - 2),
+                        slice(2, n),
+                    )
                 v, fa, fb = tuple(sl_v), tuple(sl_a), tuple(sl_b)
                 ahead[v] = fluid[fa]
                 behind_ok[v] = (lab[fb] == lab[v]) & (arr[fb] < arr[v])
-                tops |= ahead & behind_ok & (np.abs(s.direction[..., ax]) > np.cos(np.pi / 4))
+                tops |= (
+                    ahead
+                    & behind_ok
+                    & (np.abs(s.direction[..., ax]) > np.cos(np.pi / 4))
+                )
         tops &= s.cortex
     else:
-        tops = s.cortex & ndi.binary_dilation(fluid, ndi.generate_binary_structure(3, 1))
+        tops = s.cortex & ndi.binary_dilation(
+            fluid, ndi.generate_binary_structure(3, 1)
+        )
     tops &= f.label >= 0
     lab = f.label[tops]
     # the top lies half a voxel beyond the voxel centre, on average
@@ -374,28 +403,49 @@ def score_points(P, u_pts, c, cp, mu_f, sd_f, h):
         along = d @ u
         perp = np.linalg.norm(d - along[:, None] * u, axis=1)
         near = (np.linalg.norm(d, axis=1) * h < 1.0) & (perp * h < 0.4)
-        row = dict(k=k_ + 1, offset=np.nan, n=int(near.sum()), thin_mu_minus_S=np.nan, thick_mu_minus_S=np.nan,
-                   thin_sd=np.nan, thick_sd=np.nan, S_thin=np.nan, S_thick=np.nan)
+        row = dict(
+            k=k_ + 1,
+            offset=np.nan,
+            n=int(near.sum()),
+            thin_mu_minus_S=np.nan,
+            thick_mu_minus_S=np.nan,
+            thin_sd=np.nan,
+            thick_sd=np.nan,
+            S_thin=np.nan,
+            S_thick=np.nan,
+        )
         if near.any():
             i = np.flatnonzero(near)
             a, b = c.a[i], c.b[i]
-            step = np.zeros((i.size, 3)); step[np.arange(i.size), c.axis[i]] = 1.0  # from a's side to b's
+            step = np.zeros((i.size, 3))
+            step[np.arange(i.size), c.axis[i]] = 1.0  # from a's side to b's
             b_thin = mu_f[b] < mu_f[a]
             to_thin = np.where(b_thin[:, None], step, -step)
             sg = np.sign(np.sum(to_thin @ u))
             sg = 1.0 if sg == 0 else sg
-            o = along[i] * sg * h  # + : the contact lies beyond the point, toward the thinner side
-            thin = np.where(b_thin, b, a); thick = np.where(b_thin, a, b)
+            o = (
+                along[i] * sg * h
+            )  # + : the contact lies beyond the point, toward the thinner side
+            thin = np.where(b_thin, b, a)
+            thick = np.where(b_thin, a, b)
             d_thin = np.where(b_thin, c.db[i], c.da[i]) * h
             d_thick = np.where(b_thin, c.da[i], c.db[i]) * h
-            S_thin = d_thin + o  # the point lies o short of the contact on the thick side
+            S_thin = (
+                d_thin + o
+            )  # the point lies o short of the contact on the thick side
             S_thick = d_thick - o
-            row.update(offset=float(np.median(o)),
-                       thin_mu_minus_S=float(np.median(mu_f[thin] * h - S_thin)),
-                       thick_mu_minus_S=float(np.median(mu_f[thick] * h - S_thick)),
-                       thin_sd=float(np.median(sd_f[thin] * h)), thick_sd=float(np.median(sd_f[thick] * h)),
-                       S_thin=float(np.median(S_thin)), S_thick=float(np.median(S_thick)),
-                       sep_mm=float(np.median(np.where(np.isinf(c.sep[i]), 999, c.sep[i] * h))))
+            row.update(
+                offset=float(np.median(o)),
+                thin_mu_minus_S=float(np.median(mu_f[thin] * h - S_thin)),
+                thick_mu_minus_S=float(np.median(mu_f[thick] * h - S_thick)),
+                thin_sd=float(np.median(sd_f[thin] * h)),
+                thick_sd=float(np.median(sd_f[thick] * h)),
+                S_thin=float(np.median(S_thin)),
+                S_thick=float(np.median(S_thick)),
+                sep_mm=float(
+                    np.median(np.where(np.isinf(c.sep[i]), 999, c.sep[i] * h))
+                ),
+            )
         rows.append(row)
     return rows
 
@@ -422,10 +472,21 @@ def score_points_sides(s, f, P, u_pts, c, cp, mu_f, sd_f, h, reach_mm=2.5):
         ctx_ok[inside] = s.cortex[tuple(line[inside].T)]
         neg = np.flatnonzero(ctx_ok & (lab >= 0) & (steps < 0))
         pos = np.flatnonzero(ctx_ok & (lab >= 0) & (steps > 0))
-        empty = dict(k=k_ + 1, offset=np.nan, n=0, thin_mu_minus_S=np.nan, thick_mu_minus_S=np.nan,
-                     thin_sd=np.nan, thick_sd=np.nan, S_thin=np.nan, S_thick=np.nan, end_sep_mm=np.nan)
+        empty = dict(
+            k=k_ + 1,
+            offset=np.nan,
+            n=0,
+            thin_mu_minus_S=np.nan,
+            thick_mu_minus_S=np.nan,
+            thin_sd=np.nan,
+            thick_sd=np.nan,
+            S_thin=np.nan,
+            S_thick=np.nan,
+            end_sep_mm=np.nan,
+        )
         if neg.size == 0 or pos.size == 0:
-            rows.append(empty); continue
+            rows.append(empty)
+            continue
         lm, lp = lab[neg[0]], lab[pos[-1]]  # the deepest cortex on each side
         d = dijkstra(s.graph, indices=s.rep[[lm, lp]])
         dm, dp = d[0][s.rep], d[1][s.rep]  # per patch
@@ -438,24 +499,41 @@ def score_points_sides(s, f, P, u_pts, c, cp, mu_f, sd_f, h, reach_mm=2.5):
         empty["end_sep_mm"] = float(dm[lp] * h)
         # the nearest crossing in any direction (unsigned): separates a line oblique to the
         # contact from a boundary that is really displaced
-        empty["nearest_mm"] = float(np.min(np.linalg.norm(dd[cross], axis=1)) * h) if cross.any() else np.nan
+        empty["nearest_mm"] = (
+            float(np.min(np.linalg.norm(dd[cross], axis=1)) * h)
+            if cross.any()
+            else np.nan
+        )
         if not near.any():
-            rows.append(empty); continue
+            rows.append(empty)
+            continue
         i = np.flatnonzero(near)
         a, b = c.a[i], c.b[i]
         # the two fronts' beliefs: the end labels (the columns through the point)
         thin_end = lm if mu_f[lm] < mu_f[lp] else lp
-        sg = -1.0 if thin_end == lm else 1.0  # direction (along u) toward the thinner side
+        sg = (
+            -1.0 if thin_end == lm else 1.0
+        )  # direction (along u) toward the thinner side
         o = along[i] * sg * h
         a_thin = side[a] == (-1 if thin_end == lm else 1)
-        thin = np.where(a_thin, a, b); thick = np.where(a_thin, b, a)
+        thin = np.where(a_thin, a, b)
+        thick = np.where(a_thin, b, a)
         d_thin = np.where(a_thin, c.da[i], c.db[i]) * h
         d_thick = np.where(a_thin, c.db[i], c.da[i]) * h
         S_thin, S_thick = d_thin + o, d_thick - o
-        rows.append(dict(k=k_ + 1, offset=float(np.median(o)), n=int(i.size),
-                         thin_mu_minus_S=float(np.median(mu_f[thin] * h - S_thin)),
-                         thick_mu_minus_S=float(np.median(mu_f[thick] * h - S_thick)),
-                         thin_sd=float(np.median(sd_f[thin] * h)), thick_sd=float(np.median(sd_f[thick] * h)),
-                         S_thin=float(np.median(S_thin)), S_thick=float(np.median(S_thick)),
-                         end_sep_mm=float(dm[lp] * h), nearest_mm=empty["nearest_mm"]))
+        rows.append(
+            dict(
+                k=k_ + 1,
+                offset=float(np.median(o)),
+                n=int(i.size),
+                thin_mu_minus_S=float(np.median(mu_f[thin] * h - S_thin)),
+                thick_mu_minus_S=float(np.median(mu_f[thick] * h - S_thick)),
+                thin_sd=float(np.median(sd_f[thin] * h)),
+                thick_sd=float(np.median(sd_f[thick] * h)),
+                S_thin=float(np.median(S_thin)),
+                S_thick=float(np.median(S_thick)),
+                end_sep_mm=float(dm[lp] * h),
+                nearest_mm=empty["nearest_mm"],
+            )
+        )
     return rows

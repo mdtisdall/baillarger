@@ -75,8 +75,10 @@ def test_click_mapping(wavy):
     es = np.abs(s - tr.d) * H
     er = np.linalg.norm(R - tr.foot, axis=1) * H
     (sm, s95), (rm, r95) = TOL[ratio]
-    print(f"\nratio {ratio}: |s err| median {np.median(es):.4f} p95 {np.percentile(es, 95):.4f} mm; "
-          f"root median {np.median(er):.4f} p95 {np.percentile(er, 95):.4f} mm")
+    print(
+        f"\nratio {ratio}: |s err| median {np.median(es):.4f} p95 {np.percentile(es, 95):.4f} mm; "
+        f"root median {np.median(er):.4f} p95 {np.percentile(er, 95):.4f} mm"
+    )
     assert np.median(es) <= sm and np.percentile(es, 95) <= s95
     assert np.median(er) <= rm and np.percentile(er, 95) <= r95
 
@@ -91,13 +93,17 @@ def test_columns_follow_characteristics(wavy):
     err = {}
     for s in (5.0, 10.0):
         p = P.point_at(cols, np.full(len(sel), s))
-        exact = foot.foot + (s + foot.d)[:, None] * foot.n  # v may sit off the true surface by d
+        exact = (
+            foot.foot + (s + foot.d)[:, None] * foot.n
+        )  # v may sit off the true surface by d
         e = np.linalg.norm(p - exact, axis=1) * H
         err[s] = e[np.isfinite(e)]
         assert np.mean(np.isfinite(e)) > 0.99
     (_, _), (rm, r95) = TOL[ratio]
     for s, e in err.items():
-        print(f"\nratio {ratio}, s = {s:g}: column error median {np.median(e):.4f} p95 {np.percentile(e, 95):.4f} mm")
+        print(
+            f"\nratio {ratio}, s = {s:g}: column error median {np.median(e):.4f} p95 {np.percentile(e, 95):.4f} mm"
+        )
         # the vertex's own position error (finding 28: |d| p95 0.027 mm) enters once more here
         assert np.median(e) <= rm + 0.01 and np.percentile(e, 95) <= r95 + 0.03
 
@@ -112,7 +118,9 @@ def test_label_top_open(wavy):
     d0 = ph.truth(v[sel]).d
     # the label's top is the voxel staircase of d <= T: within half a voxel diagonal
     e = t + d0 - ph.T
-    print(f"\nratio {ratio}: label top - T median {np.median(e):+.3f}, IQR {np.subtract(*np.percentile(e, [75, 25])):.3f} voxels")
+    print(
+        f"\nratio {ratio}: label top - T median {np.median(e):+.3f}, IQR {np.subtract(*np.percentile(e, [75, 25])):.3f} voxels"
+    )
     assert np.mean(kind == P.TOP_FLUID) > 0.99
     assert abs(np.median(e)) < 0.25 and np.percentile(np.abs(e), 95) < 0.9
 
@@ -128,8 +136,13 @@ def p4(request):
     g = P.march_from_mesh(v, f, wm, ctx, fluid, xdir, ratio)
     C = P.characteristic_field(g)
     # bank B's inner WM face inside the fused patch, away from the patch's edges
-    sel = np.flatnonzero((np.abs(v[:, 0] - 55.5) < 0.3) & (v[:, 1] >= 16) & (v[:, 1] <= 23)
-                         & (v[:, 2] >= 38) & (v[:, 2] <= 43))
+    sel = np.flatnonzero(
+        (np.abs(v[:, 0] - 55.5) < 0.3)
+        & (v[:, 1] >= 16)
+        & (v[:, 1] <= 23)
+        & (v[:, 2] >= 38)
+        & (v[:, 2] <= 43)
+    )
     cols = P.trace_columns(v[sel], n[sel], g, C, np.where(ctx[..., None], xdir, 0.0))
     return ratio, v[sel], n[sel], cols
 
@@ -142,8 +155,10 @@ def test_p4_vertices_found(p4):
 
 def test_p4_ridge_then_extension(p4):
     ratio, v, n, cols = p4
-    print(f"\nratio {ratio}: ridge at {np.median(cols.ridge_s):.2f} voxels (exact 23), "
-          f"range {np.min(cols.ridge_s):.2f}-{np.max(cols.ridge_s):.2f}")
+    print(
+        f"\nratio {ratio}: ridge at {np.median(cols.ridge_s):.2f} voxels (exact 23), "
+        f"range {np.min(cols.ridge_s):.2f}-{np.max(cols.ridge_s):.2f}"
+    )
     assert np.all(cols.extended)
     np.testing.assert_allclose(cols.ridge_s, 23.0, atol=1.0)
 
@@ -152,8 +167,10 @@ def test_p4_reaches_contact_straight(p4):
     ratio, v, n, cols = p4
     p = P.point_at(cols, np.full(len(v), 30.0))
     assert np.all(np.isfinite(p))
-    print(f"\nratio {ratio}: x at arc length 30: {np.median(p[:, 0]):.3f} (exact 25.5); "
-          f"max off-line {np.max(np.abs(p[:, 1:] - v[:, 1:])):.3f} voxels")
+    print(
+        f"\nratio {ratio}: x at arc length 30: {np.median(p[:, 0]):.3f} (exact 25.5); "
+        f"max off-line {np.max(np.abs(p[:, 1:] - v[:, 1:])):.3f} voxels"
+    )
     np.testing.assert_allclose(p[:, 0], 25.5, atol=0.1)
     np.testing.assert_allclose(p[:, 1:], v[:, 1:], atol=0.1)
     assert np.all(cols.stop_why == P.CAP)

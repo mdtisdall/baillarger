@@ -2,7 +2,9 @@
 vertex, its H, the prior budget, the posterior budget, whether it is in a piece without evidence, the
 evidence within 2 mm along the mesh (count, median s), and the geodesic distance to the nearest vertex
 with evidence."""
+
 import sys
+
 sys.argv = [sys.argv[0], sys.argv[1], sys.argv[2], sys.argv[3], "V1V2_banks"]
 sys.path.insert(0, sys.argv[2])
 import numpy as np
@@ -40,5 +42,7 @@ for k, Pk in enumerate(P):
         near = (D <= 2.0) & has
         dev = D[has].min() if np.isfinite(D[has]).any() else np.inf
         med = np.exp(np.median(E["len"][near])) if near.any() else np.nan
-        print(f"{k+1:2d}  {end}  {v:7d} {F.H[v]:+.2f}  {prior[v]:.2f}  {b[v]:.2f}  {int(nobel[v])}  "
-              f"{near.sum():5d}  {med:.2f}  {dev:.2f}")
+        print(
+            f"{k + 1:2d}  {end}  {v:7d} {F.H[v]:+.2f}  {prior[v]:.2f}  {b[v]:.2f}  {int(nobel[v])}  "
+            f"{near.sum():5d}  {med:.2f}  {dev:.2f}"
+        )
