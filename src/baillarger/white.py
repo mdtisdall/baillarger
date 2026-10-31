@@ -764,6 +764,7 @@ OVERVIEW_SPEC = SidecarSpec(
         Key("TrueFaces", "integer", True, "the white surface's faces"),
         Key("Pieces", "array of objects", True, "per connected piece"),
         Key("IdsFile", "string", True, "the true vertex ids' GIfTI (name)"),
+        Key("Repairs", "array of objects", True, "per repair round"),
         Key("Passes", "array of objects", True, "per decimation pass"),
     ),
 )
@@ -847,6 +848,7 @@ def write_white_overview(
             TrueFaces=len(f),
             Pieces=pieces,
             IdsFile=paths["ids"].name,
+            Repairs=D.repairs,
             Passes=D.passes,
         ),
     )

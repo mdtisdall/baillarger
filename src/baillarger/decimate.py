@@ -1,8 +1,9 @@
-"""Decimation of a triangle mesh by blocks, in parallel, with four guarantees:
+"""Decimation of a triangle mesh by blocks, in parallel, with five guarantees:
 the topology is kept (manifold edges, components, genus), every input vertex
 stays within eps of the output surface, the output's vertices are input
-vertices (they never move), and every face it makes faces the way of the input
-surface it stands for.
+vertices (they never move), every face it makes faces the way of the input
+surface it stands for, and no two faces of the output intersect (with repair,
+for an input with none).
 
 Half-edge collapses: a vertex a is merged into a neighbour b, which keeps its
 position. They are taken cheapest first by quadric error (Garland & Heckbert
@@ -31,6 +32,21 @@ input faces merged into it). A collapse is made only if all hold:
 
 A rejected collapse is tried again when the region around a or b changes.
 
+Repair: the distance bound lets faces that stand for two sheets of the input
+closer than about 2 eps cross (on the hemisphere white surface at 0.1 mm, its
+sheets come within 0.05 to 0.2 mm of each other at necks and thin passages: 251
+crossing faces). So decimate finds the faces of its result that intersect
+(baillarger.mesh_intersect) and pins, as locked, the input vertices that they
+stand for (corners and carried), then decimates again, until none intersect.
+Pinned vertices are never collapsed, so a pinned region keeps its input faces,
+which do not intersect; each round pins more, so the rounds end. A block whose
+inputs did not change is not run again (its result is reused by a hash of its
+inputs), so a round costs the blocks round the crossings. The result equals a
+decimation given those pins from the start. Simplification envelopes (Cohen,
+Varshney, Manocha et al. 1996), which narrow the allowed distance where the
+surface comes close to itself, would prevent the crossings rather than repair
+them.
+
 Blocks: in a pass, each vertex belongs to the cube of side `block` that holds
 it (the grid shifted by `offset` blocks). A vertex that shares a face with a
 vertex of another block, or lies on the mesh's boundary, is locked, and an
@@ -56,6 +72,7 @@ mesh's own arrays (positions, faces, quadrics) and its block and lock keys; a wh
 brain would need the first pass read block by block from the mesh's files.
 """
 
+import hashlib
 import heapq
 import os
 import resource
@@ -76,6 +93,7 @@ import numpy as np
 import numpy.typing as npt
 
 from baillarger._jit import njit
+from baillarger.mesh_intersect import intersecting_faces
 from baillarger.mesh_smoothing import boundary_vertices
 
 type Float = npt.NDArray[np.float64]
@@ -931,11 +949,16 @@ def decimate_pass(
     workers: int = 1,
     reference: bool = False,
     log: Callable[[str], object] | None = None,
+    pinned: npt.NDArray[np.bool_] | None = None,
+    memo: dict[bytes, BlockResult] | None = None,
 ) -> tuple[Mesh, dict[str, Any]]:
     """One pass: the blocks of the grid of side `block` (from origin, default
     the minimum of v, shifted by offset blocks), each decimated on its own,
     in parallel with workers > 1; reference: with the Python worker. log: each
-    step's time and peak memory."""
+    step's time and peak memory. pinned: input vertices locked as well. memo:
+    block results by a hash of the block's inputs, read and filled, so that a
+    block whose inputs are the same as before is not run again (the same
+    inputs give the same result)."""
     lap = _Laps(log)
     v, f = M.v, M.f
     o = v.min(0) if origin is None else np.asarray(origin, float)
@@ -947,6 +970,8 @@ def decimate_pass(
     inb = (fk[:, 0] == fk[:, 1]) & (fk[:, 1] == fk[:, 2])
     locked = boundary_vertices(f, len(v))
     locked[f[~inb]] = True
+    if pinned is not None:
+        locked |= pinned
     rows = np.flatnonzero(inb)
     order = rows[np.argsort(fk[rows, 0], kind="stable")]
     cuts = np.flatnonzero(np.diff(fk[order, 0])) + 1
@@ -991,21 +1016,44 @@ def decimate_pass(
             BlockResult(r.F, np.zeros((0, 10)), r.cptr, r.cids, r.collapses),
         )
 
+    reused = 0
+
+    def block_key(B: Block) -> bytes:
+        h = hashlib.sha1(repr((eps, reference)).encode())
+        for a in (B.gids, B.F, B.locked, B.Q, B.cptr, B.cids):
+            h.update(np.ascontiguousarray(a).tobytes())
+        return h.digest()
+
+    def store(k: bytes | None, j: int, gids: Int, r: BlockResult) -> None:
+        if memo is not None and k is not None:
+            memo[k] = r
+        fold(j, gids, r)
+
     if workers > 1:
         with ProcessPoolExecutor(max_workers=workers) as ex:
-            pending: dict[Future[BlockResult], tuple[int, Int]] = {}
+            pending: dict[Future[BlockResult], tuple[bytes | None, int, Int]] = {}
             for j, (gids, B) in enumerate(blocks()):
-                pending[ex.submit(_run_block, (B, eps, reference))] = (j, gids)
+                k = block_key(B) if memo is not None else None
+                if k is not None and memo is not None and k in memo:
+                    fold(j, gids, memo[k])
+                    reused += 1
+                    continue
+                pending[ex.submit(_run_block, (B, eps, reference))] = (k, j, gids)
                 del B
                 while len(pending) >= 2 * workers:
                     done, _ = wait(pending, return_when=FIRST_COMPLETED)
                     for fu in done:
-                        fold(*pending.pop(fu), fu.result())
+                        store(*pending.pop(fu), fu.result())
             for fu in as_completed(pending):
-                fold(*pending[fu], fu.result())
+                store(*pending[fu], fu.result())
     else:
         for j, (gids, B) in enumerate(blocks()):
-            fold(j, gids, _run_block((B, eps, reference)))
+            k = block_key(B) if memo is not None else None
+            if k is not None and memo is not None and k in memo:
+                fold(j, gids, memo[k])
+                reused += 1
+                continue
+            store(k, j, gids, _run_block((B, eps, reference)))
     lap("run blocks")
     results = [out[j] for j in range(len(out))]
     keep = np.sort(np.concatenate(kept))
@@ -1019,6 +1067,7 @@ def decimate_pass(
         faces_before=len(f),
         faces_after=len(f_new),
         collapses=sum(r.collapses for _, r in results),
+        reused=reused,
         locked=int(locked.sum()),
     )
     M2 = Mesh(v=v, f=f_new.astype(np.int64), Q=Q, cptr=cptr, cids=cids, N=M.N)
@@ -1030,8 +1079,9 @@ def decimate_pass(
 class Decimated:
     """The output: vertex_ids (the input vertex of each output vertex), faces
     (into vertex_ids), per face the input vertices it carries (cptr, cids:
-    input ids), the largest distance from a carried vertex to its face, and a
-    summary per pass."""
+    input ids), the largest distance from a carried vertex to its face, a
+    summary per pass (of the last round) and per repair round, and the input
+    vertices pinned by the repair."""
 
     vertex_ids: Int
     faces: Int
@@ -1039,6 +1089,8 @@ class Decimated:
     cids: Int
     max_distance: float
     passes: list[dict[str, Any]] = field(default_factory=list)
+    repairs: list[dict[str, Any]] = field(default_factory=list)
+    pinned: Int = field(default_factory=lambda: np.zeros(0, np.int64))
 
 
 def carried_distances(v: Float, f: Int, cptr: Int, cids: Int) -> Float:
@@ -1104,10 +1156,17 @@ def decimate(
     workers: int | None = None,
     log: Callable[[str], object] = print,
     reference: bool = False,
+    repair: bool = True,
+    max_rounds: int = 10,
+    pinned: npt.ArrayLike | None = None,
 ) -> Decimated:
     """Decimate mesh (v, f) within eps (in v's units) on blocks of side
     `block`: `passes` passes, on the grid shifted by half a block in every
-    other pass, each with `workers` processes (default: the CPU count)."""
+    other pass, each with `workers` processes (default: the CPU count).
+    pinned: input vertices kept. repair: rounds of finding faces of the result
+    that intersect and pinning what they stand for, until none do (a block
+    whose inputs did not change is reused, not run); RuntimeError after
+    max_rounds."""
     lap = _Laps(log)
     V = np.asarray(v, np.float64)
     Fa = np.asarray(f, np.int64)
@@ -1122,21 +1181,64 @@ def decimate(
     lap("quadrics and normals")
     nw = (os.cpu_count() or 1) if workers is None else workers
     origin = V.min(0)
-    out: list[dict[str, Any]] = []
-    for k in range(passes):
-        t0 = time.time()
-        M, s = decimate_pass(
-            M, eps, block, 0.5 * (k % 2), origin, nw, reference, log=log
+    pin = np.zeros(len(V), bool)
+    if pinned is not None:
+        pin[np.asarray(pinned, np.int64)] = True
+    memo: dict[bytes, BlockResult] = {}
+    M0 = M
+    repairs: list[dict[str, Any]] = []
+    for rnd in range(max_rounds + 1):
+        M = M0
+        out: list[dict[str, Any]] = []
+        for k in range(passes):
+            t0 = time.time()
+            M, s = decimate_pass(
+                M,
+                eps,
+                block,
+                0.5 * (k % 2),
+                origin,
+                nw,
+                reference,
+                log=log,
+                pinned=pin,
+                memo=memo,
+            )
+            s["seconds"] = round(time.time() - t0, 2)
+            out.append(s)
+            log(
+                f"decimate pass {k + 1}/{passes}: {s['blocks']} blocks "
+                f"({s['reused']} reused), "
+                f"{s['faces_before']:,} -> {s['faces_after']:,} faces "
+                f"({s['seconds']} s)"
+            )
+            lap.t = time.time()
+        vid = np.unique(M.f)
+        if not repair:
+            break
+        loc = np.searchsorted(vid, M.f)
+        hit, pairs = intersecting_faces(V[vid], loc)
+        repairs.append(
+            dict(
+                round=rnd,
+                intersecting_faces=int(hit.sum()),
+                pairs=int(pairs),
+                pinned=int(pin.sum()),
+            )
         )
-        s["seconds"] = round(time.time() - t0, 2)
-        out.append(s)
-        log(
-            f"decimate pass {k + 1}/{passes}: {s['blocks']} blocks, "
-            f"{s['faces_before']:,} -> {s['faces_after']:,} faces "
-            f"({s['seconds']} s)"
+        lap(f"round {rnd}: {int(hit.sum())} intersecting faces")
+        if not hit.any():
+            break
+        # pin what the crossing faces stand for: their corners and their
+        # carried vertices (a ring of faces round them as well pinned about ten
+        # times as many vertices on the hemisphere, for two rounds fewer)
+        rows = np.flatnonzero(hit)
+        pin[M.f[rows].ravel()] = True
+        pin[_csr_take(M.cptr, M.cids, rows)[1]] = True
+    else:
+        raise RuntimeError(
+            f"decimate: faces still intersect after {max_rounds} repair rounds"
         )
-        lap.t = time.time()
-    vid = np.unique(M.f)
     d = carried_distances(V, M.f, M.cptr, M.cids)
     lap("distances")
     return Decimated(
@@ -1146,4 +1248,6 @@ def decimate(
         cids=M.cids,
         max_distance=float(d.max()) if d.size else 0.0,
         passes=out,
+        repairs=repairs,
+        pinned=np.flatnonzero(pin),
     )

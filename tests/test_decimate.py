@@ -295,3 +295,63 @@ def test_no_output_face_faces_away_from_the_surface_it_stands_for(eps: float) ->
     out = D.decimate(v, f, eps=eps, block=1.5, passes=2, workers=1, log=lambda s: None)
     cos = surface_cosines(v, f, out)
     assert np.sum(cos <= 0) == 0, f"{np.sum(cos <= 0)} of {len(cos)} faces flipped"
+
+
+def slabs(gap: int, n: int = 26) -> tuple[Float, Int]:
+    """Two bumpy slabs, one above the other, `gap` voxels apart: at gap 1 their
+    facing surfaces are one voxel (0.16 mm) apart and touch at corners (one
+    piece of genus > 0), like the necks of the real white surface; at gap 2,
+    two pieces."""
+    x, y, z = np.indices((n, n, 24))
+    h = 10 + np.round(2.5 * np.sin(x / 4.0) * np.cos(y / 5.0)).astype(int)
+    inside = (x > 2) & (x < n - 3) & (y > 2) & (y < n - 3)
+    a = (z >= 3) & (z < h) & inside
+    b = (z >= h + gap) & (z < 21) & inside
+    v, f = marching_tetrahedra((a | b).astype(float), 0.5)
+    return v * 0.16, f.astype(np.int64)
+
+
+@pytest.mark.parametrize(
+    ("gap", "eps", "n"), [(1, 0.12, 26), (1, 0.2, 26), (2, 0.08, 40)]
+)
+def test_repair_leaves_no_faces_intersecting(gap: int, eps: float, n: int) -> None:
+    """Without repair the facing surfaces cross; with it no faces intersect,
+    and the other guarantees hold."""
+    from baillarger.mesh_intersect import intersecting_faces
+
+    v, f = slabs(gap, n)
+    quiet = dict(block=1.6, workers=1, log=lambda s: None)
+    raw = D.decimate(v, f, eps=eps, repair=False, **quiet)  # type: ignore[arg-type]
+    assert intersecting_faces(v[raw.vertex_ids], raw.faces)[0].any()
+    out = D.decimate(v, f, eps=eps, **quiet)  # type: ignore[arg-type]
+    assert not intersecting_faces(v[out.vertex_ids], out.faces)[0].any()
+    assert out.repairs[-1]["intersecting_faces"] == 0 and len(out.repairs) >= 2
+    check(v, f, out, eps)
+    assert (surface_cosines(v, f, out) > 0).all()
+    assert np.isin(out.pinned, out.vertex_ids).all()  # pinned vertices are kept
+
+
+def test_the_repaired_result_is_the_result_with_its_pins() -> None:
+    """Reusing unchanged blocks changes nothing: the repaired result equals a
+    decimation with its pinned vertices given from the start, serial or not."""
+    v, f = slabs(1)
+    quiet = dict(block=1.6, log=lambda s: None)
+    out = D.decimate(v, f, eps=0.12, workers=1, **quiet)  # type: ignore[arg-type]
+    for workers in (1, 2):
+        again = D.decimate(
+            v,
+            f,
+            eps=0.12,
+            workers=workers,
+            repair=False,
+            pinned=out.pinned,
+            **quiet,  # type: ignore[arg-type]
+        )
+        for x, y in (
+            (out.vertex_ids, again.vertex_ids),
+            (out.faces, again.faces),
+            (out.cids, again.cids),
+        ):
+            np.testing.assert_array_equal(x, y)
+    reused = [s["reused"] for s in out.passes]
+    assert sum(reused) > 0

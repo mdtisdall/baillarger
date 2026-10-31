@@ -177,3 +177,10 @@ At 50 µm the whole brain's surface files would be about 20 GB.
      one carried id per true vertex: a few GB).
   Neither is the first limit at whole-brain scale: handle removal and the
   whole-volume arrays of `dseg` and `mesh` are.
+- The overview's self-intersections are repaired (`baillarger.decimate`:
+  rounds that pin what crossing faces stand for, rerunning only the blocks
+  that change). If near-contacts of the white surface are far more common at
+  50 µm, simplification envelopes (Cohen, Varshney, Manocha et al. 1996:
+  offset surfaces that narrow where the surface comes close to itself, which
+  the result must stay between) would prevent them instead, at the cost of
+  building non-overlapping envelopes in blocks.
