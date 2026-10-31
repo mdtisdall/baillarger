@@ -26,6 +26,7 @@ The command line:
     python -m baillarger.white mesh DSEG --out DERIVATIVES [--block-cells N]
         [--device DEVICE] [--overview-eps MM] [--workers N]
     python -m baillarger.white overview SURF [--eps MM] [--workers N]
+    python -m baillarger.white sites SURF
 
 dseg writes the corrected segmentation (desc-wmtopo_dseg) and the changed
 voxels (desc-wmtopofixes_dseg), with their .tsv and .json sidecars
@@ -36,7 +37,8 @@ segmentation as GIfTI, with its normals, edge keys and block index
 (docs/formats/white-surf.md), then its overview (write_white_overview): the
 surface decimated for viewing, as an ordinary GIfTI with embedded data
 (docs/formats/white-overview.md). overview writes the overview of a surface
-that mesh wrote.
+that mesh wrote. sites writes where the surface folds tightest, the review
+queue (baillarger.wm_sites, docs/formats/wm-sites.md).
 """
 
 import argparse
@@ -1037,6 +1039,8 @@ def main(argv: list[str] | None = None) -> None:
     o.add_argument("surf", type=Path, help="a hemi-<h>_white.surf.gii (mesh)")
     o.add_argument("--eps", type=float, default=OVERVIEW_EPS_MM, help="bound (mm)")
     o.add_argument("--workers", type=int, default=4, help="processes to decimate")
+    st = sub.add_parser("sites", help="where a surface folds tightest (review queue)")
+    st.add_argument("surf", type=Path, help="a hemi-<h>_white.surf.gii (mesh)")
     a = ap.parse_args(argv)
     if a.cmd == "dseg":
         for role, path in write_wm_topo(a.aseg, a.out, a.edits).items():
@@ -1048,10 +1052,15 @@ def main(argv: list[str] | None = None) -> None:
             print(f"{role}: {path}")
         for role, path in ov.paths.items():
             print(f"overview {role}: {path}")
-    else:
+    elif a.cmd == "overview":
         ov = write_white_overview(a.surf, a.eps, workers=a.workers)
         for role, path in ov.paths.items():
             print(f"overview {role}: {path}")
+    else:
+        from baillarger.wm_sites import write_sites
+
+        for role, path in write_sites(a.surf).items():
+            print(f"sites {role}: {path}")
 
 
 if __name__ == "__main__":
