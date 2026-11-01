@@ -84,7 +84,48 @@ Two patterns stand out:
   the surface.
 - **Coarse meshes**: every tool that makes surfaces on large or fine data
   (purple-mri, CIVET, BigBrain) coarsens to 80,000–330,000 triangles. That is
-  the step our principle rules out.
+  the step our principle rules out (next section).
+
+## Why the other tools coarsen, and why we do not
+
+Their reasons, and whether each applies to us:
+
+1. **Mesh density matched to the data.** In vivo at 1 mm, vertices much
+   closer than 1 mm add no information: their extra positions come from
+   interpolation and the staircase. A mesh at about the voxel spacing is
+   right. *For us:* the same rule gives a mesh at 160 µm (later 50 µm), not
+   a coarse one.
+2. **Mesh density matched to the analysis.** Thickness and curvature maps are
+   smoothed with kernels around 10 mm before vertex-wise statistics, and
+   parcellations vary over centimetres; more vertices add cost and multiple
+   comparisons, not information. *For us:* laminar questions are about fine
+   detail, so this does not apply.
+3. **Correspondence for registration and group analysis.** The surface is
+   resampled onto a template sphere so that every subject has the same
+   vertices. CIVET's code says its 81,920-triangle sphere "is the one used
+   for surface registration"; purple-mri decimates to 327,680 faces, the
+   size of FreeSurfer's ico7, for `mris_register` and the DKT atlas;
+   BigBrain's surfaces have ico7's 163,842 vertices. This is resampling to
+   a template, and nothing in it requires the template to be coarse. *For
+   us:* there is no atlas registration, so it does not apply.
+4. **Tooling.** On fine data, what still forces coarsening is the software:
+   CPU pipelines with whole volumes and surfaces in memory, about 0.5–1 KB
+   per vertex in FreeSurfer, global steps (sphere mapping, whole-surface
+   self-intersection checks, which scale poorly with mesh size), and
+   downstream tools that expect ico7. This is not a fundamental limit:
+   out-of-core and streaming meshes, spatial hierarchies for collision
+   tests and GPU methods exist, and our block layout is a form of them.
+   *For us:* the reason this project builds its own data structures.
+
+The one sound idea behind coarsening survives: at the voxel scale, geometry
+is mostly staircase and segmentation noise, so normals and curvature need a
+scale larger than a voxel. Coarsening imposes that crudely, smoothing
+positions and directions together and discarding the sampling density. This
+plan separates the two: the mesh stays at the data's resolution, and the
+normals are defined at an explicit scale s.
+
+So coarsening the mesh has no justification for this project, and is not
+reconsidered.
 
 ## Properties of the surface
 
