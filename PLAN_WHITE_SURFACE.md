@@ -57,6 +57,35 @@ statistics from the echoes inside and outside the WM near each place, in
 floating point (not FreeSurfer's 8-bit, WM-at-110 convention). A bias field,
 where needed, may be estimated coarsely, since it varies slowly.
 
+## Other tools
+
+Each tool's answer to the decisions above, and what we take from it.
+"Unverified" marks what comes from memory, not from a source or the code.
+
+| Tool | Topology | Cut or fill | Thin WM; smoothing | Self-intersection | Resolution | Licence | We take |
+|---|---|---|---|---|---|---|---|
+| FreeSurfer, ex vivo route | Corrected on the surface, through a sphere mapping | Per-defect intensity and curvature statistics | Thickens strands (`mri_segment`); `mri_pretess` adds voxels at diagonal contacts | Checked while placing the surface | Built for 1 mm; `-hires` keeps native voxels | Research only (FreeSurfer licence) | The model: steps 2, 3, 5 |
+| CRUISE (Nighres) | A correction step, then a topology-preserving level set (Han et al. 2004) | From the correction step | Curvature force on the level set | None possible: one level set | 0.4 mm at 7T | Apache-2.0 | Step 6's relaxed field; well-composed topology (its default `wcs`), step 5 |
+| CIVET (CLASP) | WM mask cleaned, `mincdefrag`, then `sphere_mesh` (genus 0); then a deformation from it | Unverified | Removes loosely connected voxels and fills tightly connected ones before meshing; then coarsens to 120,000 and resamples to 81,920 triangles | Explicit prevention and a self-proximity cost (MacDonald et al. 2000; Kim et al. 2005) | About 1 mm; its mesh is coarsened | Not stated on GitHub | Morphological clean-up before meshing (steps 3, 5); not the coarsening |
+| CAT12 | Spherical harmonics patch each defect (Yotter et al. 2011) | Intensity decides | Central surface from projection-based thickness; refinement afterwards | A separate collision-reduction step | About 1 mm | GPL-2.0+ | Cut or fill by intensity, again (step 2) |
+| BrainSuite | Graph-based (Shattuck and Leahy 2001) | The smaller change | | | About 1 mm | GPL-2.0 (source) | A baseline only |
+| BrainVoyager (Kriegeskorte and Goebel 2001) | Region growing from deep inside, by distance, stopped where it touches itself | Per defect, at the thinnest place | | | About 1 mm | Commercial | Confirms our fronts (step 2) |
+| BrainVISA (Mangin et al. 1995) | Homotopic growth of a sphere-topology interface toward the segmentation (`VipHomotopic`) | Implicit in the growth | | | About 1 mm | Unverified | Gaps defined by the skeleton between two banks (step 4) |
+| Template flows: TopoFit (FreeSurfer's `mris_estimate_wm`), CorticalFlow, CortexODE | By construction: a template mesh moved by a learned diffeomorphic flow | None needed | Learned | Avoided in theory (CortexODE); conditions for manifold meshes (CorticalFlow) | Trained on 1 mm FreeSurfer surfaces | Varies | The idea of topology by construction, not the trained models |
+| BigBrain (Lewis et al. 2014; Wagstyl et al. 2018, 2020) | Unverified | Unverified | | | 20 µm data; released surfaces have 163,842 vertices per hemisphere | Open data | Little for this step: the surfaces are far coarser than the data |
+
+Two patterns stand out:
+
+- **Topology by construction** (CIVET, BrainVISA, template flows): start
+  from a sphere and move it, rather than correct defects afterwards.
+  `remove_handles`' fronts are already a form of this, a homotopic growth
+  from deep inside the WM, so it is not a separate path; but a deformation
+  that keeps genus 0 throughout (step 6 relaxed) is the same idea applied to
+  the surface.
+- **Coarse meshes**: every tool that makes surfaces on large or fine data
+  (purple-mri, CIVET, BigBrain) coarsens to 80,000–330,000 triangles. That is
+  the step our principle rules out.
+
 ## Properties of the surface
 
 M is the corrected mask, S the surface meshed from it.
