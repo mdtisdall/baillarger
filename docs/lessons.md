@@ -159,10 +159,10 @@ Stream 1 has two parts that meet at one interface:
 
 - **What it is.** nnU-Net v2 (Apache-2.0) trained on the FLASH echoes. purple-mri's labels serve as weak seeds, and the review queue's verified answers become training labels.
 - **What it publishes.** Labels are required; P(filled WM) and the spread at folds are optional `probseg` outputs. The surface steps keep working from labels alone, so the two parts can advance in parallel.
-- **The model keeps improving as hemispheres arrive.** No number of training hemispheres is fixed in advance: each new hemisphere's reviewed labels join the training set. This needs:
-  - held-out test regions that never enter training, so each model version can be compared with the last;
-  - the model version recorded in each output's sidecar, so a label can be traced to the model that made it;
-  - a choice, per hemisphere, of whether to rerun earlier hemispheres with a newer model. A rerun changes everything downstream of the label.
+- **The model is trained in generations, through continuous human-in-the-loop review.** Each generation segments the hemispheres, the review queue corrects its output, and the verified answers join the training labels for the next generation. No number of hemispheres or generations is fixed in advance. This needs:
+  - held-out test regions that never enter training, so each generation can be compared with the last;
+  - the model generation recorded in each output's sidecar, so a label can be traced to the model that made it;
+  - a choice, at each generation, of whether to rerun earlier hemispheres with it. A rerun changes everything downstream of the label.
 - **Open decisions:**
   - the training hardware;
   - the labelling tool;
