@@ -213,7 +213,10 @@ sign) on the mask from steps 1–5, and measure. If tight folds remain at the
 voxel scale, relax it: let the field change sign at simple points only,
 within the bound of property 4, minimising its smoothness energy (a
 topology-preserving level set, as in CRUISE; Han et al. 2004). This is the
-step that may move the surface off the voxel staircase.
+step that may move the surface off the voxel staircase. A sign change must
+also keep property 3: it may not make a thin voxel or a gap voxel within s
+of it. Without that test the energy shrinks widened gaps and thin blades
+from every side (experiment 6).
 
 ### Step 7. Normals
 
@@ -342,6 +345,38 @@ Neighbour-normal angles of the output normals, over the edges (degrees):
   failures of property 3 on the final mask, with a size below which a piece
   is not a site.
 
+Step 6 on crops (experiment 6; `scratch/step6-proto/REPORT.md`). Ten crops
+of the steps 3–5 result at s = 0.30 mm, each a 64³ core measured inside a
+16-voxel margin: the 5 windows with the most thickened voxels, a control
+with no fix, and 4 random windows with at least the median WM boundary. The
+relaxed solve is today's thin-plate solve warm-started from today's field;
+a voxel within the bound of the input boundary may change sign only at a
+simple point, one parity class at a time. Misfacing here is a face's normal
+against the mean of its corners', not the site count above.
+
+| Crops | Main | Today, steps 3–5 | Relaxed, bound 0.30 mm | Relaxed, thickened and widened voxels locked |
+|---|---|---|---|---|
+| 4 random, 90th pct | 3.35° | 4.00° | 3.21° | 3.55° |
+| 5 thickened, 90th pct | 8.86° | 10.08° | 6.18° | 8.75° |
+| control, 90th pct | 2.06° | 2.06° | 1.70° | |
+| 5 thickened, thin voxels | 6,567 | 723 | 1,367 | about as input |
+| 5 thickened, misfacing faces | | 11 | 2 | |
+
+- **Relaxing works on the bulk.** The 90th percentile falls below main's on
+  every kind of crop, the untouched control included, and the area of the
+  thickened crops falls 6–23%. Betti numbers never change. Bounds of 0.30
+  and 0.45 mm agree within 0.4°; 0.16 mm is worse (misfacing 11 to 39), so
+  the bound is s.
+- **But it undoes steps 3 and 4 in places.** The thin-plate energy shrinks
+  small background regions (widened gaps, tunnels) and thin blades from
+  every side; topology stops them closing, so they become slivers. In one
+  crop it re-creates 11 gap voxels and the edges over 60° go from 1 to 59
+  (maximum 113°), 231 of its 270 edges over 30° within 3 voxels of them.
+- **Locking the voxels steps 3 and 4 changed is not enough**: it keeps
+  property 3 but only a third to half of the gain, and gaps still narrow
+  just outside the locked voxels. Step 6 needs property 3 as a constraint
+  of its own.
+
 ## Experiments, in order
 
 Each runs on the hemisphere under `scripts/memguard`, one at a time, and is
@@ -361,8 +396,10 @@ mm) upward. Done: 0.26, 0.30, 0.36, 0.42 and 0.52 mm, with steps 3, 4 and 5
 **Experiment 5.** The intensity score for cut or fill (step 2), against the
 size rule and the reference sites.
 
-**Experiment 6.** Step 6 relaxed, if the measures after 1–5 still show
-voxel-scale folds.
+**Experiment 6.** Step 6 relaxed, on crops of the steps 3–5 result at
+s = 0.30 mm (results above). Next: a flip may not make a thin or gap voxel
+within s; if that is not enough, alternate relaxing with steps 3–5 until
+nothing changes, then finish with today's antialiasing.
 
 ## Tests
 
@@ -393,10 +430,10 @@ are superseded by steps 2–4; #83 is closed when this lands.
 
 ## Open
 
-- **s**, from experiment 4. The floor is about 1.5 voxels: below it the
-  voxel staircase itself is thinner than 2s (a cube's edges at 1 voxel). s
-  must also stay off whole numbers of voxels along any axis (lone tips).
-- **The bound in property 4**: s, or a separate distance.
+- **s**: 0.30 mm from experiment 4, on one hemisphere. The floor is about
+  1.5 voxels: below it the voxel staircase itself is thinner than 2s (a
+  cube's edges at 1 voxel). s must also stay off whole numbers of voxels
+  along any axis (lone tips).
 - **Fills across a sulcal fundus.** A fill there puts a WM plug in the
   cortex whose sides face along the layers, not across them. Step 2's
   intensity score should usually cut such a handle; whether that needs a
