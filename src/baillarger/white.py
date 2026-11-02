@@ -23,7 +23,7 @@ column traces start from.
 The command line:
 
     python -m baillarger.white dseg ASEG [--edits EDITS] [--scale-mm S]
-        --out DERIVATIVES
+        [--well-composed] --out DERIVATIVES
     python -m baillarger.white mesh DSEG --out DERIVATIVES [--block-cells N]
         [--device DEVICE] [--overview-eps MM] [--workers N]
     python -m baillarger.white overview SURF [--eps MM] [--workers N]
@@ -71,7 +71,13 @@ from baillarger.bids import (
 from baillarger.blocks import EmbeddedSource, open_volume
 from baillarger.decimate import closest_points, csr_take, decimate, reorder
 from baillarger.gifti import DataArray, write_external
-from baillarger.handles import kuhn_betti, kuhn_structure, remove_handles, thicken
+from baillarger.handles import (
+    kuhn_betti,
+    kuhn_structure,
+    remove_handles,
+    thicken,
+    well_compose,
+)
 from baillarger.mesh import (
     BLOCK,
     MeshBlocks,
@@ -133,6 +139,8 @@ FIXES = {
     4: "manual_edit",
     5: "thickened",
     6: "exception",
+    7: "well_composed_add",
+    8: "well_composed_remove",
 }
 
 #: docs/formats/wm-dseg.md
@@ -153,7 +161,10 @@ DSEG_SPEC = SidecarSpec(
         Key("ScaleMM", "number", True, "the scale s of the normals (0: off)"),
         Key("ThickenedVoxels", "integer", True, "voxels added by thickening"),
         Key("ThickenPasses", "integer", True, "passes of the thickening"),
-        Key("Exceptions", "integer", True, "pieces the thickening could not add"),
+        Key("WellComposed", "boolean", True, "diagonal-only contacts removed"),
+        Key("WellComposedAdded", "integer", True, "voxels added for them"),
+        Key("WellComposedRemoved", "integer", True, "voxels removed for them"),
+        Key("Exceptions", "integer", True, "pieces left (thicken, pinch)"),
         Key("ExceptionsFile", "string", True, "the exceptions table (name)"),
         Key("Moves", "array of objects", True, "each manual edit and handle move"),
     ),
@@ -245,7 +256,10 @@ class WMTopo:
     #: voxels added by the thickening, and its passes
     thickened_voxels: int = 0
     thicken_passes: int = 0
-    #: per exception: Kind (thicken), Voxels, Centre (0-based voxel)
+    #: voxels added and removed to remove diagonal-only contacts
+    composed_added: int = 0
+    composed_removed: int = 0
+    #: per exception: Kind (thicken, pinch), Voxels, Centre (0-based voxel)
     exceptions: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -254,6 +268,7 @@ def wm_topo(
     voxel_mm: npt.ArrayLike,
     edits: Edits | None = None,
     scale_mm: float = 0.0,
+    well_composed: bool = False,
 ) -> WMTopo:
     """The corrected segmentation of an aseg: the manual edits made first
     (baillarger.wm_edits.apply_edits; it raises ValueError for edits that do
@@ -266,8 +281,11 @@ def wm_topo(
     leaving it would leave a cavity, so a person resolves it. With scale_mm
     (s) above 0, the mask is then thickened where it is thinner than about
     2s (baillarger.handles.thicken), the added voxels set to the WM label;
-    each piece of the target that could not be added is an exception. The
-    corrected segmentation's
+    each piece of the target that could not be added is an exception. With
+    well_composed, the mask's diagonal-only contacts are then removed by
+    simple points (baillarger.handles.well_compose): added voxels get the WM
+    label, removed ones are relabelled as cuts, and each piece of the
+    contacts left is an exception. The corrected segmentation's
     voxels with a filled label are exactly the corrected mask. Raises
     RuntimeError if that mask still has a handle or a cavity (b1 or b2 not 0),
     which a fill of one piece of the mask touching another can make."""
@@ -322,29 +340,42 @@ def wm_topo(
     exceptions: list[dict[str, Any]] = []
     passes = 0
     exc_vox: list[npt.NDArray[np.intp]] = []
-    if scale_mm > 0:
-        th = thicken(obj, scale_mm, sampling=(vox[0], vox[1], vox[2]))
-        lap("thicken")
-        thick, passes = th.obj & ~obj, th.passes
-        obj = th.obj
-        bl, _ = ndi.label(th.blocked, kuhn_structure())
-        pts = np.argwhere(bl > 0)
-        ids = bl[tuple(pts.T)]
+
+    def pieces(mask: Bool, kind: str) -> None:
+        lab, _ = ndi.label(mask, kuhn_structure())
+        pts = np.argwhere(lab > 0)
+        ids = lab[tuple(pts.T)]
         order = np.argsort(ids, kind="stable")
         pts, ids = pts[order], ids[order]
         for v in np.split(pts, np.flatnonzero(np.diff(ids)) + 1) if len(pts) else []:
             exc_vox.append(v)
             exceptions.append(
                 dict(
-                    Kind="thicken",
+                    Kind=kind,
                     Voxels=len(v),
                     Centre=np.round(v.mean(0) + lo).astype(int).tolist(),
                 )
             )
+
+    if scale_mm > 0:
+        th = thicken(obj, scale_mm, sampling=(vox[0], vox[1], vox[2]))
+        lap("thicken")
+        thick, passes = th.obj & ~obj, th.passes
+        obj = th.obj
+        pieces(th.blocked, "thicken")
         lap("exceptions")
-    cut, fill = x & ~obj, obj & ~x
+    c_add = np.zeros_like(obj)
+    c_rem = np.zeros_like(obj)
+    if well_composed:
+        wc = well_compose(obj)
+        lap("well-composed")
+        c_add, c_rem, obj = wc.added, wc.removed, wc.obj
+        thick &= obj
+        pieces(wc.left, "pinch")
+    # a cut voxel the thickening adds back is unchanged; fills are the handles'
+    cut, fill = x & ~obj, r.obj & ~x
     labels = a.copy()
-    labels[cav | fill | (thick & ~x)] = wm_label
+    labels[cav | (fill & obj) | ((thick | c_add) & ~x)] = wm_label
     relabel_cuts(labels, cut, ~obj & ~cut, voxel_mm)
     lap("relabel cuts")
     if not np.array_equal(np.isin(labels, filled), obj):
@@ -365,9 +396,11 @@ def wm_topo(
         fixes[manual] = 4  # an edited voxel the correction then changes shows that
     fx = fixes[box]
     fx[cut] = 1
-    fx[fill] = 2
+    fx[fill & obj] = 2
     fx[cav] = 3
     fx[thick & ~x] = 5
+    fx[c_add & ~x] = 7
+    fx[c_rem & x] = 8
     for v in exc_vox:
         e = fx[tuple(v.T)]
         e[e == 0] = 6  # an exception voxel some fix changed shows the fix
@@ -405,6 +438,8 @@ def wm_topo(
         0 if manual is None else int(manual.sum()),
         int((thick & ~x).sum()),
         passes,
+        int((c_add & ~x).sum()),
+        int((c_rem & x).sum()),
         exceptions,
     )
 
@@ -419,6 +454,7 @@ def write_wm_topo(
     out: Path,
     edits: Path | None = None,
     scale_mm: float = 0.0,
+    well_composed: bool = False,
 ) -> dict[str, Path]:
     """The dseg command: wm_topo of the aseg at aseg, with the manual edits in
     the table at edits (docs/formats/wm-edits.md) if given, written to the BIDS
@@ -438,7 +474,7 @@ def write_wm_topo(
     lap = Laps()
     a = np.asarray(img.dataobj)
     lap("read")
-    t = wm_topo(a, vox, e, scale_mm)
+    t = wm_topo(a, vox, e, scale_mm, well_composed)
     lap = Laps()
     dataset_description(out)
     p = dict(
@@ -487,6 +523,9 @@ def write_wm_topo(
             ScaleMM=scale_mm,
             ThickenedVoxels=t.thickened_voxels,
             ThickenPasses=t.thicken_passes,
+            WellComposed=well_composed,
+            WellComposedAdded=t.composed_added,
+            WellComposedRemoved=t.composed_removed,
             Exceptions=len(t.exceptions),
             ExceptionsFile=p["exceptions"].name,
             Moves=t.moves,
@@ -499,7 +538,8 @@ def write_wm_topo(
             SpecVersion=FIXES_SPEC.version,
             Description="The voxels that the WM topology correction changed: "
             "1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit, "
-            "5 thickened, 6 exception (could not be thickened).",
+            "5 thickened, 6 exception, "
+            "7 added and 8 removed for diagonal-only contacts.",
             **src,
             Provenance=prov,
         ),
@@ -1119,6 +1159,11 @@ def main(argv: list[str] | None = None) -> None:
         default=0.0,
         help="thicken the WM to 2 x this where thinner (0: off)",
     )
+    d.add_argument(
+        "--well-composed",
+        action="store_true",
+        help="remove the WM's diagonal-only contacts",
+    )
     d.add_argument("--out", required=True, type=Path, help="BIDS derivatives root")
     m = sub.add_parser("mesh", help="the white surface of a corrected segmentation")
     m.add_argument("dseg", type=Path, help="a desc-wmtopo_dseg (the dseg command)")
@@ -1142,7 +1187,8 @@ def main(argv: list[str] | None = None) -> None:
     o.add_argument("--workers", type=int, default=4, help="processes to decimate")
     a = ap.parse_args(argv)
     if a.cmd == "dseg":
-        for role, path in write_wm_topo(a.aseg, a.out, a.edits, a.scale_mm).items():
+        paths = write_wm_topo(a.aseg, a.out, a.edits, a.scale_mm, a.well_composed)
+        for role, path in paths.items():
             print(f"{role}: {path}")
     elif a.cmd == "mesh":
         w = write_white_surface(a.dseg, a.out, a.block_cells, a.device)

@@ -11,6 +11,7 @@ import numpy.typing as npt
 import pytest
 
 from baillarger import bids, white
+from baillarger import handles as H
 from baillarger.handles import kuhn_betti
 
 SHAPE = (40, 36, 30)
@@ -155,6 +156,7 @@ def test_thickening_adds_wm_and_keeps_the_topology(tmp_path: Path) -> None:
     assert t.thickened_voxels == (t.fixes == 5).sum() > 0 and t.thicken_passes > 0
     assert (t.dseg[t.fixes == 5] == 41).all() and (a[t.fixes == 5] != 41).all()
     assert sum(x["Voxels"] for x in t.exceptions) == (t.fixes == 6).sum()
+    assert (t.fixes == 2).sum() == 4  # the tunnel's plug, as without thickening
     src = tmp_path / "in" / "sub-T01_ses-S1_aseg.nii.gz"
     src.parent.mkdir()
     nib.save(nib.nifti1.Nifti1Image(a, np.diag([*VOX, 1.0])), src)
@@ -168,3 +170,14 @@ def test_thickening_adds_wm_and_keeps_the_topology(tmp_path: Path) -> None:
     rows = (anat / side["ExceptionsFile"]).read_text().splitlines()
     assert rows[0] == "index\tkind\tvoxels\ti\tj\tk"
     assert len(rows) == 1 + side["Exceptions"] == 1 + len(t.exceptions)
+
+
+def test_well_composed_removes_the_diagonal_contacts() -> None:
+    a = synthetic_aseg()
+    a[22, 20, 18] = 41  # touches the block's WM corner (21, 19, 17) only there
+    t = white.wm_topo(a, VOX, well_composed=True)
+    assert t.betti_after == (2, 0, 0)
+    assert not H.pinched(np.isin(t.dseg, FILLED)).any()
+    assert t.composed_added == (t.fixes == 7).sum()
+    assert t.composed_removed == (t.fixes == 8).sum()
+    assert t.composed_added + t.composed_removed > 0

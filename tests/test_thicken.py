@@ -1,6 +1,7 @@
 """Tests for baillarger.handles beyond the handle removal itself: fills that
-may not take given voxels (remove_handles, nofill) and the thickening of thin
-WM (thin_voxels, thicken), on shapes whose answer is known exactly."""
+may not take given voxels (remove_handles, nofill), the thickening of thin
+WM (thin_voxels, thicken) and the removal of diagonal-only contacts
+(pinched, well_compose), on shapes whose answer is known exactly."""
 
 import numpy as np
 import numpy.typing as npt
@@ -90,3 +91,40 @@ def test_thickening_keeps_the_topology_of_random_objects() -> None:
         assert H.kuhn_betti(t.obj) == H.kuhn_betti(a), seed
         assert not (a & ~t.obj).any() and t.added.any()
         assert not (t.blocked & t.obj).any()
+
+
+def two_cubes(second: tuple[slice, slice, slice]) -> Bool3:
+    a = np.zeros((20, 20, 20), bool)
+    a[5:10, 5:10, 5:10] = True
+    a[second] = True
+    return a
+
+
+def test_each_kind_of_diagonal_contact_is_resolved_minimally() -> None:
+    """Two cubes touching along an edge or at a corner. Where the Kuhn
+    adjacency joins them (offsets in {0, 1}^3), the neck is filled; where it
+    does not, they are parted."""
+    cases = [
+        # (second cube, contact voxels, Betti, added, removed)
+        ((slice(10, 15), slice(10, 15), slice(5, 10)), 20, (1, 0, 0), 5, 0),
+        ((slice(10, 15), slice(0, 5), slice(5, 10)), 20, (2, 0, 0), 0, 5),
+        ((slice(10, 15), slice(10, 15), slice(10, 15)), 8, (1, 0, 0), 2, 0),
+        ((slice(10, 15), slice(0, 5), slice(10, 15)), 8, (2, 0, 0), 0, 1),
+    ]
+    for second, n, betti, added, removed in cases:
+        a = two_cubes(second)
+        assert H.pinched(a).sum() == n and H.kuhn_betti(a) == betti
+        w = H.well_compose(a)
+        assert [int(w.added.sum()), int(w.removed.sum())] == [added, removed]
+        assert not w.left.any() and H.kuhn_betti(w.obj) == betti
+
+
+def test_well_compose_keeps_the_topology_and_ends() -> None:
+    rng = np.random.default_rng(1)
+    for seed in range(3):
+        a = np.zeros((24, 24, 24), bool)
+        a[4:20, 4:20, 4:20] = rng.random((16, 16, 16)) > 0.5
+        w = H.well_compose(a)
+        assert H.kuhn_betti(w.obj) == H.kuhn_betti(a), seed
+        assert w.left.sum() < H.pinched(a).sum()
+        assert np.array_equal(w.left, H.pinched(w.obj))

@@ -2,7 +2,7 @@
 
 SpecVersion `wm-dseg/1` (the corrected segmentation) and `wm-dseg-fixes/1`
 (the diagnostic image of the changes). Written by
-`python -m baillarger.white dseg ASEG [--edits EDITS] [--scale-mm S] --out DERIV`
+`python -m baillarger.white dseg ASEG [--edits EDITS] [--scale-mm S] [--well-composed] --out DERIV`
 (`baillarger.white.write_wm_topo`); the keys are enforced by
 `baillarger.white.DSEG_SPEC` and `FIXES_SPEC`, and `tests/test_bids.py` checks
 that the tables below list the same keys, types and requirements.
@@ -17,10 +17,10 @@ In the BIDS derivatives root `DERIV`, for an input with entities `sub` and
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.nii.gz` | The corrected segmentation: the input's grid, affine, header and data type |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.tsv` | `index` and `name` (FreeSurfer LUT) of every label in it |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.json` | Sidecar, `wm-dseg/1` |
-| `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.nii.gz` | uint8, the changed voxels: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit, 5 thickened, 6 exception (a target voxel the thickening could not add); 0 elsewhere. A manually edited voxel that the correction then changes shows the correction's value |
+| `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.nii.gz` | uint8, the changed voxels: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit, 5 thickened, 6 exception (a target voxel the thickening could not add, or a voxel of a diagonal-only contact left), 7 added and 8 removed for diagonal-only contacts; 0 elsewhere. A manually edited voxel that the correction then changes shows the correction's value |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.tsv` | `index` and `name` of those values |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.json` | Sidecar, `wm-dseg-fixes/1` |
-| `sub-<sub>_ses-<ses>_desc-wmtopo_exceptions.tsv` | The exceptions (below): `index`, `kind`, `voxels`, and the centre `i`, `j`, `k` (0-based voxel); only the header without `--scale-mm` |
+| `sub-<sub>_ses-<ses>_desc-wmtopo_exceptions.tsv` | The exceptions (below): `index`, `kind`, `voxels`, and the centre `i`, `j`, `k` (0-based voxel); only the header without `--scale-mm` or `--well-composed` |
 
 `DERIV/dataset_description.json` (`DatasetType` `derivative`) is written if
 it is not there. BIDS's `desc` entity and `dseg` suffix are standard; the
@@ -74,6 +74,21 @@ target) is left out; each connected piece of those is an **exception**
 voxels: below it the voxel staircase itself is thin. Growth into cortex is
 allowed: the white surface is where columns start, not the GM/WM boundary.
 
+## Well-composed
+
+With `--well-composed` (off by default), the mask's diagonal-only contacts
+are then removed, as FreeSurfer's `mri_pretess` does
+(`baillarger.handles.well_compose`). A contact is a 2 x 2 square of voxels
+in a checkerboard, or a 2 x 2 x 2 cube whose two voxels of one phase touch
+only at a corner: either way the surface has a pinch of zero width there,
+whichever phase the Kuhn adjacency joins. Only voxels of a contact change,
+by simple points (the topology stays), each at most once. Additions and
+removals that leave no contact at the voxel come first; when none is left,
+additions that leave no more contacts at the voxel than before (a contact
+through a cube's Kuhn diagonal takes two additions in a row). Added voxels
+get `WMLabel`, removed ones take labels as cuts do. Each piece of the
+contacts left is an exception (`kind` `pinch`).
+
 ## Manual edits
 
 With `--edits`, the manual edits of the input in a `wm-edits/1` table
@@ -108,7 +123,10 @@ whole by the command, so an edit costs a `dseg` run.
 | `ScaleMM` | number | yes | s of `--scale-mm` (0: no thickening) |
 | `ThickenedVoxels` | integer | yes | Voxels set to `WMLabel` by the thickening |
 | `ThickenPasses` | integer | yes | Passes the thickening took (0 when off) |
-| `Exceptions` | integer | yes | Pieces of the target the thickening could not add |
+| `WellComposed` | boolean | yes | Whether `--well-composed` was given |
+| `WellComposedAdded` | integer | yes | Voxels set to `WMLabel` to remove diagonal-only contacts |
+| `WellComposedRemoved` | integer | yes | Voxels removed from the mask to remove them |
+| `Exceptions` | integer | yes | Pieces left: of the target the thickening could not add (`thicken`), and of the contacts left (`pinch`) |
 | `ExceptionsFile` | string | yes | The name of the exceptions table, in the same directory |
 | `Moves` | array of objects | yes | Per manual answer with rows, then per handle move: `Kind` (`manual`, `cut`, `fill` or `stranded`), `Voxels` (count), `Centre` (0-based voxel of the grid), and for `manual` the `Answer` (its `Id`) |
 

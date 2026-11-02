@@ -657,6 +657,169 @@ def thicken(
     return Thickening(out, out & ~a, target & ~out, passes)
 
 
+# ---------------------------------------------------------------- well-composed
+
+
+def _square_configs() -> Int:
+    """The 12 squares of 2 x 2 voxels (in the three axis planes) that hold a
+    voxel, as offsets from it (12, 4, 3): the diagonal pair first, then the
+    other pair."""
+    out = []
+    for a, b in ((0, 1), (0, 2), (1, 2)):
+        for oa in (-1, 0):
+            for ob in (-1, 0):
+                corners = []
+                for da, db in ((0, 0), (1, 1), (1, 0), (0, 1)):
+                    o = [0, 0, 0]
+                    o[a], o[b] = oa + da, ob + db
+                    corners.append(o)
+                out.append(corners)
+    return np.array(out, np.int64)
+
+
+def _cube_configs() -> Int:
+    """The 8 cubes of 2 x 2 x 2 voxels that hold a voxel, as offsets from it
+    (8, 8, 3), corner c at bit pattern c (so c and 7 - c are opposite)."""
+    out = []
+    for o in itertools.product((-1, 0), repeat=3):
+        out.append(
+            [
+                [o[0] + (c >> 2 & 1), o[1] + (c >> 1 & 1), o[2] + (c & 1)]
+                for c in range(8)
+            ]
+        )
+    return np.array(out, np.int64)
+
+
+_SQUARES = _square_configs()
+_CUBES = _cube_configs()
+
+
+def _bad_square(x: list[Bool]) -> Bool:
+    """A checkerboard: the diagonal pair alike, the other pair alike, the two
+    pairs different."""
+    out: Bool = (x[0] == x[1]) & (x[2] == x[3]) & (x[0] != x[2])
+    return out
+
+
+def _bad_cube(x: list[Bool]) -> Bool:
+    """Two opposite corners of one phase and the other six of the other."""
+    n = np.zeros(x[0].shape, np.uint8)
+    for c in x:
+        n += c
+    out = np.zeros(n.shape, bool)
+    for u in range(4):
+        pair = x[u] & x[7 - u]
+        out |= (n == 2) & pair
+        out |= (n == 6) & ~x[u] & ~x[7 - u]
+    return out
+
+
+def pinched(obj: npt.ArrayLike) -> Bool:
+    """The voxels of every diagonal-only contact of the object (3D bool): a
+    2 x 2 square in a checkerboard, or a 2 x 2 x 2 cube whose two voxels of
+    one phase touch only at a corner. Either phase can be the pinched one
+    (the Kuhn adjacency joins one diagonal of each square and one of each
+    cube); either way the surface between them has a pinch of zero width."""
+    a = np.asarray(obj, bool)
+    out = np.zeros_like(a)
+    n = a.shape
+    for cfgs, bad in ((_SQUARES, _bad_square), (_CUBES, _bad_cube)):
+        # each configuration whose least corner is (0, 0, 0)
+        lo = cfgs.min(1)
+        k = int(np.flatnonzero((lo == 0).all(1))[0])
+        corners = cfgs[k]
+        ext = corners.max(0)
+        sl = [
+            tuple(slice(int(c[d]), n[d] - int(ext[d]) + int(c[d])) for d in range(3))
+            for c in corners
+        ]
+        hit = bad([a[s] for s in sl])
+        for s in sl:
+            out[s] |= hit
+    return out
+
+
+def _contacts(flat: Bool, v: Int, shape: tuple[int, ...]) -> Int:
+    """The number of diagonal-only contacts that hold each voxel v (flat
+    indices)."""
+    st = np.array([shape[1] * shape[2], shape[2], 1], np.int64)
+    out = np.zeros(v.size, np.int64)
+    for cfgs, bad in ((_SQUARES, _bad_square), (_CUBES, _bad_cube)):
+        for cfg in cfgs:
+            out += bad([flat[v + int(o @ st)] for o in cfg])
+    return out
+
+
+@dataclass(frozen=True)
+class WellComposed:
+    """The result of well_compose: the object, the voxels added and removed,
+    the voxels of the diagonal-only contacts left, and the passes taken."""
+
+    obj: Bool
+    added: Bool
+    removed: Bool
+    left: Bool
+    passes: int
+
+
+def well_compose(obj: npt.ArrayLike, max_passes: int = 100) -> WellComposed:
+    """Remove the object's (3D bool) diagonal-only contacts (pinched), as
+    FreeSurfer's mri_pretess does, keeping its topology. Only voxels of a
+    contact change, and only by simple points, one parity class
+    (i % 2, j % 2, k % 2) at a time (as in thicken), and each voxel at most
+    once, so the passes end. A pass first adds the background voxels, then
+    removes the object voxels, whose change leaves no contact at that voxel.
+    When that changes nothing, it adds the background voxels whose addition
+    leaves no more contacts at that voxel than before: a contact through the
+    Kuhn diagonal of a cube takes two additions in a row, and the first only
+    turns it into a contact along an edge. Passes repeat until one changes
+    nothing; the contacts left are reported. Voxels within 2 of the array
+    border are not changed."""
+    a = np.asarray(obj, bool)
+    shape = a.shape
+    inner = np.zeros(shape, bool)
+    inner[2:-2, 2:-2, 2:-2] = True
+    flat = np.ascontiguousarray(a).ravel().copy()
+    fixed = ~inner.ravel()
+    offs = _flat_offsets(shape)
+
+    def flip(phase: bool, strict: bool) -> bool:
+        cand = np.flatnonzero(pinched(flat.reshape(shape)).ravel() & ~fixed)
+        cand = cand[flat[cand] != phase]
+        i, j, k = np.unravel_index(cand, shape)
+        cls = (i % 2) * 4 + (j % 2) * 2 + k % 2
+        changed = False
+        for c in range(8):
+            v = cand[cls == c]
+            if not v.size:
+                continue
+            before = _contacts(flat, v, shape)
+            v, before = v[before > 0], before[before > 0]
+            m = np.zeros(v.size, np.int64)
+            for b in range(14):
+                m |= flat[v + offs[b]].astype(np.int64) << b
+            v, before = v[SIMPLE[m]], before[SIMPLE[m]]
+            flat[v] = phase
+            after = _contacts(flat, v, shape)
+            ok = after == 0 if strict else after <= before
+            flat[v[~ok]] = not phase
+            if ok.any():
+                fixed[v[ok]] = True
+                changed = True
+        return changed
+
+    passes = 0
+    while passes < max_passes:
+        passes += 1
+        changed = flip(True, True)
+        changed |= flip(False, True)
+        if not changed and not flip(True, False):
+            break
+    out = flat.reshape(shape)
+    return WellComposed(out, out & ~a, a & ~out, pinched(out), passes)
+
+
 def _flat_offsets(shape: tuple[int, ...]) -> Int:
     """The flat-index offsets of the 14 Kuhn neighbours in an array of shape."""
     return (
