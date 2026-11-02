@@ -87,12 +87,12 @@ These describe this one aseg, not asegs in general. It is the example data we ha
 - It fills thin fluid channels of collapsed sulci with cortex, and labels superficial vessels and thin Fomblin gaps at tight bends as cortex. These make false contacts. At V1V2, relabelling such cells took the columns crossing fused banks from 6,001 to 717.
 - Missing tissue (excised blocks that the aseg imputes) is 14.6 % of V1V2's cortex label. It shows as FLASH below 0.25 × the cortex median.
 
-**Boxes distort results**
+**Domain edges: what the boxes taught**
 
-- Near a face, the tissue just outside the box is missing. Columns run out through the face, and fronts from WM beyond the face never arrive, so their neighbours meet in their place.
-- 65–99 % of column failures and a quarter to two thirds of contacts lie at box faces (SF F26, F27).
-- Any box-scale measurement needs regions at least 6 mm from every face, and leaves out roots within 2 mm of a face.
-- The restart works on the hemisphere. Box numbers in this document are evidence about methods, not about the hemisphere.
+The restart does not work on boxes. Two things from them still matter:
+
+- **Read the box numbers with their edge bias in mind.** Most stream 2 and 3 evidence comes from boxes, and 65–99 % of column failures and a quarter to two thirds of contacts lay at box faces (SF F26, F27). The numbers here are evidence about methods; expect them to change on the hemisphere.
+- **Blocked processing has the same edge effect at every block boundary.** Near any cut in the data, columns run out and fronts from beyond the cut never arrive, so their neighbours meet in their place. On the boxes it took regions at least 6 mm from every face, and leaving out roots within 2 mm of a face, to keep results clean. So a block's halo must reach as far as anything that crosses it: a column (up to the 8 mm length cap), a front, a smoothing kernel. Otherwise the result depends on where the block boundaries fall.
 
 **Identity, topology and precision** (code; #61)
 
