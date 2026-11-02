@@ -726,17 +726,17 @@ def pinched(obj: npt.ArrayLike) -> Bool:
     n = a.shape
     for cfgs, bad in ((_SQUARES, _bad_square), (_CUBES, _bad_cube)):
         # each configuration whose least corner is (0, 0, 0)
-        lo = cfgs.min(1)
-        k = int(np.flatnonzero((lo == 0).all(1))[0])
-        corners = cfgs[k]
-        ext = corners.max(0)
-        sl = [
-            tuple(slice(int(c[d]), n[d] - int(ext[d]) + int(c[d])) for d in range(3))
-            for c in corners
-        ]
-        hit = bad([a[s] for s in sl])
-        for s in sl:
-            out[s] |= hit
+        for corners in cfgs[(cfgs.min(1) == 0).all(1)]:
+            ext = corners.max(0)
+            sl = [
+                tuple(
+                    slice(int(c[d]), n[d] - int(ext[d]) + int(c[d])) for d in range(3)
+                )
+                for c in corners
+            ]
+            hit = bad([a[s] for s in sl])
+            for s in sl:
+                out[s] |= hit
     return out
 
 

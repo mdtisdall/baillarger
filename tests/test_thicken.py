@@ -128,3 +128,13 @@ def test_well_compose_keeps_the_topology_and_ends() -> None:
         assert H.kuhn_betti(w.obj) == H.kuhn_betti(a), seed
         assert w.left.sum() < H.pinched(a).sum()
         assert np.array_equal(w.left, H.pinched(w.obj))
+
+
+def test_contacts_are_found_in_every_plane() -> None:
+    """Two cubes touching along an edge parallel to each axis in turn."""
+    for ax in range(3):
+        a = two_cubes((slice(10, 15), slice(10, 15), slice(5, 10)))
+        a = np.moveaxis(a, 2, ax)
+        assert H.pinched(a).sum() == 20, ax
+        w = H.well_compose(a)
+        assert not w.left.any() and H.kuhn_betti(w.obj) == H.kuhn_betti(a), ax
