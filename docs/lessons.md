@@ -23,7 +23,7 @@ This document states current knowledge only. How the project got here is in git,
 - One right hemisphere, imaged with 7 T multi-echo FLASH in Fomblin: magnitude only, TE 9.37 / 20.71 / 32.05 ms, TR 80, flip 25°.
 - The voxel is 0.16028 × 0.16 × 0.16028 mm, which is not isotropic.
 - The aseg comes from purple-mri at native resolution.
-- Most stream 2 and 3 results come from 141³ boxes (V1V2, M1S1, PCC_SPL), checked against the user's marked points: M1/S1 23, V1V2 35, PCC pieces 22 and 37.
+- Most stream 2 and 3 results come from **boxes**: 141³-voxel crops (about 22.6 mm on a side) cut from the hemisphere volume round a test site (V1V2, M1S1, PCC_SPL). A **box face** is one of a box's six bounding planes, where the data is cut off. The results were checked against the user's marked points: M1/S1 23, V1V2 35, PCC pieces 22 and 37.
 - Only stream 1 has run on the whole hemisphere.
 
 ## 1. Goals, constraints and working rules
@@ -89,6 +89,7 @@ These describe this one aseg, not asegs in general. It is the example data we ha
 
 **Boxes distort results**
 
+- Near a face, the tissue just outside the box is missing. Columns run out through the face, and fronts from WM beyond the face never arrive, so their neighbours meet in their place.
 - 65–99 % of column failures and a quarter to two thirds of contacts lie at box faces (SF F26, F27).
 - Any box-scale measurement needs regions at least 6 mm from every face, and leaves out roots within 2 mm of a face.
 - The restart works on the hemisphere. Box numbers in this document are evidence about methods, not about the hemisphere.
