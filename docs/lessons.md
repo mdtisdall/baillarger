@@ -65,6 +65,11 @@ These bind every stream from its first version. A first version may be rough, bu
 - **Diagnostics over criteria.** While a method is exploratory, design each checkpoint around views the user can read, not pass/fail numbers. The default image view is echo 2 with the depth trend removed.
 - **Keep principle, role and estimator apart.** Record each result against one estimator in one role. A failed estimator is not a failed principle.
 - **Feasibility, not speed,** for prototypes and interactive tools. Correctness checks still apply.
+- **Judge efficiency by analysis, not by wall time on the laptop.** For each algorithm, state:
+  - its computational complexity in the sizes that grow (voxels, vertices, columns, candidate pairs);
+  - its memory traffic: bytes moved per element, the working set per block, and whether it is bound by bandwidth or by compute.
+
+  Evaluate both at whole-brain 50 µm on the target hardware. Laptop timings are supporting context only. A step that is quick on a 160 µm hemisphere can still be the wrong design if its cost grows badly, and a slow one can be right.
 - **Heavy runs go under `scripts/memguard`,** one at a time, with the cap at about 1.5× the run's peak.
 
 ## 2. Facts that cut across streams
