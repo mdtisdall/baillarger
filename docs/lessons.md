@@ -258,14 +258,19 @@ These steps would apply to any WM label. The numbers come from running them on t
 - Each answer serves twice:
   - as an edit that corrects this hemisphere now;
   - as a verified label for training the next generation.
-- Only verified labels train the model. Automatic fixes do not.
+- **Answers stand on their own.** Each is the verified label of each voxel it covers, valid for any input, not a diff against one segmentation. That way answers survive from one generation to the next. `wm-edits/1` is to be edited in place to say so.
+- **Two kinds of answer:**
+  - **Site answers:** a choice among options at a site from the queue, as above.
+  - **Scribbles:** a few strokes marking voxels as WM or not WM, wherever the reviewer sees an error, including errors no site finder flags. Everything unmarked stays unlabelled, so nnU-Net trains on the strokes with its ignore label (scribble supervision, Gotkowski et al. 2024). Scribbles cost little per answer.
+- The queue also takes the places where the model is least sure: the largest spread across folds, and the topology walls with the smallest margin in P.
+- Only verified labels train the model. Automatic fixes and the model's own predictions never do.
 - The held-out test regions are labelled from scratch, apart from the queue.
 
 **Open**
 
-- **Carrying answers across generations.** An edit is a diff against one SHA-pinned input, and `dseg` refuses edits whose `old` labels don't match. A new generation's labels therefore invalidate the earlier answers. We need a rule: re-express each answer against the new labels, or treat it as satisfied when the new model already agrees with it.
-- What the queue covers: only the sites the surface stage flags, or also regions where the segmentation is uncertain (from its probabilities, as active learning).
-- What exactly trains the model: only the voxels an answer changed, or the whole corrected mask in a reviewed region. And whether an automatic fix that a reviewer accepted (`leave`) counts as verified.
+- **How `dseg` applies standalone answers** to a new generation's labels: whether a verified voxel always overrides the input, and how to show the reviewer where a new generation disagrees with an earlier answer.
+- **Whether a scribble also corrects the current hemisphere,** or only trains the next generation. A few strokes give no full-voxel edit, so the current correction might need the model rerun (or an interactive model, such as nnInteractive) to spread them.
+- Whether an automatic fix that a reviewer accepted (`leave`) counts as verified, and so trains the model.
 - How stream 3's feedback (for example, the GM/WM transition found along columns) becomes a stream 1 input. Does it edit the label, or adjust the surface stage?
 
 ## 4. Stream 2: columns
