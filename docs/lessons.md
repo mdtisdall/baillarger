@@ -30,15 +30,14 @@ This document states current knowledge only. How the project got here is in git,
 
 ### Goals
 
-- **Laminar structure from ex vivo MRI.** Find where the cortical layers lie along every column of the cortex, from the image's own contrast (the bands of Baillarger, the stria and their kin), in ultra-high-resolution ex vivo MRI.
-- **Whole brains at the acquired resolution.** The tools run on whole human brains at 50 µm, not only on hemispheres or boxes at 160 µm.
-- **Four tools, one per stream.** Each publishes its outputs in a specified format and reads only the others' published outputs:
-  1. WM segmentation and the white surface: a surface whose normals are the cortical normals.
-  2. Columns: complete rays from that surface through the cortex.
-  3. Laminar profiles along the columns, aligned across columns and across contacts between banks. The results feed back to stream 1 as an input.
-  4. A viewer for the manual steps in streams 1–3 and for exploring the results.
-- **Each stream advances on its own.** Each reaches a first version good enough for the others to build on, then improves along its own course. A change in one stream should not force work in another.
-- **A person decides where the data cannot.** Each place that needs judgment goes into one review queue per stage. Each answer is recorded as a replayable edit, so the automatic result stays correct without it and the review only refines it.
+One top-level goal per stream:
+
+1. **WM segmentation and the white surface:** a closed white surface without handles for each hemisphere, at the acquired resolution, whose normals are the cortical normals.
+2. **Columns:** a complete ray from every white-surface vertex through the cortex, to fluid or into the far bank's WM, recording what it meets on the way.
+3. **Laminar profiles:** where each layer lies along every column, read from the image's own contrast and aligned across columns and across contacts between banks, with what it learns fed back to stream 1 as an input.
+4. **The viewer:** a way to see any result at full resolution anywhere in a whole brain, and to answer each stage's review queue.
+
+Each stream publishes its outputs in a specified format and reads only the others' published outputs. Each reaches a first version good enough for the others to build on, then improves along its own course; a change in one stream should not force work in another.
 
 ### Constraints
 
@@ -52,6 +51,7 @@ These bind every stream from its first version. A first version may be rough, bu
 - **Standard formats.** GIfTI and NIfTI, BIDS-derivative names, and JSON sidecars with provenance. Each output has one written spec, enforced by one writer and one reader.
 - **No GPL dependencies** where an alternative exists. State the licence when proposing a library.
 - **FreeSurfer is the model.** Its topology correction, pretess and strand thickening are the defaults to follow. Deviate only with cause and data. We do not run FreeSurfer, even as a benchmark.
+- **A person decides only where the data cannot.** Places that need judgment go into one review queue per stage. Each answer is a replayable edit: the automatic result is correct without it, and the review refines it.
 - **Assume no particular aseg source.** The aseg is an input with its own errors, read in the FreeSurfer label convention. Take evidence from the echoes, not from one tool's quirks.
 
 ### Working rules
