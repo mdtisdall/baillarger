@@ -22,12 +22,7 @@ Most tools define a white surface and a pial surface, then treat the cortex as e
 
 ## About this document
 
-What the work so far has established, for a clean start on four streams:
-
-1. WM segmentation and white surface generation
-2. Columns traced from that surface
-3. Laminar profiles along the columns, with possible feedback to the white surface
-4. A viewer for manual interaction and exploration
+What the work so far has established, for a clean start.
 
 This document states current knowledge only. How the project got here is in git, the PRs and the reports. Each item points to its evidence:
 
@@ -52,7 +47,7 @@ This document states current knowledge only. How the project got here is in git,
 
 ### Goals
 
-One top-level goal per stream:
+The work is split into four streams, each a tool with one top-level goal:
 
 1. **WM segmentation and the white surface:** a closed white surface without handles for each hemisphere, at the acquired resolution, whose normals are the cortical normals.
 2. **Columns:** a complete ray from every white-surface vertex through the cortex, to fluid or into the far bank's WM, recording what it meets on the way.
