@@ -145,11 +145,24 @@ Independent of the network; exact-answer tests on phantoms first
    answer must stand on its own: the verified label of each voxel, valid for
    any input. `wm-edits/1` is edited in place to say so
    ([[spec-versions-until-release]]).
-3. Retrain from the previous round's weights with the verified labels added.
-4. The rule against drift: only labels the user has verified become
+3. Two kinds of answer, both verified labels:
+   - **Site answers:** a choice among a few options at a site from the queue,
+     as in item 1.
+   - **Scribbles:** a few strokes marking voxels as WM or not WM, made
+     anywhere the user sees an error, including errors no site finder flags.
+     Unmarked voxels stay at the ignore label, so the next round trains on
+     the strokes alone (scribble supervision, Gotkowski et al. 2024). A
+     scribble is cheap to make and needs no site.
+
+   A scribble is too sparse to correct the current hemisphere by itself. It
+   reaches the current labels only through the next round's prediction, or
+   through an interactive model that spreads it (nnInteractive; see
+   **Decisions**, 3). Which of the two, if any, is open.
+4. Retrain from the previous round's weights with the verified labels added.
+5. The rule against drift: only labels the user has verified become
    training labels. The decoded, topology-corrected labels and the network's
    own predictions never do.
-5. Diagnostics per round, on the test regions only: the same as phase 3,
+6. Diagnostics per round, on the test regions only: the same as phase 3,
    plus the length of the queue.
 
 ### Phase 5: uncertainty
@@ -184,6 +197,7 @@ Open, for the user:
 3. The labelling tool for the test regions and the answers: our viewer, or
    ITK-SNAP / 3D Slicer with nnInteractive (Apache-2.0 code; check the
    licence of its weights, which may be non-commercial).
+   Whichever it is must support scribbles as well as site answers.
 4. Missing tissue: a class of its own, or ignored; and what the filled mask
    does where it meets missing tissue.
 5. Whether the hippocampus stays outside the filled mask when our labels
