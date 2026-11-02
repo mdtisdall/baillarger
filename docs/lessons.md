@@ -47,12 +47,14 @@ This document states current knowledge only. How the project got here is in git,
 
 ### Goals
 
-The work is split into four streams, each a tool with one top-level goal:
+The work is split into four streams, each a tool:
 
-1. **WM segmentation and the white surface:** a closed white surface without handles for each hemisphere, at the acquired resolution, whose normals are the cortical normals.
-2. **Columns:** a complete ray from every white-surface vertex through the cortex, to fluid or into the far bank's WM, recording what it meets on the way.
-3. **Laminar profiles:** where each layer lies along every column, read from the image's own contrast and aligned across columns and across contacts between banks, with what it learns fed back to stream 1 as an input.
-4. **The viewer:** a way to see any result at full resolution anywhere in a whole brain, and to answer each stage's review queue.
+1. WM segmentation and the white surface (§3)
+2. Columns (§4)
+3. Laminar profiles (§5)
+4. The viewer (§6)
+
+Each stream's section gives its goal, its high-level design, its implementation design (the details and lessons for each design step) and its implementation plan.
 
 Each stream publishes its outputs in a specified format and reads only the others' published outputs. Each reaches a first version good enough for the others to build on, then improves along its own course; a change in one stream should not force work in another.
 
@@ -139,10 +141,17 @@ The restart does not work on boxes. Two things from them still matter:
 
 ## 3. Stream 1: WM segmentation and the white surface
 
-Stream 1 has two parts that meet at one interface:
+### 3a. Goal
 
-- **The WM label.** Today it is the aseg we received from purple-mri. The plan is our own segmentation of the FLASH.
-- **The white surface, made from a WM label.** These steps take a label in the FreeSurfer convention, with an optional probability map. They must not depend on which segmentation produced it.
+A closed white surface without handles for each hemisphere, at the acquired resolution, whose normals are the cortical normals.
+
+### 3b. High-level design
+
+1. **Segment the WM.** Today the WM label is the aseg we received from purple-mri. The plan is our own segmentation of the FLASH (nnU-Net), trained in generations through human review. Either way, the label is in the FreeSurfer convention, with an optional probability map.
+2. **Correct the topology (`dseg`).** Apply the edits, fill the WM mask, then remove handles and cavities and repair tight folds, automatically.
+3. **Make the surface (`mesh`).** Antialias the corrected mask and contour it by blocked marching tetrahedra into `white-surf/1`.
+4. **Make an overview for display (`overview`).** A decimated mesh that maps every pick back to true vertices.
+5. **Review.** Gather the places that need judgment into one queue per hemisphere. Each answer becomes an edit for step 2 and, with our own segmentation, a training label for step 1.
 
 **The flow runs one way. Feedback enters only as inputs.**
 
@@ -152,23 +161,32 @@ Stream 1 has two parts that meet at one interface:
 - The loop closes through inputs. A person's answer, or later stream 3's feedback, becomes an edit against the input label, and stream 1 reruns from the start.
   - Edits are kept apart from the automatic changes, so they apply again when the correction changes.
   - `DecidedAgainst` records the SHA of the `dseg` the person looked at, so a rerun can list the answers whose context changed (`wm-edits/1`, #78).
+- Steps 2–4 must not depend on which segmentation produced the label.
 
-### 3a. The WM label
+**Standing decisions**
+
+- **The white surface exists for its normals, not its position.** Columns start on it and run along its normals. There is no pial surface and no "true GM/WM boundary": the GM/WM transition is aligned afterwards like any other layer.
+  - Judge methods by normal quality: neighbour-angle spread, misfacing faces, cancellation in thin blades, and agreement with orientation from the image.
+  - The surface may move into GM or WM to make normals well defined, as long as it keeps the topology and does not self-intersect.
+- The input label is never rewritten. Corrections are derivatives, and manual edits are replayable inputs applied before the automatic correction.
+- The generator fixes topology automatically, with no question per handle. Review refines a result that is already correct.
+- WM may grow into cortex: thin gyral WM is thickened, not removed, as FreeSurfer's mri_segment does.
+- The meshing uses no cortex label. Every white-mesh vertex is a column root, and what columns pass through is for later stages to judge.
+
+### 3c. Implementation design
+
+#### Step 1: the WM label
 
 **Today: the purple-mri aseg, taken as given**
 
-- **Where it comes from.** purple-mri segments the 160 µm FLASH at native resolution. Its network was trained on 7 T T2w at 0.3 mm, and it gives labels without probabilities (#86).
-- **How we use it.** The aseg is never rewritten.
-  - The WM mask is a derivative (`desc-wmtopo_dseg`): aseg 41 plus 43, 49–52 and 192, with cavities filled; the hippocampus is not filled (#61, #67).
-  - Manual edits are replayable diffs against it (`wm-edits/1`), applied before the automatic correction.
-  - The deep structures (ventricle, thalamus, ...) belong in the mask, and imputed WM must be included, so that the edge of a cut does not become a false white surface (#66; PL).
-- **What it costs.** Every stream 1 number below was measured on this aseg. Its repeatable errors are listed in §2.
+- **Where it comes from.** purple-mri segments the 160 µm FLASH at native resolution. Its network was trained on 7 T T2w at 0.3 mm, and it gives labels without probabilities.
+- **What it costs.** Every stream 1 number in this section was measured on this aseg. Its repeatable errors are listed in §2.
 
 **Planned: our own segmentation of the FLASH** (also on #86, as `PLAN_WM_SEGMENTATION.md`)
 
 *Why*
 
-- purple-mri's network was trained on 7 T T2w at 0.3 mm. Its accuracy on the 160 µm FLASH is not established, and it gives only labels (the argmax), not the probabilities behind them.
+- purple-mri's accuracy on the 160 µm FLASH is not established, and it gives only labels (the argmax), not the probabilities behind them.
 - Its own topology steps don't help us:
   - its WM topology fix is FreeSurfer's `mris_fix_topology` on its own mesh, never written back to the labels;
   - its buried-sulcus removal is a second network on the labels alone, with no topology guarantee.
@@ -178,31 +196,151 @@ Stream 1 has two parts that meet at one interface:
 *What it is*
 
 - nnU-Net v2 (Apache-2.0), `3d_fullres` with a residual-encoder preset (M or L), trained on the three FLASH echoes as channels.
-- It is trained in generations, through continuous human-in-the-loop review. Each generation segments the hemispheres, the review queue corrects its output (§3c), and the verified answers join the training labels for the next generation. No number of hemispheres or generations is fixed in advance. This needs:
+- It is trained in generations, through continuous human-in-the-loop review. Each generation segments the hemispheres, the review queue corrects its output (step 5), and the verified answers join the training labels for the next generation. No number of hemispheres or generations is fixed in advance. This needs:
   - held-out test regions that never enter training, so each generation can be compared with the last;
   - the model generation recorded in each output's sidecar, so a label can be traced to the model that made it;
   - a choice, at each generation, of whether to rerun earlier hemispheres with it. A rerun changes everything downstream of the label.
 
-*The interface to the white surface*
+*The interface to steps 2–4*
 
-| Output | Required | BIDS name | Use in the surface steps |
+| Output | Required | BIDS name | Use in steps 2–4 |
 |---|---|---|---|
 | Labels, FreeSurferColorLUT | yes | `_dseg` | the filled mask, as now |
 | P(filled WM), float | no | `_label-WMfilled_probseg` | the order of handle removal; the data term of the antialiasing |
 | Fold spread of P | no | `_label-WMfilled_desc-foldsd_probseg` | uncertainty for the review queue |
 
-- With labels only, the surface steps work as now: handle removal ordered by distance to the other phase, antialiasing by thin-plate smoothness alone. So any segmentation still fits.
+- With labels only, steps 2–4 work as now: handle removal ordered by distance to the other phase, antialiasing by thin-plate smoothness alone. So any segmentation still fits.
 - With P, the same algorithms make better decisions. The surface work does not wait for the network, and the network does not wait for the surface work.
-- The surface is still judged by its normals. P matters to it mainly where P moves a wall (which side of a fused bank a cut falls) and where it smooths the staircase. Both change the normals; position finer than a voxel is a by-product.
+- P matters to the surface mainly where P moves a wall (which side of a fused bank a cut falls) and where it smooths the staircase. Both change the normals; position finer than a voxel is a by-product.
 
 The coupling that is real, decided once:
 
 1. **The label set.** The filled mask is `FILLED_LABELS` (WM, lateral ventricle, caudate, putamen, pallidum, thalamus, CC; not the hippocampus). The network must output at least these classes, separately from cortex, hippocampus and outside, or the surface changes.
-2. **Missing tissue.** purple-mri invents labels in the blocks cut out before the scan. Our network labels them as missing, or they are ignored in training. The surface steps then need a rule for a filled mask that ends at missing tissue (open, below).
+2. **Missing tissue.** purple-mri invents labels in the blocks cut out before the scan. Our network labels them as missing, or they are ignored in training. Step 2 then needs a rule for a filled mask that ends at missing tissue (open, below).
 3. **Calibration.** Handle removal by P puts each wall where P is lowest along the bridge or tunnel. That is right only if P is calibrated near 0.5, so calibration is a diagnostic of every generation.
 4. **The defect count.** The number of handles and cavities before correction sets the length of the review queue. It is a diagnostic of every generation, not a target to optimise inside the network.
 
-*Phases.* Each is one or more PRs. Phase 1 does not depend on phases 2–4.
+*Decisions taken*
+
+- The network gives evidence. Topology is guaranteed after it, by our own code (`handles`, `antialias`), never by the network.
+- Steps 2–4 keep working from labels alone.
+- Only verified labels train later generations.
+- Test regions are labelled from scratch and never trained on.
+
+*Literature* (from memory; check before citing)
+
+- nnU-Net v2 and residual encoders: Isensee et al., *Nature Methods* 2021; "nnU-Net revisited", MICCAI 2024.
+- Sparse labels with the ignore label: Gotkowski et al., "Embarrassingly simple scribble supervision for 3D medical segmentation", 2024.
+- Interactive refinement: Wang et al., DeepIGeoS (TPAMI 2018) and BIFSeg (TMI 2018); MONAI Label (Diaz-Pinto et al., *Medical Image Analysis* 2024); nnInteractive (arXiv 2503.08373).
+- Topology correction from probabilities: Han, Xu and Prince (topology-preserving level sets); Bazin and Pham (fast-marching topology correction, TOADS); Ségonne et al. (FreeSurfer's defect correction).
+- Distance outputs: Xue et al., AAAI 2020; Navarro et al., MLMI 2019; Ma et al., MIDL 2020; for cortex, SegRecon (Gopinath et al. 2021), DeepCSR (Cruz et al., CVPR 2021), recon-all-clinical (Gopinath et al. 2024).
+- Uncertainty: Kendall and Gal, NeurIPS 2017; β-NLL, Seitzer et al., ICLR 2022.
+- Topology losses: Hu et al., NeurIPS 2019; clDice (Shit et al., CVPR 2021); Betti matching (Stucki et al., ICML 2023).
+- purple-mri: Khandelwal et al., *Imaging Neuroscience* 2024; the purple-mri repository (topology notes and surface scripts).
+
+#### Step 2: topology correction (`dseg`)
+
+- **The filled mask** (#61, #66, #67). Aseg 41 plus 43, 49–52 and 192 (right hemisphere), with cavities filled; the hippocampus is not filled. The deep structures (ventricle, thalamus, ...) belong in the mask, and imputed WM must be included, so that the edge of a cut does not become a false white surface (PL). A cut voxel takes the label of the nearest (mm) voxel outside the mask.
+- **Handle removal** (`handles.remove_handles`; #38, #48, #67):
+  - Topology uses Kuhn adjacency, so it equals the mesh's (§2).
+  - Object and background fronts grow by simple points. Each handle's wall is cut or filled, whichever changes fewer voxels; ties go to the cut, then to the lowest voxel index.
+  - Walls that block each other are claimed as sets (Mayer–Vietoris), or voxels are stranded.
+  - Fills of one piece can touch another piece, so check the union's Betti numbers and refuse to write unless b1 = b2 = 0.
+  - On the purple-mri aseg: Betti (1, 111, 182) → (1, 0, 0) in 3.4 min at about 22 GB. Most moves are 1–2 voxels.
+  - The meeting wall need not be the smallest cut: one cut of 2,047 voxels ran along a thin strand.
+  - Batching walls per pass changes the result, so don't.
+- **Tight folds (misfacing faces)** (#81, #85). On the purple-mri aseg the surface has 152 at 91 sites. Diagonal-only contacts in the label cause most of them: 74 of 90 sites have a checkerboard or corner-only contact within 4 voxels. A different segmentation may show a different pattern.
+  - Thicken to 2s, widen gaps between surfaces, then make the mask well-composed, at s = 0.30 mm. This takes 90 sites to 5 and edges over 60° from 297 to 4, at a cost of +3.9 % area and a 90th-percentile neighbour angle of 5.4° against 3.9°.
+  - s must not be a whole number of voxels along any axis: at 0.32 mm (exactly 2 voxels on one axis) the checkerboards rise from about 390 to 7,000. 0.26 mm is worse on every count; above 0.30 mm the bulk and area grow.
+  - Synthetic antialiased phantoms make no misfacing faces, so fold tests need hand-built folds plus a hemisphere run.
+  - Doesn't work: forcing cuts, with no fills into cortex (90 → 131 sites); voxel opening at 0.24–0.40 mm (worse at every radius, grows the area, cascades over passes).
+  - Relaxing the level set needs a local "no new blade or gap voxel within s" test, or the thin-plate energy shrinks widened gaps and blades into slivers. With the test it keeps 95 % of the gain on crops, but misses tubes.
+- **Missing tissue** (PL): excised blocks the aseg labels as tissue but where the FLASH is black (below 0.25 × the cortex median after smoothing by 2 voxels, in blocks of at least 250 voxels, grown by 0.3 mm). It is an obstacle for columns, not a source. Today it is computed in the old box frame; it should become a published stream 1 output.
+
+#### Step 3: the surface (`mesh`)
+
+- **Antialiasing beats smoothing** (#61; SF F28).
+  - A thin-plate field φ with φ ≥ ε on the mask and φ ≤ −ε off it, in a band of the signed distance, solved by FISTA with restarts in PyTorch.
+  - Each vertex stays on its own grid edge, so the surface has no self-intersections by construction and keeps the edge keys.
+  - A tilted plane's normals come out within 0.5° (the raw staircase is 31° off).
+  - On the hemisphere: one closed genus-0 piece, 12.7 M vertices, 25.3 M faces, no self-intersecting faces; CPU and MPS identical bit for bit; 1,651 iterations, 16 min on MPS, peak 20–24 GB.
+- **Smoothing is the wrong tool here:**
+  - Smoothing the label and then contouring loses 2-voxel WM blades: at σ = 1 voxel it loses 16 % of V1V2's thin WM, shrinks convex surfaces by about σ²κ, and makes slivers.
+  - Taubin λ|μ smoothing is unstable at short cutoffs. Tukey twicing never amplifies.
+- **Limits of any binary label.** Its terraces limit curvature and normals below about 1–2 mm on surfaces near a grid axis, whatever the method. Thin-blade normals keep as little as 0.56 of their length after averaging (`docs/scaling.md`); the column stage has to handle them.
+- **Normals** point out of the WM: area-weighted, then 10 smoothing steps.
+- **Curvature** (SF F28): the 0.32 mm mesh with curvature at 0.48 mm agrees with quadrics fitted to the voxel faces (rank correlation 0.85–0.98), with about half their jitter.
+  - Never take curvature from the Hessian of a smoothed signed distance: it mixes the two sides of thin blades.
+  - Valence-weighted smoothing biases Gaussian curvature. Use smoothing that keeps mass.
+- **Doesn't work:**
+  - A level set started on a 2× grid from the label's own signed distance: 6–11 % wrong signs. A finer grid cannot fix an error that is in the boundary data (SF F28).
+  - Inside/outside from the face normal: distance 0 at staircase edges. Use the pseudonormal of the closest feature (SF F28).
+
+#### Step 4: the overview (`overview`)
+
+- `decimate` (#70–#77): 25.3 M → 210 k faces at ε = 0.1 mm in 186 s, keeping topology, the ε bound, unmoved true vertices, orientation and no self-intersections. The Numba block worker is bit for bit the Python reference.
+- The fold test must compare against the input normals each face stands for, not the face's last state; otherwise 1,027 faces turned over.
+- Pairs of sheets closer than 2ε at necks cross. Pinning the crossing faces' input vertices and re-decimating clears them.
+- Map anything back to true vertices with the decimation's own carried-vertex map. A nearest-face search lands on the wrong side of thin sheets.
+- For display only: nothing is measured on it.
+
+#### Step 5: review
+
+**Today** (`wm-edits/1`, #78; the review plan in #80; the site finder in #81)
+
+- The pipeline finds the sites that need judgment, such as tight folds (`wm-sites/1`) and large handle fixes. It gathers them into one queue per hemisphere, after the automatic result.
+- For each site the viewer offers a few concrete choices with previews: `remove-strand`, `thicken`, `fill-gap`, `widen-gap`, `leave`, `manual-paint`. Each choice is a function of the input label that returns the voxels it changes. ITK-SNAP is the escape hatch for free painting.
+- Each answer is saved as voxel diffs against the input label, with its site, choice, time and the `dseg` SHA. An answer with no voxels (`leave`) is recorded too, so the site counts as answered.
+
+**With our own segmentation**
+
+- Each answer serves twice:
+  - as an edit that corrects this hemisphere now;
+  - as a verified label for training the next generation.
+- **Answers stand on their own.** Each is the verified label of each voxel it covers, valid for any input, not a diff against one segmentation. That way answers survive from one generation to the next. `wm-edits/1` is to be edited in place to say so.
+- **Two kinds of answer:**
+  - **Site answers:** a choice among options at a site from the queue, as above.
+  - **Scribbles:** a few strokes marking voxels as WM or not WM, wherever the reviewer sees an error, including errors no site finder flags. Everything unmarked stays unlabelled, so nnU-Net trains on the strokes with its ignore label. Scribbles cost little per answer.
+- The queue also takes the places where the model is least sure: the largest spread across folds, and the topology walls with the smallest margin in P.
+- Only verified labels train the model. Automatic fixes and the model's own predictions never do.
+- The held-out test regions are labelled from scratch, apart from the queue.
+
+#### Open
+
+- Fixes chosen by intensity (FreeSurfer's cut or fill by intensity; #85 step 2); the tube case; the size threshold for exceptions; whether fills through cortex are as acceptable as thickening.
+- Whether T = 0 should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
+- Finding hidden fluid gaps from the image before columns are traced: a thin, slowly decaying dark strip inside labelled cortex (SF F21).
+- **How `dseg` applies standalone answers** to a new generation's labels: whether a verified voxel always overrides the input, and how to show the reviewer where a new generation disagrees with an earlier answer.
+- **Whether a scribble also corrects the current hemisphere,** or only trains the next generation. A few strokes give no full-voxel edit, so the current correction might need the model rerun (or an interactive model, such as nnInteractive) to spread them.
+- Whether an automatic fix that a reviewer accepted (`leave`) counts as verified, and so trains the model.
+- How stream 3's feedback (for example, the GM/WM transition found along columns) becomes a stream 1 input. Does it edit the label, or adjust the surface stage?
+- Open decisions for our own segmentation:
+  - Where to train. nnU-Net needs CUDA for training; inference runs on the laptop.
+  - The labelling tool for the test regions and the answers: our viewer, or ITK-SNAP / 3D Slicer with nnInteractive (Apache-2.0 code; check the licence of its weights, which may be non-commercial). Whichever it is must support scribbles as well as site answers.
+  - Missing tissue: a class of its own or ignored, and what the filled mask does where it meets missing tissue.
+  - Whether the hippocampus stays outside the filled mask when our labels replace purple-mri's.
+  - nnU-Net as a package dependency, or an external tool that only the export and import modules know about. Proposed: external.
+
+### 3d. Implementation plan
+
+Three tracks that can run in parallel: the surface steps, our own segmentation, and the review loop.
+
+**Surface steps (2–4)**
+
+- Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
+- Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
+- Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
+- Make missing tissue a published output (it has no spec yet).
+- Rewrite `pial_labels` as a stream 1 input: keep its noise estimators and detector, and have it emit spec'd edits that relabel the aseg's fluid channels and vessels, which crest methods in stream 2 need (§4c, step 2).
+- Scale to whole brains, in this order (`docs/scaling.md`):
+  1. The midline cut (the corpus callosum joins the hemispheres).
+  2. `dseg` in blocks: blocked connected components with a merge, Euler sums per block, the cavity fill, and handle removal as "find globally, fix in local boxes". That last part needs a design and a prototype first: one piece is about 43 GB, and whole-array `dseg` at 50 µm is about 1 TB.
+  3. NIfTI-Zarr volumes, together with item 2.
+  4. A band-only multigrid antialias solver with a fused kernel: FISTA on the whole volume costs about h⁻⁵; the target is about h⁻² per cycle.
+  5. Decimation with int32 ids and a block-wise first pass.
+- GPU, by cost: antialias first, then the normal-smoothing tables, then mesh and volume connected components. Handle removal, cut relabelling, decimation and I/O stay on the CPU.
+
+**Our own segmentation (step 1).** Each phase is one or more PRs. Phase 1 does not depend on phases 2–4.
 
 - **Phase 0: data, label set, test regions.**
   - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 6 is needed.
@@ -219,12 +357,12 @@ The coupling that is real, decided once:
   - purple-mri's labels as weak seed labels: its labels in the interiors; ignore in a band of about 2 voxels each side of every purple-mri boundary, in the missing blocks, and where a simple FLASH check disagrees with purple-mri (the check to be chosen on the test regions).
   - The existing `wm-edits` answers as verified labels, never ignored.
   - Verified labels are kept apart from seed labels, with provenance, so a generation can be retrained with or without the seed.
-  - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset (proposed; see the decisions).
+  - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset (proposed).
 - **Phase 3: the first generation.**
   - Five folds, split by hemisphere when there are several, by box otherwise. A split by box makes the folds' accuracy an upper bound.
   - Inference writes the `_dseg`, the WM-filled `_probseg` and the fold spread, with sidecars.
   - Diagnostics against purple-mri, on the test regions and the hemisphere: boundary distance and Dice on the test regions; calibration of P near 0.5; handles and cavities before correction; the phase 1 walls and their margins; views of where ours and purple-mri's differ most.
-- **Phase 4: the review loop.** See §3c. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics are on the test regions only: those of phase 3, plus the length of the queue.
+- **Phase 4: the review loop.** As in step 5. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics are on the test regions only: those of phase 3, plus the length of the queue.
 - **Phase 5: uncertainty.**
   - Two estimates that need no new network output:
     - the fold spread, which is epistemic: what more labels can fix;
@@ -239,135 +377,49 @@ The coupling that is real, decided once:
   - Synthetic training images from label maps (SynthSeg, PostSynth), as augmentation, if the problem is generalising to other hemispheres or protocols.
   - A topology loss (clDice, Betti matching), if the queue is too long. It can only reduce defects; the guarantee stays in phase 1's decoding.
 
-*Decisions taken*
+**Review loop (step 5)** (the steps of the #80 plan, with #81 and #82 as its first PRs)
 
-- The network gives evidence. Topology is guaranteed after it, by our own code (`handles`, `antialias`), never by the network.
-- The surface steps keep working from labels alone.
-- Only verified labels train later generations.
-- Test regions are labelled from scratch and never trained on.
+1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
+2. The volume pane in `--white` mode (#82).
+3. The review pane, with site answers and scribbles.
+4. The ITK-SNAP escape hatch.
+5. `wm-edits/1` edited so that answers stand on their own.
 
-*Open decisions*
-
-- Where to train. nnU-Net needs CUDA for training; inference runs on the laptop.
-- The labelling tool for the test regions and the answers: our viewer, or ITK-SNAP / 3D Slicer with nnInteractive (Apache-2.0 code; check the licence of its weights, which may be non-commercial). Whichever it is must support scribbles as well as site answers.
-- Missing tissue: a class of its own or ignored, and what the filled mask does where it meets missing tissue.
-- Whether the hippocampus stays outside the filled mask when our labels replace purple-mri's.
-- nnU-Net as a package dependency, or an external tool that only the export and import modules know about. Proposed: external.
-
-*Literature* (from memory; check before citing)
-
-- nnU-Net v2 and residual encoders: Isensee et al., *Nature Methods* 2021; "nnU-Net revisited", MICCAI 2024.
-- Sparse labels with the ignore label: Gotkowski et al., "Embarrassingly simple scribble supervision for 3D medical segmentation", 2024.
-- Interactive refinement: Wang et al., DeepIGeoS (TPAMI 2018) and BIFSeg (TMI 2018); MONAI Label (Diaz-Pinto et al., *Medical Image Analysis* 2024); nnInteractive (arXiv 2503.08373).
-- Topology correction from probabilities: Han, Xu and Prince (topology-preserving level sets); Bazin and Pham (fast-marching topology correction, TOADS); Ségonne et al. (FreeSurfer's defect correction).
-- Distance outputs: Xue et al., AAAI 2020; Navarro et al., MLMI 2019; Ma et al., MIDL 2020; for cortex, SegRecon (Gopinath et al. 2021), DeepCSR (Cruz et al., CVPR 2021), recon-all-clinical (Gopinath et al. 2024).
-- Uncertainty: Kendall and Gal, NeurIPS 2017; β-NLL, Seitzer et al., ICLR 2022.
-- Topology losses: Hu et al., NeurIPS 2019; clDice (Shit et al., CVPR 2021); Betti matching (Stucki et al., ICML 2023).
-- purple-mri: Khandelwal et al., *Imaging Neuroscience* 2024; the purple-mri repository (topology notes and surface scripts).
-
-### 3b. From a WM label to the white surface
-
-These steps would apply to any WM label. The numbers come from running them on the purple-mri aseg.
-
-#### Established
-
-- **The pipeline that works on the hemisphere** (#61, #67, #79):
-  1. Fill the WM mask.
-  2. Remove handles.
-  3. Antialias to a thin-plate field φ (φ ≥ ε inside, φ ≤ −ε outside).
-  4. Contour φ by blocked marching tetrahedra.
-
-  On the purple-mri aseg:
-  - Betti (1, 111, 182) → (1, 0, 0).
-  - One closed genus-0 piece: 12.7 M vertices, 25.3 M faces, no self-intersecting faces.
-  - CPU and MPS give identical meshes, bit for bit.
-  - Peaks: `dseg` about 22 GB, `mesh` 20–24 GB.
-- **Handle removal** (`handles.remove_handles`) (#38, #48, #67):
-  - Object and background fronts grow by simple points. Each handle's wall is cut or filled, whichever changes fewer voxels; ties go to the cut, then to the lowest voxel index.
-  - Walls that block each other are claimed as sets (Mayer–Vietoris), or voxels are stranded.
-  - Fills of one piece can touch another piece, so check the union's Betti numbers and refuse to write unless b1 = b2 = 0.
-  - Most moves are 1–2 voxels.
-  - The meeting wall need not be the smallest cut: one cut of 2,047 voxels ran along a thin strand.
-  - Batching walls per pass changes the result, so don't.
-- **Antialiasing beats smoothing** (#61; SF F28).
-  - Each vertex stays on its own grid edge, so the surface has no self-intersections by construction and keeps the edge keys.
-  - A tilted plane's normals come out within 0.5° (the raw staircase is 31° off).
-  - Smoothing the label and then contouring is wrong where WM blades are 2 voxels thick. At σ = 1 voxel it loses 16 % of V1V2's thin WM, it shrinks convex surfaces by about σ²κ, and it makes slivers.
-  - Taubin λ|μ smoothing is unstable at short cutoffs. Tukey twicing never amplifies.
-  - The label's own terraces limit curvature and normals below about 1–2 mm on surfaces near a grid axis, whatever the method.
-- **Tight folds (misfacing faces).** On the purple-mri aseg the surface has 152 at 91 sites. Diagonal-only contacts in the label cause most of them: 74 of 90 sites have a checkerboard or corner-only contact within 4 voxels (#81, #85). A different segmentation may show a different pattern.
-  - Thicken to 2s, widen gaps between surfaces, then make the mask well-composed, at s = 0.30 mm. This takes 90 sites to 5 and edges over 60° from 297 to 4, at a cost of +3.9 % area and a 90th-percentile neighbour angle of 5.4° against 3.9° (#85).
-  - s must not be a whole number of voxels along any axis: at 0.32 mm (exactly 2 voxels on one axis) the checkerboards rise from about 390 to 7,000. 0.26 mm is worse on every count; above 0.30 mm the bulk and area grow.
-  - Synthetic antialiased phantoms make no misfacing faces, so fold tests need hand-built folds plus a hemisphere run.
-- **Curvature** (SF F28): the 0.32 mm mesh with curvature at 0.48 mm agrees with quadrics fitted to the voxel faces (rank correlation 0.85–0.98), with about half their jitter.
-  - Never take curvature from the Hessian of a smoothed signed distance: it mixes the two sides of thin blades.
-  - Valence-weighted smoothing biases Gaussian curvature. Use smoothing that keeps mass.
-- **Overview decimation** (`decimate`; #70–#77): 25.3 M → 210 k faces at ε = 0.1 mm in 186 s, keeping topology, the ε bound, unmoved true vertices, orientation and no self-intersections.
-  - The fold test must compare against the input normals each face stands for, not the face's last state; otherwise 1,027 faces turned over.
-  - Pairs of sheets closer than 2ε at necks cross. Pinning the crossing faces' input vertices and re-decimating clears them.
-  - Map anything back to true vertices with the decimation's own carried-vertex map. A nearest-face search lands on the wrong side of thin sheets.
-
-#### Doesn't work (stops a retry)
-
-- Forcing cuts, with no fills into cortex: 90 → 131 sites (#85).
-- Voxel opening at 0.24–0.40 mm: worse at every radius, grows the area, and cascades over passes (#85).
-- Relaxing the level set without a local "no new blade or gap voxel within s" test: the thin-plate energy shrinks widened gaps and blades into slivers. With the test it keeps 95 % of the gain on crops, but misses tubes (#85).
-- A level set started on a 2× grid from the label's own signed distance: 6–11 % wrong signs. A finer grid cannot fix an error that is in the boundary data (SF F28).
-- Inside/outside from the face normal: distance 0 at staircase edges. Use the pseudonormal of the closest feature (SF F28).
-
-#### Standing decisions
-
-- The input label is never rewritten. Corrections are derivatives, and manual edits are replayable diffs applied before the automatic correction.
-- The generator fixes topology automatically, with no question per handle. Places that need judgment go to one review queue, asked in one sitting. Each answer becomes a `wm-edits` row.
-- **The white surface exists for its normals, not its position.** Columns start on it and run along its normals. There is no pial surface and no "true GM/WM boundary": the GM/WM transition is aligned afterwards like any other layer.
-  - Judge methods by normal quality: neighbour-angle spread, misfacing faces, cancellation in thin blades, and agreement with orientation from the image.
-  - The surface may move into GM or WM to make normals well defined, as long as it keeps the topology and does not self-intersect.
-- WM may grow into cortex: thin gyral WM is thickened, not removed, as FreeSurfer's mri_segment does.
-- The meshing uses no cortex label. Every white-mesh vertex is a column root, and what columns pass through is for later stages to judge.
-
-#### Open
-
-- Fixes chosen by intensity (FreeSurfer's cut or fill by intensity; #85 step 2); the tube case; the size threshold for exceptions; whether fills through cortex are as acceptable as thickening.
-- Using P(filled WM), when a segmentation provides it, in `handles` and `antialias` (§3a, phase 1).
-- Whether T = 0 should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
-- Finding hidden fluid gaps from the image before columns are traced: a thin, slowly decaying dark strip inside labelled cortex (SF F21).
-
-### 3c. Where people come in
-
-**How people give feedback today** (`wm-edits/1`, #78; the review plan in #80; the site finder in #81)
-
-- The pipeline finds the sites that need judgment, such as tight folds (`wm-sites/1`) and large handle fixes. It gathers them into one queue per hemisphere, after the automatic result.
-- For each site the viewer offers a few concrete choices with previews: `remove-strand`, `thicken`, `fill-gap`, `widen-gap`, `leave`, `manual-paint`. Each choice is a function of the input label that returns the voxels it changes. ITK-SNAP is the escape hatch for free painting.
-- Each answer is saved as voxel diffs against the input label, with its site, choice, time and the `dseg` SHA. An answer with no voxels (`leave`) is recorded too, so the site counts as answered.
-
-**With our own segmentation** (phase 4 of the plan in §3a)
-
-- Each answer serves twice:
-  - as an edit that corrects this hemisphere now;
-  - as a verified label for training the next generation.
-- **Answers stand on their own.** Each is the verified label of each voxel it covers, valid for any input, not a diff against one segmentation. That way answers survive from one generation to the next. `wm-edits/1` is to be edited in place to say so.
-- **Two kinds of answer:**
-  - **Site answers:** a choice among options at a site from the queue, as above.
-  - **Scribbles:** a few strokes marking voxels as WM or not WM, wherever the reviewer sees an error, including errors no site finder flags. Everything unmarked stays unlabelled, so nnU-Net trains on the strokes with its ignore label (scribble supervision, Gotkowski et al. 2024). Scribbles cost little per answer.
-- The queue also takes the places where the model is least sure: the largest spread across folds, and the topology walls with the smallest margin in P.
-- Only verified labels train the model. Automatic fixes and the model's own predictions never do.
-- The held-out test regions are labelled from scratch, apart from the queue.
-
-**Open**
-
-- **How `dseg` applies standalone answers** to a new generation's labels: whether a verified voxel always overrides the input, and how to show the reviewer where a new generation disagrees with an earlier answer.
-- **Whether a scribble also corrects the current hemisphere,** or only trains the next generation. A few strokes give no full-voxel edit, so the current correction might need the model rerun (or an interactive model, such as nnInteractive) to spread them.
-- Whether an automatic fix that a reviewer accepted (`leave`) counts as verified, and so trains the model.
-- How stream 3's feedback (for example, the GM/WM transition found along columns) becomes a stream 1 input. Does it edit the label, or adjust the surface stage?
+The queue's size estimate in #80 (about 60 sites per hemisphere) predates #85; after its fold repair about 5 sites remain.
 
 ## 4. Stream 2: columns
 
-### Established
+### 4a. Goal
 
-- **Columns are complete rays.** They run from the white surface, inward as well as outward, through GM to fluid, or through a contact into the far bank's WM. They stop only at fluid, far WM, missing tissue, the domain edge or a length cap.
-  - Meetings are recorded on the column (`crest_at`, `meet_at`, `turn_at`) and never acted on. The cut is read from the profile in stream 3.
+A complete ray from every white-surface vertex through the cortex, to fluid or into the far bank's WM, recording what it meets on the way.
+
+### 4b. High-level design
+
+1. **Roots.** One root per `white-surf/1` vertex, keyed by edge key, with rays both inward and outward.
+2. **Orientation evidence.** The data normal from the echoes' structure tensor, and a field T fitted to it, for the methods that follow the image.
+3. **Trace complete rays.** A small set of simple methods that differ in one respect each and share the rest, including one frozen crossing rule.
+4. **Record what each ray meets.** Crests, meetings with other fronts, turns, and the class of each column. Nothing is cut here: the cut is read from the profile in stream 3.
+5. **Publish the column traces** in a spec'd format that stream 3 and the viewer read.
+
+**Standing decisions**
+
+- **Columns are complete rays.** They stop only at fluid, far WM, missing tissue, the domain edge or a length cap (8 mm), never where two fronts meet.
 - **The crossing rule is frozen** (user, #52; `column_front.past_crest`): climb ∇T; inside T's crest stencil, keep the heading; on leaving it, if T falls ahead, descend −∇T for good. Methods that differ in one respect share it.
-  - Column rules stay simple. A field artefact is recorded in a test, never patched with a new clause.
+- **Column rules stay simple.** A field artefact is recorded in a test, never patched with a new clause.
+- Normal rays stay straight (user, #47).
+- No step uses the fixes image to decide where to search, or re-finds a boundary as the depth origin.
+- Banks are told apart by distance along the white mesh, using the across-triangle graph (`SAME_MM` 5 mm), so the two sides of a thin blade stay apart.
+
+### 4c. Implementation design
+
+#### Step 1: roots
+
+- One root per white-mesh vertex (about one per voxel). Rays go both inward and outward from the surface.
+- **Distances on the mesh** need the edges across neighbouring triangles: 8.2 % bound on a plane, against 41 % along edges alone (#10, #45).
+- **Theory** (SF; shock theory): because the WM is connected, every collision is a front meeting itself. A fold and a contact differ only in how far apart the meeting roots lie along the surface, which is a continuum, so no pointwise quantity separates them.
+
+#### Step 2: orientation evidence
+
 - **The data normal** (SF F1): structure tensor of trend-removed log echoes 2 and 3, at derivative scale 1 voxel and integration scale 2 voxels, by masked normalized convolution over cortex.
   - For about 91 % of interior cortex the echoes agree within 10°.
   - Coherence falls to 0.05–0.38 at contacts and fundi, which is where most failures happen.
@@ -377,54 +429,133 @@ These steps would apply to any WM label. The numbers come from running them on t
   - It must be extended 1 voxel into fluid and 0.5 mm into WM, or it makes spurious turns at the pia.
   - pyamg needs local Jacobi weights to be deterministic (#40, #45).
 - **T's crest is the midline between the two WM surfaces, not the contact.** On the kissing phantom it sits 0.3 mm from the contact, even across a fluid gap (CP). The crest test (T rises into a voxel but not beyond, with a slope change above L²κ plus noise) needs no calibration.
-- **Column methods**, measured at the marked points (CP; #47, #52, #58):
-  - **normal** (straight rays along the smoothed white normal, no field, no image): keeps the right class on every phantom and almost never returns to its own bank. Its profile split is the best at M1/S1 (median 0.17 mm) and 0.075 mm at V1V2. Its costs are more stops at caps and edges, and 0.18–0.41 mm path error against curved true columns at crowns. The user's decision: normal rays stay straight.
-  - **front** (the white mesh grown as one surface, directions coupled along the mesh at 2 voxels): the most accurate wherever folds are 0.64 mm or wider (contact p90 0.054 mm), and it reaches all 35 V1V2 points. Its swept volume matches equal volume within 0.2 %. It is worst at 0.32 mm crowns (p90 0.77 mm), because the coupling scale equals the crown radius.
-  - **fitted_blend start** (mesh normal at the root, blended into the field over 0.3 mm): the most accurate field tracer at tight fundi and contacts, and the default start for the field methods. It removes the turn spike at 0.3 mm from the WM (turns fall from 11–16 % to 0.5–2.4 %).
-  - **front-equivolume** (speed A₀/A along the smoothed normals): bends 0.25–0.31 mm off the straight ray, ends many columns at the caps, splits poorly at M1/S1 (0.55 mm), and runs 8–9× slower. Which paths are right is untested.
-- **Fast marching** (`baillarger.fronts`; Mirebeau's Selling stencils) is causal for anisotropic metrics and never jumps a one-voxel wall.
-  - Arrival is first order, with 4–8 % error from a point source.
-  - Arc length is good only where paths follow the metric's direction.
-  - 141³ takes about 10 s at 2.7 GB.
+- **Crests on the aseg's errors.** Many crests sit on the aseg's fluid channels and vessels, so crest methods need those relabelled first. That relabelling (`pial_labels`: closed-form darkness at α = 10⁻³, fluid fraction above ½, a noise-bound component size, the stria trap) belongs to stream 1 as a spec'd input (#46, #49).
+- **Doesn't work:**
+  - Tracing step by step along the raw tensor normal: no field, no stop, so paths stall and run on (SF F3).
+  - Laplace streamlines: they make fused cortex look open (49 k open against 348 crossing at V1V2) and need the outer boundary first.
+  - A single all-WM field cannot place an unequal contact: its ridge is the geometric midline (F11).
+
+#### Step 3: tracing methods
+
+Measured at the marked points (CP; #47, #52, #58):
+
+- **normal** (straight rays along the smoothed white normal, no field, no image): keeps the right class on every phantom and almost never returns to its own bank. Its profile split is the best at M1/S1 (median 0.17 mm) and 0.075 mm at V1V2. Its costs are more stops at caps and edges, and 0.18–0.41 mm path error against curved true columns at crowns.
+- **front** (the white mesh grown as one surface, directions coupled along the mesh at 2 voxels): the most accurate wherever folds are 0.64 mm or wider (contact p90 0.054 mm), and it reaches all 35 V1V2 points. Its swept volume matches equal volume within 0.2 %. It is worst at 0.32 mm crowns (p90 0.77 mm), because the coupling scale equals the crown radius.
+- **crest and traverse,** with the **fitted_blend start** (mesh normal at the root, blended into the field over 0.3 mm): the most accurate field tracers at tight fundi and contacts. The blended start removes the turn spike at 0.3 mm from the WM (turns fall from 11–16 % to 0.5–2.4 %).
+- **front-equivolume** (speed A₀/A along the smoothed normals): bends 0.25–0.31 mm off the straight ray, ends many columns at the caps, splits poorly at M1/S1 (0.55 mm), and runs 8–9× slower. Which paths are right is untested.
+- **one-pass** (fronts from all WM in one fast-marching pass):
+  - `baillarger.fronts` (Mirebeau's Selling stencils) is causal for anisotropic metrics and never jumps a one-voxel wall. Arrival is first order (4–8 % error from a point source); arc length is good only where paths follow the metric's direction; 141³ takes about 10 s at 2.7 GB.
   - Per-source start times and speeds give crystal growth: connected regions.
   - The root's position must be carried through the pass, as arc length is; it then lands within 0.01 mm. One label per root voxel triples the arrival error, and root patches misplace the root by 0.36–0.80 mm (SF F23).
-- **Distances on the mesh** need the edges across neighbouring triangles: 8.2 % bound on a plane, against 41 % along edges alone (#10, #45).
-- **Theory** (SF; shock theory): because the WM is connected, every collision is a front meeting itself. A fold and a contact differ only in how far apart the meeting roots lie along the surface, which is a continuum, so no pointwise quantity separates them.
+  - It is a sequential heap on whole arrays: box scale only.
+- **Bok's measure** for a vertex is the exact flux of its dual cell. Equivolume depth is (V(s) − V(s₀)) / (V(s₁) − V(s₀)).
+- **Doesn't work:**
+  - Dijkstra or 6-neighbour fast marching for anisotropic metrics: about 29° lattice bias.
+  - A lattice step across T's crest: about 31 k returns to the own bank per site.
+  - Sorting front sides by connected pieces, and geometric walls between banks: fragile where banks join round a fundus. The one-pass march needs no sides.
 
-### Doesn't work (stops a retry)
+#### Step 4: recording what each ray meets
 
-- Tracing step by step along the raw tensor normal: no field, no stop, so paths stall and run on (SF F3).
-- Laplace streamlines: they make fused cortex look open (49 k open against 348 crossing at V1V2) and need the outer boundary first.
-- Any threshold on bend angle, turn, or root separation along the surface: each cuts a continuum. Between 10° and 60°, 5–34 % of classes change. A 5 mm "same bank" fallback is wrong at both faces.
-- Dijkstra or 6-neighbour fast marching for anisotropic metrics: about 29° lattice bias.
-- A lattice step across T's crest: about 31 k returns to the own bank per site.
-- Crest methods on the raw aseg: they cross the aseg's fluid channels and vessels. They need the pial-label refinement first (#46).
-- Sorting front sides by connected pieces, and geometric walls between banks: fragile where banks join round a fundus. The one-pass march needs no sides.
-- A single all-WM field cannot place an unequal contact: its ridge is the geometric midline (F11).
+- Meetings are recorded on the column (`crest_at`, `meet_at`, `turn_at`) and never acted on.
+- Classes: open, crossing, own-bank return, to-contact, failed.
+- **Doesn't work:** any threshold on bend angle, turn, or root separation along the surface. Each cuts a continuum: between 10° and 60°, 5–34 % of classes change. A 5 mm "same bank" fallback is wrong at both faces.
 
-### Standing decisions
+#### Step 5: the published traces
 
-- Columns root on `white-surf/1` vertices, keyed by edge key, and run inward and outward. No step uses the fixes image to decide where to search, or re-finds a boundary as the depth origin.
-- Banks are told apart by distance along the white mesh, using the across-triangle graph (`SAME_MM` 5 mm), so the two sides of a thin blade stay apart.
-- Bok's measure for a vertex is the exact flux of its dual cell. Equivolume depth is (V(s) − V(s₀)) / (V(s₁) − V(s₀)).
+- Today the traces are a prototype `.npz` with no spec, built on a box white mesh with no edge keys.
+- They must key on edge keys, carry each sample's 3D position and the recorded meetings, and be readable by block.
 
-### Open
+#### Open
 
 - Which paths are right in real cortex: straight rays, field traces or the front. The planned check is phantoms with curved, equivolume true columns.
 - What the crests inside thick cortex are: they cover 5–10 % of cortex even after relabelling.
 - The cost ratio across the layer normal for arrival (3, 1, or falling with coherence).
 - `fronts` accuracy when the metric is tilted 5–20° off the true paths, which is the case on real data.
-- Thin-blade normals keep as little as 0.56 of their length after averaging (`docs/scaling.md`). The column stage has to handle them.
+- **Radial fibres.** At 160 µm the texture is planar, so no source shows radial fibres giving column orientation. Their fade-out depth can still be a planar laminar edge.
+
+### 4d. Implementation plan
+
+- Write the spec for column traces first: it is the interface stream 3 and the viewer wait on.
+- Rewrite `column_traces` to root on `white-surf/1` vertices by edge key and trace by mesh blocks, keeping the methods, classes, constants and the frozen rule.
+- Port with changes: the `streamlines` integrators and tensor tools (torch, blocks); `column_front` per mesh block, with `past_crest` byte for byte; `mesh_graph` in a local form, with the duplicate-edge bug fixed (§7).
+- Rewrite `fitted_field` as a blocked or multigrid solve, if T stays.
+- Size each block's halo to the 8 mm length cap (§2, domain edges).
+- Leave `fronts` at box scale; do not build a whole-brain step on it.
+- Run the open experiments above on the hemisphere, away from box faces.
 
 ## 5. Stream 3: laminar profiles, contacts and alignment
 
-### Established
+### 5a. Goal
+
+Where each layer lies along every column, read from the image's own contrast and aligned across columns and across contacts between banks, with what it learns fed back to stream 1 as an input.
+
+### 5b. High-level design
+
+1. **The column volume.** Sample the echoes along every column into traces, each sample keeping its 3D position.
+2. **Flatten.** Estimate shifts between neighbouring traces and fit a warp, so that layers become level.
+3. **The joint warp.** One monotone depth map per column, tied across contacts and anchored at open tops. The pial edge is its top level (τ = 1), and the GM/WM transition one of its levels.
+4. **Bands and layer identity.** Find the bands in the flattened frame, and tell which layer each is, including where an area's pattern changes.
+5. **Thickness and contacts.** Carry thickness sideways from where it is visible, and place each contact between two banks.
+6. **Feed back** to stream 1 as a spec'd input.
+
+**Standing decisions**
+
+- **Where there is contrast, the data decide; where there is none, depth follows equal volume.** "The metric" is three roles: depth within a column, thickness carried sideways, and arrival at a contact. Each has its own estimator status.
+- **No faults in cortex.** A depth jump between neighbouring columns is an upstream error. Areal borders are facies changes: a thickness kink, a pinch-out, or a contrast change at continuous depth. A fused contact is a boundary between two stacks, not a fault.
+- Never label banks by geometry. A voxel's bank is its column's root.
+- Search only bands of at least 2–3 voxels; thinner layers ride along on the levels. The stria is at this limit and is the reference case.
+- **Build order into the representation; let contrast decide placement** (CL). Constraints that hold everywhere (ordering, no crossings, zero thickness allowed, topology) belong in the representation; those that hold only on average (smoothness, equal volume, templates) belong in the energy. Every surveyed method that broke this rule needed patches.
+- The B0-orientation covariate is deferred: a possible later check only if facies changes track folding.
+
+### 5c. Implementation design
+
+#### Step 1: the column volume
+
+- One trace per white-mesh vertex, sampled every 0.04 mm, each sample keeping its 3D position. It reads like a seismic section: the stria runs as a continuous band from open into fused cortex, and the far bank's stria appears mirrored past a contact (CP).
+- The voxels within 1 voxel of the WM or the pia are partial volume. They made half the data term and drew 30 % of band boundaries; leave them out (PL; #24).
+
+#### Step 2: flattening
+
+- **Shifts between neighbours** (`flatten`; Lucas–Kanade shifts, the Lomask / Wu–Hale form, CG):
+  - Exact on synthetic warps.
+  - On the boxes: 5–6 min, 6–7 GB, weighted RMS misfit 0.033–0.042 mm.
+  - It keeps real upstream faults visible rather than smoothing them away.
+- **Dynamic warping adds nothing between neighbours.** It agrees with the gradient shifts on 98.4 % of samples, and widening the bound makes the fit worse. Use it for long-range matching: templates, across gaps, between areas (#57, #60).
+- **Doesn't work:** phase-unwrapping relative geologic time (it slips cycles at facies changes).
+
+#### Step 3: the joint warp
+
+- One monotone z(τ) per column, z(1) = the pia, solved by QPBO at a few levels and then filled between them.
+- Its terms: conservation of shifts inside each bank, the two-sided tie c_A + c_B = L at contacts (the user's choice), robust open-top anchors, weak lateral smoothness, a vertical prior and hard ordering.
+- It certifies 96.6–100 % of variables, so the remaining errors belong to the model.
+- The vertical prior must be the chain form, |z_ℓ − (τ_ℓ/τ_ℓ₊₁) z_ℓ₊₁|.
+- Levels placed at detected bands tighten the stria's spread by about 40 %. It reaches 0.08 mm at both M1/S1 and V1V2.
+- The first pial surface is a level of the joint warp (τ = 1), not a separate cut. The fill between levels uses distance until an equal-volume estimator is validated.
+- **QPBO engineering** (#30–#33):
+  - Hard costs must be 1 + the finite total, not 1000×.
+  - QPBO-I must reseed rand() for determinism.
+  - No term may depend on a window's centre (that made the passes cycle).
+  - scipy's `maximum_flow` takes int32 capacities only; keep the total below 2³⁰.
+  - The QPBO in use (`thinqpbo`) is GPL-3 and has to be replaced.
+- **Doesn't work:** a single darkness horizon for the pia. Where the dark line fades it jumps to the far bank's stria, a mirrored decoy (CP).
+
+#### Step 4: bands and layer identity
+
+- **Bands in τ:** stack each trace with neighbours weighted by profile correlation, and keep extrema at least 1.5 voxels wide. A 2.5-voxel threshold drops the stria (1.67 voxels).
+  - V1V2: bright at τ 0.18, the stria at 0.37, bright at 0.81.
+  - M1S1 has a dark band at τ 0.33 that is not a stria.
+- **Bands per region** (PL; #12–#24): Bellman DP, with K chosen by 2-fold cross-validation. Do not refit the held-out gain, and take the least K within max(1 SE, 5 % of the held-out gain). This finds the true K in 160 of 160 synthetic cases.
+- Ward merging stops at the column graph's connected pieces. Cumulative bottom tests react late, so test each bin on its own.
+- **From the literature** (CL; FS): nothing published fits a depth field to laminar contrast. Areal types are astriate (M1), unistriate (V2) and bistriate (V1); counting peaks mislabels unistriate areas. Keep "present but invisible" apart from "pinched out"; model partial volume at both edges; use sub-voxel boundaries; avoid top-down sequential chains; put a soft prior on changes of band thickness.
+- **Doesn't work:** multi-object level sets (they cannot let a band vanish); k-means with no spatial prior; per-column classifiers glued together afterwards.
+
+#### Step 5: thickness and contacts
 
 **Depth within a column (role 1)**
 
-- The principle: where there is contrast, the data decide; where there is none, depth follows equal volume. Geometry alone cannot put layers on level sets: one equal-volume surface lies in different layers in different areas (Wagstyl 2018).
+- Geometry alone cannot put layers on level sets: one equal-volume surface lies in different layers in different areas (Wagstyl 2018).
 - The current estimator is distance, until an equal-volume estimator is validated against visible bands. The results so far:
-  - **The closed form from white-surface curvature** (A/A₀ = (1 + κ₁s)(1 + κ₂s)): see the conflict in §9. With curvature at 0.32–0.80 mm it over-corrects on open V1 (ρ −0.69), because the pia is flatter than a parallel shell (SF F10). With curvature smoothed at 1 mm it gives no stria trend in the band model (PL; #23).
+  - **The closed form from white-surface curvature** (A/A₀ = (1 + κ₁s)(1 + κ₂s)): the evidence conflicts (open, below).
   - **Carried area / div u:** over-corrects about 2× and is noisy upwind (SF F6, F10; #23).
   - **The volume form of the level set:** its carried area is biased (LS).
   - **The front's swept volume:** exact on phantoms, not yet tested against bands (CP).
@@ -435,141 +566,118 @@ These steps would apply to any WM label. The numbers come from running them on t
 
 - Crowns are thicker than fundi everywhere measured: V1V2 slope +1.2 mm per (1/mm), M1S1 +2.7. Fit the slope per area, because M1S1 mixes an areal step with folding (SF F10).
 - Volume per unit white-surface area is the least conserved quantity against curvature (ρ 0.95). Equal-volume thickness does not absorb the curvature trend.
-- A stationary Matérn/SPDE field (on log thickness, about 2 mm long) fits tightly at the evidence. But across the 1–2.5 mm without evidence before a contact it reverts to a broad mean and over-predicts the thin bank by 0.26–0.92 mm. The missing evidence is the sums t₁ + t₂ = L at contacts (F13–F16).
-- Convert to mm with the median, exp(m), not the lognormal mean (LS).
+- A stationary Matérn/SPDE field (on log thickness, about 2 mm long, on the white-mesh vertices) fits tightly at the evidence. But across the 1–2.5 mm without evidence before a contact it reverts to a broad mean and over-predicts the thin bank by 0.26–0.92 mm. The missing evidence is the sums t₁ + t₂ = L at contacts (F13–F16).
+- Thickness evidence is the front's own column tops, from roots at least 2 mm from any domain edge, with a guard against wandering tops. Convert to mm with the median, exp(m), not the lognormal mean (LS).
+- Region-specific thickness priors are future work, as soft regions.
 
 **Contacts**
 
 - **M1/S1 is genuinely unequal:** 2.0 mm against 3.2–3.3 mm. At its contact two layer I's meet with no fluid gap, and the superficial layers are 0.1–0.15 mm thinner per side than at open pia (F12, F13, F17).
 - V1V2's banks are near equal (2.18 and 2.31 mm) and sit on a residual dark line, which explains much of every estimator's success there.
+- Equal arrival is right only for near-equal banks: at M1/S1 it misses by 0.63–0.68 mm.
 - The two fronts' errors are correlated. Where both banks are over-predicted alike, a σ² split cancels the bias.
 - How a contact split shares the misfit: the Gaussian posterior shares it in proportion to σ², and equal z-scores share it in proportion to σ. Past runs used both, so they are not directly comparable.
-
-**The column volume and flattening**
-
-- **The column volume:** one trace per white-mesh vertex, sampled every 0.04 mm, each sample keeping its 3D position. It reads like a seismic section: the stria runs as a continuous band from open into fused cortex, and the far bank's stria appears mirrored past a contact (CP).
-- **Flattening by shifts between neighbours** (`flatten`; Lucas–Kanade shifts, the Lomask / Wu–Hale form, CG):
-  - Exact on synthetic warps.
-  - On the boxes: 5–6 min, 6–7 GB, weighted RMS misfit 0.033–0.042 mm.
-  - It keeps real upstream faults visible rather than smoothing them away.
-- **Dynamic warping adds nothing between neighbours.** It agrees with the gradient shifts on 98.4 % of samples, and widening the bound makes the fit worse. Use it for long-range matching: templates, across gaps, between areas (#57, #60).
-- **The joint warp** (one monotone z(τ) per column, z(1) = the pia, solved by QPBO at a few levels then filled):
-  - Its terms: conservation of shifts inside each bank, the two-sided tie c_A + c_B = L at contacts, robust open-top anchors, weak lateral smoothness, a vertical prior and hard ordering.
-  - It certifies 96.6–100 % of variables, so the remaining errors belong to the model.
-  - The vertical prior must be the chain form, |z_ℓ − (τ_ℓ/τ_ℓ₊₁) z_ℓ₊₁|.
-  - Levels placed at detected bands tighten the stria's spread by about 40 %.
-  - It reaches 0.08 mm at both M1/S1 and V1V2.
-- **QPBO engineering** (#30–#33):
-  - Hard costs must be 1 + the finite total, not 1000×.
-  - QPBO-I must reseed rand() for determinism.
-  - No term may depend on a window's centre (that made the passes cycle).
-- **Bands in τ:** stack each trace with neighbours weighted by profile correlation, and keep extrema at least 1.5 voxels wide. A 2.5-voxel threshold drops the stria (1.67 voxels).
-  - V1V2: bright at τ 0.18, the stria at 0.37, bright at 0.81.
-  - M1S1 has a dark band at τ 0.33 that is not a stria.
 - **The profile likelihood of a split** (template A stretched to x, B reversed to L − x):
   - On spliced columns with a known answer it is within 0.02–0.09 mm.
   - It is 2–3× overconfident, because the residuals are correlated.
   - The top-anchored stretch beats the linear one.
-  - At M1/S1 it misses by 0.5–0.8 mm into the thin bank. This is not diagnosed.
-
-**Bands, regions and edges** (PL; #12–#24)
-
-- Bands per region: Bellman DP, with K chosen by 2-fold cross-validation. Do not refit the held-out gain, and take the least K within max(1 SE, 5 % of the held-out gain). This finds the true K in 160 of 160 synthetic cases.
-- The voxels within 1 voxel of the WM or the pia are partial volume. They made half the data term and drew 30 % of band boundaries; leave them out.
-- Ward merging stops at the column graph's connected pieces.
-- Cumulative bottom tests react late, so test each bin on its own.
-
-**From the literature** (CL; FS)
-
-- Nothing published fits a depth field to laminar contrast, or places a fused contact from expected thickness: every tool splits fused banks symmetrically.
-- Design requirements:
-  - Keep "present but invisible" apart from "pinched out".
-  - Model partial volume at both edges.
-  - Use sub-voxel boundaries.
-  - Avoid top-down sequential chains.
-  - Put a soft prior on changes of band thickness.
-- **Build order into the representation; let contrast decide placement.**
-  - Constraints that hold everywhere belong in the representation: ordering, no crossings, zero thickness allowed, topology.
-  - Constraints that hold only on average belong in the energy: smoothness, equivolume, templates.
-  - Every surveyed method that broke this rule needed patches.
-
-### Doesn't work (stops a retry)
-
-- A single darkness horizon for the pia: where the dark line fades it jumps to the far bank's stria, a mirrored decoy (CP).
-- Profile templates from open tops far from the fused stretch: they miss at M1/S1.
-- Phase-unwrapping relative geologic time (it slips cycles at facies changes). Multi-object level sets (they cannot let a band vanish). k-means with no spatial prior. Per-column classifiers glued together afterwards.
-
-### Standing decisions
-
-- **No faults in cortex.** A depth jump between neighbouring columns is an upstream error. Areal borders are facies changes: a thickness kink, a pinch-out, or a contrast change at continuous depth. A fused contact is a boundary between two stacks, not a fault.
-- Never label banks by geometry. A voxel's bank is its column's root.
-- Search only bands of at least 2–3 voxels; thinner layers ride along on the levels. The stria is at this limit and is the reference case.
-- The first pial surface is a level of the joint warp (τ = 1), not a separate cut.
-- Ties at contacts are two-sided (c_A + c_B = L).
+  - At M1/S1 it misses by 0.5–0.8 mm into the thin bank. This is not diagnosed. Templates from open tops far from the fused stretch are one suspect.
 - Report a split three ways (profile alone, profile with field, field alone), and with both stretches.
-- Region-specific thickness priors are future work, as soft regions.
-- The B0-orientation covariate is deferred: a possible later check only if facies changes track folding.
 
-### Open
+#### Step 6: feedback to stream 1
 
+- Nothing is built. The feedback must arrive as a spec'd input to stream 1, as `wm-edits` does, never as a code dependency.
+
+#### Open
+
+- **Conflict: the equal-volume closed form from white-surface curvature.** PL (#23) adopted it with curvature smoothed at 1 mm (no stria trend); SF F10 lists it as failed with curvature at 0.32–0.80 mm (over-corrects on open V1, ρ −0.69, because the pia is flatter than a parallel shell). The tests differ in curvature scale, columns and measure, so the dependence on scale is unresolved. Normal rays (#47) use it at 0.5 mm, unvalidated.
+- **Conflict: the best M1/S1 estimator depends on the paths and the score.** The field prior alone on crossing paths gives 0.07–0.12 mm, against 0.26–0.33 mm in other scores. The profile split misses by 0.5–0.8 mm on tensor paths but gets 0.17 mm on normal rays. The crossing path's L and the column arc lengths were never reconciled. Compare estimators only on one shared set of paths with one score.
 - The joint fit of the thickness field to visible tops and to the contact sums L, and whether it converges.
 - σ or σ² on the contact. It should follow a stated principle.
 - The M1/S1 profile miss. The candidates: template locality, superficial thinning at the contact, or an areal border.
 - An honest likelihood: measure the residual correlation, or use Student-t.
 - Band identity beyond the stria; whether equal τ is the same layer across an areal border; what M1S1's τ 0.33 band is.
-- How the stream 3 → 1 feedback is expressed, as a spec'd input to stream 1 in the way `wm-edits` is.
+- What the feedback to stream 1 says, and in what format.
+
+### 5d. Implementation plan
+
+- Wait for the column-trace spec (stream 2) and build the column volume on it, by blocks.
+- Port `flatten` with a blocked or local solve, and a torch version if it stays heavy.
+- Port `surfcut.model` and `surfcut.cut`; replace `surfcut.qpbo` with a QPBO that is not GPL (our own, or a permissive library).
+- Rewrite `bands` (DP with the cross-validated K) and `gain` only if they are needed. Drop the old patch pipeline (`columns`, `regions`, `surfaces`, `bottom`, `tv`, `refine`, `output`): it needs a pial exit and writes no BIDS output.
+- Salvage the layer-maps diagnostics from #56 (isopachs, pinch-outs, facies; `layer_maps_lib.py` and its tests) once columns exist on the hemisphere.
+- Write specs for every output, including the feedback to stream 1.
+- Resolve the two conflicts above on one shared set of hemisphere columns, away from domain edges.
 
 ## 6. Stream 4: the viewer
 
-### Established
+### 6a. Goal
 
-- **The architecture works:** one server bound to 127.0.0.1, holding the data and doing the computation. Shared state goes over POST /state and Server-Sent Events, so any number of windows and panes stay in step. There are two linked points: a crosshair in world mm, and a selected true vertex (#43, #44).
-  - This keeps a server on a big machine with a tunnelled browser possible.
-  - No response may scale with the whole mesh or volume.
-- **Display through the overview:** every pick maps to a true vertex, nothing is measured on the overview, and caches are keyed by the source SHA. Hemisphere start takes 24 s the first time and 0.8 s cached (#70–#72).
-- **The brick pyramid volume viewer** (32³ bricks, 2×2×2 means, a WebGL2 page-table atlas): the hemisphere echo builds in 6.8 s at 1.4 GB, and every sampled pixel matches the data. Its `BrickSource` is the interface for a NIfTI-Zarr store (#84).
-- **NiiVue 0.69:**
-  - Its 2D mesh display is unusable at 160 µm. Draw exact plane sections on a 2D canvas instead (16–22 ms for 873 k triangles).
-  - A click on a mesh does not move the crosshair, so the surface pane is our own WebGL view.
-  - Load it from the pinned `+esm` URL.
-  - `readTCK` drops the first line: start the data with a NaN row.
-  - `loadMeshes`/`removeMesh` race: use `addMeshFromUrl`.
-  - Catch keys in the capture phase.
-- **Geometry tools:**
-  - Sections from a plane cut of the true mesh cannot fork.
-  - Closed pieces inflate by mapping back to their own second moments; area restoration gives a needle.
-  - Open pieces need their boundary pinned.
-  - Flat maps work per geodesic patch round a selection (LSCM, R ≤ 5 mm in 0.1–0.44 s). A whole-hemisphere flat map is out of scope.
-  - `splu` with MMD and no pivoting; pyamg does not converge on LSCM.
-- **Editing lessons** (PE; CP):
+A way to see any result at full resolution anywhere in a whole brain, and to answer each stage's review queue.
+
+### 6b. High-level design
+
+1. **A server next to the data,** holding the data and doing the computation, with shared state across any number of browser windows.
+2. **Panes** on that state: volume, surface (true or inflated), sections, flat-map patch.
+3. **Review panes** for each stage's queue, saving answers as spec'd edits.
+4. **Only published outputs** are read, never a stream's internals.
+
+**Standing decisions**
+
+- The server binds 127.0.0.1. Keep a server on a big machine with a tunnelled browser possible: no response may scale with the whole mesh or volume.
+- Looking comes first; which correction tools to build waits until the data can be seen well.
+- Review queues offer a few concrete options per site with previews, not a free-form editor, plus scribbles for stream 1.
+
+### 6c. Implementation design
+
+#### Step 1: the server and shared state
+
+- One server; shared state over POST /state and Server-Sent Events, so any number of windows and panes stay in step (#43, #44).
+- Two linked points: a crosshair in world mm, and a selected true vertex.
+- Send binary arrays, not VTK. Caches are keyed by the source SHA.
+
+#### Step 2: panes
+
+- **Volume:** the brick pyramid (32³ bricks, 2×2×2 means, a WebGL2 page-table atlas). The hemisphere echo builds in 6.8 s at 1.4 GB, and every sampled pixel matches the data. Its `BrickSource` is the interface for a NIfTI-Zarr store (#84).
+- **Surface:** through the overview. Every pick maps to a true vertex and nothing is measured on the overview. Hemisphere start takes 24 s the first time and 0.8 s cached (#70–#72). Our own WebGL view, because a click on a NiiVue mesh does not move the crosshair.
+- **Sections:** exact plane cuts of the true mesh, which cannot fork, drawn on a 2D canvas (16–22 ms for 873 k triangles). NiiVue 0.69's 2D mesh display is unusable at 160 µm.
+- **Inflation:** closed pieces inflate by mapping back to their own second moments (area restoration gives a needle); open pieces need their boundary pinned.
+- **Flat map:** per geodesic patch round a selection (LSCM, R ≤ 5 mm in 0.1–0.44 s). A whole-hemisphere flat map is out of scope. `splu` with MMD and no pivoting; pyamg does not converge on LSCM; CHOLMOD is GPL.
+- **NiiVue 0.69 pitfalls:** load it from the pinned `+esm` URL; `readTCK` drops the first line (start the data with a NaN row); `loadMeshes`/`removeMesh` race (use `addMeshFromUrl`); catch keys in the capture phase.
+
+#### Step 3: review panes
+
+- **Lessons from the pial editor** (PE; CP):
   - Edits are stored as data (world mm, roots) that replay exactly in any order. A vertex drag must be saved as that vertex.
   - An edit reaches about 1 mm, so the base matters most, and an editor needs a worklist over every doubtful site.
   - A surface built as heights over crossing columns tangles. A contoured base cannot cross itself.
-  - Send binary arrays, not VTK.
+- The stream 1 review pane is described in §3c, step 5.
 
-### Standing decisions
-
-- The viewer reads only published outputs.
-- Looking comes first; which correction tools to build waits until the data can be seen well.
-- Review queues offer a few concrete options per site with previews, not a free-form editor. Answers are saved as spec'd edits.
-
-### Open
+#### Open
 
 - Overlays, mesh outlines and the 3D tile on the brick viewer.
 - Placing points from the volume pane.
 - A camera shared between windows.
 
-## 7. Code worth carrying over
+### 6d. Implementation plan
 
-These are verdicts for a restart. Most tests are exact: phantoms, brute force, reference solvers, device equality.
+- Port with changes: `viewer.server`, `viewer.overview`, `viewer.white_view`, `viewer.surface` (the parts that already read published outputs).
+- Port as is: `viewer.flatmap`, `viewer.inflation`, `viewer.sections`.
+- Rewrite against published specs: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
+- Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
+- Bring in the geodesic-patch flat map (#69), with its `edge_graph` fix split out.
+- Build the stream 1 review pane, with site answers and scribbles.
+- Add panes for stream 2 and 3 outputs as their specs appear.
+
+## 7. Shared code
+
+Each stream's plan lists its own modules. These are shared, or belong to no stream. Most tests are exact: phantoms, brute force, reference solvers, device equality.
 
 | Verdict | Modules |
 |---|---|
-| Port as is | `backend`, `bids` (strict sidecars, spec docs tested against code), `gifti`, `timing`, `_jit`, `mesh` (Kuhn marching, edge keys, Morton blocks: the most reusable piece), `mesh_intersect`, `phantoms`, `handles` (hemisphere scale), `wm_edits`, `decimate`, `viewer.flatmap`, `viewer.inflation`, `viewer.sections`, `scripts/check`, `scripts/affected-tests`, `scripts/memguard` |
-| Port with changes | `blocks` (add the chunked source; never read large inputs whole), `mesh_torch` (block-local tables), `mesh_smoothing` (keep normals, edges, pieces), `mesh_graph` (local form; fix the bug below), `white` (split into dseg, surface and overview; drop the box `white_mesh`), `antialias` (band only, multigrid), `streamlines` (integrators and tensor tools in blocks), `column_front` (per mesh block; `past_crest` byte for byte), `flatten` (blocked solve), `viewer.server`, `viewer.overview`, `viewer.white_view`, `viewer.surface` |
-| Box scale only | `fronts`: correct, but a sequential heap on whole arrays. Don't build a whole-brain step on it. |
-| Rewrite, keep the idea | `column_traces` (root on `white-surf/1`, publish a spec'd output; keep the methods, classes and constants), `pial_labels` (keep the noise estimators; emit spec'd edits as a stream 1 input), `streamlines.fitted_field` (blocked or multigrid), `bands` and `gain` (if stream 3 needs them), `surfcut.qpbo` (needs a non-GPL QPBO), the viewer's `data`, `filters`, `labels`, `streamlines` and page (they read prototype `.npz` files) |
-| Drop | `topology` and `wellcomposed` ((26,6) codes), `growth` and `joint` (old seam model), `frame` (move `missing_tissue` to stream 1), the patch pipeline: `columns`, `regions`, `surfaces`, `bottom`, `tv`, `refine`, `output` |
+| Port as is | `backend`, `bids` (strict sidecars, spec docs tested against code), `gifti`, `timing`, `_jit`, `mesh` (Kuhn marching, edge keys, Morton blocks: the most reusable piece), `mesh_intersect`, `phantoms`, `scripts/check`, `scripts/affected-tests`, `scripts/memguard` |
+| Port with changes | `blocks` (add the chunked source; never read large inputs whole), `mesh_torch` (block-local tables), `mesh_smoothing` (keep normals, edges, pieces), `mesh_graph` (local form; fix the bug below) |
+| Drop | `topology` and `wellcomposed` ((26,6) codes), `growth` and `joint` (old seam model), `frame` (move `missing_tissue` to stream 1) |
 
 Problems in the current code that a restart should not inherit:
 
@@ -599,37 +707,12 @@ There is no spec yet for:
 - any stream 3 output, including feedback to stream 1;
 - the review-queue sites (`wm-sites/1` is on #81).
 
-## 9. Scaling gaps
+## 9. Scaling gaps across streams
 
-From `docs/scaling.md`, in the order needed before a whole-brain run:
-
-1. The midline cut.
-2. `dseg` in blocks. Handle removal as "find globally, fix in local boxes" needs a design first: one piece is about 43 GB, and whole-array `dseg` at 50 µm is about 1 TB.
-3. NIfTI-Zarr, together with item 2.
-4. A band-only multigrid antialias solver: FISTA on the whole volume costs about h⁻⁵. On the hemisphere it takes 1,651 iterations, 16 min on MPS.
-
-Decimation also needs int32 ids and a block-wise first pass.
-
-Gaps beyond that document:
+Stream 1's ordered scaling steps are in its plan (§3d). Across the streams:
 
 - Streams 2 and 3 exist only at box scale, with whole-box arrays: `column_traces`, `fitted_field` (pyamg), `fronts`, `fit_warp`, `mesh_graph`.
 - Normals are computed on the whole mesh.
-- `NiftiSource` reads a `.nii.gz` whole.
+- `NiftiSource` reads a `.nii.gz` whole, and `BlockReader` keeps volumes up to 4 GB resident on the device.
 - Many scales are hard-wired to 0.16 mm voxels: the 0.04 mm sampling, the 1.5-voxel band width, the tapers, the 0.32 mm twicing and the 2-voxel coupling. Restate each as mm or as voxels on purpose.
 - Box costs per 141³ on one CPU core: column volume 3–5 min and 6 GB, the single-surface cut 18 GB, joint warp about 10 min and 10 GB, flattening about 6 min.
-
-## 10. Unresolved conflicts in the evidence
-
-These need a decision or a test, not a choice by default.
-
-1. **The equal-volume closed form from white-surface curvature.**
-   - PL (#23) adopted it with curvature smoothed at 1 mm: no stria trend.
-   - SF F10 lists the same form as failed with curvature at 0.32–0.80 mm.
-   - The tests differ in curvature scale, columns and measure. The dependence on scale is unresolved.
-   - Normal rays (#47) use it at 0.5 mm, unvalidated.
-2. **The best M1/S1 estimator depends on the paths and the score.**
-   - The field prior alone on crossing paths gives 0.07–0.12 mm, against 0.26–0.33 mm in other scores.
-   - The profile split misses by 0.5–0.8 mm on tensor paths but gets 0.17 mm on normal rays.
-   - The crossing path's L and the column arc lengths were never reconciled.
-   - Compare estimators only on one shared set of paths with one score.
-3. **Radial fibres.** At 160 µm the texture is planar, so no source shows radial fibres giving column orientation. Their fade-out depth can still be a planar laminar edge.
