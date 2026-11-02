@@ -54,7 +54,7 @@ These bind every stream from its first version. A first version may be rough, bu
   - Where BIDS has no rule, names are BIDS-like and the spec records the choice.
 
   Each output has one written spec, enforced by one writer and one reader.
-- **No GPL dependencies** where an alternative exists. State the licence when proposing a library.
+- **No GPL dependencies,** with no exceptions. Where only a GPL library fits, use a permissive one or write the piece ourselves. State the licence when proposing a library.
 - **FreeSurfer is the model.** Its topology correction, pretess and strand thickening are the defaults to follow. Deviate only with cause and data. We do not run FreeSurfer, even as a benchmark.
 - **A person decides only where the data cannot.** Places that need judgment go into one review queue per stage. Each answer is a replayable edit: the automatic result is correct without it, and the review refines it.
 - **Assume no particular aseg source.** The aseg is an input with its own errors, read in the FreeSurfer label convention. Take evidence from the echoes, not from one tool's quirks.
@@ -101,7 +101,7 @@ These bind every stream from its first version. A first version may be rough, bu
 
 **Licences**
 
-- **`thinqpbo` is GPL-3** (checked: its dist-info LICENSE). `surfcut.qpbo` wraps it for the joint warp. `src/` imports it only behind `surfcut.qpbo`; the prototypes call it.
+- **`thinqpbo` is GPL-3** (checked: its dist-info LICENSE), so it has to go. `surfcut.qpbo` wraps it for the joint warp. `src/` imports it only behind `surfcut.qpbo`; the prototypes call it.
 - PyMaxflow and CHOLMOD are GPL and avoided. scipy's `maximum_flow` gives the same optimal cuts on int32 capacities. Keep the total below 2³⁰, because int64 silently returns a flow of 0 (#14).
 - nnU-Net is Apache-2.0 (#86).
 - Licences believed but not checked: Madagascar, CAT12/SPM and cut-pursuit are GPL; Nighres, LayNii, ANTs and HFM/agd are not.
