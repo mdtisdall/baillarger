@@ -48,7 +48,12 @@ These bind every stream from its first version. A first version may be rough, bu
 - **GPU where it pays at the large scale.** PyTorch: CUDA on big machines, MPS on the laptop, with numpy as the reference. Each device is tested against numpy on the laptop. These stay on the CPU, parallel over independent pieces: sequential steps (handle removal), I/O and checks.
 - **Results identical across devices up to float32 rounding.** No discrete jump that rounding can flip.
 - **Always 3D.** Slices only for seeding or display.
-- **Standard formats.** GIfTI and NIfTI, BIDS-derivative names, and JSON sidecars with provenance. Each output has one written spec, enforced by one writer and one reader.
+- **Standard formats where they fit, extended where scale needs it.** Volumes are NIfTI and surfaces GIfTI, with BIDS-derivative names and JSON sidecars that carry provenance. Where whole-brain scale needs more than a standard gives, extend it so that a standard reader still opens the file, and specify the extension:
+  - `white-surf/1` is GIfTI with external binary data (nibabel reads it, memory-mapped), plus our own block index and edge keys.
+  - Chunked volumes are to be NIfTI-Zarr, still a draft standard, exported to `.nii.gz` for other tools.
+  - Where BIDS has no rule, names are BIDS-like and the spec records the choice.
+
+  Each output has one written spec, enforced by one writer and one reader.
 - **No GPL dependencies** where an alternative exists. State the licence when proposing a library.
 - **FreeSurfer is the model.** Its topology correction, pretess and strand thickening are the defaults to follow. Deviate only with cause and data. We do not run FreeSurfer, even as a benchmark.
 - **A person decides only where the data cannot.** Places that need judgment go into one review queue per stage. Each answer is a replayable edit: the automatic result is correct without it, and the review refines it.
