@@ -214,8 +214,8 @@ voxel scale, relax it: let the field change sign at simple points only,
 within the bound of property 4, minimising its smoothness energy (a
 topology-preserving level set, as in CRUISE; Han et al. 2004). This is the
 step that may move the surface off the voxel staircase. A sign change must
-also keep property 3: it may not make a thin voxel or a gap voxel within s
-of it. Without that test the energy shrinks widened gaps and thin blades
+also keep property 3: it may not make a blade voxel (a thin voxel whose
+removal is not simple) or a gap voxel within s of it. Without that test the energy shrinks widened gaps and thin blades
 from every side (experiment 6).
 
 ### Step 7. Normals
@@ -354,13 +354,15 @@ a voxel within the bound of the input boundary may change sign only at a
 simple point, one parity class at a time. Misfacing here is a face's normal
 against the mean of its corners', not the site count above.
 
-| Crops | Main | Today, steps 3–5 | Relaxed, bound 0.30 mm | Relaxed, thickened and widened voxels locked |
-|---|---|---|---|---|
-| 4 random, 90th pct | 3.35° | 4.00° | 3.21° | 3.55° |
-| 5 thickened, 90th pct | 8.86° | 10.08° | 6.18° | 8.75° |
-| control, 90th pct | 2.06° | 2.06° | 1.70° | |
-| 5 thickened, thin voxels | 6,567 | 723 | 1,367 | about as input |
-| 5 thickened, misfacing faces | | 11 | 2 | |
+| Crops | Main | Today, steps 3–5 | Relaxed, bound 0.30 mm | Relaxed, thickened and widened voxels locked | Relaxed, no new blade or gap voxel |
+|---|---|---|---|---|---|
+| 4 random, 90th pct | 3.35° | 4.00° | 3.21° | 3.55° | 3.21° |
+| 5 thickened, 90th pct | 8.86° | 10.08° | 6.18° | 8.75° | 6.36° |
+| control, 90th pct | 2.06° | 2.06° | 1.70° | 1.70° | 1.70° |
+| 5 thickened, edges over 30° | 2,554 | 332 | 318 | 342 | 198 |
+| 5 thickened, edges over 60° | 119 | 1 | 59 | | 0 |
+| 5 thickened, gap voxels | 573 | 2 | 11 | | 0 |
+| 5 thickened, misfacing faces | 259 | 11 | 2 | 12 | 9 |
 
 - **Relaxing works on the bulk.** The 90th percentile falls below main's on
   every kind of crop, the untouched control included, and the area of the
@@ -376,6 +378,19 @@ against the mean of its corners', not the site count above.
   property 3 but only a third to half of the gain, and gaps still narrow
   just outside the locked voxels. Step 6 needs property 3 as a constraint
   of its own.
+- **A local test keeps property 3 and nearly all the gain.** A sign change
+  is refused if it makes a new blade voxel or gap voxel within s of it,
+  tested in a window round the voxel. A blade voxel is a thin voxel whose
+  removal is not simple (the gap voxels of the background), as a gap voxel
+  is a thin background voxel whose addition is not simple. Counting every
+  thin voxel instead refuses most flips, because a one-voxel bump on a flat
+  face is thin, so a new layer can never start (one crop: 14,000 refused,
+  2,100 made, 90th percentile 6.80° against 5.77°). With the blade test the
+  random crops and the control are exactly as unconstrained (nothing or
+  about 40 flips refused), and the thickened crops keep 95% of the gain with
+  no edge over 60° (the crop above: maximum 49°, 0 gap voxels). Misfacing
+  faces are 9 against 2 unconstrained, 7 in one crop, not yet looked at. The
+  test costs 15–220 s per 96³ crop on the CPU, one window at a time.
 
 ## Experiments, in order
 
@@ -397,9 +412,8 @@ mm) upward. Done: 0.26, 0.30, 0.36, 0.42 and 0.52 mm, with steps 3, 4 and 5
 size rule and the reference sites.
 
 **Experiment 6.** Step 6 relaxed, on crops of the steps 3–5 result at
-s = 0.30 mm (results above). Next: a flip may not make a thin or gap voxel
-within s; if that is not enough, alternate relaxing with steps 3–5 until
-nothing changes, then finish with today's antialiasing.
+s = 0.30 mm (results above), then with the local blade and gap test. Next:
+the misfacing faces it leaves, then the hemisphere.
 
 ## Tests
 
