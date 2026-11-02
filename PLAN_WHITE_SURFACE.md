@@ -264,6 +264,38 @@ example hemisphere, from `scratch/topo-variants/` and `scratch/wm-invariants/`:
   a pit in one surface, not a gap between two. It is dropped; step 4's gap
   test and step 6 replace it.
 
+Steps 3 and 5 of this plan (`scratch/white-surface/`; "near a fix" counts
+fixes values 1–3 only, so thickened and well-composed voxels are not fixes
+here):
+
+| Variant | Sites | GM, near a fix | GM, no fix nearby | Fluid | Area (mm²) | Voxels changed | Exceptions |
+|---|---|---|---|---|---|---|---|
+| none (main) | 90 | 36 | 23 | 22 | 72,089 | | |
+| step 3, s = 0.32 mm | 84 | 16 | 32 | 32 | 76,367 | 767,487 added | 103 |
+| step 5 | 50 | 21 | 13 | 11 | 72,073 | 936 added, 194 removed | 25 |
+| steps 3 and 5, s = 0.32 mm | 54 | 10 | 13 | 29 | 76,371 | 767,292 + 6,806 added, 180 removed | 169 |
+| steps 3 and 5, s = 0.30 mm | 43 | 11 | 8 | 23 | 74,797 | 331,524 + 427 added, 189 removed | 141 |
+
+- **Diagonal-only contacts cause most folds.** At baseline, 74 of the 90
+  sites have a checkerboard square or a corner-only cube of the mask within
+  4 voxels, though the whole mask has only about 1,150 of them. Step 5
+  alone takes the sites from 90 to 50, by changing 1,130 voxels, and leaves
+  the area as it was; 10 of its 50 sites have a contact nearby.
+- **Thickening removes the GM folds it is meant for** (GM sites 34 with
+  step 5 alone, 19 with steps 3 and 5 at 0.30 mm), but adds folds where the
+  WM meets unlabelled background (fluid, the medial cut, next to the
+  ventricle and thalamus), many next to blocked target voxels: gaps that
+  step 4 is for.
+- **s must not be a whole number of voxels along an axis.** Axis 1 is
+  0.16 mm and the others 0.16028 mm, so s = 0.32 mm is exactly 2 voxels along
+  axis 1, and every ball has a lone voxel at each end along it. Their
+  contacts multiplied the checkerboards in the planes of axes 0 and 2 (about
+  390 to 7,000) and more than doubled the voxels added. At 0.30 mm the
+  thickening adds 332,000 voxels and the sites drop from 54 to 43.
+- **The remaining step-5 sites** are mostly thin WM inside cortex (largest
+  depth within 4 voxels at most 2.4 voxels: about 15 sites) and handle
+  fills of tens of voxels.
+
 ## Experiments, in order
 
 Each runs on the hemisphere under `scripts/memguard`, one at a time, and is
@@ -315,7 +347,8 @@ are superseded by steps 2–4; #83 is closed when this lands.
 ## Open
 
 - **s**, from experiment 4. The floor is about 1.5 voxels: below it the
-  voxel staircase itself is thinner than 2s (a cube's edges at 1 voxel).
+  voxel staircase itself is thinner than 2s (a cube's edges at 1 voxel). s
+  must also stay off whole numbers of voxels along any axis (lone tips).
 - **The bound in property 4**: s, or a separate distance.
 - **Fills across a sulcal fundus.** A fill there puts a WM plug in the
   cortex whose sides face along the layers, not across them. Step 2's
