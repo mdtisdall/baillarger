@@ -300,7 +300,8 @@ voxel-scale folds.
 ## The code on this branch
 
 Commit 14ecc4d implemented the earlier design (no growth into cortex, the
-voxel opening). Under this plan:
+voxel opening). It stays for reference on the branch
+`archive/wm-invariants-opening`, which is never merged. Under this plan:
 
 - kept: the refusal of cavities holding cortex, the exceptions table
   (`desc-wmtopo_exceptions.tsv`), and the `nofill` argument of
