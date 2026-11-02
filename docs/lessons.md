@@ -144,7 +144,14 @@ Stream 1 has two parts that meet at one interface:
 - **The WM label.** Today it is the aseg we received from purple-mri. The plan is our own segmentation of the FLASH.
 - **The white surface, made from a WM label.** These steps take a label in the FreeSurfer convention, with an optional probability map. They must not depend on which segmentation produced it.
 
-Section 3c covers which way data flows between the two parts, and where people give feedback.
+**The flow runs one way. Feedback enters only as inputs.**
+
+- The flow: input label + edits → `dseg` (automatic correction, with a fixes image) → white surface.
+  - No later step writes back into the input label or into `dseg`. The surface stage never changes the label it read.
+  - The automatic fixes (cuts, fills, thickening) stay in the derivative and its fixes image. They never become part of the input.
+- The loop closes through inputs. A person's answer, or later stream 3's feedback, becomes an edit against the input label, and stream 1 reruns from the start.
+  - Edits are kept apart from the automatic changes, so they apply again when the correction changes.
+  - `DecidedAgainst` records the SHA of the `dseg` the person looked at, so a rerun can list the answers whose context changed (`wm-edits/1`, #78).
 
 ### 3a. The WM label
 
@@ -238,16 +245,7 @@ These steps would apply to any WM label. The numbers come from running them on t
 - Whether T = 0 should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Finding hidden fluid gaps from the image before columns are traced: a thin, slowly decaying dark strip inside labelled cortex (SF F21).
 
-### 3c. Which way data flows, and where people come in
-
-**The flow runs one way. Feedback enters only as inputs.**
-
-- The flow: input label + edits → `dseg` (automatic correction, with a fixes image) → white surface.
-  - No later step writes back into the input label or into `dseg`. The surface stage never changes the label it read.
-  - The automatic fixes (cuts, fills, thickening) stay in the derivative and its fixes image. They never become part of the input.
-- The loop closes through inputs. A person's answer, or later stream 3's feedback, becomes an edit against the input label, and stream 1 reruns from the start.
-  - Edits are kept apart from the automatic changes, so they apply again when the correction changes.
-  - `DecidedAgainst` records the SHA of the `dseg` the person looked at, so a rerun can list the answers whose context changed (`wm-edits/1`, #78).
+### 3c. Where people come in
 
 **How people give feedback today** (`wm-edits/1`, #78; the review plan in #80; the site finder in #81)
 
