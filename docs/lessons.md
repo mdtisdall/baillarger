@@ -1,5 +1,15 @@
 # Lessons for the restart
 
+## The approach
+
+Most tools define a white surface and a pial surface, then treat the cortex as everything between them. We do not.
+
+- **There is no true GM/WM boundary to find,** so we build only an approximate white surface. It may sit somewhat inside the GM or the WM.
+- **The white surface exists for its normals.** What we ask of it is that its normals align with the cortical normal, so that columns traced from it run along the cortex's normal. That is how white-surface methods are judged, not by where the surface sits.
+- **Everything along a column is read from the image.** The contrast along the columns identifies the laminae, the GM/WM transition and the pial edge of the cortex. Each is aligned across columns after the fact, like any other layer. There is no separately built pial surface; the pial edge is a level of that alignment.
+
+## About this document
+
 What the work so far has established, for a clean start on four streams:
 
 1. WM segmentation and white surface generation
@@ -25,14 +35,6 @@ This document states current knowledge only. How the project got here is in git,
 - The aseg comes from purple-mri at native resolution.
 - Most stream 2 and 3 results come from **boxes**: 141³-voxel crops (about 22.6 mm on a side) cut from the hemisphere volume round a test site (V1V2, M1S1, PCC_SPL). A **box face** is one of a box's six bounding planes, where the data is cut off. The results were checked against the user's marked points: M1/S1 23, V1V2 35, PCC pieces 22 and 37.
 - Only stream 1 has run on the whole hemisphere.
-
-## The approach
-
-Most tools define a white surface and a pial surface, then treat the cortex as everything between them. We do not.
-
-- **There is no true GM/WM boundary to find,** so we build only an approximate white surface. It may sit somewhat inside the GM or the WM.
-- **The white surface exists for its normals.** What we ask of it is that its normals align with the cortical normal, so that columns traced from it run along the cortex's normal. That is how white-surface methods are judged, not by where the surface sits.
-- **Everything along a column is read from the image.** The contrast along the columns identifies the laminae, the GM/WM transition and the pial edge of the cortex. Each is aligned across columns after the fact, like any other layer. There is no separately built pial surface; the pial edge is a level of that alignment.
 
 ## 1. Goals, constraints and working rules
 
