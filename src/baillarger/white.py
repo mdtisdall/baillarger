@@ -22,7 +22,8 @@ column traces start from.
 
 The command line:
 
-    python -m baillarger.white dseg ASEG [--edits EDITS] --out DERIVATIVES
+    python -m baillarger.white dseg ASEG [--edits EDITS] [--scale-mm S]
+        --out DERIVATIVES
     python -m baillarger.white mesh DSEG --out DERIVATIVES [--block-cells N]
         [--device DEVICE] [--overview-eps MM] [--workers N]
     python -m baillarger.white overview SURF [--eps MM] [--workers N]
@@ -70,7 +71,7 @@ from baillarger.bids import (
 from baillarger.blocks import EmbeddedSource, open_volume
 from baillarger.decimate import closest_points, csr_take, decimate, reorder
 from baillarger.gifti import DataArray, write_external
-from baillarger.handles import kuhn_betti, kuhn_structure, open_thin, remove_handles
+from baillarger.handles import kuhn_betti, kuhn_structure, remove_handles, thicken
 from baillarger.mesh import (
     BLOCK,
     MeshBlocks,
@@ -130,7 +131,7 @@ FIXES = {
     2: "handle_fill",
     3: "cavity_fill",
     4: "manual_edit",
-    5: "opening",
+    5: "thickened",
     6: "exception",
 }
 
@@ -149,10 +150,10 @@ DSEG_SPEC = SidecarSpec(
         Key("HandleCutVoxels", "integer", True, "voxels cut from the mask"),
         Key("CutLabels", "object", True, "new label of the cut voxels: count"),
         Key("ManualVoxels", "integer", True, "voxels changed by manual edits"),
-        Key("Invariants", "object", True, "NoGMFills, ThicknessMM, GapMM"),
-        Key("OpeningVoxels", "integer", True, "voxels removed for thickness, gaps"),
-        Key("OpeningPasses", "integer", True, "passes of the opening"),
-        Key("Exceptions", "integer", True, "pieces where thickness or gap fail"),
+        Key("ScaleMM", "number", True, "the scale s of the normals (0: off)"),
+        Key("ThickenedVoxels", "integer", True, "voxels added by thickening"),
+        Key("ThickenPasses", "integer", True, "passes of the thickening"),
+        Key("Exceptions", "integer", True, "pieces the thickening could not add"),
         Key("ExceptionsFile", "string", True, "the exceptions table (name)"),
         Key("Moves", "array of objects", True, "each manual edit and handle move"),
     ),
@@ -241,42 +242,18 @@ class WMTopo:
     moves: list[dict[str, Any]]
     #: voxels changed by the manual edits
     manual_voxels: int = 0
-    #: voxels removed by the opening for thickness and gaps
-    opening_voxels: int = 0
-    opening_passes: int = 0
-    #: per exception: Kind (thin, gap, thin+gap), Voxels, Centre (0-based voxel)
+    #: voxels added by the thickening, and its passes
+    thickened_voxels: int = 0
+    thicken_passes: int = 0
+    #: per exception: Kind (thicken), Voxels, Centre (0-based voxel)
     exceptions: list[dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class Invariants:
-    """The invariants the corrected WM mask is made to hold beyond its
-    topology (docs/formats/wm-dseg.md; off by default): no handle fill takes
-    a cortex voxel (no_gm_fills), every mask voxel lies in a ball of radius
-    thickness_mm inside the mask, and no gap between WM surfaces is narrower
-    than about 2 gap_mm (baillarger.handles.open_thin); 0 turns one off."""
-
-    no_gm_fills: bool = False
-    thickness_mm: float = 0.0
-    gap_mm: float = 0.0
-
-    def to_json(self) -> dict[str, Any]:
-        return dict(
-            NoGMFills=self.no_gm_fills,
-            ThicknessMM=self.thickness_mm,
-            GapMM=self.gap_mm,
-        )
-
-
-#: no invariants beyond the topology
-NO_INVARIANTS = Invariants()
 
 
 def wm_topo(
     aseg: npt.ArrayLike,
     voxel_mm: npt.ArrayLike,
     edits: Edits | None = None,
-    invariants: Invariants = NO_INVARIANTS,
+    scale_mm: float = 0.0,
 ) -> WMTopo:
     """The corrected segmentation of an aseg: the manual edits made first
     (baillarger.wm_edits.apply_edits; it raises ValueError for edits that do
@@ -284,12 +261,13 @@ def wm_topo(
     with its cavities filled and its handles removed
     (baillarger.handles.remove_handles). Cavity and handle fills become the
     WM label; each handle cut takes the label of the nearest voxel that is
-    outside the corrected mask and not a cut. With invariants, no handle fill
-    takes a cortex voxel (that handle is cut; a cavity holding cortex raises
-    ValueError), and then the mask's thin parts and the WM next to its narrow
-    gaps are removed where that keeps the topology (baillarger.handles.
-    open_thin; removed voxels are relabelled as cuts), the rest listed as
-    exceptions. The corrected segmentation's
+    outside the corrected mask and not a cut. A cavity holding cortex raises
+    ValueError: filling it would grow the WM round a pocket of cortex, and
+    leaving it would leave a cavity, so a person resolves it. With scale_mm
+    (s) above 0, the mask is then thickened where it is thinner than about
+    2s (baillarger.handles.thicken), the added voxels set to the WM label;
+    each piece of the target that could not be added is an exception. The
+    corrected segmentation's
     voxels with a filled label are exactly the corrected mask. Raises
     RuntimeError if that mask still has a handle or a cavity (b1 or b2 not 0),
     which a fill of one piece of the mask touching another can make."""
@@ -306,8 +284,12 @@ def wm_topo(
         np.flatnonzero(m.any(axis=tuple(j for j in range(3) if j != i)))
         for i in range(3)
     ]
-    lo = np.array([max(int(t[0]) - 2, 0) for t in nz])
-    hi = np.array([min(int(t[-1]) + 3, s) for t, s in zip(nz, m.shape, strict=True)])
+    vox = tuple(float(v) for v in np.asarray(voxel_mm, float))
+    margin = 2 + int(np.ceil(scale_mm / min(vox))) + 2  # room to thicken
+    lo = np.array([max(int(t[0]) - margin, 0) for t in nz])
+    hi = np.array(
+        [min(int(t[-1]) + margin + 1, s) for t, s in zip(nz, m.shape, strict=True)]
+    )
     box = tuple(slice(int(p), int(q)) for p, q in zip(lo, hi, strict=True))
     x = np.ascontiguousarray(m[box])
     del m
@@ -316,55 +298,53 @@ def wm_topo(
     lap("Betti before")
     cav = cavities(x)
     a = a0[box]
-    nofill = None
-    if invariants.no_gm_fills:
-        nofill = a == GM_LABEL[hemi]
-        if (cav & nofill).any():
-            # a pocket of cortex enclosed by WM: neither filling it (growth into
-            # cortex) nor leaving it (a cavity) is right; a person resolves it
-            pl, n = ndi.label(cav, kuhn_structure())
-            where = [
-                (int(c), np.round(np.argwhere(pl == k).mean(0) + lo).astype(int))
-                for k in np.unique(pl[cav & nofill])
-                for c in [(pl == k).sum()]
-            ]
-            raise ValueError(
-                f"cavities of the WM mask hold cortex ({len(where)}; voxels, centre): "
-                + "; ".join(f"{c}, {ctr.tolist()}" for c, ctr in where)
-                + ". Filling them would grow the WM into cortex: resolve each "
-                "by a manual edit (--edits), then run dseg again"
-            )
+    gm = cav & (a == GM_LABEL[hemi])
+    if gm.any():
+        # a pocket of cortex enclosed by WM: neither filling it (growth round
+        # cortex) nor leaving it (a cavity) is right; a person resolves it
+        pl, _ = ndi.label(cav, kuhn_structure())
+        where = [
+            (int(c), np.round(np.argwhere(pl == k).mean(0) + lo).astype(int))
+            for k in np.unique(pl[gm])
+            for c in [(pl == k).sum()]
+        ]
+        raise ValueError(
+            f"cavities of the WM mask hold cortex ({len(where)}; voxels, centre): "
+            + "; ".join(f"{c}, {ctr.tolist()}" for c, ctr in where)
+            + ". Resolve each by a manual edit (--edits), then run dseg again"
+        )
     x |= cav
     lap("cavities")
-    r = remove_handles(x, nofill)
+    r = remove_handles(x)
     obj = r.obj
     lap("handles")
-    vox = tuple(float(v) for v in np.asarray(voxel_mm, float))
-    opened = np.zeros_like(obj)
+    thick = np.zeros_like(obj)
     exceptions: list[dict[str, Any]] = []
     passes = 0
     exc_vox: list[npt.NDArray[np.intp]] = []
-    if invariants.thickness_mm > 0 or invariants.gap_mm > 0:
-        o = open_thin(
-            obj,
-            invariants.thickness_mm,
-            invariants.gap_mm,
-            sampling=(vox[0], vox[1], vox[2]),
-        )
-        opened, obj, passes = o.removed, o.obj, o.passes
-        exceptions = [
-            dict(
-                Kind=mv.kind,
-                Voxels=len(mv.voxels),
-                Centre=np.round(mv.voxels.mean(0) + lo).astype(int).tolist(),
+    if scale_mm > 0:
+        th = thicken(obj, scale_mm, sampling=(vox[0], vox[1], vox[2]))
+        lap("thicken")
+        thick, passes = th.obj & ~obj, th.passes
+        obj = th.obj
+        bl, _ = ndi.label(th.blocked, kuhn_structure())
+        pts = np.argwhere(bl > 0)
+        ids = bl[tuple(pts.T)]
+        order = np.argsort(ids, kind="stable")
+        pts, ids = pts[order], ids[order]
+        for v in np.split(pts, np.flatnonzero(np.diff(ids)) + 1) if len(pts) else []:
+            exc_vox.append(v)
+            exceptions.append(
+                dict(
+                    Kind="thicken",
+                    Voxels=len(v),
+                    Centre=np.round(v.mean(0) + lo).astype(int).tolist(),
+                )
             )
-            for mv in o.exceptions
-        ]
-        exc_vox = [mv.voxels for mv in o.exceptions]
-        lap("opening")
+        lap("exceptions")
     cut, fill = x & ~obj, obj & ~x
     labels = a.copy()
-    labels[cav | fill] = wm_label
+    labels[cav | fill | (thick & ~x)] = wm_label
     relabel_cuts(labels, cut, ~obj & ~cut, voxel_mm)
     lap("relabel cuts")
     if not np.array_equal(np.isin(labels, filled), obj):
@@ -387,7 +367,7 @@ def wm_topo(
     fx[cut] = 1
     fx[fill] = 2
     fx[cav] = 3
-    fx[opened] = 5
+    fx[thick & ~x] = 5
     for v in exc_vox:
         e = fx[tuple(v.T)]
         e[e == 0] = 6  # an exception voxel some fix changed shows the fix
@@ -423,7 +403,7 @@ def wm_topo(
         {int(k): int(c) for k, c in zip(new, cnt, strict=True)},
         moves,
         0 if manual is None else int(manual.sum()),
-        int(opened.sum()),
+        int((thick & ~x).sum()),
         passes,
         exceptions,
     )
@@ -438,7 +418,7 @@ def write_wm_topo(
     aseg: Path,
     out: Path,
     edits: Path | None = None,
-    invariants: Invariants = NO_INVARIANTS,
+    scale_mm: float = 0.0,
 ) -> dict[str, Path]:
     """The dseg command: wm_topo of the aseg at aseg, with the manual edits in
     the table at edits (docs/formats/wm-edits.md) if given, written to the BIDS
@@ -458,7 +438,7 @@ def write_wm_topo(
     lap = Laps()
     a = np.asarray(img.dataobj)
     lap("read")
-    t = wm_topo(a, vox, e, invariants)
+    t = wm_topo(a, vox, e, scale_mm)
     lap = Laps()
     dataset_description(out)
     p = dict(
@@ -504,9 +484,9 @@ def write_wm_topo(
             HandleCutVoxels=int((t.fixes == 1).sum()),
             CutLabels={str(k): v for k, v in t.cut_labels.items()},
             ManualVoxels=t.manual_voxels,
-            Invariants=invariants.to_json(),
-            OpeningVoxels=t.opening_voxels,
-            OpeningPasses=t.opening_passes,
+            ScaleMM=scale_mm,
+            ThickenedVoxels=t.thickened_voxels,
+            ThickenPasses=t.thicken_passes,
             Exceptions=len(t.exceptions),
             ExceptionsFile=p["exceptions"].name,
             Moves=t.moves,
@@ -519,7 +499,7 @@ def write_wm_topo(
             SpecVersion=FIXES_SPEC.version,
             Description="The voxels that the WM topology correction changed: "
             "1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit, "
-            "5 opening (thin or next to a narrow gap), 6 exception.",
+            "5 thickened, 6 exception (could not be thickened).",
             **src,
             Provenance=prov,
         ),
@@ -1134,13 +1114,10 @@ def main(argv: list[str] | None = None) -> None:
         "--edits", type=Path, help="manual edits of the aseg (desc-wmedits_edits.tsv)"
     )
     d.add_argument(
-        "--no-gm-fills", action="store_true", help="no handle fill takes cortex"
-    )
-    d.add_argument(
-        "--thickness-mm", type=float, default=0.0, help="minimum WM thickness radius"
-    )
-    d.add_argument(
-        "--gap-mm", type=float, default=0.0, help="minimum gap radius between WM"
+        "--scale-mm",
+        type=float,
+        default=0.0,
+        help="thicken the WM to 2 x this where thinner (0: off)",
     )
     d.add_argument("--out", required=True, type=Path, help="BIDS derivatives root")
     m = sub.add_parser("mesh", help="the white surface of a corrected segmentation")
@@ -1165,8 +1142,7 @@ def main(argv: list[str] | None = None) -> None:
     o.add_argument("--workers", type=int, default=4, help="processes to decimate")
     a = ap.parse_args(argv)
     if a.cmd == "dseg":
-        inv = Invariants(a.no_gm_fills, a.thickness_mm, a.gap_mm)
-        for role, path in write_wm_topo(a.aseg, a.out, a.edits, inv).items():
+        for role, path in write_wm_topo(a.aseg, a.out, a.edits, a.scale_mm).items():
             print(f"{role}: {path}")
     elif a.cmd == "mesh":
         w = write_white_surface(a.dseg, a.out, a.block_cells, a.device)

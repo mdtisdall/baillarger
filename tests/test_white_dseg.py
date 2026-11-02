@@ -20,7 +20,7 @@ FILLED = white.FILLED_LABELS["R"]
 
 def synthetic_aseg() -> npt.NDArray[np.int16]:
     """Right hemisphere: a WM block drilled by a 2 x 2 tunnel of cortex (a
-    fill of 4), holding a ventricle and an enclosed pocket of cortex (a
+    fill of 4), holding a ventricle and an enclosed pocket of background (a
     cavity of 8); a WM ring 5 wide closed by a one-voxel rod across a slit of
     background (a cut of 1); a patch of hippocampus."""
     a = np.zeros(SHAPE, np.int16)
@@ -28,7 +28,7 @@ def synthetic_aseg() -> npt.NDArray[np.int16]:
     a[10:22, 8:20, 6:18] = 41
     a[15:17, 13:15, 6:18] = 42  # the tunnel
     a[11:13, 9:11, 8:10] = 43  # a ventricle inside the WM
-    a[19:21, 9:11, 12:14] = 42  # the enclosed pocket
+    a[19:21, 9:11, 12:14] = 0  # the enclosed pocket
     a[8:10, 6:10, 4:8] = 53
     a[25:37, 3:33, 22:28] = 41  # the ring round a 2 x 20 hole
     a[30:32, 8:28, 22:28] = 0
@@ -138,39 +138,33 @@ def test_the_dseg_command_writes_the_bids_files(tmp_path: Path) -> None:
     )
 
 
-def test_the_invariants_turn_cortex_fills_into_cuts_and_widen_gaps(
-    tmp_path: Path,
-) -> None:
+def test_a_cavity_holding_cortex_is_refused() -> None:
     a = synthetic_aseg()
-    # the enclosed pocket is cortex: filling it would grow the WM into cortex
+    a[19:21, 9:11, 12:14] = 42  # the enclosed pocket is cortex
     with pytest.raises(
         ValueError, match=r"hold cortex \(1; voxels, centre\): 8, \[20, 10, 12\]"
     ):
-        white.wm_topo(a, VOX, invariants=white.Invariants(no_gm_fills=True))
-    a[19:21, 9:11, 12:14] = 0  # the pocket as background: it may be filled
-    # the tunnel through the block is cortex (a fill of 4): it is cut instead
-    t = white.wm_topo(a, VOX, invariants=white.Invariants(no_gm_fills=True))
-    assert t.betti_after == (2, 0, 0) and {m["Kind"] for m in t.moves} == {"cut"}
-    assert not (t.dseg[a == 42] == 41).any()  # no cortex voxel became WM
-    inv = white.Invariants(no_gm_fills=True, thickness_mm=0.3, gap_mm=0.3)
-    t = white.wm_topo(a, VOX, invariants=inv)
+        white.wm_topo(a, VOX)
+
+
+def test_thickening_adds_wm_and_keeps_the_topology(tmp_path: Path) -> None:
+    a = synthetic_aseg()
+    t = white.wm_topo(a, VOX, scale_mm=0.4)
     assert t.betti_after == (2, 0, 0)
     assert kuhn_betti(np.isin(t.dseg, FILLED)) == (2, 0, 0)
-    assert t.opening_voxels == (t.fixes == 5).sum() > 0
-    assert not np.isin(t.dseg[t.fixes == 5], FILLED).any()
+    assert t.thickened_voxels == (t.fixes == 5).sum() > 0 and t.thicken_passes > 0
+    assert (t.dseg[t.fixes == 5] == 41).all() and (a[t.fixes == 5] != 41).all()
+    assert sum(x["Voxels"] for x in t.exceptions) == (t.fixes == 6).sum()
     src = tmp_path / "in" / "sub-T01_ses-S1_aseg.nii.gz"
     src.parent.mkdir()
     nib.save(nib.nifti1.Nifti1Image(a, np.diag([*VOX, 1.0])), src)
     out = tmp_path / "d"
-    white.main(
-        ["dseg", str(src), "--out", str(out), "--no-gm-fills", "--gap-mm", "0.3"]
-    )
+    white.main(["dseg", str(src), "--out", str(out), "--scale-mm", "0.4"])
     anat = out / "sub-T01" / "ses-S1" / "anat"
     side = bids.read_sidecar(
         anat / "sub-T01_ses-S1_desc-wmtopo_dseg.json", white.DSEG_SPEC
     )
-    assert side["Invariants"] == dict(NoGMFills=True, ThicknessMM=0.0, GapMM=0.3)
-    assert side["OpeningVoxels"] > 0
+    assert side["ScaleMM"] == 0.4 and side["ThickenedVoxels"] == t.thickened_voxels
     rows = (anat / side["ExceptionsFile"]).read_text().splitlines()
     assert rows[0] == "index\tkind\tvoxels\ti\tj\tk"
-    assert len(rows) == 1 + side["Exceptions"]
+    assert len(rows) == 1 + side["Exceptions"] == 1 + len(t.exceptions)

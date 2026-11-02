@@ -558,117 +558,103 @@ def remove_handles(
     return HandleRemoval(out, moves, stranded)
 
 
-# ---------------------------------------------------------------- thickness, gaps
+# ---------------------------------------------------------------- thickening
 
 
 @dataclass(frozen=True)
-class Opening:
-    """The result of open_thin: the object, the voxels removed, and the
-    pieces left that violate the thickness or the gap and cannot be removed
-    whole without changing the topology: kind 'thin', 'gap' or 'thin+gap',
-    and voxels (n, 3)."""
+class Thickening:
+    """The result of thicken: the object, the voxels added, the target voxels
+    that could not be added without changing the topology (blocked), and the
+    passes the growth took."""
 
     obj: Bool
-    removed: Bool
-    exceptions: list[Move]
+    added: Bool
+    blocked: Bool
     passes: int
 
 
-def _opening(a: Bool, r: float, sampling: tuple[float, float, float]) -> Bool:
-    """The opening of a (3D bool) by a ball of radius r (in the units of
-    sampling, the voxel size): the voxels that lie in a ball of radius r
-    inside a."""
-    core = ndi.distance_transform_edt(a, sampling=sampling) > r
+def thin_voxels(
+    obj: npt.ArrayLike, s: float, sampling: tuple[float, float, float] = (1.0, 1.0, 1.0)
+) -> Bool:
+    """The object's (3D bool) voxels that no ball of radius s (in the units of
+    sampling, the voxel size) inside the object holds: where it is thinner
+    than about 2s. A ball holds a voxel when the voxel is within s of its
+    centre, and the centre is more than s from the background. Distances
+    within a millionth of a voxel of s count as s (grid distances often equal
+    it, and voxel sizes read as float32 would otherwise decide)."""
+    a = np.asarray(obj, bool)
+    s = s + 1e-6 * min(sampling)
+    core = ndi.distance_transform_edt(a, sampling=sampling) > s
     if not core.any():
-        return np.zeros_like(a)
-    out: Bool = ndi.distance_transform_edt(~core, sampling=sampling) <= r
+        return a.copy()
+    out: Bool = a & (ndi.distance_transform_edt(~core, sampling=sampling) > s)
     return out
 
 
-def open_thin(
+def thicken(
     obj: npt.ArrayLike,
-    r: float,
-    g: float,
+    s: float,
     sampling: tuple[float, float, float] = (1.0, 1.0, 1.0),
-    max_passes: int = 100,
-) -> Opening:
-    """Remove the object's (3D bool) thin parts and widen its narrow gaps,
-    keeping its topology: a voxel violates the thickness when no ball of
-    radius r (in the units of sampling, the voxel size; voxels by default)
-    inside the object holds it, and the gap when it is within
-    g of a background voxel that no ball of radius g in the background holds.
-    The violating voxels, in Kuhn-connected pieces, are removed a piece at a
-    time, each whole and only when that keeps the homology (_set_simple; a
-    single voxel: a simple point); pieces are not adjacent, so a pass does not
-    depend on their order. Passes repeat until one removes nothing, since a
-    removal changes what violates. A piece that cannot be removed whole is
-    left as it is (not thinned) and listed. Components with no part thicker
-    than r are not touched. Only removes: the object never grows. Outside the
-    array is background."""
+    max_passes: int = 1000,
+) -> Thickening:
+    """Thicken the object (3D bool) where it is thinner than about 2s,
+    keeping its topology. The target is the object with a ball of radius s
+    (in the units of sampling, the voxel size) round each of its thin voxels
+    (thin_voxels), so every target voxel lies in a ball of radius s inside
+    the target, closed by radius s near the balls (a fillet where they meet
+    the object). The object grows into the target by simple points only (so
+    its Betti numbers and its background's stay), in passes: each pass adds
+    every simple target voxel next to the object, one parity class
+    (i % 2, j % 2, k % 2) at a time. Voxels of one class are never in each
+    other's neighbourhoods, so adding them together is adding them one by
+    one. Passes repeat until one adds nothing. The target voxels left out
+    are blocked: adding them would join two parts of the object or close a
+    handle or a cavity (a gap narrower than the target). Outside the array
+    is background; the object is not grown within 2 voxels of the border."""
     a = np.asarray(obj, bool)
-    pad = 2  # room for _set_simple's box round a piece
-    p = np.pad(a, pad)
-    s = kuhn_structure()
-    offs = _flat_offsets(p.shape)
-    exceptions: list[Move] = []
+    thin = thin_voxels(a, s, sampling)
+    s = s + 1e-6 * min(sampling)  # ties as in thin_voxels
+    target = a | (ndi.distance_transform_edt(~thin, sampling=sampling) <= s)
+    # the union of balls has notches below the scale s where it meets the
+    # object (a voxel of background between a ball and the object's side);
+    # the closing by radius s, near what is added, fills them with a fillet
+    near = ndi.distance_transform_edt(~(target & ~a), sampling=sampling) <= s
+    grown = ndi.distance_transform_edt(~target, sampling=sampling) <= s
+    target |= near & (ndi.distance_transform_edt(grown, sampling=sampling) > s)
+    del near, grown
+    pad = 2
+    target[:pad] = target[-pad:] = False
+    target[:, :pad] = target[:, -pad:] = False
+    target[:, :, :pad] = target[:, :, -pad:] = False
+    target |= a
+    flat = np.ascontiguousarray(a).ravel().copy()
+    want = (target & ~a).ravel()
+    offs = _flat_offsets(a.shape)
+    cand = np.flatnonzero(want)
+    i, j, k = np.unravel_index(cand, a.shape)
+    cls = ((i % 2) * 4 + (j % 2) * 2 + k % 2).astype(np.uint8)
+    del i, j, k
     passes = 0
-    while passes < max_passes:
+    while cand.size and passes < max_passes:
         passes += 1
-        thin = np.zeros_like(p)
-        if r > 0:
-            thin = p & ~_opening(p, r, sampling)
-            comp, _ = ndi.label(p, s)
-            core = ndi.distance_transform_edt(p, sampling=sampling) > r
-            core_comps = np.unique(comp[core])
-            thin &= np.isin(comp, core_comps[core_comps > 0])
-            del comp
-        gap = np.zeros_like(p)
-        if g > 0:
-            narrow = ~p & ~_opening(~p, g, sampling)
-            if narrow.any():
-                gap = p & (ndi.distance_transform_edt(~narrow, sampling=sampling) <= g)
-        cand = thin | gap
-        lab, n = ndi.label(cand, s)
-        if not n:
-            exceptions = []
-            break
-        state = np.where(p, _OBJ, _BG).astype(np.uint8)
-        flat = state.ravel()
-        sizes = np.bincount(lab.ravel(), minlength=n + 1)
-        removed = np.zeros(n + 1, bool)
-        one = np.flatnonzero((sizes[lab.ravel()] == 1) & (lab.ravel() > 0))
-        m = np.zeros(one.size, np.int64)
-        for k in range(14):
-            m |= (flat[one + offs[k]] == _OBJ).astype(np.int64) << k
-        ok = (m != 0) & SIMPLE[m]
-        flat[one[ok]] = _BG
-        removed[lab.ravel()[one[ok]]] = True
-        for k, sl in enumerate(ndi.find_objects(lab), 1):
-            if sl is None or sizes[k] == 1:
+        grew = False
+        for c in range(8):
+            v = cand[(cls == c) & ~flat[cand]]
+            if not v.size:
                 continue
-            pts = np.stack(np.nonzero(lab[sl] == k), 1) + np.array(
-                [t.start for t in sl]
-            )
-            pf = np.ravel_multi_index(tuple(pts.T), state.shape).astype(np.int64)
-            if _set_simple(state, _BG, pf):
-                flat[pf] = _BG
-                removed[k] = True
-        p = state == _OBJ
-        if not removed[1:].any():
-            for k, sl in enumerate(ndi.find_objects(lab), 1):
-                if sl is None:
-                    continue
-                sub = lab[sl] == k
-                kind = "+".join(
-                    name
-                    for name, mask in (("thin", thin[sl]), ("gap", gap[sl]))
-                    if (sub & mask).any()
-                )
-                vox = np.stack(np.nonzero(sub), 1) + np.array([t.start for t in sl])
-                exceptions.append(Move(kind, vox - pad))
+            m = np.zeros(v.size, np.int64)
+            for b in range(14):
+                m |= flat[v + offs[b]].astype(np.int64) << b
+            ok = SIMPLE[m]
+            if ok.any():
+                flat[v[ok]] = True
+                grew = True
+        keep = ~flat[cand]
+        cand, cls = cand[keep], cls[keep]
+        if not grew:
             break
-    out = p[pad:-pad, pad:-pad, pad:-pad]
-    return Opening(out, a & ~out, exceptions, passes)
+    out = flat.reshape(a.shape)
+    return Thickening(out, out & ~a, target & ~out, passes)
 
 
 def _flat_offsets(shape: tuple[int, ...]) -> Int:
