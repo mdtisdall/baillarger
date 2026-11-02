@@ -193,11 +193,13 @@ fully), real WM is thickened.
 
 ### Step 4. Widen gaps between two surfaces
 
-A background voxel whose filling would join two parts of M that are separate
-nearby (filling it is not simple) is in a gap between surfaces. Where such a
-gap is narrower than 2s, it is widened by removing WM by simple points on
-both sides. A pit in one surface (filling it is simple) is not a gap, and is
-left to step 6.
+A thin background voxel (no ball of radius s in the background holds it)
+whose filling is not simple touches two surfaces at once: it is in a gap
+between them. The WM within s of it is removed by simple points, on both
+sides. This finds gaps one voxel wide, which is what step 3 leaves where it
+could not close a gap, and slots open at one end, whose walls face each
+other as a gap's do. Wider gaps, and pits in one surface (filling them is
+simple), are not found; pits are left to step 6.
 
 ### Step 5. Well-composed WM
 
@@ -275,6 +277,16 @@ here):
 | step 5 | 50 | 21 | 13 | 11 | 72,073 | 936 added, 194 removed | 25 |
 | steps 3 and 5, s = 0.32 mm | 54 | 10 | 13 | 29 | 76,371 | 767,292 + 6,806 added, 180 removed | 169 |
 | steps 3 and 5, s = 0.30 mm | 43 | 11 | 8 | 23 | 74,797 | 331,524 + 427 added, 189 removed | 141 |
+| steps 3, 4 and 5, s = 0.30 mm | 5 | 1 | 1 | 1 | 74,871 | 328,017 + 341 added, 7,034 removed | 92 |
+
+Neighbour-normal angles of the output normals, over the edges (degrees):
+
+| Variant | 50th | 90th | 99th | 99.9th | 99.99th | Edges over 60° | Over 90° |
+|---|---|---|---|---|---|---|---|
+| none (main) | 1.34 | 3.88 | 11.42 | 20.6 | 34.7 | 297 | 23 |
+| step 5 | 1.33 | 3.88 | 11.38 | 20.3 | 33.2 | 243 | 19 |
+| steps 3 and 5, 0.30 mm | 1.46 | 5.37 | 12.49 | 19.0 | 35.7 | 587 | 38 |
+| steps 3, 4 and 5, 0.30 mm | 1.47 | 5.41 | 12.57 | 18.3 | 25.6 | 4 | 0 |
 
 - **Diagonal-only contacts cause most folds.** At baseline, 74 of the 90
   sites have a checkerboard square or a corner-only cube of the mask within
@@ -295,6 +307,19 @@ here):
 - **The remaining step-5 sites** are mostly thin WM inside cortex (largest
   depth within 4 voxels at most 2.4 voxels: about 15 sites) and handle
   fills of tens of voxels.
+- **Steps 3, 4 and 5 together** take the sites from 90 to 5 (6 misfacing
+  faces) and remove the tail of the neighbour-normal angles (edges over 60°
+  from 297 to 4, none over 90°). Widening removes 7,034 voxels round 2,095
+  gap voxels. The cost is the bulk: the 90th percentile rises from 3.9° to
+  5.4°, the voxel-scale roughness of the ball unions that step 6 is for,
+  and the area grows 3.9%.
+- **Exceptions belong at the end.** The 81 thickening exceptions are
+  counted before widening and well-composing. On the final mask, 10 gap
+  voxels are left (9 pieces), but 4,742 voxels are thin, in 1,381 pieces, of
+  which 79 have 10 voxels or more: widening and step 5 thin some WM again,
+  and most pieces are single staircase voxels. The review queue needs the
+  failures of property 3 on the final mask, with a size below which a piece
+  is not a site.
 
 ## Experiments, in order
 
