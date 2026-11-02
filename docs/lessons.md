@@ -81,7 +81,7 @@ These bind every stream from its first version. A first version may be rough, bu
 
 **The aseg we have, from purple-mri, errs in repeatable ways** (CP; SF F21; #46, #49)
 
-These describe this one aseg, not asegs in general. Another source will err in its own ways, so treat these as cases to test against, not as rules to build in.
+These describe this one aseg, not asegs in general. It is the example data we have today, so these are the errors the tools must cope with now. Later versions of purple-mri may fix some of them, and another source will err in its own ways. Treat them as cases to test against, not as rules to build in.
 
 - Its cortex runs 1–3 voxels into the Fomblin around most sulci.
 - It fills thin fluid channels of collapsed sulci with cortex, and labels superficial vessels and thin Fomblin gaps at tight bends as cortex. These make false contacts. At V1V2, relabelling such cells took the columns crossing fused banks from 6,001 to 717.
