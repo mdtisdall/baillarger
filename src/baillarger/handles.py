@@ -591,6 +591,51 @@ def thin_voxels(
     return out
 
 
+def _inner(shape: tuple[int, ...]) -> Bool:
+    """The voxels at least 2 from the array border (room for a voxel's
+    neighbourhood and its configurations)."""
+    out = np.zeros(shape, bool)
+    out[2:-2, 2:-2, 2:-2] = True
+    return out
+
+
+def _flip_simple(
+    flat: Bool, cand: Int, phase: bool, shape: tuple[int, ...], max_passes: int = 1000
+) -> int:
+    """Set the voxels cand (flat indices into flat, the object of shape
+    raveled; none within 2 of the border) to phase (True: add) by simple
+    points only, in passes: each pass sets every candidate that is a simple
+    point, one parity class (i % 2, j % 2, k % 2) at a time. Voxels of one
+    class are never in each other's neighbourhoods, so setting them together
+    is setting them one by one. Passes repeat until one sets nothing; returns
+    the passes. flat is changed in place."""
+    offs = _flat_offsets(shape)
+    cand = cand[flat[cand] != phase]
+    i, j, k = np.unravel_index(cand, shape)
+    cls = ((i % 2) * 4 + (j % 2) * 2 + k % 2).astype(np.uint8)
+    del i, j, k
+    passes = 0
+    while cand.size and passes < max_passes:
+        passes += 1
+        moved = False
+        for c in range(8):
+            v = cand[(cls == c) & (flat[cand] != phase)]
+            if not v.size:
+                continue
+            m = np.zeros(v.size, np.int64)
+            for b in range(14):
+                m |= flat[v + offs[b]].astype(np.int64) << b
+            ok = SIMPLE[m]
+            if ok.any():
+                flat[v[ok]] = phase
+                moved = True
+        keep = flat[cand] != phase
+        cand, cls = cand[keep], cls[keep]
+        if not moved:
+            break
+    return passes
+
+
 def thicken(
     obj: npt.ArrayLike,
     s: float,
@@ -622,39 +667,75 @@ def thicken(
     grown = ndi.distance_transform_edt(~target, sampling=sampling) <= s
     target |= near & (ndi.distance_transform_edt(grown, sampling=sampling) > s)
     del near, grown
-    pad = 2
-    target[:pad] = target[-pad:] = False
-    target[:, :pad] = target[:, -pad:] = False
-    target[:, :, :pad] = target[:, :, -pad:] = False
+    target &= _inner(a.shape)
     target |= a
     flat = np.ascontiguousarray(a).ravel().copy()
-    want = (target & ~a).ravel()
-    offs = _flat_offsets(a.shape)
-    cand = np.flatnonzero(want)
-    i, j, k = np.unravel_index(cand, a.shape)
-    cls = ((i % 2) * 4 + (j % 2) * 2 + k % 2).astype(np.uint8)
-    del i, j, k
-    passes = 0
-    while cand.size and passes < max_passes:
-        passes += 1
-        grew = False
-        for c in range(8):
-            v = cand[(cls == c) & ~flat[cand]]
-            if not v.size:
-                continue
-            m = np.zeros(v.size, np.int64)
-            for b in range(14):
-                m |= flat[v + offs[b]].astype(np.int64) << b
-            ok = SIMPLE[m]
-            if ok.any():
-                flat[v[ok]] = True
-                grew = True
-        keep = ~flat[cand]
-        cand, cls = cand[keep], cls[keep]
-        if not grew:
-            break
+    passes = _flip_simple(flat, np.flatnonzero((target & ~a).ravel()), True, a.shape)
     out = flat.reshape(a.shape)
     return Thickening(out, out & ~a, target & ~out, passes)
+
+
+@dataclass(frozen=True)
+class Widening:
+    """The result of widen_gaps: the object, the gap voxels found, the
+    voxels removed, the target voxels that could not be removed without
+    changing the topology (blocked), and the passes taken."""
+
+    obj: Bool
+    gaps: Bool
+    removed: Bool
+    blocked: Bool
+    passes: int
+
+
+def gap_voxels(
+    obj: npt.ArrayLike, s: float, sampling: tuple[float, float, float] = (1.0, 1.0, 1.0)
+) -> Bool:
+    """The background voxels of the object (3D bool) in a gap between two of
+    its surfaces narrower than about 2s: thin voxels of the background
+    (thin_voxels of its complement) whose addition to the object is not a
+    simple point, because their object neighbours are in two or more pieces
+    of their link: the voxel touches two surfaces at once. So a gap is found
+    where it is one voxel wide (after thicken, the voxels it could not add);
+    a wider gap, and a pit in one surface (whose filling is simple), are not
+    found. A slot open at one end is found: locally its walls face each
+    other as a gap's do. Voxels within 2 of the array border are not
+    considered."""
+    a = np.asarray(obj, bool)
+    cand = np.flatnonzero((thin_voxels(~a, s, sampling) & _inner(a.shape)).ravel())
+    flat = np.ascontiguousarray(a).ravel()
+    offs = _flat_offsets(a.shape)
+    m = np.zeros(cand.size, np.int64)
+    for b in range(14):
+        m |= flat[cand + offs[b]].astype(np.int64) << b
+    out = np.zeros(a.size, bool)
+    out[cand[(m != 0) & ~SIMPLE[m]]] = True
+    return out.reshape(a.shape)
+
+
+def widen_gaps(
+    obj: npt.ArrayLike,
+    s: float,
+    sampling: tuple[float, float, float] = (1.0, 1.0, 1.0),
+) -> Widening:
+    """Widen the object's (3D bool) gaps between two surfaces (gap_voxels)
+    to about 2s, keeping its topology: the object voxels within s of a gap
+    voxel (in the units of sampling, the voxel size) are removed by simple
+    points only, in passes (as thicken adds). The target voxels left are
+    blocked: removing them would cut the object (a thin bridge) or open a
+    handle or a cavity."""
+    a = np.asarray(obj, bool)
+    gaps = gap_voxels(a, s, sampling)
+    if not gaps.any():
+        z = np.zeros_like(a)
+        return Widening(a.copy(), gaps, z, z.copy(), 0)
+    r = s + 1e-6 * min(sampling)  # ties as in thin_voxels
+    target = a & (ndi.distance_transform_edt(~gaps, sampling=sampling) <= r)
+    target &= _inner(a.shape)
+    flat = np.ascontiguousarray(a).ravel().copy()
+    passes = _flip_simple(flat, np.flatnonzero(target.ravel()), False, a.shape)
+    out = flat.reshape(a.shape)
+    return Widening(out, gaps, a & ~out, target & out, passes)
 
 
 # ---------------------------------------------------------------- well-composed

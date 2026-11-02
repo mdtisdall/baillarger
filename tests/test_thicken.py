@@ -1,6 +1,7 @@
 """Tests for baillarger.handles beyond the handle removal itself: fills that
 may not take given voxels (remove_handles, nofill), the thickening of thin
-WM (thin_voxels, thicken) and the removal of diagonal-only contacts
+WM (thin_voxels, thicken), the widening of gaps (gap_voxels, widen_gaps)
+and the removal of diagonal-only contacts
 (pinched, well_compose), on shapes whose answer is known exactly."""
 
 import numpy as np
@@ -138,3 +139,43 @@ def test_contacts_are_found_in_every_plane() -> None:
         assert H.pinched(a).sum() == 20, ax
         w = H.well_compose(a)
         assert not w.left.any() and H.kuhn_betti(w.obj) == H.kuhn_betti(a), ax
+
+
+def test_a_one_voxel_cut_is_widened_to_2s() -> None:
+    s = np.zeros((30, 20, 20), bool)
+    s[3:27, 5:15, 5:15] = True
+    s[15, 5:15, 5:15] = False  # a cut one voxel wide
+    g = H.gap_voxels(s, 1.5)
+    # all of the cut but its 4 corners, which a ball in the open background
+    # beside the bar holds
+    corners = {(15, y, z) for y in (5, 14) for z in (5, 14)}
+    assert {tuple(p) for p in np.argwhere(g)} == {
+        (15, y, z) for y in range(5, 15) for z in range(5, 15)
+    } - corners
+    w = H.widen_gaps(s, 1.5)
+    gone = np.argwhere(w.removed)
+    assert set(gone[:, 0].tolist()) == {14, 16} and len(gone) == 200
+    assert H.kuhn_betti(w.obj) == (2, 0, 0) and not w.blocked.any()
+
+
+def test_a_pit_and_a_wider_gap_are_not_gaps() -> None:
+    p = cube()
+    p[9:11, 9:11, 12:15] = False  # a pit 2 x 2 in the top face
+    assert not H.gap_voxels(p, 1.5).any()
+    b = np.zeros((30, 30, 30), bool)
+    b[5:25, 5:25, 10:14] = True
+    b[5:25, 5:25, 16:20] = True  # two blades 2 voxels apart
+    assert not H.gap_voxels(b, 2.0).any()
+
+
+def test_a_gap_voxel_closing_a_ring_is_found_and_the_ring_kept() -> None:
+    """A ring with a one-voxel slit: the slit is a gap, but the wall beside
+    it is the ring's only connection on that side, so the widening cuts what
+    it can and keeps the topology."""
+    a = np.zeros((30, 30, 12), bool)
+    a[5:25, 5:25, 4:8] = True
+    a[10:20, 10:20, 4:8] = False  # the hole: a ring
+    a[15, 5:10, 4:8] = False  # a slit through one side
+    w = H.widen_gaps(a, 1.5)
+    assert w.gaps[15, 5:10, 4:8].sum() > 0
+    assert H.kuhn_betti(w.obj) == H.kuhn_betti(a) == (1, 0, 0)
