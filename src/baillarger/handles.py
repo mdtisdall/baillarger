@@ -405,10 +405,12 @@ def _resolve_cluster(
     offs: Int,
     shape: tuple[int, ...],
     u: Int,
+    nofill: Bool | None = None,
 ) -> Move | None | bool:
     """When no wall can be claimed voxel by voxel: claim the smallest set of
     unclaimed voxels that one front can take whole (_set_simple), by the front
-    that changes fewer voxels (ties: the background, a cut). The sets tried
+    that changes fewer voxels (ties: the background, a cut); a fill that would
+    take a voxel of nofill (flat, the size of state) is not tried. The sets tried
     are the walls, the pairs of touching walls of opposite phase and the
     clusters (Kuhn-connected pieces of both phases; a ring of walls is one
     that no front can take whole). u: the unclaimed voxels (sorted flat
@@ -434,6 +436,12 @@ def _resolve_cluster(
             ((n_obj, _BG, _OBJ, "cut"), (c.size - n_obj, _OBJ, _BG, "fill"))
         )
         for changed, front, lose, kind in options:
+            if (
+                kind == "fill"
+                and nofill is not None
+                and nofill[c[phase[c] == _BG]].any()
+            ):
+                continue
             if _set_simple(s3, front, c):
                 state[c] = front
                 if not changed:
@@ -443,9 +451,10 @@ def _resolve_cluster(
     return False
 
 
-def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
+def _remove_one(obj: Bool, nofill: Bool | None = None) -> tuple[Bool, list[Move]]:
     """remove_handles for an object with one component."""
     x = np.pad(obj, 2)
+    forb = None if nofill is None else np.pad(nofill, 2).ravel()
     if x.size >= 1 << _IDX_BITS:
         raise ValueError("array too large for the heap keys")
     s = kuhn_structure()
@@ -487,6 +496,8 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
         for w in walls:
             own = int(ph[w[0]])
             other = _BG if own == _OBJ else _OBJ
+            if own == _BG and forb is not None and forb[w].any():
+                continue  # a fill may not take these voxels
             got = np.array([i for i in w if st[i] == _U], np.int64)
             if not _claim(st, w, other, offs, SIMPLE):
                 continue
@@ -498,7 +509,7 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
             done = True
             break
         if not done:
-            m = _resolve_cluster(st, ph, offs, x.shape, u)
+            m = _resolve_cluster(st, ph, offs, x.shape, u, forb)
             if m is False:
                 break
             if isinstance(m, Move):
@@ -521,11 +532,15 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
     return out[2:-2, 2:-2, 2:-2], moves
 
 
-def remove_handles(obj: npt.ArrayLike) -> HandleRemoval:
+def remove_handles(
+    obj: npt.ArrayLike, nofill: npt.ArrayLike | None = None
+) -> HandleRemoval:
     """Remove every handle of the object (3D bool) with the Kuhn adjacency,
     keeping its components and cavities: each handle is cut or filled,
-    whichever changes fewer voxels (module docstring). Outside the array is
-    background."""
+    whichever changes fewer voxels (module docstring). A fill never takes a
+    voxel of nofill (3D bool, the object's shape): a handle whose fill would
+    is cut. Outside the array is background."""
+    nf = None if nofill is None else np.asarray(nofill, bool)
     a = np.asarray(obj, bool)
     lab, n = ndi.label(a, kuhn_structure())
     out = np.zeros_like(a)
@@ -536,8 +551,360 @@ def remove_handles(obj: npt.ArrayLike) -> HandleRemoval:
         lo = np.array([max(t.start - 2, 0) for t in sl])
         hi = np.array([min(t.stop + 2, m) for t, m in zip(sl, a.shape, strict=True)])
         box = tuple(slice(int(p), int(q)) for p, q in zip(lo, hi, strict=True))
-        got, mv = _remove_one(lab[box] == k)
+        got, mv = _remove_one(lab[box] == k, None if nf is None else nf[box])
         out[box] |= got
         moves += [Move(m.kind, m.voxels + lo) for m in mv]
     stranded = sum(len(m.voxels) for m in moves if m.kind == "stranded")
     return HandleRemoval(out, moves, stranded)
+
+
+# ---------------------------------------------------------------- thickening
+
+
+@dataclass(frozen=True)
+class Thickening:
+    """The result of thicken: the object, the voxels added, the target voxels
+    that could not be added without changing the topology (blocked), and the
+    passes the growth took."""
+
+    obj: Bool
+    added: Bool
+    blocked: Bool
+    passes: int
+
+
+def thin_voxels(
+    obj: npt.ArrayLike, s: float, sampling: tuple[float, float, float] = (1.0, 1.0, 1.0)
+) -> Bool:
+    """The object's (3D bool) voxels that no ball of radius s (in the units of
+    sampling, the voxel size) inside the object holds: where it is thinner
+    than about 2s. A ball holds a voxel when the voxel is within s of its
+    centre, and the centre is more than s from the background. Distances
+    within a millionth of a voxel of s count as s (grid distances often equal
+    it, and voxel sizes read as float32 would otherwise decide)."""
+    a = np.asarray(obj, bool)
+    s = s + 1e-6 * min(sampling)
+    core = ndi.distance_transform_edt(a, sampling=sampling) > s
+    if not core.any():
+        return a.copy()
+    out: Bool = a & (ndi.distance_transform_edt(~core, sampling=sampling) > s)
+    return out
+
+
+def _inner(shape: tuple[int, ...]) -> Bool:
+    """The voxels at least 2 from the array border (room for a voxel's
+    neighbourhood and its configurations)."""
+    out = np.zeros(shape, bool)
+    out[2:-2, 2:-2, 2:-2] = True
+    return out
+
+
+def _flip_simple(
+    flat: Bool, cand: Int, phase: bool, shape: tuple[int, ...], max_passes: int = 1000
+) -> int:
+    """Set the voxels cand (flat indices into flat, the object of shape
+    raveled; none within 2 of the border) to phase (True: add) by simple
+    points only, in passes: each pass sets every candidate that is a simple
+    point, one parity class (i % 2, j % 2, k % 2) at a time. Voxels of one
+    class are never in each other's neighbourhoods, so setting them together
+    is setting them one by one. Passes repeat until one sets nothing; returns
+    the passes. flat is changed in place."""
+    offs = _flat_offsets(shape)
+    cand = cand[flat[cand] != phase]
+    i, j, k = np.unravel_index(cand, shape)
+    cls = ((i % 2) * 4 + (j % 2) * 2 + k % 2).astype(np.uint8)
+    del i, j, k
+    passes = 0
+    while cand.size and passes < max_passes:
+        passes += 1
+        moved = False
+        for c in range(8):
+            v = cand[(cls == c) & (flat[cand] != phase)]
+            if not v.size:
+                continue
+            m = np.zeros(v.size, np.int64)
+            for b in range(14):
+                m |= flat[v + offs[b]].astype(np.int64) << b
+            ok = SIMPLE[m]
+            if ok.any():
+                flat[v[ok]] = phase
+                moved = True
+        keep = flat[cand] != phase
+        cand, cls = cand[keep], cls[keep]
+        if not moved:
+            break
+    return passes
+
+
+def thicken(
+    obj: npt.ArrayLike,
+    s: float,
+    sampling: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    max_passes: int = 1000,
+) -> Thickening:
+    """Thicken the object (3D bool) where it is thinner than about 2s,
+    keeping its topology. The target is the object with a ball of radius s
+    (in the units of sampling, the voxel size) round each of its thin voxels
+    (thin_voxels), so every target voxel lies in a ball of radius s inside
+    the target, closed by radius s near the balls (a fillet where they meet
+    the object). The object grows into the target by simple points only (so
+    its Betti numbers and its background's stay), in passes: each pass adds
+    every simple target voxel next to the object, one parity class
+    (i % 2, j % 2, k % 2) at a time. Voxels of one class are never in each
+    other's neighbourhoods, so adding them together is adding them one by
+    one. Passes repeat until one adds nothing. The target voxels left out
+    are blocked: adding them would join two parts of the object or close a
+    handle or a cavity (a gap narrower than the target). Outside the array
+    is background; the object is not grown within 2 voxels of the border."""
+    a = np.asarray(obj, bool)
+    thin = thin_voxels(a, s, sampling)
+    s = s + 1e-6 * min(sampling)  # ties as in thin_voxels
+    target = a | (ndi.distance_transform_edt(~thin, sampling=sampling) <= s)
+    # the union of balls has notches below the scale s where it meets the
+    # object (a voxel of background between a ball and the object's side);
+    # the closing by radius s, near what is added, fills them with a fillet
+    near = ndi.distance_transform_edt(~(target & ~a), sampling=sampling) <= s
+    grown = ndi.distance_transform_edt(~target, sampling=sampling) <= s
+    target |= near & (ndi.distance_transform_edt(grown, sampling=sampling) > s)
+    del near, grown
+    target &= _inner(a.shape)
+    target |= a
+    flat = np.ascontiguousarray(a).ravel().copy()
+    passes = _flip_simple(flat, np.flatnonzero((target & ~a).ravel()), True, a.shape)
+    out = flat.reshape(a.shape)
+    return Thickening(out, out & ~a, target & ~out, passes)
+
+
+@dataclass(frozen=True)
+class Widening:
+    """The result of widen_gaps: the object, the gap voxels found, the
+    voxels removed, the target voxels that could not be removed without
+    changing the topology (blocked), and the passes taken."""
+
+    obj: Bool
+    gaps: Bool
+    removed: Bool
+    blocked: Bool
+    passes: int
+
+
+def gap_voxels(
+    obj: npt.ArrayLike, s: float, sampling: tuple[float, float, float] = (1.0, 1.0, 1.0)
+) -> Bool:
+    """The background voxels of the object (3D bool) in a gap between two of
+    its surfaces narrower than about 2s: thin voxels of the background
+    (thin_voxels of its complement) whose addition to the object is not a
+    simple point, because their object neighbours are in two or more pieces
+    of their link: the voxel touches two surfaces at once. So a gap is found
+    where it is one voxel wide (after thicken, the voxels it could not add);
+    a wider gap, and a pit in one surface (whose filling is simple), are not
+    found. A slot open at one end is found: locally its walls face each
+    other as a gap's do. Voxels within 2 of the array border are not
+    considered."""
+    a = np.asarray(obj, bool)
+    cand = np.flatnonzero((thin_voxels(~a, s, sampling) & _inner(a.shape)).ravel())
+    flat = np.ascontiguousarray(a).ravel()
+    offs = _flat_offsets(a.shape)
+    m = np.zeros(cand.size, np.int64)
+    for b in range(14):
+        m |= flat[cand + offs[b]].astype(np.int64) << b
+    out = np.zeros(a.size, bool)
+    out[cand[(m != 0) & ~SIMPLE[m]]] = True
+    return out.reshape(a.shape)
+
+
+def widen_gaps(
+    obj: npt.ArrayLike,
+    s: float,
+    sampling: tuple[float, float, float] = (1.0, 1.0, 1.0),
+) -> Widening:
+    """Widen the object's (3D bool) gaps between two surfaces (gap_voxels)
+    to about 2s, keeping its topology: the object voxels within s of a gap
+    voxel (in the units of sampling, the voxel size) are removed by simple
+    points only, in passes (as thicken adds). The target voxels left are
+    blocked: removing them would cut the object (a thin bridge) or open a
+    handle or a cavity."""
+    a = np.asarray(obj, bool)
+    gaps = gap_voxels(a, s, sampling)
+    if not gaps.any():
+        z = np.zeros_like(a)
+        return Widening(a.copy(), gaps, z, z.copy(), 0)
+    r = s + 1e-6 * min(sampling)  # ties as in thin_voxels
+    target = a & (ndi.distance_transform_edt(~gaps, sampling=sampling) <= r)
+    target &= _inner(a.shape)
+    flat = np.ascontiguousarray(a).ravel().copy()
+    passes = _flip_simple(flat, np.flatnonzero(target.ravel()), False, a.shape)
+    out = flat.reshape(a.shape)
+    return Widening(out, gaps, a & ~out, target & out, passes)
+
+
+# ---------------------------------------------------------------- well-composed
+
+
+def _square_configs() -> Int:
+    """The 12 squares of 2 x 2 voxels (in the three axis planes) that hold a
+    voxel, as offsets from it (12, 4, 3): the diagonal pair first, then the
+    other pair."""
+    out = []
+    for a, b in ((0, 1), (0, 2), (1, 2)):
+        for oa in (-1, 0):
+            for ob in (-1, 0):
+                corners = []
+                for da, db in ((0, 0), (1, 1), (1, 0), (0, 1)):
+                    o = [0, 0, 0]
+                    o[a], o[b] = oa + da, ob + db
+                    corners.append(o)
+                out.append(corners)
+    return np.array(out, np.int64)
+
+
+def _cube_configs() -> Int:
+    """The 8 cubes of 2 x 2 x 2 voxels that hold a voxel, as offsets from it
+    (8, 8, 3), corner c at bit pattern c (so c and 7 - c are opposite)."""
+    out = []
+    for o in itertools.product((-1, 0), repeat=3):
+        out.append(
+            [
+                [o[0] + (c >> 2 & 1), o[1] + (c >> 1 & 1), o[2] + (c & 1)]
+                for c in range(8)
+            ]
+        )
+    return np.array(out, np.int64)
+
+
+_SQUARES = _square_configs()
+_CUBES = _cube_configs()
+
+
+def _bad_square(x: list[Bool]) -> Bool:
+    """A checkerboard: the diagonal pair alike, the other pair alike, the two
+    pairs different."""
+    out: Bool = (x[0] == x[1]) & (x[2] == x[3]) & (x[0] != x[2])
+    return out
+
+
+def _bad_cube(x: list[Bool]) -> Bool:
+    """Two opposite corners of one phase and the other six of the other."""
+    n = np.zeros(x[0].shape, np.uint8)
+    for c in x:
+        n += c
+    out = np.zeros(n.shape, bool)
+    for u in range(4):
+        pair = x[u] & x[7 - u]
+        out |= (n == 2) & pair
+        out |= (n == 6) & ~x[u] & ~x[7 - u]
+    return out
+
+
+def pinched(obj: npt.ArrayLike) -> Bool:
+    """The voxels of every diagonal-only contact of the object (3D bool): a
+    2 x 2 square in a checkerboard, or a 2 x 2 x 2 cube whose two voxels of
+    one phase touch only at a corner. Either phase can be the pinched one
+    (the Kuhn adjacency joins one diagonal of each square and one of each
+    cube); either way the surface between them has a pinch of zero width."""
+    a = np.asarray(obj, bool)
+    out = np.zeros_like(a)
+    n = a.shape
+    for cfgs, bad in ((_SQUARES, _bad_square), (_CUBES, _bad_cube)):
+        # each configuration whose least corner is (0, 0, 0)
+        for corners in cfgs[(cfgs.min(1) == 0).all(1)]:
+            ext = corners.max(0)
+            sl = [
+                tuple(
+                    slice(int(c[d]), n[d] - int(ext[d]) + int(c[d])) for d in range(3)
+                )
+                for c in corners
+            ]
+            hit = bad([a[s] for s in sl])
+            for s in sl:
+                out[s] |= hit
+    return out
+
+
+def _contacts(flat: Bool, v: Int, shape: tuple[int, ...]) -> Int:
+    """The number of diagonal-only contacts that hold each voxel v (flat
+    indices)."""
+    st = np.array([shape[1] * shape[2], shape[2], 1], np.int64)
+    out = np.zeros(v.size, np.int64)
+    for cfgs, bad in ((_SQUARES, _bad_square), (_CUBES, _bad_cube)):
+        for cfg in cfgs:
+            out += bad([flat[v + int(o @ st)] for o in cfg])
+    return out
+
+
+@dataclass(frozen=True)
+class WellComposed:
+    """The result of well_compose: the object, the voxels added and removed,
+    the voxels of the diagonal-only contacts left, and the passes taken."""
+
+    obj: Bool
+    added: Bool
+    removed: Bool
+    left: Bool
+    passes: int
+
+
+def well_compose(obj: npt.ArrayLike, max_passes: int = 100) -> WellComposed:
+    """Remove the object's (3D bool) diagonal-only contacts (pinched), as
+    FreeSurfer's mri_pretess does, keeping its topology. Only voxels of a
+    contact change, and only by simple points, one parity class
+    (i % 2, j % 2, k % 2) at a time (as in thicken), and each voxel at most
+    once, so the passes end. A pass first adds the background voxels, then
+    removes the object voxels, whose change leaves no contact at that voxel.
+    When that changes nothing, it adds the background voxels whose addition
+    leaves no more contacts at that voxel than before: a contact through the
+    Kuhn diagonal of a cube takes two additions in a row, and the first only
+    turns it into a contact along an edge. Passes repeat until one changes
+    nothing; the contacts left are reported. Voxels within 2 of the array
+    border are not changed."""
+    a = np.asarray(obj, bool)
+    shape = a.shape
+    inner = np.zeros(shape, bool)
+    inner[2:-2, 2:-2, 2:-2] = True
+    flat = np.ascontiguousarray(a).ravel().copy()
+    fixed = ~inner.ravel()
+    offs = _flat_offsets(shape)
+
+    def flip(phase: bool, strict: bool) -> bool:
+        cand = np.flatnonzero(pinched(flat.reshape(shape)).ravel() & ~fixed)
+        cand = cand[flat[cand] != phase]
+        i, j, k = np.unravel_index(cand, shape)
+        cls = (i % 2) * 4 + (j % 2) * 2 + k % 2
+        changed = False
+        for c in range(8):
+            v = cand[cls == c]
+            if not v.size:
+                continue
+            before = _contacts(flat, v, shape)
+            v, before = v[before > 0], before[before > 0]
+            m = np.zeros(v.size, np.int64)
+            for b in range(14):
+                m |= flat[v + offs[b]].astype(np.int64) << b
+            v, before = v[SIMPLE[m]], before[SIMPLE[m]]
+            flat[v] = phase
+            after = _contacts(flat, v, shape)
+            ok = after == 0 if strict else after <= before
+            flat[v[~ok]] = not phase
+            if ok.any():
+                fixed[v[ok]] = True
+                changed = True
+        return changed
+
+    passes = 0
+    while passes < max_passes:
+        passes += 1
+        changed = flip(True, True)
+        changed |= flip(False, True)
+        if not changed and not flip(True, False):
+            break
+    out = flat.reshape(shape)
+    return WellComposed(out, out & ~a, a & ~out, pinched(out), passes)
+
+
+def _flat_offsets(shape: tuple[int, ...]) -> Int:
+    """The flat-index offsets of the 14 Kuhn neighbours in an array of shape."""
+    return (
+        KUHN_OFFSETS[:, 0] * shape[1] * shape[2]
+        + KUHN_OFFSETS[:, 1] * shape[2]
+        + KUHN_OFFSETS[:, 2]
+    ).astype(np.int64)
