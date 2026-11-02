@@ -26,7 +26,21 @@ This document states current knowledge only. How the project got here is in git,
 - Most stream 2 and 3 results come from 141³ boxes (V1V2, M1S1, PCC_SPL), checked against the user's marked points: M1/S1 23, V1V2 35, PCC pieces 22 and 37.
 - Only stream 1 has run on the whole hemisphere.
 
-## 1. Goals and working rules
+## 1. Goals, constraints and working rules
+
+### Goals
+
+- **Laminar structure from ex vivo MRI.** Find where the cortical layers lie along every column of the cortex, from the image's own contrast (the bands of Baillarger, the stria and their kin), in ultra-high-resolution ex vivo MRI.
+- **Whole brains at the acquired resolution.** The tools run on whole human brains at 50 µm, not only on hemispheres or boxes at 160 µm.
+- **Four tools, one per stream.** Each publishes its outputs in a specified format and reads only the others' published outputs:
+  1. WM segmentation and the white surface: a surface whose normals are the cortical normals.
+  2. Columns: complete rays from that surface through the cortex.
+  3. Laminar profiles along the columns, aligned across columns and across contacts between banks. The results feed back to stream 1 as an input.
+  4. A viewer for the manual steps in streams 1–3 and for exploring the results.
+- **Each stream advances on its own.** Each reaches a first version good enough for the others to build on, then improves along its own course. A change in one stream should not force work in another.
+- **A person decides where the data cannot.** Each place that needs judgment goes into one review queue per stage. Each answer is recorded as a replayable edit, so the automatic result stays correct without it and the review only refines it.
+
+### Constraints
 
 These bind every stream from its first version. A first version may be rough, but its algorithms and data structures must be ones that scale.
 
@@ -40,7 +54,7 @@ These bind every stream from its first version. A first version may be rough, bu
 - **FreeSurfer is the model.** Its topology correction, pretess and strand thickening are the defaults to follow. Deviate only with cause and data. We do not run FreeSurfer, even as a benchmark.
 - **Assume no particular aseg source.** The aseg is an input with its own errors, read in the FreeSurfer label convention. Take evidence from the echoes, not from one tool's quirks.
 
-Working rules:
+### Working rules
 
 - **Test, don't patch.** Diagnose first, then write a test with an exact answer that fails, then fix. Never move a threshold to hide a symptom.
 - **Diagnostics over criteria.** While a method is exploratory, design each checkpoint around views the user can read, not pass/fail numbers. The default image view is echo 2 with the depth trend removed.
