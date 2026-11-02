@@ -215,7 +215,8 @@ within the bound of property 4, minimising its smoothness energy (a
 topology-preserving level set, as in CRUISE; Han et al. 2004). This is the
 step that may move the surface off the voxel staircase. A sign change must
 also keep property 3: it may not make a blade voxel (a thin voxel whose
-removal is not simple) or a gap voxel within s of it. Without that test the energy shrinks widened gaps and thin blades
+removal is not simple), a gap voxel, or a thin voxel in a thin piece of 10
+voxels or more, within s of it. Without that test the energy shrinks widened gaps and thin blades
 from every side (experiment 6).
 
 ### Step 7. Normals
@@ -402,8 +403,19 @@ against the mean of its corners', not the site count above.
   no new blade voxel) is worse on all three crops tried: removing a
   staircase corner makes a thin voxel, so most flips are refused (90th
   percentile 7.40°, 7.55° and 6.62°, against 6.78°, 6.67° and 5.77°), and
-  the strand's site keeps 9 misfacing faces. Open: a thinness test that sees
-  tubes but not single staircase voxels, such as thin pieces above a size.
+  the strand's site keeps 9 misfacing faces.
+- **A size floor on thin pieces sees tubes.** Adding to the blade and gap
+  test "no new thin voxel in a thin piece of 10 voxels or more" (in the
+  window) keeps the strand as wide as it was (34 thin voxels round the
+  site, 56 before relaxing). Its 6 misfacing faces are the 6 of before
+  relaxing, next to the exception, with angles near 34°: a review site, not
+  a step 6 failure. Pooled over the thickened crops: 90th percentile 6.59°
+  (blade test 6.36°), edges over 30° 136 (198), none over 60°, thin voxels
+  1,146 (1,368; input 723), misfacing 10 (9); the random crops and the
+  control as before (3.22°, 1.70°). A floor of 5 refuses too much (90th
+  percentile 0.2–0.6° worse than 10 on four crops). Thin pieces under the
+  floor still grow, so relaxing keeps about 400 more thin voxels than its
+  input; whether they matter depends on the size floor of the exceptions.
 
 ## Experiments, in order
 
@@ -425,8 +437,8 @@ mm) upward. Done: 0.26, 0.30, 0.36, 0.42 and 0.52 mm, with steps 3, 4 and 5
 size rule and the reference sites.
 
 **Experiment 6.** Step 6 relaxed, on crops of the steps 3–5 result at
-s = 0.30 mm (results above), then with the local blade and gap test. Next:
-the misfacing faces it leaves, then the hemisphere.
+s = 0.30 mm (results above), then with the local blade and gap test, then
+with a size floor of 10 on thin pieces. Next: the hemisphere.
 
 ## Tests
 
