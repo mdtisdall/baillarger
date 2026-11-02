@@ -79,7 +79,9 @@ These bind every stream from its first version. A first version may be rough, bu
 - **The noise is spatially correlated:** neighbouring voxels correlate at 0.5–0.67, even in deep WM. What works is a white-noise model with the same gradient power: the median smallest structure-tensor eigenvalue, corrected by the derivative filter's gain and the Wishart min-eigenvalue bias (0.68 at n_eff = 39). It needs no calibration (actual over predicted noise is 1.0–1.6).
 - Laminar structure is planar at 160 µm everywhere, M1 included (median λ2/λ1 ≤ 0.20). Radial and tangential fibres give the same tensor signature.
 
-**The aseg errs in repeatable ways** (CP; SF F21; #46, #49)
+**The aseg we have, from purple-mri, errs in repeatable ways** (CP; SF F21; #46, #49)
+
+These describe this one aseg, not asegs in general. Another source will err in its own ways, so treat these as cases to test against, not as rules to build in.
 
 - Its cortex runs 1–3 voxels into the Fomblin around most sulci.
 - It fills thin fluid channels of collapsed sulci with cortex, and labels superficial vessels and thin Fomblin gaps at tight bends as cortex. These make false contacts. At V1V2, relabelling such cells took the columns crossing fused banks from 6,001 to 717.
