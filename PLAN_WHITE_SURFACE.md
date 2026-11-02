@@ -278,6 +278,10 @@ here):
 | steps 3 and 5, s = 0.32 mm | 54 | 10 | 13 | 29 | 76,371 | 767,292 + 6,806 added, 180 removed | 169 |
 | steps 3 and 5, s = 0.30 mm | 43 | 11 | 8 | 23 | 74,797 | 331,524 + 427 added, 189 removed | 141 |
 | steps 3, 4 and 5, s = 0.30 mm | 5 | 1 | 1 | 1 | 74,871 | 328,017 + 341 added, 7,034 removed | 92 |
+| steps 3, 4 and 5, s = 0.26 mm | 12 | 5 | 3 | 2 | 74,578 | 298,724 + 1,032 added, 5,359 removed | 137 |
+| steps 3, 4 and 5, s = 0.36 mm | 7 | 0 | 4 | 0 | 79,055 | 1,695,547 + 1,956 added, 13,106 removed | 124 |
+| steps 3, 4 and 5, s = 0.42 mm | 4 | 1 | 1 | 2 | 79,143 | 2,024,339 + 355 added, 14,200 removed | 87 |
+| steps 3, 4 and 5, s = 0.52 mm | 5 | 0 | 1 | 3 | 80,539 | 5,147,823 + 2,045 added, 15,815 removed | 84 |
 
 Neighbour-normal angles of the output normals, over the edges (degrees):
 
@@ -287,6 +291,10 @@ Neighbour-normal angles of the output normals, over the edges (degrees):
 | step 5 | 1.33 | 3.88 | 11.38 | 20.3 | 33.2 | 243 | 19 |
 | steps 3 and 5, 0.30 mm | 1.46 | 5.37 | 12.49 | 19.0 | 35.7 | 587 | 38 |
 | steps 3, 4 and 5, 0.30 mm | 1.47 | 5.41 | 12.57 | 18.3 | 25.6 | 4 | 0 |
+| steps 3, 4 and 5, 0.26 mm | 1.58 | 5.40 | 12.94 | 19.8 | 27.4 | 9 | 3 |
+| steps 3, 4 and 5, 0.36 mm | 2.58 | 6.96 | 11.92 | 16.7 | 22.1 | 0 | 0 |
+| steps 3, 4 and 5, 0.42 mm | 2.45 | 6.45 | 10.73 | 15.1 | 20.7 | 1 | 0 |
+| steps 3, 4 and 5, 0.52 mm | 2.81 | 6.09 | 9.76 | 13.4 | 19.0 | 0 | 0 |
 
 - **Diagonal-only contacts cause most folds.** At baseline, 74 of the 90
   sites have a checkerboard square or a corner-only cube of the mask within
@@ -313,6 +321,19 @@ Neighbour-normal angles of the output normals, over the edges (degrees):
   gap voxels. The cost is the bulk: the 90th percentile rises from 3.9° to
   5.4°, the voxel-scale roughness of the ball unions that step 6 is for,
   and the area grows 3.9%.
+- **s (experiment 4).** Sites (sites with mixed GM and fluid faces are in
+  the total only) and the tail of the angles change little above 0.30 mm,
+  but the bulk does: thickening adds about 300,000 voxels at 0.26 and
+  0.30 mm, 1.7 million at 0.36 mm and 5.1 million at 0.52 mm, the area grows
+  from 3.9% to 10–12% over main, and the median angle goes from 1.5° to
+  2.5–2.8°. The jump between 0.30 and 0.36 mm (about 4 voxels of width,
+  0.6–0.7 mm) is likely where 2s passes the width of much of the WM in
+  gyral blades, so thickening there moves the boundary into cortex instead
+  of filling noise. 0.26 mm is worse than 0.30 mm on every count (9 edges
+  over 60°, 3 over 90°). On the final mask, gap voxels left are 57, 10, 204,
+  21 and 23 from 0.26 to 0.52 mm, none in a piece of 10 voxels or more;
+  thin voxels (against each run's own s, so not comparable) are 4,273,
+  4,742, 16,497, 14,118 and 30,608. 0.30 mm is the working value.
 - **Exceptions belong at the end.** The 81 thickening exceptions are
   counted before widening and well-composing. On the final mask, 10 gap
   voxels are left (9 pieces), but 4,742 voxels are thin, in 1,381 pieces, of
@@ -334,7 +355,8 @@ instead of trimming. Compare with "threads trimmed" and "fills thickened".
 **Experiment 3.** Add step 4 (gaps between two surfaces).
 
 **Experiment 4.** s over a range, from the floor of about 1.5 voxels (0.24
-mm) upward.
+mm) upward. Done: 0.26, 0.30, 0.36, 0.42 and 0.52 mm, with steps 3, 4 and 5
+(results above); 0.30 mm is the working value.
 
 **Experiment 5.** The intensity score for cut or fill (step 2), against the
 size rule and the reference sites.
