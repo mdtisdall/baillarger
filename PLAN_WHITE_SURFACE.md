@@ -389,8 +389,21 @@ against the mean of its corners', not the site count above.
   random crops and the control are exactly as unconstrained (nothing or
   about 40 flips refused), and the thickened crops keep 95% of the gain with
   no edge over 60° (the crop above: maximum 49°, 0 gap voxels). Misfacing
-  faces are 9 against 2 unconstrained, 7 in one crop, not yet looked at. The
-  test costs 15–220 s per 96³ crop on the CPU, one window at a time.
+  faces are 9 against 2 unconstrained. The test costs 15–220 s per 96³ crop
+  on the CPU, one window at a time.
+- **The blade test misses tubes.** Seven of the 9 misfacing faces are on one
+  strand that step 3 had thickened (6 of its 67 voxels thin in the input):
+  relaxing thinned it to a tube 2 voxels across (49 thin), and removing a
+  voxel from a tube's side is simple, so no blade voxel appears. The site
+  was already misfacing before relaxing (6 faces), next to a thickening
+  exception and a handle cut. Unconstrained, the strand retracts whole and
+  the crop gains 18 diagonal-contact voxels, which undoes step 5. Splitting
+  the test by direction (a removal may make no new thin voxel, an addition
+  no new blade voxel) is worse on all three crops tried: removing a
+  staircase corner makes a thin voxel, so most flips are refused (90th
+  percentile 7.40°, 7.55° and 6.62°, against 6.78°, 6.67° and 5.77°), and
+  the strand's site keeps 9 misfacing faces. Open: a thinness test that sees
+  tubes but not single staircase voxels, such as thin pieces above a size.
 
 ## Experiments, in order
 
