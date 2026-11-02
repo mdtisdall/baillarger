@@ -139,15 +139,46 @@ The restart does not work on boxes. Two things from them still matter:
 
 ## 3. Stream 1: WM segmentation and the white surface
 
-### Established
+Stream 1 has two parts that meet at one interface:
+
+- **The WM label.** Today it is the aseg we received from purple-mri. The plan is our own segmentation of the FLASH.
+- **The white surface, made from a WM label.** These steps take a label in the FreeSurfer convention, with an optional probability map. They must not depend on which segmentation produced it.
+
+### 3a. The WM label
+
+**Today: the purple-mri aseg, taken as given**
+
+- **Where it comes from.** purple-mri segments the 160 µm FLASH at native resolution. Its network was trained on 7 T T2w at 0.3 mm, and it gives labels without probabilities (#86).
+- **How we use it.** The aseg is never rewritten.
+  - The WM mask is a derivative (`desc-wmtopo_dseg`): aseg 41 plus 43, 49–52 and 192, with cavities filled; the hippocampus is not filled (#61, #67).
+  - Manual edits are replayable diffs against it (`wm-edits/1`), applied before the automatic correction.
+  - The deep structures (ventricle, thalamus, ...) belong in the mask, and imputed WM must be included, so that the edge of a cut does not become a false white surface (#66; PL).
+- **What it costs.** Every stream 1 number below was measured on this aseg. Its repeatable errors are listed in §2.
+
+**Planned: our own segmentation of the FLASH** (#86, plan only)
+
+- **What it is.** nnU-Net v2 (Apache-2.0) trained on the FLASH echoes. purple-mri's labels serve as weak seeds, and the review queue's verified answers become training labels.
+- **What it publishes.** Labels are required; P(filled WM) and the spread at folds are optional `probseg` outputs. The surface steps keep working from labels alone, so the two parts can advance in parallel.
+- **Open decisions:**
+  - the number of hemispheres;
+  - the training hardware;
+  - the labelling tool;
+  - missing tissue and the hippocampus;
+  - nnU-Net as a dependency or as an external tool.
+
+### 3b. From a WM label to the white surface
+
+These steps would apply to any WM label. The numbers come from running them on the purple-mri aseg.
+
+#### Established
 
 - **The pipeline that works on the hemisphere** (#61, #67, #79):
-  1. Fill a WM mask: aseg 41 plus 43, 49–52, 192, with cavities filled; the hippocampus is not filled.
+  1. Fill the WM mask.
   2. Remove handles.
   3. Antialias to a thin-plate field φ (φ ≥ ε inside, φ ≤ −ε outside).
   4. Contour φ by blocked marching tetrahedra.
 
-  Results:
+  On the purple-mri aseg:
   - Betti (1, 111, 182) → (1, 0, 0).
   - One closed genus-0 piece: 12.7 M vertices, 25.3 M faces, no self-intersecting faces.
   - CPU and MPS give identical meshes, bit for bit.
@@ -160,15 +191,15 @@ The restart does not work on boxes. Two things from them still matter:
   - The meeting wall need not be the smallest cut: one cut of 2,047 voxels ran along a thin strand.
   - Batching walls per pass changes the result, so don't.
 - **Antialiasing beats smoothing** (#61; SF F28).
-  - Each vertex stays on its own grid edge, so the surface has no self-intersections by construction and keeps the edge keys. A tilted plane's normals come out within 0.5° (the raw staircase is 31° off).
+  - Each vertex stays on its own grid edge, so the surface has no self-intersections by construction and keeps the edge keys.
+  - A tilted plane's normals come out within 0.5° (the raw staircase is 31° off).
   - Smoothing the label and then contouring is wrong where WM blades are 2 voxels thick. At σ = 1 voxel it loses 16 % of V1V2's thin WM, it shrinks convex surfaces by about σ²κ, and it makes slivers.
   - Taubin λ|μ smoothing is unstable at short cutoffs. Tukey twicing never amplifies.
   - The label's own terraces limit curvature and normals below about 1–2 mm on surfaces near a grid axis, whatever the method.
-- **Tight folds (misfacing faces).** The hemisphere surface has 152 at 91 sites, and diagonal-only contacts cause most of them: 74 of 90 sites have a checkerboard or corner-only contact within 4 voxels (#81, #85).
+- **Tight folds (misfacing faces).** On the purple-mri aseg the surface has 152 at 91 sites. Diagonal-only contacts in the label cause most of them: 74 of 90 sites have a checkerboard or corner-only contact within 4 voxels (#81, #85). A different segmentation may show a different pattern.
   - Thicken to 2s, widen gaps between surfaces, then make the mask well-composed, at s = 0.30 mm. This takes 90 sites to 5 and edges over 60° from 297 to 4, at a cost of +3.9 % area and a 90th-percentile neighbour angle of 5.4° against 3.9° (#85).
   - s must not be a whole number of voxels along any axis: at 0.32 mm (exactly 2 voxels on one axis) the checkerboards rise from about 390 to 7,000. 0.26 mm is worse on every count; above 0.30 mm the bulk and area grow.
   - Synthetic antialiased phantoms make no misfacing faces, so fold tests need hand-built folds plus a hemisphere run.
-- **The deep structures belong in the mask** (ventricle, thalamus, ...). The white mesh must include imputed WM, so the edge of a cut does not become a false white surface (#66; PL).
 - **Curvature** (SF F28): the 0.32 mm mesh with curvature at 0.48 mm agrees with quadrics fitted to the voxel faces (rank correlation 0.85–0.98), with about half their jitter.
   - Never take curvature from the Hessian of a smoothed signed distance: it mixes the two sides of thin blades.
   - Valence-weighted smoothing biases Gaussian curvature. Use smoothing that keeps mass.
@@ -177,7 +208,7 @@ The restart does not work on boxes. Two things from them still matter:
   - Pairs of sheets closer than 2ε at necks cross. Pinning the crossing faces' input vertices and re-decimating clears them.
   - Map anything back to true vertices with the decimation's own carried-vertex map. A nearest-face search lands on the wrong side of thin sheets.
 
-### Doesn't work (stops a retry)
+#### Doesn't work (stops a retry)
 
 - Forcing cuts, with no fills into cortex: 90 → 131 sites (#85).
 - Voxel opening at 0.24–0.40 mm: worse at every radius, grows the area, and cascades over passes (#85).
@@ -185,9 +216,9 @@ The restart does not work on boxes. Two things from them still matter:
 - A level set started on a 2× grid from the label's own signed distance: 6–11 % wrong signs. A finer grid cannot fix an error that is in the boundary data (SF F28).
 - Inside/outside from the face normal: distance 0 at staircase edges. Use the pseudonormal of the closest feature (SF F28).
 
-### Standing decisions
+#### Standing decisions
 
-- The aseg is never rewritten. Corrections are derivatives (`desc-wmtopo_dseg`), and manual edits are replayable diffs (`wm-edits/1`) applied before the automatic correction.
+- The input label is never rewritten. Corrections are derivatives, and manual edits are replayable diffs applied before the automatic correction.
 - The generator fixes topology automatically, with no question per handle. Places that need judgment go to one review queue, asked in one sitting. Each answer becomes a `wm-edits` row.
 - **The white surface exists for its normals, not its position.** Columns start on it and run along its normals. There is no pial surface and no "true GM/WM boundary": the GM/WM transition is aligned afterwards like any other layer.
   - Judge methods by normal quality: neighbour-angle spread, misfacing faces, cancellation in thin blades, and agreement with orientation from the image.
@@ -195,10 +226,10 @@ The restart does not work on boxes. Two things from them still matter:
 - WM may grow into cortex: thin gyral WM is thickened, not removed, as FreeSurfer's mri_segment does.
 - The meshing uses no cortex label. Every white-mesh vertex is a column root, and what columns pass through is for later stages to judge.
 
-### Open
+#### Open
 
 - Fixes chosen by intensity (FreeSurfer's cut or fill by intensity; #85 step 2); the tube case; the size threshold for exceptions; whether fills through cortex are as acceptable as thickening.
-- Whether to use our own WM segmentation of the FLASH (nnU-Net, with review answers as labels; #86). Its interface (labels required, probseg optional) keeps the surface steps independent of it.
+- Using P(filled WM), when a segmentation provides it, in `handles` and `antialias` (#86 phase 1).
 - Whether T = 0 should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Finding hidden fluid gaps from the image before columns are traced: a thin, slowly decaying dark strip inside labelled cortex (SF F21).
 
