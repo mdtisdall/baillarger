@@ -144,6 +144,8 @@ Stream 1 has two parts that meet at one interface:
 - **The WM label.** Today it is the aseg we received from purple-mri. The plan is our own segmentation of the FLASH.
 - **The white surface, made from a WM label.** These steps take a label in the FreeSurfer convention, with an optional probability map. They must not depend on which segmentation produced it.
 
+Section 3c covers which way data flows between the two parts, and where people give feedback.
+
 ### 3a. The WM label
 
 **Today: the purple-mri aseg, taken as given**
@@ -235,6 +237,38 @@ These steps would apply to any WM label. The numbers come from running them on t
 - Using P(filled WM), when a segmentation provides it, in `handles` and `antialias` (#86 phase 1).
 - Whether T = 0 should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Finding hidden fluid gaps from the image before columns are traced: a thin, slowly decaying dark strip inside labelled cortex (SF F21).
+
+### 3c. Which way data flows, and where people come in
+
+**The flow runs one way. Feedback enters only as inputs.**
+
+- The flow: input label + edits → `dseg` (automatic correction, with a fixes image) → white surface.
+  - No later step writes back into the input label or into `dseg`. The surface stage never changes the label it read.
+  - The automatic fixes (cuts, fills, thickening) stay in the derivative and its fixes image. They never become part of the input.
+- The loop closes through inputs. A person's answer, or later stream 3's feedback, becomes an edit against the input label, and stream 1 reruns from the start.
+  - Edits are kept apart from the automatic changes, so they apply again when the correction changes.
+  - `DecidedAgainst` records the SHA of the `dseg` the person looked at, so a rerun can list the answers whose context changed (`wm-edits/1`, #78).
+
+**How people give feedback today** (`wm-edits/1`, #78; the review plan in #80; the site finder in #81)
+
+- The pipeline finds the sites that need judgment, such as tight folds (`wm-sites/1`) and large handle fixes. It gathers them into one queue per hemisphere, after the automatic result.
+- For each site the viewer offers a few concrete choices with previews: `remove-strand`, `thicken`, `fill-gap`, `widen-gap`, `leave`, `manual-paint`. Each choice is a function of the input label that returns the voxels it changes. ITK-SNAP is the escape hatch for free painting.
+- Each answer is saved as voxel diffs against the input label, with its site, choice, time and the `dseg` SHA. An answer with no voxels (`leave`) is recorded too, so the site counts as answered.
+
+**With our own segmentation** (#86)
+
+- Each answer serves twice:
+  - as an edit that corrects this hemisphere now;
+  - as a verified label for training the next generation.
+- Only verified labels train the model. Automatic fixes do not.
+- The held-out test regions are labelled from scratch, apart from the queue.
+
+**Open**
+
+- **Carrying answers across generations.** An edit is a diff against one SHA-pinned input, and `dseg` refuses edits whose `old` labels don't match. A new generation's labels therefore invalidate the earlier answers. We need a rule: re-express each answer against the new labels, or treat it as satisfied when the new model already agrees with it.
+- What the queue covers: only the sites the surface stage flags, or also regions where the segmentation is uncertain (from its probabilities, as active learning).
+- What exactly trains the model: only the voxels an answer changed, or the whole corrected mask in a reviewed region. And whether an automatic fix that a reviewer accepted (`leave`) counts as verified.
+- How stream 3's feedback (for example, the GM/WM transition found along columns) becomes a stream 1 input. Does it edit the label, or adjust the surface stage?
 
 ## 4. Stream 2: columns
 
