@@ -505,8 +505,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument(
         "--white",
         type=Path,
-        help="a white surface from the mesh command (..._white.surf.gii) with its "
-        "overview, alone",
+        help="a white surface from baillarger.white_surf (..._white.surf.gii) with "
+        "its overview from baillarger.white_overview, alone",
     )
     ap.add_argument("--port", type=int, default=8790)
     a = ap.parse_args(argv)

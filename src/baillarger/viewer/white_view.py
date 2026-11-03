@@ -1,13 +1,13 @@
-"""A white surface from the mesh command, viewed alone (no column volume): its overview
-(baillarger.viewer.overview) in the 3D surface pane, and the WM selection on it, with
-the true vertex that each overview vertex is; and the volume pane on a box round a
-voxel (BOX voxels each way): the echoes, the true surface's faces there (from its
-blocks), and an overlay of the WM mask and the topology fixes of its corrected
+"""A white surface from baillarger.white_surf, viewed alone (no column volume): its
+overview (baillarger.viewer.overview) in the 3D surface pane, and the WM selection on
+it, with the true vertex that each overview vertex is; and the volume pane on a box
+round a voxel (BOX voxels each way): the echoes, the true surface's faces there (from
+its blocks), and an overlay of the WM mask and the topology fixes of its corrected
 segmentation (OVERLAY: 1 mask, 2 handle cut, 3 handle fill, 4 cavity fill). The
 page moves the box to the WM selection.
 
 Run: python -m baillarger.viewer --white <..._white.surf.gii> --cache DIR (the
-overview is written by the mesh command, or by python -m baillarger.white overview)
+overview is written by python -m baillarger.white_overview)
 """
 
 import gzip
