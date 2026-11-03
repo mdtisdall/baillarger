@@ -12,7 +12,7 @@ removed) along the traces, depth down. A click on a section at a depth adds an e
 {trace: depth} to the pending list; "re-solve" makes the pending edits one step: free =
 edit_resolve.neighbourhood(G, roots, the step's traces, R), then edit_resolve.local_solve with every
 edit made so far. The steps replay in order from the saved joint result, so the pia depends only
-on the list (QPBO-I's rand() reseeded per step, see SURFCUT_SEEDS). Worklist: the top decile of
+on the list (QPBO-I's order comes from a seeded numpy Generator). Worklist: the top decile of
 `combined`, joined into patches by the joint warp's neighbour pairs, ordered by size x mean score.
 
 Requests:
@@ -37,9 +37,7 @@ Usage: pia_editor.py <port> <work> <tag> [--flat <flat_map npz>] [--edits <json>
 """
 
 import argparse
-import ctypes
 import datetime
-import inspect
 import json
 import os
 import sys
@@ -65,15 +63,10 @@ STATIC = Path(__file__).parent / "pia_editor_static"
 STEP = ED.STEP
 H = 0.04
 DECILE = 90
-# QPBO-I (baillarger.surfcut.qpbo_pruned -> thinqpbo improve()) visits variables in an order drawn
-# from the C library's rand(): the same step could end differently with the process's rand() state
-# (measured: one trace by 0.12 mm in a 192-trace step). surfcut from PR #33 on reseeds rand() itself
-# (qpbo_pruned(seed=0), which edit_resolve.local_solve gets by default); with an older surfcut each
-# step reseeds it here, so either way a step's result depends only on its inputs and a replay of the
-# list gives the same levels.
-_LIBC = ctypes.CDLL(None)
-RAND_SEED = 1
-SURFCUT_SEEDS = "seed" in inspect.signature(ER.WC.qpbo_pruned).parameters
+# QPBO-I (baillarger.surfcut.qpbo_pruned) visits variables in an order drawn from
+# numpy.random.Generator(PCG64(seed)), with no global random state (qpbo_pruned(seed=0), which
+# edit_resolve.local_solve gets by default), so a step's result depends only on its inputs and a
+# replay of the list gives the same levels.
 
 
 def now():
@@ -314,8 +307,6 @@ class Editor:
         for e in step["edits"]:
             made[e["trace"]] = e["depth"]
         free = ER.neighbourhood(self.G, self.rv, seeds, step["R"])
-        if not SURFCUT_SEEDS:
-            _LIBC.srand(RAND_SEED)
         z2, info = ER.local_solve(self.D, z, free, h=H, edits=made)
         return z2, info
 

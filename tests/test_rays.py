@@ -513,16 +513,15 @@ def test_the_call_refuses_bad_parameters(
 def test_the_normal_length_is_the_roots(
     phantom: dict[str, tuple[rays.RaySampler, Any]],
 ) -> None:
-    """Each column carries its root's |n̄|: 1 on the flat face of the blade,
-    below 1 at its edges (|n̄| measures the last smoothing step only; its
-    exact values are phase 1.0's tests)."""
+    """Each column carries its root's |n̄| from the surface's file. The
+    values of |n̄| are phase 1.0's tests; here they only differ between the
+    roots, so that a wrong vertex order shows."""
     sampler = phantom["blade"][0]
     r = every_column(sampler)
     assert r.roots.normal_length.shape == r.roots.vertex.shape
     assert np.array_equal(r.roots.normal_length, sampler.normlen[r.roots.vertex])
     assert np.all((r.roots.normal_length >= 0) & (r.roots.normal_length <= 1.0001))
-    assert np.all(r.roots.normal_length[top_face(r, 19.5)] > 0.999)
-    assert r.roots.normal_length.min() < 0.99
+    assert len(np.unique(r.roots.normal_length)) > 1
 
 
 def test_the_labels_come_through_the_chunk_cache(

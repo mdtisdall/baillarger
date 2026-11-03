@@ -139,21 +139,25 @@ def twice[T: np.floating[Any]](
 def smooth_normals_and_length[T: np.floating[Any]](
     v: V[T], f: Faces, iters: int = 10
 ) -> tuple[V[T], V[T]]:
-    """Area-weighted vertex normals, then iters steps (at least 1) of
-    Laplacian smoothing along the edges (as baillarger.frame.white_mesh).
-    Returns the unit normals and the normal length: the norm of the smoothed
-    normal before the last division. It measures the disagreement in the
-    last step only: 1 on a plane, less than 1 where the neighbours' normals
-    point in different directions, as near the crest of a thin blade."""
+    """Area-weighted unit vertex normals, then iters steps (at least 1) of
+    Laplacian smoothing along the edges (as baillarger.frame.white_mesh),
+    each step divided by the norm. Returns these unit normals and the normal
+    length: the norm after the same iters steps with no division. It
+    measures how much the unit normals cancel over the smoothing support: 1
+    on a plane, less than 1 where the normals point in different
+    directions, as on a thin blade whose faces point in opposite
+    directions."""
     if iters < 1:
         raise ValueError("iters must be at least 1")
     n = vertex_normals(v, f)
+    m = n.copy()
     A, deg = umbrella(v, f)
     for _ in range(iters):
         n = 0.5 * n + 0.5 * (A @ n) / deg[:, None]
-        length = np.linalg.norm(n, axis=1, keepdims=True)
-        n /= length + 1e-12
-    return n, length[:, 0]
+        n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-12
+        m = 0.5 * m + 0.5 * (A @ m) / deg[:, None]
+    length: V[T] = np.linalg.norm(m, axis=1)
+    return n, length
 
 
 def smooth_normals[T: np.floating[Any]](v: V[T], f: Faces, iters: int = 10) -> V[T]:
