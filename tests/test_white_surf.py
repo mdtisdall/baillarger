@@ -12,6 +12,7 @@ import pytest
 from nibabel.gifti.gifti import GiftiImage
 
 from baillarger import bids, white_dseg, white_surf
+from baillarger import mesh_smoothing as S
 from baillarger.mesh import topology
 
 VOX = (0.2, 0.16, 0.2)
@@ -67,6 +68,13 @@ def test_the_surface_and_its_sidecar(surface: tuple[Path, Path]) -> None:
     assert rad.min() > 10 and rad.max() < 13
     assert np.all(np.sum(s.normals[ball] * (s.v[ball] - c), 1) > 0)
     assert np.allclose(np.linalg.norm(s.normals, axis=1), 1, atol=1e-5)
+    # the normal length: in [0, 1], near 1 on the smooth ball and block, and
+    # the length that mesh_smoothing gives for the vertices as read
+    assert s.normlen.dtype == np.float32 and s.normlen.shape == (len(s.v),)
+    assert s.normlen.min() >= 0 and s.normlen.max() <= 1
+    assert np.median(s.normlen) > 0.999
+    _, ref = S.smooth_normals_and_length(s.v, s.f)
+    assert np.abs(s.normlen - np.minimum(ref, 1)).max() < 1e-4
 
 
 def test_nibabel_reads_the_external_data(surface: tuple[Path, Path]) -> None:
@@ -88,6 +96,16 @@ def test_nibabel_reads_the_external_data(surface: tuple[Path, Path]) -> None:
         str(surf.with_name(s.sidecar["NormalsFile"])), mmap=True
     )
     assert np.allclose(n.darrays[0].data, s.normals, atol=1e-6)
+    nl = GiftiImage.from_filename(
+        str(surf.with_name(s.sidecar["NormLenFile"])), mmap=True
+    ).darrays[0]
+    # one value per vertex: a 1-D array, shape (n,)
+    assert nl.dims == [len(s.v)]
+    assert nl.data.dtype == np.float32 and nl.data.shape == (len(s.v),)
+    assert np.array_equal(nl.data, s.normlen)
+    assert nl.ext_fname == surf.name.replace(
+        "_white.surf.gii", "_desc-normlen_white.dat"
+    )
     # the edge keys: int64 as (low, high) int32 words, one per vertex
     k = (
         GiftiImage.from_filename(
@@ -116,6 +134,7 @@ def test_blocks_cover_the_mesh(surface: tuple[Path, Path]) -> None:
         assert np.array_equal(g, whole.f[int(row[5]) : int(row[6])])
         assert np.allclose(b.v, whole.v[b.vertex_ids])
         assert np.allclose(b.normals, whole.normals[b.vertex_ids])
+        assert np.array_equal(b.normlen, whole.normlen[b.vertex_ids])
         assert np.array_equal(b.vertex_key, whole.vertex_key[b.vertex_ids])
         # the box holds the vertices as read, with no tolerance
         assert np.all(b.v >= row[7:10]) and np.all(b.v <= row[10:13])
@@ -183,5 +202,6 @@ def test_the_reader_gives_float32(surface: tuple[Path, Path]) -> None:
     _, surf = surface
     s = white_surf.WhiteSurface.load(surf)
     assert s.v.dtype == np.float32 and s.normals.dtype == np.float32
+    assert s.normlen.dtype == np.float32
     b = white_surf.WhiteSurface.load(surf, block=(0, 0, 0))
     assert b.v.dtype == np.float32
