@@ -364,6 +364,7 @@ The coupling that is real, decided once:
 |---|---|---|
 | `_hemi-<h>_white.surf.gii` (+ `.dat`): vertices and triangles | `white-surf/1` | step 5; stream 2 (roots); stream 3 (column graph); the viewer |
 | `_desc-normals_white.func.gii`: unit normals | `white-surf/1` | stream 2 (ray directions) |
+| `_desc-normlen_white.func.gii`: the length of the averaged normal before renormalising, \|n̄\| in [0, 1] (planned) | `white-surf/1` | stream 2 (recorded per column); stream 3 (weighing evidence) |
 | `_desc-edgekeys_white.func.gii`: each vertex's grid-edge key | `white-surf/1` | every per-vertex output downstream |
 | `_desc-blocks_white.tsv`: the block index | `white-surf/1` | blocked readers downstream |
 | The cut-face flag per vertex, keyed by edge key (planned) | none yet | stream 2 (no roots there) |
@@ -379,7 +380,7 @@ The coupling that is real, decided once:
 - **Smoothing is the wrong tool here:**
   - Smoothing the label and then contouring loses 2-voxel WM blades: at σ = 1 voxel it loses 16 % of V1V2's thin WM, shrinks convex surfaces by about σ²κ, and makes slivers.
   - Taubin λ|μ smoothing is unstable at short cutoffs. Tukey twicing never amplifies.
-- **Limits of any binary label.** Its terraces limit curvature and normals below about 1–2 mm on surfaces near a grid axis, whatever the method. Thin-blade normals keep as little as 0.56 of their length after averaging (`docs/scaling.md`); the column stage has to handle them.
+- **Limits of any binary label.** Its terraces limit curvature and normals below about 1–2 mm on surfaces near a grid axis, whatever the method. Thin-blade normals keep as little as 0.56 of their length after averaging (`docs/scaling.md`): near a blade's crest the two faces point opposite ways and cancel. Stream 1 publishes the averaged normal's length per vertex, and the readers weigh roots by it.
 - **Normals** point out of the WM: area-weighted, then 10 smoothing steps.
 - **Curvature is not published.** Its scale is an open question downstream (§5c, Open), so readers compute it from `white-surf/1` with the shared curvature code (§7), at the scale they are testing.
 - **Curvature** (SF F28): the 0.32 mm mesh with curvature at 0.48 mm agrees with quadrics fitted to the voxel faces (rank correlation 0.85–0.98), with about half their jitter.
@@ -466,6 +467,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - Cut faces: R and r for the bite grow, chosen on the bootstrap hemisphere; whether flat-face excisions are cut close enough to planar for the plane fit; how far a cut face bends the normals of vertices near it but not on it, and whether stream 2 should use distance along the mesh from flagged vertices; whether the viewer needs the cut face as a surface label of its own.
 - Whether depth 0 (the column roots) should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Hidden fluid gaps (a thin, slowly decaying dark strip inside labelled cortex; SF F21): under the majority rule they stay cortex, and stream 3 finds them along the columns. Open: whether a detector before tracing is still worth having, as a diagnostic or to rank review sites.
+- Whether normal smoothing should stop at blade crests (feature-preserving smoothing, such as bilateral normal filtering, Zheng et al. 2011) instead of letting the two faces cancel.
 - Whether `orient`'s window should stop where the WM-distance fronts of two banks meet, so that it never spans a fused sulcus (step 3).
 - Whether `orient` needs a robust window near the pia, vessels and fused sulci, where tissue-edge gradients (largest in echo 1) can outweigh the laminae (step 3).
 - **How `dseg` applies standalone answers** to a new generation's labels: whether a verified voxel always overrides the input, and how to show the reviewer where a new generation disagrees with an earlier answer.
@@ -596,7 +598,7 @@ Rays that follow a field fitted to the image (T) are not part of the design. On 
 
 | Input | From | Use |
 |---|---|---|
-| `white-surf/1`: vertices, normals, edge keys, block index | stream 1, step 4 | one root per vertex |
+| `white-surf/1`: vertices, normals, normal lengths, edge keys, block index | stream 1, step 4 | one root per vertex; each root's normal length recorded on its column |
 | The cut-face flag (planned) | stream 1, step 4 | roots left out |
 | `_desc-cut_mask` (planned) | stream 1, step 2 | the domain-edge stop |
 
@@ -753,6 +755,7 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0. Phase 2 needs 
   - the misalignment diagnostic (4c, Open), and from it the steering it calls for: the deflected normal ray here, stream 1's antialiasing term there, or both;
   - which paths are right, by phantoms with curved, equivolume true columns;
   - the capped rays;
+  - column outcomes and the misalignment diagnostic against the root's normal length \|n̄\| (thin blades);
   - radial fibres;
   - with stream 1's hippocampus decision (its phase 5), how roots on the surface round the hippocampus are treated.
 - **Phase 3, only if phase 2 shows something was missed, and the deflected normal ray does not cover it: revisit fields fitted to the data normal** (4c). Nothing of `fitted_field`, `past_crest`, the field methods of `column_front` or `fronts` is ported before then; they stay in git, with the lessons above.
@@ -922,7 +925,7 @@ Where each layer lies along every column, read from the image's own contrast and
 - Crowns are thicker than fundi everywhere measured: V1V2 slope +1.2 mm per (1/mm), M1S1 +2.7. Fit the slope per area, because M1S1 mixes an areal step with folding (SF F10).
 - Volume per unit white-surface area is the least conserved quantity against curvature (ρ 0.95). Equal-volume thickness does not absorb the curvature trend.
 - A stationary Matérn/SPDE field (on log thickness, about 2 mm long, on the white-mesh vertices) fits tightly at the evidence. But across the 1–2.5 mm without evidence before a contact it reverts to a broad mean and over-predicts the thin bank by 0.26–0.92 mm. The missing evidence is the sums t₁ + t₂ = L at contacts (F13–F16).
-- Thickness evidence is the front's own column tops, from roots at least 2 mm from any domain edge, with a guard against wandering tops. Convert to mm with the median, exp(m), not the lognormal mean (LS).
+- Thickness evidence is the front's own column tops, from roots at least 2 mm from any domain edge, with a guard against wandering tops. Convert to mm with the median, exp(m), not the lognormal mean (LS). Columns whose root normal cancelled (low \|n̄\|, thin blades) can be down-weighted as evidence; how is a choice of the likelihood.
 - Region-specific thickness priors are future work, as soft regions.
 
 **Contacts**
@@ -1129,7 +1132,7 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | Spec | Defines | Written in |
 |---|---|---|
 | `wm-dseg/1`, `wm-dseg-fixes/1` | The corrected segmentation and the fixes image (1 cut, 2 fill, 3 cavity, 4 manual, 5 fluid relabel, to be added); Betti before and after; each move. To be extended with the fix table and the sparse fix diff (stream 1, phase 1) and the margin (phase 3) | exists |
-| `white-surf/1` | GIfTI with external data: float32 vertices in scanner mm, int32 triangles, float32 normals, int64 edge keys, a block index in Morton order | exists |
+| `white-surf/1` | GIfTI with external data: float32 vertices in scanner mm, int32 triangles, float32 normals, float32 normal lengths (to be added), int64 edge keys, a block index in Morton order | exists |
 | `white-overview/1` | The decimated display mesh, its true-vertex ids and the true vertices each face carries; five guarantees | exists |
 | `wm-edits/1` | Exists as voxel-row diffs against a SHA-pinned aseg, with each answer's site and choice; to be revised so answers stand on their own (verified labels, valid for any input), in an append-only log where a correction supersedes and never rewrites | revision: stream 1, phase 1 |
 | Cut seeds; the cut mask; the cut-face flag | Replayable seed points in scanner mm with their kind; the outside voxels against a cut face; a per-vertex flag keyed by edge key | stream 1, phase 0 |
