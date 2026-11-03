@@ -89,7 +89,7 @@ These bind every stream from its first version. A first version may be rough, bu
 - **No GPL dependencies,** with no exceptions. Where only a GPL library fits, use a permissive one or write the piece ourselves. State the licence when proposing a library.
 - **FreeSurfer is the model.** Its topology correction, pretess and strand thickening are the defaults to follow. Deviate only with cause and data. We do not run FreeSurfer, even as a benchmark.
 - **A person decides only where the data cannot.** Places that need judgment go into one review queue per stage. Each answer is a replayable edit: the automatic result is correct without it, and the review refines it.
-- **The WM label comes from our own segmentation** (from stream 1's phase 8; until then the purple-mri aseg, with a stand-in P from phase 6), which gives labels in the FreeSurfer convention and P(filled WM) (§3). The surface steps require both; there is no labels-only path once stream 1's phase 6 is done (§3d). The label is still an input with its own errors: take evidence from the echoes, not from the quirks of the labels.
+- **The WM label comes from our own segmentation** (from stream 1's phase 8; until then the purple-mri aseg, which gives labels only), which gives labels in the FreeSurfer convention and P(filled WM) (§3). The surface steps require both; there is no labels-only path once our own segmentation exists (stream 1's phase 8, §3d). The label is still an input with its own errors: take evidence from the echoes, not from the quirks of the labels.
 
 ### Working rules
 
@@ -231,8 +231,8 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 
 *Probabilities*
 
-- Steps 2 and 4 require labels and P; there is no labels-only path. The one exception is phase 0, which runs the current code's labels-only path on the purple-mri aseg until phase 6 replaces it. Step 6 uses the fold spread when it exists; during bootstrapping it ranks without it.
-- During bootstrapping, P is a stand-in from purple-mri (3d, phase 6). That lets the surface steps run before the first generation exists, so the surface work does not wait for the network, and the network does not wait for the surface work.
+- Steps 2 and 4 require labels and P; there is no labels-only path. The one exception is the bootstrap: the current code's labels-only path runs on the purple-mri aseg from phase 0 until our first generation's P replaces it (phase 8). Step 6 uses the fold spread when it exists; during bootstrapping it ranks without it.
+- During bootstrapping there is no P: purple-mri gives labels only, and no probabilities are expected from it. The surface steps' P-reading code is still written and tested on phantoms first (3d, phase 6), so the surface work does not wait for the network; it runs on the hemisphere once the first generation exists.
 
 The coupling that is real, decided once:
 
@@ -277,7 +277,7 @@ The coupling that is real, decided once:
 
 | Input | From | Use |
 |---|---|---|
-| `_dseg` and P | step 1; until phase 8, the purple-mri aseg, with no P in phase 0 and a stand-in P from phase 6 | the filled mask; handle removal ordered by P |
+| `_dseg` and P | step 1; until phase 8, the purple-mri aseg, with no P | the filled mask; handle removal ordered by P |
 | `_desc-wmedits_edits.tsv` and sidecar (`wm-edits/1`) | step 6 | edits applied before the correction |
 | The FLASH | the scan | fixes chosen by intensity, only if adopted (Open) |
 
@@ -499,7 +499,6 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
   Since labelling happens in our viewer, an interactive model would run on the viewer's server, not inside Slicer or ITK-SNAP. Whichever spreads a scribble, its output is the model's guess, not a verified label. Only the strokes, and what the reviewer explicitly accepts, train the next generation.
 - Whether an automatic fix that a reviewer accepted (`leave`) counts as verified, and so trains the model.
 - Which of stream 3's disagreements become sites, and how they rank against the other site finders.
-- **The bootstrap's stand-in P.** If purple-mri cannot save its probabilities, the surface steps need another stand-in P before the first generation exists.
 - Open decisions for our own segmentation:
   - **The hippocampus: inside the white surface or outside it.** To be decided once there is data, by looking at both on our own segmentation. If inside, stream 2 must also decide how to treat roots on the part of the surface that wraps it, which is not neocortex: a medial-wall label, or roots kept and judged later.
   - **How fast a generation follows a review.** nnU-Net can start from the previous weights (`-pretrained_weights`) with a short custom schedule, sampling patches mostly round the new verified labels and replaying the older labels so the model does not forget them. On a CUDA GPU that is hours, not days, so a generation could follow each review session. How often to train, how long, and how much replay are to be found by experiment, not chosen in advance (3d, phase 9):
@@ -530,23 +529,21 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
   - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 11 is needed.
   - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, and other labels only if a later stage needs them. Check `FILLED_LABELS` against FreeSurfer's fill (`mri_edit_wm_with_aseg`) and decide each label it omits, with the reason recorded: accumbens (26/58), ventral DC (28/60), the inferior lateral ventricle (5/44), choroid plexus (31/63), vessel (30/62). Write the label-set spec with the majority rule for partial volume (3b), as the rule labellers follow.
   - Test regions: a few boxes per hemisphere (start with V1V2, PCC_SPL, M1S1, and the V1V2 seam review points). They are labelled from scratch, not by correcting the seed labels, so the seed does not anchor them, and they are never used in training. Format: a BIDS `_dseg` with a versioned sidecar spec that records the box and the labeller. They are painted in the viewer's painting mode (stream 4, phase 1).
-- **Phase 6: the surface steps read probabilities.** Independent of the network; exact-answer tests on phantoms first.
+- **Phase 6: the surface steps read probabilities.** Code and exact-answer tests on phantoms only: there is no P on the real hemisphere until phase 8, which runs it there.
   1. `handles.remove_handles` takes a required priority volume, P: the object front claims in order of decreasing P and the background front in order of increasing P, so the walls fall where P is closest to 0.5. Distance ordering goes. Phantom test: a handle whose bridge has a known low-P place away from its thinnest place; the cut must fall there.
   2. `antialias` takes a required data term: near the boundary, φ is pulled towards a smooth function of P − 0.5, weighted by a per-voxel confidence. The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. Phantom test: a plane at a known sub-voxel offset, with P a blurred step across it; the vertices must recover the offset.
   3. The fix table gains each fix's signed margin in P (step 2). The review queue ranks by it.
-  4. Bootstrapping: a stand-in P on the real hemisphere until our own exists: purple-mri rerun with its probabilities saved (nnU-Net `--save_probabilities`), summed over `FILLED_LABELS`. Ask the purple-mri authors whether their container can do this.
-  5. Diagnostics, P ordering against phase 0's distance ordering on the hemisphere: where the walls move, the normal metrics, and views of the walls that move most.
-  6. Then remove the labels-only path (distance ordering, smoothness-only antialiasing).
 - **Phase 7: training data.**
   - Export to nnU-Net's raw dataset format: the three echoes as channels `_0000`–`_0002`, with labels that use an ignore label.
   - Bootstrapping: purple-mri's labels as weak seed labels. Its labels in the interiors; excisions relabelled to outside, from the detector, confirmed by the reviewer; ignore in a band of about 2 voxels each side of every purple-mri boundary (so the network never learns purple-mri's choices at mixed voxels), and where the bootstrap detector of fluid channels and vessels fires inside purple-mri's cortex (`pial_labels` ported as that check, step 2, on phase 2's local cortex level; checked on the test regions).
   - The answers made so far (`wm-edits`, phase 3's format, through the review pane) as verified labels, never ignored.
   - Verified labels are kept apart from seed labels, with provenance, so a generation can be retrained with or without the seed.
   - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset.
-- **Phase 8: the first generation.** Its labels and P replace the purple-mri aseg and the stand-in P as stream 1's input; streams 2–4 rerun on the new outputs.
+- **Phase 8: the first generation.** Its labels and P replace the purple-mri aseg as stream 1's input, and the surface steps read P on the hemisphere for the first time; streams 2–4 rerun on the new outputs.
+  - Then remove the labels-only path (distance ordering, smoothness-only antialiasing).
   - Five folds, split by hemisphere when there are several. With one hemisphere, five spatial folds of contiguous Morton superblocks, with a gap one patch wide set to ignore between each fold's training and validation regions, so no patch straddles both; the test regions are in no fold. Spatial folds make the folds' accuracy an upper bound, and the fold spread then includes spatial variation as well as what more labels can fix.
   - Inference writes the `_dseg`, the WM-filled `_probseg` and the fold spread, with sidecars.
-  - Diagnostics against the purple-mri seed labels as a baseline, on the test regions and the hemisphere: boundary distance and Dice on the test regions; calibration of P near 0.5; handles and cavities before correction; the phase 6 walls and their margins; views of where ours and purple-mri's differ most.
+  - Diagnostics against the purple-mri seed labels as a baseline, on the test regions and the hemisphere: boundary distance and Dice on the test regions; calibration of P near 0.5; handles and cavities before correction; the phase 6 walls and their margins, with P ordering against the labels-only path's distance ordering (where the walls move, the normal metrics, views of the walls that move most); views of where ours and purple-mri's differ most.
   - With its data, mesh the hemisphere with the hippocampus inside and outside the filled mask, and decide from views of both (Open).
 - **Phase 9: generations through review.** As in step 6. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics are on the test regions only: those of phase 8, plus the length of the queue.
   - Keep every generation's weights and the time of every answer, from the first generation on: the update-frequency experiment needs both.
@@ -1274,9 +1271,9 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 1.3 | 1.0 | the formats and code the review pane (4.2) is built on; no viewer needed |
 | 1.4 | 1.0 | |
 | 1.5 | 1.0 | writes the test-region spec first; painting the regions waits for 4.1 |
-| 1.6 | 1.0 | stand-in P from purple-mri; may later add the data-normal term, if 2.2's diagnostic calls for it, in whichever phase is then current |
+| 1.6 | 1.0 | code and phantom tests only; no P on the hemisphere until 1.8, which runs it there; may later add the data-normal term, if 2.2's diagnostic calls for it, in whichever phase is then current |
 | 1.7 | 1.2, 1.5 | the `pial_labels` check reads 1.2's local cortex level; gains from the answers made in 4.2 |
-| 1.8 | 1.6, 1.7 | replaces the purple-mri aseg; streams 2–4 rerun; decides the hippocampus |
+| 1.8 | 1.6, 1.7 | replaces the purple-mri aseg; first P on the hemisphere, then the labels-only path goes; streams 2–4 rerun; decides the hippocampus |
 | 1.9 | 1.8, 4.2 | queues 3.5's sites when they exist |
 | 1.10 | 1.8 | |
 | 1.11 | 1.9, 1.10 | only if their diagnostics ask |
@@ -1298,6 +1295,6 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 4.3 | 2.0, 4.0 | |
 | 4.4 | 3.2, 3.3, 4.0 | 3.4 adds panes when it publishes |
 
-**Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.4, 1.6, 1.8, each review's answers and each generation in 1.9; a new version of a sampler), the stored outputs that read it rerun on it: stream 1's own, and stream 3's z(τ), bands and thickness. Samplers need no rerun: they compute from whatever is published on the next call. Nothing waits for a new version: each phase works on whatever is published.
+**Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.4, 1.8, each review's answers and each generation in 1.9; a new version of a sampler), the stored outputs that read it rerun on it: stream 1's own, and stream 3's z(τ), bands and thickness. Samplers need no rerun: they compute from whatever is published on the next call. Nothing waits for a new version: each phase works on whatever is published.
 
 **The first complete pass** through all four streams: 1.0 and 1.1; then 2.0 and 4.0 in parallel; then 3.0, 3.1 and 3.2, with 4.3 alongside. It gives a white surface, columns, the viewer, and the first depth maps with a pial edge.
