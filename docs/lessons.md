@@ -518,6 +518,7 @@ In this order:
 3. NIfTI-Zarr volumes, together with item 2.
 4. A band-only multigrid antialias solver with a fused kernel: FISTA on the whole volume costs about h⁻⁵; the target is about h⁻² per cycle.
 5. Decimation with int32 ids and a block-wise first pass.
+6. Normals and their smoothing by mesh block, with a halo: they are now computed on the whole mesh.
 
 GPU, by cost: antialias first, then the normal-smoothing tables, then mesh and volume connected components. Handle removal, cut relabelling, decimation and I/O stay on the CPU.
 
@@ -1050,13 +1051,14 @@ Each stream's plan lists its own modules. These are shared, or belong to no stre
 | Verdict | Modules |
 |---|---|
 | Port as is | `backend`, `bids` (strict sidecars, spec docs tested against code), `gifti`, `timing`, `_jit`, `mesh` (Kuhn marching, edge keys, Morton blocks: the most reusable piece), `mesh_intersect`, `phantoms`, `scripts/check`, `scripts/affected-tests`, `scripts/memguard` |
-| Port with changes | `blocks` (add the chunked source; never read large inputs whole), `mesh_torch` (block-local tables), `mesh_smoothing` (keep normals, edges, pieces), `mesh_graph` (local form; fix the bug below) |
+| Port with changes | `blocks` (add the chunked source; never read large inputs whole: `NiftiSource` now reads a `.nii.gz` whole, and `BlockReader` keeps volumes up to 4 GB resident on the device), `mesh_torch` (block-local tables), `mesh_smoothing` (keep normals, edges, pieces), `mesh_graph` (local form; fix the bug below) |
 | Drop | `topology` and `wellcomposed` ((26,6) codes), `growth` and `joint` (old seam model), `frame` (move `missing_tissue` to stream 1) |
 
 Problems in the current code that a restart should not inherit:
 
 - **A bug:** `mesh_graph.edge_graph` builds a COO matrix and `tocsr()` sums duplicates. An across-triangle edge that is also a mesh edge therefore gets twice its length (2.8 % of entries on a marching-tetrahedra ball). `column_traces` and `pial_labels` use it. #69 has the fix.
 - **Four white-mesh constructions.** The restart has one: `white-surf/1`.
+- **Scales hard-wired to 0.16 mm voxels:** the 0.04 mm sampling, the 1.5-voxel band width, the tapers, the 0.32 mm twicing and the 2-voxel coupling. Restate each as mm or as voxels on purpose, since 50 µm data changes the voxel.
 - **Streams coupled through code:**
   - `pial_labels` and `column_traces` import each other's outputs.
   - The viewer reads prototype files.
@@ -1081,18 +1083,3 @@ There is no spec yet for:
 - the missing-tissue mask;
 - any stream 3 output, including feedback to stream 1;
 - the review-queue sites (`wm-sites/1` is on #81).
-
-## 9. Scaling gaps across streams
-
-Stream 1's ordered scaling steps are in its plan (§3d). Across the streams:
-
-- **The code of streams 2 and 3 has only run on boxes** (141³-voxel crops, about 22.6 mm on a side): `column_traces`, `fit_warp`, `mesh_graph` (and `fitted_field` and `fronts`, which are not ported). This describes the code, not a limit of the methods:
-  - each step holds the whole box as numpy arrays and processes it at once, with no blocks, halos or chunked reading;
-  - so its costs grow with the volume: the box costs below, scaled to a 50 µm whole brain (about 7,000 boxes' worth), would need terabytes of memory;
-  - `fronts` is sequential by nature (one heap over the whole array), so it cannot be blocked without a redesign.
-
-  Their phase 0s (§4d, §5d) build blocked versions: tracing by mesh block with halos sized to the 8 mm cap, and the column volume by blocks.
-- Normals are computed on the whole mesh.
-- `NiftiSource` reads a `.nii.gz` whole, and `BlockReader` keeps volumes up to 4 GB resident on the device.
-- Many scales are hard-wired to 0.16 mm voxels: the 0.04 mm sampling, the 1.5-voxel band width, the tapers, the 0.32 mm twicing and the 2-voxel coupling. Restate each as mm or as voxels on purpose.
-- Box costs per 141³ on one CPU core: column volume 3–5 min and 6 GB, the single-surface cut 18 GB, joint warp about 10 min and 10 GB, flattening about 6 min.
