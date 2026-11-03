@@ -13,6 +13,7 @@ import numpy.typing as npt
 import pytest
 
 from baillarger import rays, white_dseg, white_surf
+from baillarger.mesh_smoothing import umbrella, vertex_normals
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "formats" / "ray-sampler.md"
 
@@ -264,8 +265,28 @@ def phantom(
     out = {}
     for name, a in PHANTOMS.items():
         surf, dseg = write_phantom(tmp_path_factory.mktemp(name), a)
-        out[name] = (rays.RaySampler(surf, dseg), np.asarray(nib.load(dseg).dataobj))  # type: ignore[attr-defined]
+        sampler = rays.RaySampler(surf, dseg)
+        if sampler.normlen is None:
+            sampler.normlen = stand_in_normal_length(surf)
+        out[name] = (sampler, np.asarray(nib.load(dseg).dataobj))  # type: ignore[attr-defined]
     return out
+
+
+def stand_in_normal_length(surf: Path) -> npt.NDArray[np.float32]:
+    """|n̄| until white-surf/1 has its NormLenFile (phase 1.0, Part C): the
+    norm of the smoothed normal before its last division, by the formula of
+    that phase (mesh_smoothing.smooth_normals, 10 steps), on the surface as
+    read."""
+    s = white_surf.WhiteSurface.load(surf)
+    v = s.v.astype(np.float32)
+    n = vertex_normals(v, s.f)
+    A, deg = umbrella(v, s.f)
+    for _ in range(10):
+        n = 0.5 * n + 0.5 * (A @ n) / deg[:, None]
+        length = np.linalg.norm(n, axis=1, keepdims=True)
+        n = n / (length + 1e-12)
+    assert np.allclose(n, s.normals, atol=1e-3)  # the file's normals
+    return length[:, 0].astype(np.float32)
 
 
 def every_column(sampler: rays.RaySampler) -> rays.Rays:
@@ -507,3 +528,18 @@ def test_the_call_refuses_bad_parameters(
     ):
         with pytest.raises(ValueError):
             sampler.sample((0, 0, 0), 1, **kw)
+
+
+def test_the_normal_length_is_the_roots(
+    phantom: dict[str, tuple[rays.RaySampler, Any]],
+) -> None:
+    """Each column carries its root's |n̄|: 1 on the flat face of the blade,
+    below 1 at its edges (|n̄| measures the last smoothing step only; its
+    exact values are phase 1.0's tests)."""
+    sampler = phantom["blade"][0]
+    r = every_column(sampler)
+    assert sampler.normlen is not None
+    assert np.array_equal(r.roots.normal_length, sampler.normlen[r.roots.vertex])
+    assert np.all((r.roots.normal_length >= 0) & (r.roots.normal_length <= 1.0001))
+    assert np.all(r.roots.normal_length[top_face(r, 19.5)] > 0.999)
+    assert r.roots.normal_length.min() < 0.99
