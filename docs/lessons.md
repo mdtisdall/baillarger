@@ -1092,3 +1092,102 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | z(τ) | Depth maps per column: the pial edge at τ = 1, the GM/WM transition as a level | stream 3, phase 2 |
 | Bands; thickness and contacts | Bands per region and layer identity; the thickness field and contact splits | stream 3, phases 3–4 |
 | Feedback to stream 1 | An input stream 1 reads like its edits | stream 3, phase 5 |
+
+## 9. Dependencies between phases
+
+Each stream's plan (§3d, §4d, §5d, §6d) gives its own order. This section puts the four together. Stream 1's phase 0 gates everything: once it has published the white surface, each other stream can start its phase 0.
+
+```mermaid
+flowchart TB
+  subgraph S1["Stream 1: WM segmentation and surface"]
+    S1P0["1.0 pipeline on the purple-mri aseg"]
+    S1P1["1.1 review and fold repair; orient"]
+    S1P2["1.2 data, label set, test regions"]
+    S1P3["1.3 surface steps read P"]
+    S1P4["1.4 training data"]
+    S1P5["1.5 first generation"]
+    S1P6["1.6 generations through review"]
+    S1P7["1.7 uncertainty"]
+    S1P8["1.8 only if diagnostics ask"]
+    S1SC["whole-brain scaling track"]
+  end
+  subgraph S2["Stream 2: columns"]
+    S2P0["2.0 normal rays"]
+    S2P1["2.1 equivolume depth"]
+    S2P2["2.2 open questions; misalignment diagnostic"]
+    S2P3["2.3 revisit fields, only if needed"]
+  end
+  subgraph S3["Stream 3: laminar profiles"]
+    S3P0["3.0 column-volume sampler"]
+    S3P1["3.1 flattening"]
+    S3P2["3.2 joint warp"]
+    S3P3["3.3 bands and layer identity"]
+    S3P4["3.4 thickness and contacts"]
+    S3P5["3.5 feedback to stream 1"]
+  end
+  subgraph S4["Stream 4: viewer"]
+    S4P0["4.0 viewer on stream 1's outputs"]
+    S4P1["4.1 stream 1 review pane"]
+    S4P2["4.2 column traces"]
+    S4P3["4.3 stream 3's outputs"]
+  end
+
+  S1P0 --> S1P1 & S1P2 & S1P3 & S1SC
+  S1P2 --> S1P4
+  S1P1 -.-> S1P4
+  S1P3 & S1P4 --> S1P5
+  S1P1 & S1P5 --> S1P6
+  S1P5 --> S1P7
+  S1P6 & S1P7 -.-> S1P8
+
+  S1P0 --> S2P0 --> S2P1 --> S2P2
+  S1P1 --> S2P2
+  S1P5 -.-> S2P2
+  S2P2 -.-> S2P3
+
+  S2P0 --> S3P0 --> S3P1 --> S3P2
+  S3P1 --> S3P3
+  S3P3 -.-> S3P2
+  S3P2 --> S3P4 & S3P5
+  S2P1 -.-> S3P4
+  S3P5 -.-> S1P6
+
+  S1P0 --> S4P0 --> S4P1
+  S4P1 --- S1P1
+  S2P0 & S4P0 --> S4P2
+  S3P2 & S3P3 --> S4P3
+  S3P4 -.-> S4P3
+```
+
+A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or feedback that enters as an input. The plain line joins two names for the same work.
+
+| Phase | Needs | Notes |
+|---|---|---|
+| 1.0 | — | gates every stream |
+| 1.1 | 1.0; 4.0 | 4.1 is the same work (the review pane); also `orient`, the data normal |
+| 1.2 | 1.0 | |
+| 1.3 | 1.0 | stand-in P from purple-mri |
+| 1.4 | 1.2 | gains from 1.1's answers |
+| 1.5 | 1.3, 1.4 | replaces the purple-mri aseg; streams 2–4 rerun; decides the hippocampus |
+| 1.6 | 1.1, 1.5 | takes 3.5's feedback as an input when it exists |
+| 1.7 | 1.5 | |
+| 1.8 | 1.6, 1.7 | only if their diagnostics ask |
+| Scaling track | 1.0 | alongside 1.1–1.8; done before the first whole brain |
+| 2.0 | 1.0 | writes the column-trace spec first |
+| 2.1 | 2.0 | |
+| 2.2 | 2.1; 1.1 (data normal) | the hippocampus roots wait on 1.5; its diagnostic decides between steering the rays here and stream 1's antialiasing term |
+| 2.3 | 2.2 | only if 2.2 shows something was missed |
+| 3.0 | 2.0 | |
+| 3.1 | 3.0 | |
+| 3.2 | 3.1 | gains from 3.3 (bands as levels) |
+| 3.3 | 3.1 | alongside 3.2 |
+| 3.4 | 3.2 | gains from 2.1 (equivolume depth) |
+| 3.5 | 3.2 | feeds stream 1 as an input |
+| 4.0 | 1.0 | |
+| 4.1 | 4.0 | the same work as 1.1's review pane |
+| 4.2 | 2.0, 4.0 | |
+| 4.3 | 3.2, 3.3, 4.0 | 3.4 adds panes when it publishes |
+
+**Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.1, 1.3 and 1.5; stream 2 at each phase), the streams that read it rerun on it. They do not wait for it: each phase works on whatever version is published.
+
+**The first complete pass** through all four streams: 1.0; then 2.0 and 4.0 in parallel; then 3.0, 3.1 and 3.2, with 4.2 alongside. It gives a white surface, columns, the viewer, and the first depth maps with a pial edge.
