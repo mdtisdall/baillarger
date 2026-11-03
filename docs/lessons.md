@@ -76,7 +76,7 @@ These bind every stream from its first version. A first version may be rough, bu
 - **No GPL dependencies,** with no exceptions. Where only a GPL library fits, use a permissive one or write the piece ourselves. State the licence when proposing a library.
 - **FreeSurfer is the model.** Its topology correction, pretess and strand thickening are the defaults to follow. Deviate only with cause and data. We do not run FreeSurfer, even as a benchmark.
 - **A person decides only where the data cannot.** Places that need judgment go into one review queue per stage. Each answer is a replayable edit: the automatic result is correct without it, and the review refines it.
-- **Assume no particular aseg source.** The aseg is an input with its own errors, read in the FreeSurfer label convention. Take evidence from the echoes, not from one tool's quirks.
+- **The WM label comes from our own segmentation,** which gives labels in the FreeSurfer convention and P(filled WM) (§3). The surface steps require both; there is no labels-only path. The label is still an input with its own errors: take evidence from the echoes, not from the quirks of the labels.
 
 ### Working rules
 
@@ -198,7 +198,8 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 | P(filled WM), float | `_label-WMfilled_probseg` | steps 2 and 3 | where handle walls fall; the antialiasing data term |
 | Fold spread of P | `_label-WMfilled_desc-foldsd_probseg` | step 5 | ranking the review queue |
 
-- Steps 2–4 also run from labels alone: handle removal then orders by distance, and antialiasing uses smoothness alone. That lets the surface steps run on the bootstrap labels, so the surface work does not wait for the network, and the network does not wait for the surface work.
+- Steps 2 and 3 require labels and P; there is no labels-only path. Step 5 uses the fold spread when it exists; during bootstrapping it ranks without it.
+- During bootstrapping, P is a stand-in from purple-mri (3d, phase 1). That lets the surface steps run before the first generation exists, so the surface work does not wait for the network, and the network does not wait for the surface work.
 
 The coupling that is real, decided once:
 
@@ -210,6 +211,7 @@ The coupling that is real, decided once:
 *Decisions taken*
 
 - The network gives evidence. Topology is guaranteed after it, by our own code (`handles`, `antialias`), never by the network.
+- Steps 2 and 3 require P as well as labels.
 - Only verified labels train later generations.
 - Test regions are labelled from scratch and never trained on.
 
@@ -245,7 +247,7 @@ The coupling that is real, decided once:
   - On the hemisphere: Betti (1, 111, 182) → (1, 0, 0) in 3.4 min at about 22 GB. Most moves are 1–2 voxels.
   - The meeting wall need not be the smallest cut: one cut of 2,047 voxels ran along a thin strand.
   - Batching walls per pass changes the result, so don't.
-- **Handle removal with probabilities** (planned; plan phase 1). Without P, the fronts claim voxels in order of distance to the other phase. With P, the object front claims in order of decreasing P and the background front in order of increasing P, so each wall falls where P is closest to 0.5. That is right only if P is calibrated near 0.5. Each fix records its margin, the P along its wall, and the review queue ranks by it. P matters to the surface mainly here: it decides which side of a fused bank a cut falls.
+- **Handle removal by probability** (planned; plan phase 1). The fronts claim voxels by P, not by distance to the other phase as the current code does: the object front claims in order of decreasing P and the background front in order of increasing P, so each wall falls where P is closest to 0.5. That is right only if P is calibrated near 0.5. Each fix records its margin, the P along its wall, and the review queue ranks by it. P matters to the surface mainly here: it decides which side of a fused bank a cut falls.
 - **Tight folds (misfacing faces)** (#81, #85). On the hemisphere the surface has 152 at 91 sites. Diagonal-only contacts in the label cause most of them: 74 of 90 sites have a checkerboard or corner-only contact within 4 voxels.
   - Thicken to 2s, widen gaps between surfaces, then make the mask well-composed, at s = 0.30 mm. This takes 90 sites to 5 and edges over 60° from 297 to 4, at a cost of +3.9 % area and a 90th-percentile neighbour angle of 5.4° against 3.9°.
   - s must not be a whole number of voxels along any axis: at 0.32 mm (exactly 2 voxels on one axis) the checkerboards rise from about 390 to 7,000. 0.26 mm is worse on every count; above 0.30 mm the bulk and area grow.
@@ -260,7 +262,7 @@ The coupling that is real, decided once:
   - Each vertex stays on its own grid edge, so the surface has no self-intersections by construction and keeps the edge keys.
   - A tilted plane's normals come out within 0.5° (the raw staircase is 31° off).
   - On the hemisphere: one closed genus-0 piece, 12.7 M vertices, 25.3 M faces, no self-intersecting faces; CPU and MPS identical bit for bit; 1,651 iterations, 16 min on MPS, peak 20–24 GB.
-- **Antialiasing with probabilities** (planned; plan phase 1). Without P, φ is shaped by thin-plate smoothness alone. With P, an optional data term pulls φ near the boundary towards a smooth function of P − 0.5, weighted by a per-voxel confidence (1/σ², once σ exists). The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. This smooths the staircase where P carries sub-voxel information; position finer than a voxel is a by-product, not a goal.
+- **Antialiasing with probability** (planned; plan phase 1). Besides thin-plate smoothness, a data term pulls φ near the boundary towards a smooth function of P − 0.5, weighted by a per-voxel confidence (1/σ², once σ exists). The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. This smooths the staircase where P carries sub-voxel information; position finer than a voxel is a by-product, not a goal.
 - **Smoothing is the wrong tool here:**
   - Smoothing the label and then contouring loses 2-voxel WM blades: at σ = 1 voxel it loses 16 % of V1V2's thin WM, shrinks convex surfaces by about σ²κ, and makes slivers.
   - Taubin λ|μ smoothing is unstable at short cutoffs. Tukey twicing never amplifies.
@@ -309,7 +311,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - **Whether a scribble also corrects the current hemisphere,** or only trains the next generation. A few strokes give no full-voxel edit, so the current correction might need the model rerun (or an interactive model, such as nnInteractive) to spread them.
 - Whether an automatic fix that a reviewer accepted (`leave`) counts as verified, and so trains the model.
 - How stream 3's feedback (for example, the GM/WM transition found along columns) becomes a stream 1 input. Does it edit the label, or adjust the surface stage?
-- **Whether steps 2–4 keep a labels-only path** once our segmentation exists, or require P. If they require it, §1's "Assume no particular aseg source" no longer holds and the fallbacks can go.
+- **The bootstrap's stand-in P.** If purple-mri cannot save its probabilities, the surface steps need another stand-in P before the first generation exists.
 - Open decisions for our own segmentation:
   - Where to train. nnU-Net needs CUDA for training; inference runs on the laptop.
   - The labelling tool for the test regions and the answers: our viewer, or ITK-SNAP / 3D Slicer with nnInteractive (Apache-2.0 code; check the licence of its weights, which may be non-commercial). Whichever it is must support scribbles as well as site answers.
@@ -343,8 +345,8 @@ Three tracks that can run in parallel: the surface steps, our own segmentation, 
   - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, missing tissue, and other labels only if a later stage needs them.
   - Test regions: a few boxes per hemisphere (start with V1V2, PCC_SPL, M1S1, and the V1V2 seam review points). They are labelled from scratch, not by correcting the seed labels, so the seed does not anchor them, and they are never used in training. Format: a BIDS `_dseg` with a versioned sidecar spec that records the box and the labeller.
 - **Phase 1: the surface steps read probabilities.** Independent of the network; exact-answer tests on phantoms first.
-  1. `handles.remove_handles` takes an optional priority volume. With P, the object front claims in order of decreasing P and the background front in order of increasing P, so the walls fall where P is closest to 0.5. Distance ordering stays the default. Phantom test: a handle whose bridge has a known low-P place away from its thinnest place; the cut must fall there.
-  2. `antialias` takes an optional data term: near the boundary, φ is pulled towards a smooth function of P − 0.5, weighted by a per-voxel confidence. The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. Phantom test: a plane at a known sub-voxel offset, with P a blurred step across it; the vertices must recover the offset.
+  1. `handles.remove_handles` takes a required priority volume, P: the object front claims in order of decreasing P and the background front in order of increasing P, so the walls fall where P is closest to 0.5. Distance ordering goes. Phantom test: a handle whose bridge has a known low-P place away from its thinnest place; the cut must fall there.
+  2. `antialias` takes a required data term: near the boundary, φ is pulled towards a smooth function of P − 0.5, weighted by a per-voxel confidence. The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. Phantom test: a plane at a known sub-voxel offset, with P a blurred step across it; the vertices must recover the offset.
   3. Each fix in `desc-wmtopofixes` records its margin, the P along its wall. The review queue ranks by it.
   4. Bootstrapping: a stand-in P on the real hemisphere until our own exists: purple-mri rerun with its probabilities saved (nnU-Net `--save_probabilities`), summed over `FILLED_LABELS`. Ask the purple-mri authors whether their container can do this.
   5. Diagnostics, P ordering against distance ordering on the hemisphere: where the walls move, the normal metrics, and views of the walls that move most.
