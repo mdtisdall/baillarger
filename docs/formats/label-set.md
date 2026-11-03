@@ -7,10 +7,7 @@ follow this document. The values are the values of FreeSurferColorLUT.
 This document has no sidecar. A change to a class or to a rule changes the
 version.
 
-A decision marked **Proposed** is a proposal. The user decides it in the
-review of the PR that adds this document. Until then the code uses the
-proposal. The user decided the choroid plexus, the ventral DC and the WM
-hypointensities (77); the other Proposed rows are not decided yet.
+Each decision in this document is decided by the user.
 
 ## The classes
 
@@ -28,12 +25,12 @@ Right values, the left hemisphere the Left values.
 | Putamen | 51 | 12 | yes | decided |
 | Pallidum | 52 | 13 | yes | decided |
 | Corpus callosum | 192 | 192 | yes | decided |
-| Accumbens | 58 | 26 | yes | Proposed |
+| Accumbens | 58 | 26 | yes | decided |
 | Ventral DC | 60 | 28 | yes | decided |
-| Vessel | 62 | 30 | yes | Proposed |
+| Vessel | 62 | 30 | yes | decided |
 | Choroid plexus | 63 | 31 | follows the lateral ventricle | decided |
-| Inferior lateral ventricle | 44 | 5 | no | Proposed |
-| Amygdala | 54 | 18 | no | Proposed |
+| Inferior lateral ventricle | 44 | 5 | no | decided |
+| Amygdala | 54 | 18 | no | decided |
 | Hippocampus | 53 | 17 | open | open |
 
 The network gives at least outside, WM, cortex, the filled classes and the
@@ -104,19 +101,13 @@ later labels, from the network or from a person.
 
 | Label | Decision | Reason |
 |---|---|---|
-| Accumbens (58, 26) | In. Proposed | FreeSurfer fills it. It is deep grey matter inside the basal forebrain. |
+| Accumbens (58, 26) | In. Decided | FreeSurfer fills it. It is deep grey matter inside the basal forebrain. |
 | Ventral DC (60, 28) | In. Decided | FreeSurfer fills it. It touches the brainstem. At the whole-brain stage, the cut that separates the hemispheres and the brainstem must separate the ventral DC from the midbrain. |
-| Vessel (62, 30) | In. Proposed | FreeSurfer fills it. A vessel that is left out makes a cavity in the mask. |
+| Vessel (62, 30) | In. Decided | FreeSurfer fills it. A vessel that is left out makes a cavity in the mask. |
 | Choroid plexus (63, 31) | Follows the lateral ventricle. Decided | It has the same class as the lateral ventricle. While the lateral ventricle is filled, the choroid plexus is filled. If the user makes the ventricles outside (after a measurement in phase 1.0), the choroid plexus is outside with them. FreeSurfer uses a neighbourhood rule, which a class set cannot hold. |
-| Inferior lateral ventricle (44, 5) | Out. Proposed | FreeSurfer does not fill the voxel. It is the temporal horn beside the hippocampus, and the hippocampus is not in the mask. |
-| Amygdala (54, 18) | Out. Proposed | FreeSurfer has no case for it. |
+| Inferior lateral ventricle (44, 5) | Out. Decided | FreeSurfer does not fill the voxel. It is the temporal horn beside the hippocampus, and the hippocampus is not in the mask. |
+| Amygdala (54, 18) | Out. Decided | FreeSurfer has no case for it. |
 | WM hypointensities (77) | Not in the label set. Decided | The network labels them as WM, which is filled. Add 77 only if a later analysis needs it as its own class. |
-
-### Decided by the user
-
-1. The choroid plexus follows the lateral ventricle (above).
-2. The ventral DC is in the filled mask (above).
-3. The WM hypointensities (77) are not in the label set (above).
 
 ## Excisions are outside
 
