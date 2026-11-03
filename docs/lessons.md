@@ -330,8 +330,8 @@ The coupling that is real, decided once:
 
 | Output | Spec | Used by |
 |---|---|---|
-| The structure tensor per cortex voxel (6 unique components, float32), at derivative scale 1 voxel and integration scale 2 voxels | none yet | the data normal and coherence below; stream 3 (planned checks of laminar orientation) |
-| The data normal (the tensor's leading eigenvector, signed by WM distance through tissue) and its coherence | none yet | step 4 (judging the surface's normals; a term only if adopted, Open); stream 2, step 2 (diagnostics: how far each ray departs from it) |
+| The structure tensor per cortex voxel (6 unique components), at derivative scale 1 voxel and integration scale 2 voxels | not stored: computed on demand for a superblock and its halo | the data normal and coherence below; stream 3 (planned checks of laminar orientation) |
+| The data normal (the tensor's leading eigenvector, signed by WM distance through tissue) and its coherence | not stored: computed on demand | step 4 (judging the surface's normals; a term only if adopted, Open); stream 2, step 2 (diagnostics: how far each ray departs from it); the viewer, per brick on screen |
 
 *Design and lessons*
 
@@ -340,7 +340,8 @@ The coupling that is real, decided once:
   - Coherence falls to 0.05–0.38 at contacts and fundi, which is where most column failures happen.
   - The normal has no sign. Sign it by the WM distance through tissue, with fluid as an obstacle. A straight-line distance flips the sign beside open sulci (CP; #46).
   - Under the majority rule (3b), a fused sulcus is cortex in the mask, so a window there can take in both banks. Coherence already falls at contacts, which marks those voxels; whether the window should also stop where the two banks' WM-distance fronts meet is open.
-- It needs only the echoes and the corrected labels, not the surface, so it can run beside step 4. It belongs to stream 1 so that the surface's check and stream 2's misalignment diagnostic read one published output, and no stream waits on another in a cycle.
+- **A sampler, not a file.** Every quantity here is local: derivative scale 1 voxel, integration scale 2 voxels, and the sign from the capped WM distance (§2). Recomputing reads echoes 2 and 3 (8 B per voxel) and runs a few separable convolutions, so it is bandwidth-bound with little compute; reading a stored result would cost 24 B per voxel for the tensor or 16 B for the normal and coherence, and about 10¹¹ bytes of storage for a 50 µm whole brain. So `orient` is code with a written contract (the echoes, the scales, the sign rule), called for a superblock and its halo, like stream 3's column volume. A cache is an optimisation to add later if the viewer needs one, not an interface.
+- It needs only the echoes and the corrected labels, not the surface, so it can run beside step 4. It belongs to stream 1 so that the surface's check and stream 2's misalignment diagnostic call one piece of code, and no stream waits on another in a cycle.
 - **Doesn't work:** tracing step by step along the raw tensor normal: no field, no stop, so paths stall and run on (SF F3). Stream 2's rays use no field (§4c).
 
 #### Step 4: the surface (`mesh`)
@@ -504,7 +505,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   4. The ITK-SNAP escape hatch: export a crop, import the painted voxels as an answer.
   5. `wm-edits/1` edited so that answers stand on their own, in an append-only log with supersession.
   6. `dseg` publishes its fixes as a table and a sparse diff (step 2), under `wm-dseg-fixes/1`, with replay and revert tests; every run's diff is kept, keyed by its input SHAs.
-  7. Step 3, `orient`: port the tensor tools from `streamlines` (torch, blocks), publish the structure tensor and the signed data normal with its coherence, and add agreement of the surface normals with it to the surface diagnostics.
+  7. Step 3, `orient`: port the tensor tools from `streamlines` (torch, blocks) as an on-demand sampler of the structure tensor and the signed data normal with its coherence, with exact tests (phantom planes and spheres), and add agreement of the surface normals with it to the surface diagnostics.
   8. Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
 - **Phase 2: data, label set, test regions.**
   - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 8 is needed.
@@ -1128,7 +1129,6 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | `wm-edits/1` | Exists as voxel-row diffs against a SHA-pinned aseg, with each answer's site and choice; to be revised so answers stand on their own (verified labels, valid for any input), in an append-only log where a correction supersedes and never rewrites | revision: stream 1, phase 1 |
 | Cut seeds; the cut mask; the cut-face flag | Replayable seed points in scanner mm with their kind; the outside voxels against a cut face; a per-vertex flag keyed by edge key | stream 1, phase 0 |
 | `wm-sites/1` | The review queue's sites | stream 1, phase 1 (#81) |
-| Structure tensor; data normal and coherence | `orient`'s outputs (§3c, step 3) | stream 1, phase 1 |
 | Test regions | Labelled boxes, with the box and the labeller | stream 1, phase 2 |
 | Training export | The nnU-Net dataset, with seed and verified labels kept apart, with provenance | stream 1, phase 4 |
 | Our `_dseg`, P, fold spread | The network's outputs, with the model generation in each sidecar | stream 1, phase 5 |
