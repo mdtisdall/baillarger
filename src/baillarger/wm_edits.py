@@ -3,7 +3,7 @@
 The edits are diffs against one input segmentation (the aseg), which is never
 changed: per voxel its old and new label and the answer it belongs to, and per
 answer the site, the choice and when. The dseg command
-(baillarger.white.write_wm_topo) applies them before its automatic correction,
+(baillarger.white_dseg.write_wm_topo) applies them before its automatic correction,
 so no edit can leave a handle, and they apply again when the correction
 changes.
 

@@ -125,8 +125,9 @@ class Surface:
             lambda: IN.site_inflation(self.vmm, self.f, log=log),
         )
         self.infl: list[Float] = [self.vmm] + [x.astype(float) for x in Ip["x"]]
+        # each level is named by its diffusion length, sqrt(2 tau)
         self.infl_names = ["true surface"] + [
-            f"inflated, lam {lv:g}" for lv in Ip["levels"]
+            f"inflated, {np.sqrt(2 * lv):.0f} mm" for lv in Ip["levels"]
         ]
         self.vf = IN.vertex_faces(self.f, len(self.vmm))
         self.sulc = IN.sulcal_depth(self.vmm, self.infl[-1], self.f)

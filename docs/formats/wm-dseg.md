@@ -2,9 +2,9 @@
 
 SpecVersion `wm-dseg/1` (the corrected segmentation) and `wm-dseg-fixes/1`
 (the diagnostic image of the changes). Written by
-`python -m baillarger.white dseg ASEG [--edits EDITS] --out DERIV`
-(`baillarger.white.write_wm_topo`); the keys are enforced by
-`baillarger.white.DSEG_SPEC` and `FIXES_SPEC`, and `tests/test_bids.py` checks
+`python -m baillarger.white_dseg ASEG [--edits EDITS] --out DERIV`
+(`baillarger.white_dseg.write_wm_topo`); the keys are enforced by
+`baillarger.white_dseg.DSEG_SPEC` and `FIXES_SPEC`, and `tests/test_bids.py` checks
 that the tables below list the same keys, types and requirements.
 
 ## Files
@@ -30,13 +30,10 @@ it is not there. BIDS's `desc` entity and `dseg` suffix are standard; the
 The hemisphere is the one whose WM label is in the input (41: R, 2: L; both
 or neither is refused). The WM mask is the voxels with a filled label:
 
-| Hemisphere | Filled labels (FreeSurfer LUT) |
-|---|---|
-| R | 41 WM, 43 lateral ventricle, 49 thalamus, 50 caudate, 51 putamen, 52 pallidum, 192 corpus callosum |
-| L | 2 WM, 4 lateral ventricle, 10 thalamus, 11 caudate, 12 putamen, 13 pallidum, 192 corpus callosum |
-
+The filled labels are in `docs/formats/label-set.md` (`baillarger.labels.FILLED_LABELS`).
 The hippocampus (53 / 17) is not filled: it is archicortex, whose laminar
-axis does not run out from the WM below it.
+axis does not run out from the WM below it. Phase 1.8 decides whether this
+stays.
 
 1. Cavities of the mask (background components, Kuhn adjacency, that do not
    reach the border of the mask's bounding box plus 2 voxels) are filled.

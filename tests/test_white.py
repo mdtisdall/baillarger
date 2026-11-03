@@ -10,7 +10,7 @@ import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 
-from baillarger import data, white
+from baillarger import data, white, white_dseg, white_surf
 from baillarger import mesh_smoothing as S
 from baillarger.handles import kuhn_betti
 from baillarger.mesh import marching_tetrahedra, topology
@@ -21,14 +21,14 @@ VOX = (0.2, 0.16, 0.2)
 
 def phantom_aseg() -> npt.NDArray[np.int16]:
     """An aseg with two WM components: a block drilled by a 2 x 2 tunnel (a
-    fill of 4 voxels) and holding a ventricle, inside cortex; and a ring 5
+    fill of 4 voxels) and holding a thalamus, inside cortex; and a ring 5
     voxels wide closed by a one-voxel rod across a slit of background (a cut
     of 1)."""
     a = np.zeros(SHAPE, np.int16)
     a[8:24, 6:22, 4:20] = data.ASEG_CORTEX
     a[10:22, 8:20, 6:18] = data.ASEG_WM
     a[15:17, 13:15, 6:18] = data.ASEG_CORTEX  # the tunnel
-    a[11:13, 9:11, 8:10] = 43  # a ventricle inside the WM
+    a[11:13, 9:11, 8:10] = 49  # a thalamus inside the WM
     a[25:37, 3:33, 22:28] = data.ASEG_WM  # 5 wide round a 2 x 20 hole
     a[30:32, 8:28, 22:28] = 0
     a[25:30, 16:18, 22:28] = 0  # the slit
@@ -50,7 +50,7 @@ def write_data(d: Path) -> tuple[npt.NDArray[np.int16], Path]:
         side.write_text(json.dumps({"EchoTime": te, "EchoNumber": k + 1}))
     a = phantom_aseg()
     nib.save(nib.nifti1.Nifti1Image(a, aff), data.aseg_path(d))
-    return a, white.write_wm_topo(data.aseg_path(d), d / "deriv")["dseg"]
+    return a, white_dseg.write_wm_topo(data.aseg_path(d), d / "deriv")["dseg"]
 
 
 def read_labels(p: Path) -> npt.NDArray[np.int16]:
@@ -61,8 +61,8 @@ def read_labels(p: Path) -> npt.NDArray[np.int16]:
 
 def test_filled_labels_give_the_corrected_mask(tmp_path: Path) -> None:
     a, p = write_data(tmp_path)
-    filled = white.filled_labels(p)
-    assert filled == white.FILLED_LABELS["R"]
+    filled = white_dseg.filled_labels(p)
+    assert filled == white_dseg.FILLED_LABELS["R"]
     mask = np.isin(read_labels(p), filled)
     assert kuhn_betti(np.isin(a, filled)) == (2, 2, 0)
     assert kuhn_betti(mask) == (2, 0, 0)
@@ -87,8 +87,8 @@ def test_white_mesh_of_a_ball() -> None:
 
 def test_mesh_pieces_on_the_phantom() -> None:
     a = phantom_aseg()
-    v, f = white.white_mesh(np.isin(a, white.FILLED_LABELS["R"]))
-    ps = white.mesh_pieces(v, f, VOX)
+    v, f = white.white_mesh(np.isin(a, white_dseg.FILLED_LABELS["R"]))
+    ps = white_surf.mesh_pieces(v, f, VOX)
     assert [p["genus"] for p in ps] == [1, 1]
     assert [p["boundary_loops"] for p in ps] == [0, 0]
     assert ps[0]["V"] >= ps[1]["V"] and sum(p["F"] for p in ps) == len(f)

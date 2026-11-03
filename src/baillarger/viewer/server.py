@@ -33,8 +33,15 @@ Requests:
 - Labels only (no column volume; --labels): /meta and /echo2.nii.gz come from the
   review, and only the page, /events, /state and the label routes are served.
 - A white surface alone (--white, baillarger.viewer.white_view): /meta, /mesh,
-  /vertex, /snap and /white.gii come from its overview, and only those, the page,
-  /events and /state are served.
+  /vertex, /snap and /white.gii come from its overview; /white/echo<k>.nii.gz,
+  /white/surface.gii and /white/overlay.nii.gz?c=i,j,k are the volume pane's box
+  round voxel (i, j, k); only those, the page, /events and /state are served.
+- The volume as bricks (baillarger.viewer.bricks), in every mode that has a volume
+  (the column volume's box, the label review's box, or with --white the whole echo 2):
+  /volume (its name, without reading it; 404: none), /volume/meta (the levels' shapes
+  and affines, the brick size, the dtype, the default window: read on first use),
+  /volume/bricks?level=L&b=i,j,k;i,j,k;... (those bricks' bytes, one after another;
+  gzip when the page accepts it).
 - POST /state {from, patch}: merge patch into the state; every page gets
   {from, seq, patch}.
 - POST /filters/run {from, params}: start a filter (one at a time, in a thread) or
@@ -45,6 +52,7 @@ Requests:
 """
 
 import argparse
+import gzip
 import json
 import queue
 import threading
@@ -56,8 +64,10 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from baillarger.data import echo_path
 from baillarger.viewer import filters as VF
 from baillarger.viewer import streamlines as SV
+from baillarger.viewer.bricks import ArrayPyramid, LazyVolume
 from baillarger.viewer.data import Site
 from baillarger.viewer.labels import LabelReview
 from baillarger.viewer.white_view import WhiteView
@@ -113,6 +123,15 @@ def round3(a: Any) -> list[float | None]:
 
 # the routes that need no column volume (labels-only mode serves these, /meta and
 # /echo2.nii.gz from the review)
+# a white surface's box round a voxel (?c=i,j,k): echoes, the true surface, the overlay
+BOX_ROUTES = {
+    "/white/echo1.nii.gz": "1",
+    "/white/echo2.nii.gz": "2",
+    "/white/echo3.nii.gz": "3",
+    "/white/surface.gii": "surface",
+    "/white/overlay.nii.gz": "overlay",
+}
+
 # the page and the shared state, which every mode serves and none computes
 PAGE = ("/", "/index.html", "/events", "/state")
 NO_SITE = (*PAGE, "/labels/list", "/labels.nii.gz")
@@ -123,6 +142,7 @@ class Handler(BaseHTTPRequestHandler):
     shared: Shared
     labels: LabelReview | None = None
     white: WhiteView | None = None
+    volume: LazyVolume | None = None
     lock = threading.Lock()  # one site computation at a time
     groups: dict[tuple[int, float], dict[str, list[int]]] = {}
     axes: dict[int, dict[str, list[list[float]]]] = {}
@@ -217,9 +237,40 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self.shared.drop(q)
 
+    def volume_route(self, path: str, q: dict[str, str]) -> None:
+        """/volume, /volume/meta and /volume/bricks (not under the site lock: the
+        pyramid is read only once built, and LazyVolume builds it once)."""
+        v = self.volume
+        if v is None:
+            self.send_error(404)
+        elif path == "/volume":
+            self.send(json.dumps(dict(name=v.name)).encode(), "application/json")
+        elif path == "/volume/meta":
+            self.send_json(v.meta)
+        elif path == "/volume/bricks":
+            try:
+                body = v.bricks(int(q["level"]), q.get("b", ""))
+            except (KeyError, ValueError) as exc:
+                self.send(str(exc).encode(), "text/plain", 400)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            if "gzip" in (self.headers.get("Accept-Encoding") or ""):
+                body = gzip.compress(body, compresslevel=1)
+                self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_error(404)
+
     def do_GET(self) -> None:
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if u.path == "/volume" or u.path.startswith("/volume/"):
+            self.volume_route(u.path, q)
+            return
         if self.white is not None:  # a white surface alone
             w = self.white
             if u.path == "/meta":
@@ -234,6 +285,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(lambda: w.snap(mm_ or []))
             elif u.path == "/white.gii":
                 self.binary(w.white_bytes)
+            elif u.path in BOX_ROUTES:
+                cv = [int(x) for x in q.get("c", "0,0,0").split(",")]
+                if len(cv) != 3:
+                    self.send_error(400)
+                    return
+                kind = BOX_ROUTES[u.path]
+                if kind == "surface":
+                    self.binary(lambda: w.surface_bytes(cv))
+                elif kind == "overlay":
+                    self.binary(lambda: w.overlay_bytes(cv))
+                else:
+                    self.binary(lambda: w.echo_bytes(int(kind), cv))
             elif u.path not in PAGE and not u.path.startswith("/static/"):
                 self.send_error(404)
             if u.path not in PAGE and not u.path.startswith("/static/"):
@@ -394,13 +457,16 @@ def serve(
     port: int,
     labels: LabelReview | None = None,
     white: WhiteView | None = None,
+    volume: LazyVolume | None = None,
 ) -> ThreadingHTTPServer:
     """The server; without a site, labels (labels only) or white (a white surface
-    alone) is needed."""
+    alone) is needed. volume: the bricks of the volume pane (baillarger.viewer.bricks),
+    if any."""
     if site is None and labels is None and white is None:
         raise ValueError("give a column volume, label changes or a white surface")
     Handler.site = site
     Handler.white = white
+    Handler.volume = volume
     Handler.shared = Shared()
     Handler.groups = {}
     Handler.axes = {}
@@ -425,7 +491,12 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--joint", type=Path, help="joint_<tag>.npz: the levels")
     ap.add_argument("--pia", type=Path, help="pia_<name>.npz: single-surface horizon")
     ap.add_argument("--priority", type=Path, help="edit_priority_<tag>.npz")
-    ap.add_argument("--echo", type=Path, help="echo 2 of the full grid (default: data)")
+    ap.add_argument(
+        "--echo",
+        type=Path,
+        help="echo 2 of the full grid (default: data); with --white, the volume pane's "
+        "image (if the file is there)",
+    )
     ap.add_argument(
         "--labels",
         type=Path,
@@ -434,8 +505,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument(
         "--white",
         type=Path,
-        help="a white surface from the mesh command (..._white.surf.gii) with its "
-        "overview, alone",
+        help="a white surface from baillarger.white_surf (..._white.surf.gii) with "
+        "its overview from baillarger.white_overview, alone",
     )
     ap.add_argument("--port", type=int, default=8790)
     a = ap.parse_args(argv)
@@ -461,7 +532,24 @@ def main(argv: list[str] | None = None) -> None:
         )
         if a.labels:
             review = LabelReview(a.labels, site.lo, site.shape, site.affine)
-    srv = serve(site, a.port, review, white)
+    volume: LazyVolume | None = None
+    if site is not None:
+        s_ = site
+        volume = LazyVolume(
+            lambda: ArrayPyramid.from_nifti(s_.echo_path, s_.lo, s_.shape),
+            f"{s_.echo_path.name} (box)",
+        )
+    elif review is not None:
+        r_ = review
+        e_ = r_.echo or echo_path(2)
+        volume = LazyVolume(
+            lambda: ArrayPyramid.from_nifti(e_, r_.lo, r_.shape), f"{e_.name} (box)"
+        )
+    else:
+        e_ = a.echo or echo_path(2)
+        if e_.is_file():
+            volume = LazyVolume(lambda: ArrayPyramid.from_nifti(e_), e_.name)
+    srv = serve(site, a.port, review, white, volume)
     print(
         f"serving on http://127.0.0.1:{a.port}/ ({time.time() - t0:.0f} s)", flush=True
     )

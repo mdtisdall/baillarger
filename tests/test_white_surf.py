@@ -1,4 +1,4 @@
-"""Tests for the mesh command (baillarger.white.write_white_surface) and its
+"""Tests for the mesh command (baillarger.white_surf.write_white_surface) and its
 reader (WhiteSurface): GIfTI with external binary data, the block index and
 the sidecar, on a synthetic segmentation."""
 
@@ -11,7 +11,8 @@ import numpy.typing as npt
 import pytest
 from nibabel.gifti.gifti import GiftiImage
 
-from baillarger import bids, white
+from baillarger import bids, white_dseg, white_surf
+from baillarger import mesh_smoothing as S
 from baillarger.mesh import topology
 
 VOX = (0.2, 0.16, 0.2)
@@ -31,7 +32,7 @@ def write_dseg(d: Path) -> Path:
     src = d / "in" / "sub-T01_ses-S1_aseg.nii.gz"
     src.parent.mkdir(parents=True)
     nib.save(nib.nifti1.Nifti1Image(a, AFF), src)
-    white.main(["dseg", str(src), "--out", str(d / "deriv")])
+    white_dseg.main([str(src), "--out", str(d / "deriv")])
     return d / "deriv/sub-T01/ses-S1/anat/sub-T01_ses-S1_desc-wmtopo_dseg.nii.gz"
 
 
@@ -40,14 +41,14 @@ def surface(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
     d = tmp_path_factory.mktemp("surf")
     dseg = write_dseg(d)
     out = d / "deriv"
-    white.main(["mesh", str(dseg), "--out", str(out), "--block-cells", "8"])
+    white_surf.main([str(dseg), "--out", str(out), "--block-cells", "8"])
     surf = out / "sub-T01/ses-S1/anat/sub-T01_ses-S1_hemi-R_white.surf.gii"
     return dseg, surf
 
 
 def test_the_surface_and_its_sidecar(surface: tuple[Path, Path]) -> None:
     dseg, surf = surface
-    s = white.WhiteSurface.load(surf)
+    s = white_surf.WhiteSurface.load(surf)
     s.check(dseg)
     t = topology(s.f, len(s.v))
     assert t["components"] == 2 and t["genus"] == 0 and t["boundary_loops"] == 0
@@ -67,11 +68,21 @@ def test_the_surface_and_its_sidecar(surface: tuple[Path, Path]) -> None:
     assert rad.min() > 10 and rad.max() < 13
     assert np.all(np.sum(s.normals[ball] * (s.v[ball] - c), 1) > 0)
     assert np.allclose(np.linalg.norm(s.normals, axis=1), 1, atol=1e-5)
+    # the normal length: in [0, 1], near 1 on the smooth ball and block, and
+    # the length that mesh_smoothing gives for the vertices as read. On the
+    # ball (radius r about 11 voxels) the unit normals turn by about s / r
+    # over the smoothing support (s about 2 voxels), so the length is about
+    # 1 - (s / r)**2 / 2, near 0.98
+    assert s.normlen.dtype == np.float32 and s.normlen.shape == (len(s.v),)
+    assert s.normlen.min() >= 0 and s.normlen.max() <= 1
+    assert np.median(s.normlen) > 0.98
+    _, ref = S.smooth_normals_and_length(s.v, s.f)
+    assert np.abs(s.normlen - np.minimum(ref, 1)).max() < 1e-4
 
 
 def test_nibabel_reads_the_external_data(surface: tuple[Path, Path]) -> None:
     _, surf = surface
-    s = white.WhiteSurface.load(surf)
+    s = white_surf.WhiteSurface.load(surf)
     g = GiftiImage.from_filename(str(surf), mmap=True)
     pts, tri = g.agg_data(("pointset", "triangle"))
     assert isinstance(pts, np.memmap)
@@ -88,6 +99,16 @@ def test_nibabel_reads_the_external_data(surface: tuple[Path, Path]) -> None:
         str(surf.with_name(s.sidecar["NormalsFile"])), mmap=True
     )
     assert np.allclose(n.darrays[0].data, s.normals, atol=1e-6)
+    nl = GiftiImage.from_filename(
+        str(surf.with_name(s.sidecar["NormLenFile"])), mmap=True
+    ).darrays[0]
+    # one value per vertex: a 1-D array, shape (n,)
+    assert nl.dims == [len(s.v)]
+    assert nl.data.dtype == np.float32 and nl.data.shape == (len(s.v),)
+    assert np.array_equal(nl.data, s.normlen)
+    assert nl.ext_fname == surf.name.replace(
+        "_white.surf.gii", "_desc-normlen_white.dat"
+    )
     # the edge keys: int64 as (low, high) int32 words, one per vertex
     k = (
         GiftiImage.from_filename(
@@ -103,26 +124,27 @@ def test_nibabel_reads_the_external_data(surface: tuple[Path, Path]) -> None:
 
 def test_blocks_cover_the_mesh(surface: tuple[Path, Path]) -> None:
     _, surf = surface
-    whole = white.WhiteSurface.load(surf)
+    whole = white_surf.WhiteSurface.load(surf)
     idx = np.loadtxt(surf.with_name(whole.sidecar["BlocksFile"]), skiprows=1)
     assert len(idx) == whole.sidecar["Blocks"] > 8
     header = surf.with_name(whole.sidecar["BlocksFile"]).read_text().split("\n")[0]
-    assert tuple(header.split("\t")) == white.BLOCK_COLUMNS
+    assert tuple(header.split("\t")) == white_surf.BLOCK_COLUMNS
     faces = []
     for row in idx:
         blk = (int(row[0]), int(row[1]), int(row[2]))
-        b = white.WhiteSurface.load(surf, block=blk)
+        b = white_surf.WhiteSurface.load(surf, block=blk)
         g = b.vertex_ids[b.f]  # global indices
         assert np.array_equal(g, whole.f[int(row[5]) : int(row[6])])
         assert np.allclose(b.v, whole.v[b.vertex_ids])
         assert np.allclose(b.normals, whole.normals[b.vertex_ids])
+        assert np.array_equal(b.normlen, whole.normlen[b.vertex_ids])
         assert np.array_equal(b.vertex_key, whole.vertex_key[b.vertex_ids])
         # the box holds the vertices as read, with no tolerance
         assert np.all(b.v >= row[7:10]) and np.all(b.v <= row[10:13])
         assert np.all(row[10:13] - row[7:10] >= 0)
         faces.append(g)
     assert np.array_equal(np.concatenate(faces), whole.f)
-    empty = white.WhiteSurface.load(surf, block=(100, 100, 100))
+    empty = white_surf.WhiteSurface.load(surf, block=(100, 100, 100))
     assert len(empty.f) == 0 and len(empty.v) == 0
 
 
@@ -130,8 +152,8 @@ def test_the_files_move_together(surface: tuple[Path, Path], tmp_path: Path) -> 
     _, surf = surface
     for p in surf.parent.iterdir():
         shutil.copy(p, tmp_path / p.name)
-    a = white.WhiteSurface.load(surf)
-    b = white.WhiteSurface.load(tmp_path / surf.name)
+    a = white_surf.WhiteSurface.load(surf)
+    b = white_surf.WhiteSurface.load(tmp_path / surf.name)
     assert np.array_equal(a.v, b.v) and np.array_equal(a.f, b.f)
 
 
@@ -144,9 +166,9 @@ def test_the_mesh_command_refuses_a_handle(tmp_path: Path) -> None:
     a[19:22, 18:21, 12:24] = 0
     nib.save(nib.nifti1.Nifti1Image(a, img.affine, img.header), dseg)
     with pytest.raises(ValueError, match="Betti"):
-        white.write_white_surface(dseg, tmp_path / "deriv2")
-    s = white.WhiteSurface.load(
-        white.write_white_surface(
+        white_surf.write_white_surface(dseg, tmp_path / "deriv2")
+    s = white_surf.WhiteSurface.load(
+        white_surf.write_white_surface(
             write_dseg(tmp_path / "again"), tmp_path / "deriv3"
         ).paths["surf"]
     )
@@ -181,7 +203,8 @@ def test_float32_matches_the_float64_reference() -> None:
 
 def test_the_reader_gives_float32(surface: tuple[Path, Path]) -> None:
     _, surf = surface
-    s = white.WhiteSurface.load(surf)
+    s = white_surf.WhiteSurface.load(surf)
     assert s.v.dtype == np.float32 and s.normals.dtype == np.float32
-    b = white.WhiteSurface.load(surf, block=(0, 0, 0))
+    assert s.normlen.dtype == np.float32
+    b = white_surf.WhiteSurface.load(surf, block=(0, 0, 0))
     assert b.v.dtype == np.float32
