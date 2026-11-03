@@ -56,11 +56,15 @@ def edge_graph(
     """The symmetric graph of a mesh with vertices v (voxel coordinates): its
     edges and the edges across each pair of neighbouring triangles, weighted
     by their straight-line lengths in mm."""
-    E = np.concatenate([edges(f), _across(f)])
+    E = np.sort(np.concatenate([edges(f), _across(f)]), 1)
+    E = np.unique(E, axis=0)  # a pair that occurs twice gets its length once
     vox = np.asarray(voxel_mm, np.float64)
     w = np.linalg.norm((v[E[:, 0]] - v[E[:, 1]]) * vox, axis=1)
-    G = coo_matrix((w, (E[:, 0], E[:, 1])), shape=(len(v),) * 2).tocsr()
-    out: csr_matrix = G.maximum(G.T).tocsr()
+    n = (len(v),) * 2
+    out: csr_matrix = (
+        coo_matrix((w, (E[:, 0], E[:, 1])), shape=n)
+        + coo_matrix((w, (E[:, 1], E[:, 0])), shape=n)
+    ).tocsr()
     return out
 
 
