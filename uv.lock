@@ -97,7 +97,6 @@ dependencies = [
     { name = "pyamg" },
     { name = "scikit-fmm" },
     { name = "scipy" },
-    { name = "thinqpbo" },
     { name = "torch" },
 ]
 
@@ -121,7 +120,6 @@ requires-dist = [
     { name = "pyamg", specifier = ">=5.3.0" },
     { name = "scikit-fmm", specifier = ">=2025.6.23" },
     { name = "scipy", specifier = ">=1.18.1" },
-    { name = "thinqpbo", specifier = ">=0.1.5" },
     { name = "torch", specifier = ">=2.15" },
 ]
 
@@ -1825,28 +1823,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl", hash = "sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5", size = 6299353, upload-time = "2025-04-27T18:04:59.103Z" },
-]
-
-[[package]]
-name = "thinqpbo"
-version = "0.1.5"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c4/85/c8e6e751d6abaf81779c2f9ce122574cdac0f12359827abe0bf99782cd64/thinqpbo-0.1.5.tar.gz", hash = "sha256:6b0855726472132d7cbc475c088b67e083cc73077d799268341fc19c17c52ccc", size = 155995, upload-time = "2025-04-04T13:41:28.78Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d7/6a/acf5b68b217a81ad5ebac2171e4a6948c1105ab46aec905fc727dddc72a7/thinqpbo-0.1.5-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:07cfa3fe1281e24da67d8c75ea5e1ac9fd6e530e380b62471d17b15876041a84", size = 115862, upload-time = "2025-04-04T13:40:32.23Z" },
-    { url = "https://files.pythonhosted.org/packages/1b/cc/2853c155ab01593e8391023f03a433a75f2e8a0a1f773404c68d70babd8d/thinqpbo-0.1.5-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1b2ef86ee9a343271e280aa2e800b18ea06a9338bdad2cc2e713b1c935077846", size = 591192, upload-time = "2025-04-04T13:40:33.431Z" },
-    { url = "https://files.pythonhosted.org/packages/f7/db/9ff562795ce9b61cb52a5f1b47dbf29964133dc0e1eb3a68b0002276960c/thinqpbo-0.1.5-cp312-cp312-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:8fb15288757389261a460045ed3d610d4e248d5b962aa12d2f98dfd1d6f01e7d", size = 561880, upload-time = "2025-04-04T13:40:34.666Z" },
-    { url = "https://files.pythonhosted.org/packages/0f/76/a971553d9a847f5c2b6c391990931176a90a97646a1b660dc3775d578b11/thinqpbo-0.1.5-cp312-cp312-musllinux_1_2_i686.whl", hash = "sha256:0a9570a719d2ff90b870025b59bbaf5b0e5a1c80e4694ef2fa99cf568c98b4d2", size = 1712844, upload-time = "2025-04-04T13:40:36.003Z" },
-    { url = "https://files.pythonhosted.org/packages/cf/07/7e82cf486d0805ce1241759cc9991b572c55d83f40fde2542ffb515c49ad/thinqpbo-0.1.5-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:02578ddb865454bc6d66a405144bed01ca78f36128026ab71e7b0c254d629eb5", size = 1610174, upload-time = "2025-04-04T13:40:37.798Z" },
-    { url = "https://files.pythonhosted.org/packages/43/d9/9100d00aa8051aa5fccd2f29bccbf333179c88a09c2829fde0c6ce89b889/thinqpbo-0.1.5-cp312-cp312-win32.whl", hash = "sha256:4050f0d56d2e90703255742aa40e7abfad2da770619ca5572787c8bc1883f9f3", size = 79813, upload-time = "2025-04-04T13:40:39.05Z" },
-    { url = "https://files.pythonhosted.org/packages/03/66/136196f598d8eaee3ce231d2d111f5d053644c036b813e2653ae58790f5e/thinqpbo-0.1.5-cp312-cp312-win_amd64.whl", hash = "sha256:38f9510ad3ea34eef47edc943d3c65fbd8dccc313265fedfc6ca1c4c1efbfda8", size = 88331, upload-time = "2025-04-04T13:40:40.136Z" },
-    { url = "https://files.pythonhosted.org/packages/bd/f4/8a81ff968395e6bbe2f5a9298f604282e01a1108c67b330eee460694961b/thinqpbo-0.1.5-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:4a84f72945d00c0d07006a196c487bbb674b667810a092b90ea578caaa157f94", size = 114960, upload-time = "2025-04-04T13:40:41.45Z" },
-    { url = "https://files.pythonhosted.org/packages/c7/da/77e2e924b170636f49ad33b3d80e345f464492a639c1e10e650207e26d35/thinqpbo-0.1.5-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:a20d33a48826323fe004992f594fdfa36a80dfae01c077a4833164dd442fd9a3", size = 587691, upload-time = "2025-04-04T13:40:42.659Z" },
-    { url = "https://files.pythonhosted.org/packages/e4/6e/125bcbe680ea523ffbeb31211e3e96590aabd98558acc8a105b242ed142e/thinqpbo-0.1.5-cp313-cp313-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:9b22a90c4670472922409731a34c7d0684ff1a118cb5cfb158d84f98185bb6ec", size = 557644, upload-time = "2025-04-04T13:40:44.014Z" },
-    { url = "https://files.pythonhosted.org/packages/a8/33/a39e95ca24cfcfc516574cdc993eb06d930dc33a899a2d652411f65e808b/thinqpbo-0.1.5-cp313-cp313-musllinux_1_2_i686.whl", hash = "sha256:0af47db8846f06187688d33e680bce82649fcacb3ebd10673113e654a639a018", size = 1707078, upload-time = "2025-04-04T13:40:45.396Z" },
-    { url = "https://files.pythonhosted.org/packages/ce/c6/fcf86f7f72e02475f7e522bd99ce583cd118b0bc718819060db862424a6e/thinqpbo-0.1.5-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:89dd6d054ee5320eec2d5233baf36b94026d089b2c50d23e530c24244f448edb", size = 1613694, upload-time = "2025-04-04T13:40:46.952Z" },
-    { url = "https://files.pythonhosted.org/packages/e2/d1/1c3cc6e4720902732d1d66efd51b8a7cebc26ccba1b563c1dd3fbf4b9cee/thinqpbo-0.1.5-cp313-cp313-win32.whl", hash = "sha256:57b5755477193fb939607b524ed4ccc04100db1366b7d03a32f178f46324ce1c", size = 79166, upload-time = "2025-04-04T13:40:48.152Z" },
-    { url = "https://files.pythonhosted.org/packages/20/b8/4714c5c18dc067fb68abdf909d29e4b7906056aeaad58da5f58a94f9f75f/thinqpbo-0.1.5-cp313-cp313-win_amd64.whl", hash = "sha256:691d09d0b514ead075fe3963e6f63093e795e3bc054004841a44f6bafdf9e536", size = 87530, upload-time = "2025-04-04T13:40:49.149Z" },
 ]
 
 [[package]]

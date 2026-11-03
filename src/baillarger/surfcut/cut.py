@@ -15,9 +15,8 @@ from collections.abc import Iterator
 
 import numpy as np
 import numpy.typing as npt
-from scipy.sparse import coo_array
-from scipy.sparse.csgraph import breadth_first_order, maximum_flow
 
+from baillarger.surfcut._flow import min_cut
 from baillarger.surfcut.model import (
     Float,
     Int,
@@ -28,8 +27,6 @@ from baillarger.surfcut.model import (
     ints,
     table_parts,
 )
-
-SCALE = 1000  # costs to integers for scipy's maximum flow
 
 
 def _chunks(m: int, size: int) -> Iterator[slice]:
@@ -129,27 +126,13 @@ def cut(M: Model, extra_unary: dict[int, Float] | None = None) -> Int:
     """The exact minimum of unary, hard and hinge terms and the submodular
     part of the tables (ties and positive second differences left out).
     extra_unary: costs added to some variables' unary terms. Returns the
-    labels (n,). Raises ValueError if the hard bounds are infeasible. Costs
-    are rounded to 1 / SCALE."""
+    labels (n,). Raises ValueError if the hard bounds are infeasible, or if
+    the capacities reach the int32 limit. Costs are rounded to 1 / SCALE
+    (baillarger.surfcut._flow)."""
     rows, cols, caps, start, s, t_ = graph(M, extra_unary)
     N = s
-    inf = ~np.isfinite(caps)
-    ci = np.zeros(caps.size, np.int64)
-    ci[~inf] = np.round(caps[~inf] * SCALE).astype(np.int64)
-    INF = int(ci.sum()) + 1
-    ci[inf] = INF
-    keep = ci > 0
-    G = coo_array(
-        (ci[keep], (rows[keep].astype(np.int32), cols[keep].astype(np.int32))),
-        shape=(N + 2, N + 2),
-    ).tocsr()
-    G.sum_duplicates()
-    res = maximum_flow(G, s, t_, method="dinic")
-    if res.flow_value >= INF:
+    mc = min_cut(rows, cols, caps, N + 2, s, t_)
+    if mc.value >= mc.capacities.hard:
         raise ValueError("the hard bounds are infeasible")
-    resid = (G - res.flow).tocsr()
-    resid.data = (resid.data > 0).astype(np.int8)
-    resid.eliminate_zeros()
-    S = np.zeros(N + 2, bool)
-    S[breadth_first_order(resid, s, directed=True, return_predecessors=False)] = True
+    S = mc.source_side
     return (np.add.reduceat(S[:N].astype(np.int64), start[:-1]) - 1).astype(np.int64)

@@ -11,7 +11,6 @@ dependencies = [
     "pyamg>=5.3.0",
     "scikit-fmm>=2025.6.23",
     "scipy>=1.18.1",
-    "thinqpbo>=0.1.5",
     "torch>=2.15",
 ]
 
@@ -47,12 +46,11 @@ exclude = ["^\\.worktrees/", "^tests/reference/"]
 # unannotated too.
 untyped_calls_exclude = ["skimage", "nibabel", "numba"]
 
-# numba, llvmlite, pyamg, scikit-fmm, scikit-learn and thinqpbo have no type stubs.
-# baillarger._jit gives njit a typed signature; baillarger.surfcut._thinqpbo
-# gives thinqpbo's graph a typed protocol.
+# numba, llvmlite, pyamg, scikit-fmm and scikit-learn have no type stubs.
+# baillarger._jit gives njit a typed signature.
 [[tool.mypy.overrides]]
 module = ["numba", "numba.*", "llvmlite", "llvmlite.*", "pyamg", "pyamg.*", "skfmm", "skfmm.*",
-  "sklearn", "sklearn.*", "thinqpbo", "thinqpbo.*"]
+  "sklearn", "sklearn.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

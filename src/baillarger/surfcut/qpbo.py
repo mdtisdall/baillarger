@@ -1,9 +1,10 @@
 """Every term, ties and non-submodular tables included, by QPBO.
 
 QPBO (roof duality; Kolmogorov and Rother 2007, "Minimizing nonsubmodular
-functions with graph cuts - a review"; thinqpbo, double precision) on the
-binary encoding y_(i,k) = [x_i >= k], k >= 1: the submodular graph of
-baillarger.surfcut.cut, plus each tie w |k_a + k_b - L'| written as
+functions with graph cuts - a review"; our own, baillarger.surfcut._roof, on
+scipy's maximum flow) on the binary encoding y_(i,k) = [x_i >= k], k >= 1:
+the submodular graph of baillarger.surfcut.cut, plus each tie
+w |k_a + k_b - L'| written as
 
     w |k_b - L'| + sum_j y_(a,j) (2 w [k_b >= L' - j + 1] - w),
 
@@ -21,10 +22,10 @@ x_i < k, and some global minimum lies in every variable's interval at once
 submodular model every variable is certified and the labelling is the global
 minimum.
 
-The lower bound is a double-precision sum in which the hard terms' costs
-cancel: on large models with many forced nodes it is good to about 1e-7 of
-the energy, not exactly (8000 x 4 variables: within 3e-4 of an optimum of
--20797).
+The maximum flow runs on int32 capacities: costs are rounded to 1 / SCALE
+(baillarger.surfcut._flow), and the lower bound is that of the rounded
+energy. Hard terms cost 1 + the sum of the finite capacities, which must stay
+below 2^30 (ValueError otherwise).
 """
 
 from collections.abc import Callable
@@ -33,7 +34,8 @@ from dataclasses import dataclass
 import numpy as np
 import numpy.typing as npt
 
-from baillarger.surfcut._thinqpbo import new_graph, seed_rand
+from baillarger.surfcut._roof import Binary, binary_energy, roof
+from baillarger.surfcut._roof import improve as qpbo_i
 from baillarger.surfcut.cut import cut, graph
 from baillarger.surfcut.model import (
     Bool,
@@ -84,18 +86,6 @@ class Result:
     n_free: int = -1  # qpbo_pruned: variables left to QPBO-I
 
 
-def _binary_energy(
-    E0: Float, E1: Float, pi: Int, pj: Int, p10: Float, p11: Float, y: Int
-) -> float:
-    e = float(np.sum(np.where(y == 1, E1, E0)))
-    if pi.size:
-        yi, yj = y[pi], y[pj]
-        e += float(
-            np.sum(p10 * ((yi == 1) & (yj == 0)) + p11 * ((yi == 1) & (yj == 1)))
-        )
-    return e
-
-
 def qpbo(
     M: Model,
     start_labels: npt.ArrayLike | None = None,
@@ -105,8 +95,8 @@ def qpbo(
 ) -> Result:
     """Every term by QPBO, then QPBO-I from start_labels (default: cut(),
     the optimum without the non-submodular terms). QPBO-I visits the variables
-    in an order drawn from C rand(); it is reseeded with `seed` first, so the
-    result depends only on the inputs."""
+    in an order drawn from numpy.random.Generator(PCG64(seed)), and no global
+    random state, so the result depends only on the inputs."""
     say = log or (lambda m: None)
     n, K, o = M.n, ints(M.K), ints(M.o)
     a_t, b_t, L_t, w_t = tie_terms(M)
@@ -126,18 +116,8 @@ def qpbo(
     def bid(nodes: Int) -> Int:
         return ints(bstart[var[nodes]] + lab[nodes] - 1)
 
-    # a hard term costs more than every finite term together, binary labellings that
-    # break a chain included: the sum of the finite capacities, the ties' terms, plus
-    # 1. No more: QPBO's lower bound is a double-precision sum in which these costs
-    # cancel, and a larger one loses precision (at 1000 times this, a bound 0.07
-    # above the optimum on 8000 x 4 variables).
-    fin = np.isfinite(caps)
-    big = (
-        1.0
-        + float(caps[fin].sum())
-        + 2.0 * float(np.sum(w_t)) * float(K.max(initial=1))
-    )
-    caps = np.where(fin, caps, big)
+    # hard arcs keep their inf: the solver gives them 1 + the sum of the finite
+    # capacities (baillarger.surfcut._flow)
     ms = rows == s
     v = cols[ms]
     keep = lab[v] >= 1
@@ -192,21 +172,11 @@ def qpbo(
     p10 = np.bincount(inv, np.concatenate(P10), minlength=uk.size).astype(np.float64)
     p11 = np.bincount(inv, np.concatenate(P11), minlength=uk.size).astype(np.float64)
     say(f"binary: {NB:,} nodes, {uk.size:,} pairwise terms")
-    g = new_graph(NB, int(uk.size))
-    if NB:
-        g.add_node(NB)
-    nz = np.flatnonzero((E0 != 0) | (E1 != 0))
-    if nz.size:
-        np.vectorize(g.add_unary_term, otypes=[object])(nz, E0[nz], E1[nz])
-    if uk.size:
-        z = np.zeros(uk.size)
-        np.vectorize(g.add_pairwise_term, otypes=[int])(pi, pj, z, z, p10, p11)
-    g.merge_parallel_edges()
-    g.solve()
-    g.compute_weak_persistencies()
-    allb = np.arange(NB)
-    yl = ints(np.vectorize(g.get_label, otypes=[np.int64])(allb)) if NB else ints([])
-    lower = 0.5 * g.compute_twice_lower_bound()
+    z = np.zeros(uk.size)
+    P = Binary(E0, E1, pi, pj, z, z, p10, p11)
+    q = roof(P)
+    say(q.log)
+    yl, lower = q.weak, q.lower_bound
     say(f"qpbo: {int(np.sum(yl < 0)):,} of {NB:,} binary nodes unlabelled")
     certified = np.ones(n, bool)
     cert_lab = np.zeros(n, np.int64)
@@ -233,17 +203,15 @@ def qpbo(
     )
     k, chain_ok = k0, True
     if improve and NB:
-        np.vectorize(g.set_label, otypes=[object])(allb, y0)
-        seed_rand(seed)
-        g.improve()
-        yl2 = np.vectorize(g.get_label, otypes=[np.int64])(allb)
-        k = ints(np.bincount(bvar, np.clip(yl2, 0, 1).astype(np.float64), minlength=n))
+        rng = np.random.Generator(np.random.PCG64(seed))
+        yl2 = qpbo_i(P, y0, yl, rng, log=say)
+        k = ints(np.bincount(bvar, yl2.astype(np.float64), minlength=n))
         chain_ok = not bool(np.any(same & (yl2[1:] > yl2[:-1])))
     e, e0 = energy(M, k), energy(M, k0)
     if e0 < e:  # never above the start
         k, e = k0, e0
     # the encoding drops constants: relate the two scales at the start labelling
-    offset = e0 - _binary_energy(E0, E1, pi, pj, p10, p11, y0)
+    offset = e0 - binary_energy(P, y0)
     return Result(
         k,
         e,
