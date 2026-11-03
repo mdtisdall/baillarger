@@ -1,5 +1,6 @@
-"""Tests for the white surface's overview (baillarger.white.write_white_overview,
-WhiteOverview): written by the mesh command from a synthetic segmentation; its
+"""Tests for the white surface's overview
+(baillarger.white_overview.write_white_overview, WhiteOverview): written by
+the overview command from a synthetic segmentation; its
 guarantees, its files as ordinary GIfTI, its reader and check, and the overview
 command."""
 
@@ -12,7 +13,7 @@ import numpy as np
 import pytest
 from nibabel.gifti.gifti import GiftiImage
 
-from baillarger import bids, white
+from baillarger import bids, white_dseg, white_overview, white_surf
 from baillarger import decimate as D
 from baillarger.mesh import topology
 
@@ -23,7 +24,7 @@ EPS = 0.05
 @pytest.fixture(scope="module")
 def surf(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A right hemisphere: a WM ball round a ventricle, in cortex, and a separate
-    WM block, through the dseg and mesh commands (which writes the overview)."""
+    WM block, through the dseg, surface and overview commands."""
     d = tmp_path_factory.mktemp("ov")
     x = np.indices((44, 40, 36)).astype(float)
     r = np.sqrt(((x - np.array([20.3, 19.6, 17.8])[:, None, None, None]) ** 2).sum(0))
@@ -35,13 +36,14 @@ def surf(tmp_path_factory: pytest.TempPathFactory) -> Path:
     src = d / "in" / "sub-T01_ses-S1_aseg.nii.gz"
     src.parent.mkdir(parents=True)
     nib.save(nib.nifti1.Nifti1Image(a, AFF), src)
-    white.main(["dseg", str(src), "--out", str(d / "deriv")])
+    white_dseg.main([str(src), "--out", str(d / "deriv")])
     anat = d / "deriv/sub-T01/ses-S1/anat"
     dseg = anat / "sub-T01_ses-S1_desc-wmtopo_dseg.nii.gz"
     out = str(d / "deriv")
-    args = ["--block-cells", "8", "--overview-eps", str(EPS), "--workers", "1"]
-    white.main(["mesh", str(dseg), "--out", out, *args])
-    return anat / "sub-T01_ses-S1_hemi-R_white.surf.gii"
+    white_surf.main([str(dseg), "--out", out, "--block-cells", "8"])
+    surf = anat / "sub-T01_ses-S1_hemi-R_white.surf.gii"
+    white_overview.main([str(surf), "--eps", str(EPS), "--workers", "1"])
+    return surf
 
 
 def true_mesh(surf: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -50,7 +52,7 @@ def true_mesh(surf: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 def test_the_files_and_the_guarantees(surf: Path) -> None:
-    p = white.overview_paths(surf)
+    p = white_overview.overview_paths(surf)
     assert all(x.exists() for x in p.values())
     assert (
         p["carry"]
@@ -58,7 +60,7 @@ def test_the_files_and_the_guarantees(surf: Path) -> None:
         .exists()
     )
     side = json.loads(p["sidecar"].read_text())
-    white.OVERVIEW_SPEC.check(side)
+    white_overview.OVERVIEW_SPEC.check(side)
     # ordinary GIfTI: embedded data, read by nibabel with nothing special
     g = GiftiImage.from_filename(str(p["overview"]))
     assert all(da.encoding == 3 for da in g.darrays)  # GZipBase64Binary
@@ -89,8 +91,10 @@ def test_the_files_and_the_guarantees(surf: Path) -> None:
 
 
 def test_the_reader_and_its_check(surf: Path, tmp_path: Path) -> None:
-    ov = white.WhiteOverview.load(white.overview_paths(surf)["overview"])
-    W = white.WhiteSurface.load(surf)
+    ov = white_overview.WhiteOverview.load(
+        white_overview.overview_paths(surf)["overview"]
+    )
+    W = white_surf.WhiteSurface.load(surf)
     ov.check(W)
     np.testing.assert_array_equal(ov.v, W.v[ov.vertex_ids])
     assert np.allclose(ov.affine, AFF)
@@ -102,7 +106,7 @@ def test_the_reader_and_its_check(surf: Path, tmp_path: Path) -> None:
     side["DataSHA256"] = {k: "0" * 64 for k in side["DataSHA256"]}
     sc.write_text(json.dumps(side))
     with pytest.raises(ValueError, match="not made from"):
-        ov.check(white.WhiteSurface.load(d / surf.name))
+        ov.check(white_surf.WhiteSurface.load(d / surf.name))
 
 
 def test_the_overview_command_writes_the_same_overview(
@@ -111,11 +115,13 @@ def test_the_overview_command_writes_the_same_overview(
     d = tmp_path / "again"
     shutil.copytree(surf.parent, d)
     s2 = d / surf.name
-    for x in white.overview_paths(s2).values():
+    for x in white_overview.overview_paths(s2).values():
         x.unlink()
-    white.main(["overview", str(s2), "--eps", str(EPS), "--workers", "1"])
-    a = white.WhiteOverview.load(white.overview_paths(surf)["overview"])
-    b = white.WhiteOverview.load(white.overview_paths(s2)["overview"])
+    white_overview.main([str(s2), "--eps", str(EPS), "--workers", "1"])
+    a = white_overview.WhiteOverview.load(
+        white_overview.overview_paths(surf)["overview"]
+    )
+    b = white_overview.WhiteOverview.load(white_overview.overview_paths(s2)["overview"])
     np.testing.assert_array_equal(a.f, b.f)
     np.testing.assert_array_equal(a.vertex_ids, b.vertex_ids)
     np.testing.assert_array_equal(a.v, b.v)
@@ -125,8 +131,8 @@ def test_the_carried_vertices(surf: Path) -> None:
     """Each true vertex is an overview vertex or carried by exactly one face, in
     the stated order; their closest points rebuild at the carried distances,
     whose largest is MaxDistanceMM exactly."""
-    p = white.overview_paths(surf)
-    ov = white.WhiteOverview.load(p["overview"])
+    p = white_overview.overview_paths(surf)
+    ov = white_overview.WhiteOverview.load(p["overview"])
     side = ov.sidecar
     tv, _ = true_mesh(surf)
     n = len(tv)
@@ -151,7 +157,7 @@ def test_the_carried_vertices(surf: Path) -> None:
     same = fc[1:] == fc[:-1]
     assert np.all(np.diff(ids)[same] > 0)
     # closest points on the carrying faces
-    pts = white.surface_points(surf)
+    pts = white_overview.surface_points(surf)
     ids2, fc2, b0, b1, b2, d = ov.carry(np.arange(len(ov.f)), pts)
     np.testing.assert_array_equal(ids2, ids)
     np.testing.assert_array_equal(fc2, fc)
@@ -164,7 +170,9 @@ def test_the_carried_vertices(surf: Path) -> None:
 
 
 def test_a_patch_reads_its_own_faces(surf: Path) -> None:
-    ov = white.WhiteOverview.load(white.overview_paths(surf)["overview"])
+    ov = white_overview.WhiteOverview.load(
+        white_overview.overview_paths(surf)["overview"]
+    )
     patch = np.array([3, 0, 17, len(ov.f) - 1])
     ids, fc = ov.carried(patch)
     for k in patch:
