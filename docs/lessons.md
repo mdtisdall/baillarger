@@ -271,9 +271,14 @@ The coupling that is real, decided once:
 - **Curvature** (SF F28): the 0.32 mm mesh with curvature at 0.48 mm agrees with quadrics fitted to the voxel faces (rank correlation 0.85–0.98), with about half their jitter.
   - Never take curvature from the Hessian of a smoothed signed distance: it mixes the two sides of thin blades.
   - Valence-weighted smoothing biases Gaussian curvature. Use smoothing that keeps mass.
-- **Doesn't work:**
-  - A level set started on a 2× grid from the label's own signed distance: 6–11 % wrong signs. A finer grid cannot fix an error that is in the boundary data (SF F28).
-  - Inside/outside from the face normal: distance 0 at staircase edges. Use the pseudonormal of the closest feature (SF F28).
+- **Doesn't work** (both from SF F28, which tested the surface as the start of a front or level set for stream 2; the smooth surface there was a mesh smoothed by twicing at 0.32 mm, which the antialiased surface now replaces):
+  - **Refining the grid instead of smoothing the boundary.** The idea was to get sub-voxel accuracy by running a level set on a grid twice as fine (80 µm), started from the signed distance to the label's own voxel faces (or to the binary contour). It fails because the label's half-voxel steps are in the boundary data, and a finer grid reproduces them faithfully:
+    - 6–11 % of the points within 2 voxels of the surface got the wrong inside/outside sign: they lie between the true surface and the label's steps.
+    - The closest-point (foot) map jumped by more than 2 grid steps between neighbouring points at 7–11 % of pairs, so neighbouring points were assigned roots far apart.
+    - The signed-distance error kept a spread of 0.05–0.08 mm on both grids: refining did not shrink it.
+
+    A smooth surface, by contrast, gave no wrong signs, a foot-map jump p95 of 1.05 steps, and a spread of 0.013 mm. A finer grid only reduces the solver's own error, so it is worth having only once the start surface is accurate below a voxel.
+  - **Taking inside/outside from the closest face's normal.** A signed distance to a mesh needs the sign of each point: inside or outside. Reading it from the normal of the face that holds the closest point fails when the closest point lies on an edge or a vertex, which is common on a staircase-like surface: on the 2× grid, points sat exactly in a face's plane, the dot product with its normal was 0, and they got distance 0 with no sign. Use the angle-weighted pseudonormal of the closest feature (face, edge or vertex; Bærentzen and Aanæs 2005), which gives the right sign on any closed mesh. An exact test covers this case.
 
 #### Step 4: the overview (`overview`)
 
