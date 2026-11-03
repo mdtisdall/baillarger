@@ -12,7 +12,7 @@ Part B of phase 3.0.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import numpy.typing as npt
@@ -69,6 +69,40 @@ def reach_of(normal: F32, voxel_to_ras: npt.NDArray[np.float64]) -> F32:
     with np.errstate(divide="ignore"):
         chord = np.where(u != 0.0, 1.0 / np.abs(u), np.inf)
     return chord.min(axis=1).astype(np.float32)
+
+
+def take_columns(rays: Rays, lo: int, hi: int) -> Rays:
+    """The columns lo to hi of rays, as a Rays of their own, so that a caller
+    can sample a call in batches of columns. A column is the same in a batch
+    as in the whole call (spec, "Determinism")."""
+    r = rays.roots
+    c = slice(lo, hi)
+    a, b = int(rays.sample_start[lo]), int(rays.sample_start[hi])
+    q0, q1 = int(rays.interval_start[lo]), int(rays.interval_start[hi])
+    roots = replace(
+        r,
+        edge_key=r.edge_key[c],
+        vertex=r.vertex[c],
+        owned=r.owned[c],
+        root=r.root[c],
+        normal=r.normal[c],
+        normal_length=r.normal_length[c],
+    )
+    return replace(
+        rays,
+        roots=roots,
+        k_in=rays.k_in[c],
+        k_out=rays.k_out[c],
+        sample_start=rays.sample_start[lo : hi + 1] - a,
+        s=rays.s[a:b],
+        position=rays.position[a:b],
+        interval_start=rays.interval_start[lo : hi + 1] - q0,
+        interval_s0=rays.interval_s0[q0:q1],
+        interval_s1=rays.interval_s1[q0:q1],
+        interval_label=rays.interval_label[q0:q1],
+        interval_class=rays.interval_class[q0:q1],
+        derived_class=rays.derived_class[c],
+    )
 
 
 class ColumnVolumeSampler:

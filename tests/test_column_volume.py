@@ -231,6 +231,18 @@ def test_a_column_is_the_same_in_any_batch() -> None:
         assert np.array_equal(both.valid[a:b], alone.valid)
 
 
+def test_a_batch_of_columns_gives_the_same_samples() -> None:
+    vol, rays = random_case()
+    smp = sampler(vol)
+    whole = smp.sample(rays, "numpy")
+    for lo, hi in ((0, 7), (7, 40)):
+        part = smp.sample(column_volume.take_columns(rays, lo, hi), "numpy")
+        a, b = rays.sample_start[lo], rays.sample_start[hi]
+        assert np.array_equal(part.echo, whole.echo[a:b], equal_nan=True)
+        assert np.array_equal(part.partial, whole.partial[a:b])
+        assert np.array_equal(part.reach, whole.reach[lo:hi])
+
+
 def test_the_sampler_refuses_a_bad_grid() -> None:
     vol = ArraySource(np.zeros(SHAPE, np.float32))
     cls = column_volume.ColumnVolumeSampler
