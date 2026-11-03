@@ -198,6 +198,86 @@ def test_excise_drops_fragments_then_sets_crumbs_to_outside(
     assert ex.crumbs == dict(Pieces=1, Voxels=48)
 
 
+# ---------------------------------------------------------------- air bubbles
+
+
+def ball(shape: tuple[int, int, int], c: tuple[int, int, int], r: float) -> Bool:
+    i, j, k = np.indices(shape)
+    out: Bool = (i - c[0]) ** 2 + (j - c[1]) ** 2 + (k - c[2]) ** 2 <= r * r
+    return out
+
+
+SHAPE3 = (72, 40, 40)
+GROW = (24, 20, 20)  # a gas pocket: its dark ball grows from r 4 to 6 to 8
+STILL = (54, 20, 20)  # a cut: its dark ball has r 6 in each echo
+
+
+def bubble_echoes() -> tuple[F32, F32, F32]:
+    """Three echoes of bright tissue (1.0) with the two dark balls (0.02)."""
+    out = []
+    for r in (4, 6, 8):
+        e = np.ones(SHAPE3, np.float32)
+        e[ball(SHAPE3, GROW, r)] = 0.02
+        e[ball(SHAPE3, STILL, 6)] = 0.02
+        out.append(e)
+    return out[0], out[1], out[2]
+
+
+def test_a_dark_ball_that_grows_with_the_echo_time_is_a_bubble() -> None:
+    """The two balls as detector pieces (r 6). The growing one is a bubble:
+    its mask holds the echo-3 ball and stays within a few voxels of it. The
+    still one is not a bubble, and the mask does not touch it."""
+    e1, e2, e3 = bubble_echoes()
+    miss = ball(SHAPE3, GROW, 6) | ball(SHAPE3, STILL, 6)
+    bub, mask, n = excisions.bubbles(miss, (e1, e2, e3), (0.25, 0.25, 0.25))
+    assert n == 1
+    assert np.array_equal(bub, ball(SHAPE3, GROW, 6))
+    # the smoothed edge sits inside the ball: the dark region has r about 7
+    assert mask[ball(SHAPE3, GROW, 6.5)].all()
+    assert not mask[~ball(SHAPE3, GROW, 8 + 6)].any()
+    assert not mask[ball(SHAPE3, STILL, 7)].any()
+
+
+def test_a_growing_dark_region_open_to_the_outside_is_no_bubble() -> None:
+    """The growing ball joins a dark outside slab: its dark region runs to the
+    side of its box, so it is an excision open to the outside."""
+    e1, e2, e3 = bubble_echoes()
+    for e in (e1, e2, e3):
+        e[:, :, :4] = 0.02
+    grow = (24, 20, 10)  # the growing ball, moved next to the slab
+    for r, e in zip((4, 6, 8), (e1, e2, e3), strict=True):
+        e[ball(SHAPE3, GROW, r)] = 1.0
+        e[ball(SHAPE3, grow, r)] = 0.02
+    miss = ball(SHAPE3, grow, 6) & (np.indices(SHAPE3)[2] >= 4)
+    bub, mask, n = excisions.bubbles(miss, (e1, e2, e3), (0.25, 0.25, 0.25))
+    assert n == 0 and not bub.any() and not mask.any()
+
+
+def test_excise_keeps_the_labels_of_a_bubble(monkeypatch: pytest.MonkeyPatch) -> None:
+    """excise with a known detector result (the two balls) and the three
+    echoes: the cut is set to outside and is the excision map; the bubble
+    keeps its labels, is not in the map, and is in the bubble mask."""
+    aseg = np.full(SHAPE3, 42, np.int16)
+    aseg[10:62, 8:32, 8:32] = 41
+    e1, e2, e3 = bubble_echoes()
+    found = ball(SHAPE3, GROW, 6) | ball(SHAPE3, STILL, 6)
+    monkeypatch.setattr(excisions, "detect", lambda *a, **k: found)
+    ex = excisions.excise(aseg, e2, VOX, "R", echo1=e1, echo3=e3)
+    still = ball(SHAPE3, STILL, 6)
+    assert np.array_equal(ex.mask, still)
+    want = aseg.copy()
+    want[still] = 0
+    assert np.array_equal(ex.dseg, want)
+    assert ex.bubble_mask[ball(SHAPE3, GROW, 6.5)].all()
+    assert not ex.bubble_mask[still].any()
+    assert ex.bubbles["Pieces"] == 1
+    assert ex.bubbles["Voxels"] == ball(SHAPE3, GROW, 6).sum()
+    assert ex.bubbles["MaskVoxels"] == ex.bubble_mask.sum()
+    # without echoes 1 and 3 there is no bubble step
+    ex2 = excisions.excise(aseg, e2, VOX, "R")
+    assert np.array_equal(ex2.mask, found) and ex2.bubbles["Pieces"] == 0
+
+
 def old_missing_tissue(
     rim: npt.NDArray[np.int16],
     flash: npt.ArrayLike,
@@ -249,26 +329,36 @@ def read(p: Path) -> npt.NDArray[np.generic]:
     return np.asarray(img.dataobj)
 
 
-def write_inputs(d: Path) -> tuple[Path, Path, Labels, Bool]:
+def write_inputs(d: Path) -> tuple[Path, Path, Path, Path, Labels, Bool]:
+    """The excised slab's aseg and FLASH. Echoes 1 and 3 are the same as echo
+    2, so the excision does not grow with the echo time: it is no bubble."""
     aseg, flash, _ = excised_slab()
     aff = np.diag([*VOX, 1.0])
     d.mkdir(parents=True, exist_ok=True)
     a = d / "sub-T01_ses-S1_aseg.nii.gz"
-    f = d / "sub-T01_ses-S1_echo-2_FLASH.nii.gz"
     nib.save(nib.nifti1.Nifti1Image(aseg, aff), a)
-    nib.save(nib.nifti1.Nifti1Image(flash.astype(np.float32), aff), f)
-    return a, f, aseg, excisions.excise(aseg, flash, VOX, "R").mask
+    f = []
+    for e in (2, 1, 3):
+        f.append(d / f"sub-T01_ses-S1_echo-{e}_FLASH.nii.gz")
+        nib.save(nib.nifti1.Nifti1Image(flash.astype(np.float32), aff), f[-1])
+    miss = excisions.excise(aseg, flash, VOX, "R", echo1=flash, echo3=flash).mask
+    return a, f[0], f[1], f[2], aseg, miss
 
 
 def test_the_command_writes_the_bids_files(tmp_path: Path) -> None:
-    a, f, aseg, miss = write_inputs(tmp_path / "in")
+    a, f, f1, f3, aseg, miss = write_inputs(tmp_path / "in")
     out = tmp_path / "deriv"
-    excisions.main([str(a), str(f), "--hemi", "R", "--out", str(out)])
+    excisions.main(
+        [str(a), str(f), "--echo1", str(f1), "--echo3", str(f3)]
+        + ["--hemi", "R", "--out", str(out)]
+    )
     anat = out / "sub-T01/ses-S1/anat"
     dseg = anat / "sub-T01_ses-S1_desc-excised_dseg.nii.gz"
     mask = anat / "sub-T01_ses-S1_desc-excisions_mask.nii.gz"
-    x, m = read(dseg), read(mask)
-    assert x.dtype == aseg.dtype and m.dtype == np.uint8
+    bub = anat / "sub-T01_ses-S1_desc-bubbles_mask.nii.gz"
+    x, m, b = read(dseg), read(mask), read(bub)
+    assert x.dtype == aseg.dtype and m.dtype == np.uint8 and b.dtype == np.uint8
+    assert not b.any()
     assert np.array_equal(m.astype(bool), miss)
     assert np.array_equal(x, excisions.relabel(aseg, miss))
     # the slab's excision has no fragment and cuts off no crumb
@@ -276,7 +366,7 @@ def test_the_command_writes_the_bids_files(tmp_path: Path) -> None:
     tsv = (anat / "sub-T01_ses-S1_desc-excised_dseg.tsv").read_text().split("\n")
     assert tsv[0] == "index\tname" and "41\tRight-Cerebral-White-Matter" in tsv
     spec = excisions.EXCISIONS_SPEC
-    sides = [bids.read_sidecar(bids.sidecar_path(p), spec) for p in (dseg, mask)]
+    sides = [bids.read_sidecar(bids.sidecar_path(p), spec) for p in (dseg, mask, bub)]
     for side in sides:
         assert side["Hemisphere"] == "R" and side["TissueLabels"] == [41, 42]
         assert side["ExcisedVoxels"] == miss.sum()
@@ -292,16 +382,20 @@ def test_the_command_writes_the_bids_files(tmp_path: Path) -> None:
             DilationSteps=2,
             FragmentMM3=0.1,
             CrumbMM3=1.0,
+            BubbleRatio=2.0,
+            BubbleBox=20,
         )
         assert side["Fragments"] == dict(Pieces=0, Voxels=0)
         assert side["Crumbs"] == dict(Pieces=0, Voxels=0)
+        assert side["Bubbles"] == dict(Pieces=0, Voxels=0, MaskVoxels=0)
         assert side["CortexMedian"] == pytest.approx(
             float(np.median(read(f)[aseg == 42]))
         )
-        assert len(side["Sources"]) == 2
-    assert {k: v for k, v in sides[0].items() if k != "Description"} == {
-        k: v for k, v in sides[1].items() if k != "Description"
-    }
+        assert len(side["Sources"]) == 4
+    for side in sides[1:]:
+        assert {k: v for k, v in sides[0].items() if k != "Description"} == {
+            k: v for k, v in side.items() if k != "Description"
+        }
     assert (
         json.loads((out / "dataset_description.json").read_text())["DatasetType"]
         == "derivative"
@@ -309,14 +403,15 @@ def test_the_command_writes_the_bids_files(tmp_path: Path) -> None:
 
 
 def test_the_command_refuses_bad_inputs(tmp_path: Path) -> None:
-    a, f, aseg, _ = write_inputs(tmp_path / "in")
+    a, f, f1, f3, aseg, _ = write_inputs(tmp_path / "in")
     out = tmp_path / "deriv"
     # the hemisphere's WM label is not in the aseg
     with pytest.raises(ValueError, match="WM label of hemisphere L"):
-        excisions.write_excisions(a, f, "L", out)
-    # a FLASH on another grid
+        excisions.write_excisions(a, f, f1, f3, "L", out)
+    # an echo on another grid
     g = tmp_path / "in" / "sub-T01_ses-S1_echo-2_acq-x_FLASH.nii.gz"
     nib.save(nib.nifti1.Nifti1Image(np.zeros((4, 4, 4), np.float32), np.eye(4)), g)
-    with pytest.raises(ValueError, match="grid"):
-        excisions.write_excisions(a, g, "R", out)
+    for args in ((a, g, f1, f3), (a, f, g, f3), (a, f, f1, g)):
+        with pytest.raises(ValueError, match="grid"):
+            excisions.write_excisions(*args, "R", out)
     assert not out.exists()
