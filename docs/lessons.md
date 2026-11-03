@@ -426,7 +426,7 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 
 #### Step 1: roots
 
-- One root per white-mesh vertex (about one per voxel). Rays go both inward and outward from the surface.
+- One root per white-mesh vertex (about one per voxel), except vertices flagged as cut face (§3c, step 2). Rays go both inward and outward from the surface.
 - **Distances on the mesh** need the edges across neighbouring triangles: 8.2 % bound on a plane, against 41 % along edges alone (#10, #45).
 - **Theory** (SF; shock theory): because the WM is connected, every collision is a front meeting itself. A fold and a contact differ only in how far apart the meeting roots lie along the surface, which is a continuum, so no pointwise quantity separates them.
 
