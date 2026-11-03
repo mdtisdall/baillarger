@@ -35,6 +35,17 @@ This document states current knowledge only. How the project got here is in git,
 - FS is `reports/Fused sulci and thickness priors.md`.
 - PL is `PLAN_LAYER_REFINE.md`.
 
+Open PRs the plan builds on (all open as of 2026-11-02):
+
+| PR | What the plan takes from it |
+|---|---|
+| #69 | The geodesic-patch flat map, and the `edge_graph` fix (§7) |
+| #80 | The review plan for tight folds (§3c, step 6) |
+| #81 | The site finder and `wm-sites/1` |
+| #82 | The `--white` volume pane |
+| #84 | The brick volume viewer and its `BrickSource` |
+| #85 | The fold repair and the initial white surface for normals |
+
 **The data behind every result:**
 
 - One right hemisphere, imaged with 7 T multi-echo FLASH in Fomblin: magnitude only, TE 9.37 / 20.71 / 32.05 ms, TR 80, flip 25°.
@@ -517,7 +528,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   8. Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
 - **Phase 2: data, label set, test regions.**
   - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 8 is needed.
-  - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, and other labels only if a later stage needs them. Write the label-set spec with the majority rule for partial volume (3b), as the rule labellers follow.
+  - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, and other labels only if a later stage needs them. Check `FILLED_LABELS` against FreeSurfer's fill (`mri_edit_wm_with_aseg`) and decide each label it omits, with the reason recorded: accumbens (26/58), ventral DC (28/60), the inferior lateral ventricle (5/44), choroid plexus (31/63), vessel (30/62). Write the label-set spec with the majority rule for partial volume (3b), as the rule labellers follow.
   - Test regions: a few boxes per hemisphere (start with V1V2, PCC_SPL, M1S1, and the V1V2 seam review points). They are labelled from scratch, not by correcting the seed labels, so the seed does not anchor them, and they are never used in training. Format: a BIDS `_dseg` with a versioned sidecar spec that records the box and the labeller. They are painted in the viewer's painting mode (stream 4, phase 1).
 - **Phase 3: the surface steps read probabilities.** Independent of the network; exact-answer tests on phantoms first.
   1. `handles.remove_handles` takes a required priority volume, P: the object front claims in order of decreasing P and the background front in order of increasing P, so the walls fall where P is closest to 0.5. Distance ordering goes. Phantom test: a handle whose bridge has a known low-P place away from its thinnest place; the cut must fall there.
@@ -533,7 +544,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   - Verified labels are kept apart from seed labels, with provenance, so a generation can be retrained with or without the seed.
   - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset.
 - **Phase 5: the first generation.** Its labels and P replace the purple-mri aseg and the stand-in P as stream 1's input; streams 2–4 rerun on the new outputs.
-  - Five folds, split by hemisphere when there are several, by box otherwise. A split by box makes the folds' accuracy an upper bound.
+  - Five folds, split by hemisphere when there are several. With one hemisphere, five spatial folds of contiguous Morton superblocks, with a gap one patch wide set to ignore between each fold's training and validation regions, so no patch straddles both; the test regions are in no fold. Spatial folds make the folds' accuracy an upper bound, and the fold spread then includes spatial variation as well as what more labels can fix.
   - Inference writes the `_dseg`, the WM-filled `_probseg` and the fold spread, with sidecars.
   - Diagnostics against the purple-mri seed labels as a baseline, on the test regions and the hemisphere: boundary distance and Dice on the test regions; calibration of P near 0.5; handles and cavities before correction; the phase 3 walls and their margins; views of where ours and purple-mri's differ most.
   - With its data, mesh the hemisphere with the hippocampus inside and outside the filled mask, and decide from views of both (Open).
@@ -1266,6 +1277,6 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 4.2 | 2.0, 4.0 | |
 | 4.3 | 3.2, 3.3, 4.0 | 3.4 adds panes when it publishes |
 
-**Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.1, 1.3 and 1.5; stream 2 at each phase), the streams that read it rerun on it. They do not wait for it: each phase works on whatever version is published.
+**Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.1, 1.3, 1.5 and each generation in 1.6; a new version of a sampler), the stored outputs that read it rerun on it: stream 1's own, and stream 3's z(τ), bands and thickness. Samplers need no rerun: they compute from whatever is published on the next call. Nothing waits for a new version: each phase works on whatever is published.
 
 **The first complete pass** through all four streams: 1.0; then 2.0 and 4.0 in parallel; then 3.0, 3.1 and 3.2, with 4.2 alongside. It gives a white surface, columns, the viewer, and the first depth maps with a pial edge.
