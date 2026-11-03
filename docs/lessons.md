@@ -104,6 +104,7 @@ These bind every stream from its first version. A first version may be rough, bu
   - R2\* proxies from two echoes are too noisy to use.
 - **The noise is spatially correlated:** neighbouring voxels correlate at 0.5–0.67, even in deep WM. What works is a white-noise model with the same gradient power: the median smallest structure-tensor eigenvalue, corrected by the derivative filter's gain and the Wishart min-eigenvalue bias (0.68 at n_eff = 39). It needs no calibration (actual over predicted noise is 1.0–1.6).
 - Laminar structure is planar at 160 µm everywhere, M1 included (median λ2/λ1 ≤ 0.20). Radial and tangential fibres give the same tensor signature.
+- **No bias-field correction.** B1 fields at 7 T vary over about 18–60 mm (the bias FWHMs used with SPM and N4 at 7 T). Every intensity comparison here is local, over a few mm, or against Fomblin's near-zero level, and in the log a bias is additive with a negligible gradient at a voxel's scale, so the field cancels. The one global comparison is the network's per-image normalization; whether its errors follow position across the specimen is a diagnostic (3d, phase 8), and N4 (Apache-2.0) is added only if they do.
 
 **The aseg we have, from purple-mri, errs in repeatable ways** (CP; SF F21; #46, #49)
 
@@ -267,14 +268,14 @@ The coupling that is real, decided once:
 |---|---|---|
 | `_dseg` and P | step 1; until phase 5, the purple-mri aseg, with no P in phase 0 and a stand-in P from phase 3 | the filled mask; handle removal ordered by P |
 | `_desc-wmedits_edits.tsv` and sidecar (`wm-edits/1`) | step 6 | edits applied before the correction |
-| The FLASH | the scan | the fluid relabel (fix kind 5); fixes chosen by intensity, only if adopted (Open) |
+| The FLASH | the scan | fixes chosen by intensity, only if adopted (Open) |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
 | `_desc-wmtopo_dseg`: the corrected labels; filled mask with Betti (b0, 0, 0) | `wm-dseg/1` | steps 3, 4 and 6; stream 2 (masks and stops) |
-| `_desc-wmtopofixes_dseg`: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit, 5 fluid relabel (derivable from the diff; kept as the viewer's display layer) | `wm-dseg-fixes/1` | the viewer |
+| `_desc-wmtopofixes_dseg`: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit (derivable from the diff; kept as the viewer's display layer) | `wm-dseg-fixes/1` | the viewer |
 | `_desc-wmtopofixes_fixes.tsv`: one row per fix: id, kind, voxel count, centroid and bounding box in mm, wall size, signed margin in P (planned) | `wm-dseg-fixes/1` | step 6 (ranking); process review |
 | The fix diff: per changed voxel, its linear index, fix id, old label and new label, in Morton order (planned) | `wm-dseg-fixes/1` | replay and revert; process review across runs |
 
@@ -297,10 +298,9 @@ The coupling that is real, decided once:
   - The meeting wall need not be the smallest cut: one cut of 2,047 voxels ran along a thin strand.
   - Batching walls per pass changes the result, so don't.
 - **Handle removal by probability** (planned; 3d, phase 3). The fronts claim voxels by P, not by distance to the other phase as the current code does: the object front claims in order of decreasing P and the background front in order of increasing P, so each wall falls where P is closest to 0.5. That is right only if P is calibrated near 0.5. Each fix records its margin in the fix table, and the review queue ranks by it. P matters to the surface mainly here: it decides which side of a fused bank a cut falls.
-- **The fluid relabel** (fix kind 5; `pial_labels`, #46, #49). Fluid channels and vessels that the label marks as cortex are relabelled to fluid: closed-form darkness at α = 10⁻³, fluid fraction above ½ (the majority rule, 3b), a noise-bound component size, the stria trap. At V1V2 it took the columns crossing fused banks from 6,001 to 717.
-  - It is an automatic fix like the others: it stays in the derivative and its fix diff, is never an input, and never trains the model.
-  - It cannot change topology: it turns cortex into fluid, outside the filled mask.
-  - As our own labels follow the majority rule, it should find less and less. Where it still disagrees with the model, the disagreement can be a review site.
+- **Fluid channels and vessels in purple-mri's cortex** (`pial_labels`, #46, #49). Purple-mri fills thin fluid channels of collapsed sulci, and superficial vessels, with cortex (§2). A detector finds them: closed-form darkness against the local cortex level at α = 10⁻³ (step 3), fluid fraction above ½ (the majority rule, 3b), a noise-bound component size, the stria trap. At V1V2, relabelling them took the columns crossing fused banks from 6,001 to 717.
+  - It is a patch for one source's error, so it is a **bootstrap tool only**, like the excision detector: where it fires inside purple-mri's cortex, the seed labels are set to ignore (3d, phase 4). It never writes fluid into a published label, so the network is trained neither on purple-mri's error nor on the detector's guess.
+  - Past the bootstrap, channels are the labels' job: visible channels are fluid under the majority rule, the network learns them from verified labels, and stream 3 reads the pial edge from the profile where a channel is missed. The diagnostic: recall of thin fluid channels on the test regions, per generation (phase 8 holds the remedy for thin structures if it stays poor).
 - **Fixes are kept as a diff** (planned). `dseg`'s change from what it read (the input labels with the edits applied) to what it wrote is published split into fixes: a table with one row per fix, and a sparse diff with each changed voxel's fix id, old label and new label, in Morton order (12–16 bytes per changed voxel; about a megabyte for a hemisphere).
   - **The margin** of a fix is the mean of P over its wall (its own voxels), signed so that a positive value supports the choice: 0.5 − mean P for a cut, mean P − 0.5 for a fill. `dseg` computes it while it has the wall; the queue ranks the most negative first, with the wall size beside it.
   - **Replay and revert.** Input labels, edits and diff reproduce `desc-wmtopo` exactly, and a rerun checks that it reproduces the stored diff (a test of determinism across devices too). Any one fix can be reverted for inspection.
@@ -331,7 +331,14 @@ The coupling that is real, decided once:
 
 *Design and lessons*
 
-- **The data normal:** the whitened multichannel structure tensor of all the trend-removed log echoes, J = Σ Gᵀ C⁻¹ G over the window (G the echoes' gradients, one row per echo; C their gradient-noise covariance), at derivative scale 1 voxel and integration scale 2 voxels, by masked normalized convolution over cortex.
+- **The local cortex level** (the "trend"): the log intensity's normalized convolution over the cortex mask with a Gaussian of σ in mm. It is spatial, not a depth trend, so it needs no columns. Its job is the cortex's level at a point with the laminae averaged out, and two bounds set σ:
+  - **Laminae must not leak into it.** The slowest laminar component is the whole profile, wavelength about one cortical thickness T. A Gaussian keeps exp(−2π²σ²/λ²) of a wavelength λ, so a leak of at most ε at λ = T needs σ ≥ T·√(ln(1/ε)/(2π²)). With T = 2.0 mm (the thinnest cortex measured, M1/S1) and ε = 0.05, σ ≈ 0.8 mm. Once σ nears T/2, the mask also forces the average along the sheet, over the full depth.
+  - **It must follow real changes in the cortex's level,** above all areal borders: a Gaussian smears a step over about ±2σ, so σ ≤ T/2 ≈ 1 mm keeps the bias within one cortical thickness of a border.
+  - **Diagnostic:** the level's correlation with depth along normal rays at the test sites (laminar leakage) and its ramp across known areal borders.
+  - The current code uses 4 voxels (0.64 mm), just below the lower bound.
+- **The data normal:** the whitened multichannel structure tensor of all the log echoes, each minus its local cortex level (a high-pass whose use here is tested: the depth trend it removes points along the normal and is signal for orientation; Open), J = Σ Gᵀ C⁻¹ G over the window (G the echoes' gradients, one row per echo; C their gradient-noise covariance), at derivative scale 1 voxel and integration scale 2 voxels, by masked normalized convolution over cortex.
+  - **The two scales stay in voxels on purpose:** the derivative scale is the finest the data resolves, and the integration scale fixes the noise statistics that §2's noise model and its Wishart correction (n_eff) depend on. Review both at 50 µm, where 2 voxels is a 0.1 mm window.
+  - **Coherence** is c = (λ₁ − λ₂)/(λ₁ + λ₂) from the tensor's two largest eigenvalues, clipped to [0, 1]: 1 for planar structure, 0 where the two leading directions are equal. Noise adds about equally to every eigenvalue, so it lowers coherence where the signal is weak.
   - **Why all echoes.** In the log, ∇log I_e = ∇log ρ − TE_e ∇R2\*: every echo carries the same proton-density and T1 term, plus the R2\* term scaled by its TE. Both are laminar evidence and, since laminae are planar (§2), both point along the cortical normal, so echoes add aligned signal; the only question is their weight against noise. Whitening by C is the maximum-likelihood answer under the Gaussian noise model, so the data set the weights per specimen and protocol, and no subset of echoes is hard-wired. (Earlier work used echoes 2 and 3 only, without a stated reason.)
   - **C** extends §2's calibration-free noise estimate from one echo to the cross-echo covariance; if the echoes' noise is independent, C is diagonal and each echo is weighted by 1/σ_e².
   - **Diagnostics:** each echo's own tensor and its share of J's trace, by depth and region; views of where one echo's normal departs from the combined one. The echoes agree within 10° in about 91 % of interior cortex (SF F1, echoes 2 and 3).
@@ -424,7 +431,7 @@ The coupling that is real, decided once:
 | Sites from stream 3: where the GM/WM transition along the columns disagrees with the WM label | stream 3, step 6 (`wm-sites/1`) | more sites |
 | The fix table | step 2 | ranking by margin |
 | The surface | step 4 | finding sites (tight folds, misfacing faces); display |
-| The FLASH | the scan | finding sites (where the fluid relabel disagrees with the model); display |
+| The FLASH | the scan | display |
 | The overview | step 5 | display in the viewer |
 
 *Outputs*
@@ -463,6 +470,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - Hidden fluid gaps (a thin, slowly decaying dark strip inside labelled cortex; SF F21): under the majority rule they stay cortex, and stream 3 finds them along the columns. Open: whether a detector before tracing is still worth having, as a diagnostic or to rank review sites.
 - Whether normal smoothing should stop at blade crests (feature-preserving smoothing, such as bilateral normal filtering, Zheng et al. 2011) instead of letting the two faces cancel.
 - Whether `orient`'s window should stop where the WM-distance fronts of two banks meet, so that it never spans a fused sulcus (step 3).
+- Whether `orient` should subtract the local cortex level at all: compare with and without, by echo agreement, coherence and the misalignment diagnostic.
 - Whether `orient` needs a robust window near the pia, vessels and fused sulci, where tissue-edge gradients (largest in echo 1) can outweigh the laminae (step 3).
 - **How `dseg` applies standalone answers** to a new generation's labels: whether a verified voxel always overrides the input, and how to show the reviewer where a new generation disagrees with an earlier answer.
 - **Whether antialiasing should align the surface with the data normal.** A data term in step 4 would pull the surface normals towards step 3's data normal near the boundary, weighted by its coherence (high in most cortex, low at contacts and fundi). The sign constraints stay, so the topology stays guaranteed. The cost: agreement with the data normal would stop being an independent check of the surface. Keep part of the evidence out of the term (one echo, or held-out regions), or judge the surface by something else, such as how straight the columns run.
@@ -498,7 +506,6 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
   - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
   - The rule for cut faces (step 2): relabel the purple-mri aseg's excisions to outside with the detector, and keep its excision map as a test set. Phantom tests: an excision through WM that leaves a tunnel (fixed by a plug), and one that cuts a piece off (b0 rises).
-  - Rewrite `pial_labels` as step 2's fluid relabel (fix kind 5): keep its noise estimators and detector, and record its changes in the fixes image as an automatic fix. Stream 2's crossings depend on it (§4c, step 2). It builds on the fixed `mesh_graph` (§7). It follows the majority rule (3b): its test is a fluid fraction above ½, so channels narrower than that stay cortex.
 - **Phase 1: review and fold repair** on phase 0's output (the steps of the #80 plan, with #81 and #82 as its first PRs). Its answers correct the hemisphere now and become the first verified training labels.
   1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
   2. The volume pane in `--white` mode (#82).
@@ -521,7 +528,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   6. Then remove the labels-only path (distance ordering, smoothness-only antialiasing).
 - **Phase 4: training data.**
   - Export to nnU-Net's raw dataset format: the three echoes as channels `_0000`–`_0002`, with labels that use an ignore label.
-  - Bootstrapping: purple-mri's labels as weak seed labels. Its labels in the interiors; excisions relabelled to outside, from the detector, confirmed by the reviewer; ignore in a band of about 2 voxels each side of every purple-mri boundary (so the network never learns purple-mri's choices at mixed voxels), and where a simple FLASH check disagrees with purple-mri (the check to be chosen on the test regions).
+  - Bootstrapping: purple-mri's labels as weak seed labels. Its labels in the interiors; excisions relabelled to outside, from the detector, confirmed by the reviewer; ignore in a band of about 2 voxels each side of every purple-mri boundary (so the network never learns purple-mri's choices at mixed voxels), and where the bootstrap detector of fluid channels and vessels fires inside purple-mri's cortex (`pial_labels` ported as that check, step 2; checked on the test regions).
   - Phase 1's answers (`wm-edits`) as verified labels, never ignored.
   - Verified labels are kept apart from seed labels, with provenance, so a generation can be retrained with or without the seed.
   - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset.
@@ -544,6 +551,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   - Diagnostic: does σ predict the boundary errors on the test regions?
 - **Phase 8: only if the diagnostics ask for it.**
   - A signed-distance output (capped at about 5 voxels, L1, trained only where every voxel within the cap is labelled), or a Laplace head with β-NLL, if the σ derived from P is poorly calibrated or saturated where it matters.
+  - N4 bias correction, if the network's errors on the test regions follow position across the specimen or a smooth fit of WM intensity (§2).
   - Synthetic training images from label maps (SynthSeg, PostSynth), as augmentation, if the problem is generalising to other hemispheres or protocols.
   - Outputs that hold more than one interface per voxel, if stream 3's contacts need more than the profiles give: an unsigned distance to the pial interface (a channel narrower than a voxel is a valley that never reaches zero, which a signed distance cannot hold), or tissue fractions trained on 50 µm data averaged down to 160 µm, where the fractions are known.
   - A topology loss (clDice, Betti matching), if the queue is too long. It can only reduce defects; the guarantee stays in step 2's correction.
@@ -558,13 +566,12 @@ In this order:
 4. A band-only multigrid antialias solver with a fused kernel: FISTA on the whole volume costs about h⁻⁵; the target is about h⁻² per cycle.
 5. Decimation with int32 ids and a block-wise first pass.
 6. Normals and their smoothing by mesh block, with a halo: they are now computed on the whole mesh.
-7. The fluid relabel's component-size test, blocked with the same connected-component merge as `dseg`.
-8. The site finders per block, with a global merge of the queue.
-9. Inference at 50 µm: sliding-window nnU-Net on the cluster, writing NIfTI-Zarr chunks directly, and an import that never holds a whole volume.
-10. The fix diff written per block, in Morton order.
-11. The viewer's brick pyramid built from NIfTI-Zarr (with item 3).
+7. The site finders per block, with a global merge of the queue.
+8. Inference at 50 µm: sliding-window nnU-Net on the cluster, writing NIfTI-Zarr chunks directly, and an import that never holds a whole volume.
+9. The fix diff written per block, in Morton order.
+10. The viewer's brick pyramid built from NIfTI-Zarr (with item 3).
 
-`orient`, the WM distance and curvature are local samplers and need no item; the excision detector runs only on the bootstrap hemisphere.
+`orient`, the WM distance and curvature are local samplers and need no item; the excision and fluid-channel detectors run only on the bootstrap hemisphere.
 
 GPU, by cost: antialias first, then the normal-smoothing tables, then mesh and volume connected components. Handle removal, cut relabelling, decimation and I/O stay on the CPU.
 
@@ -648,7 +655,7 @@ Measured at the marked points (CP; #47, #52, #58):
 | Input | From | Use |
 |---|---|---|
 | The rays | step 2 | what each column meets |
-| `_desc-wmtopo_dseg`, with the fluid relabel applied | stream 1, step 2 | the label intervals |
+| `_desc-wmtopo_dseg` | stream 1, step 2 | the label intervals |
 | WM distance through tissue, capped at 8 mm | computed per superblock (shared code, §7) | `first_fall` |
 | The across-triangle mesh graph | step 1 | the distance along the surface between meeting roots |
 | The data normal and its coherence | stream 1, step 3 (sampler) | diagnostics only: how far each ray departs from the image's own normal |
@@ -664,7 +671,7 @@ Measured at the marked points (CP; #47, #52, #58):
 - **Label intervals, not stops.** Every crossing is recorded, including short WM runs from the staircase, a surface that sits off the label, a ray that grazes its own WM, and WM strands or islands inside the cortex. None of them cuts a column short; stream 3 reads which crossing is the pia, which WM is the far bank's, and where the transition lies.
 - Meetings are recorded on the column (`first_fall` where the WM distance through tissue stops rising along a normal ray; `meet_at` where an equivolume column meets another bank's columns at a smaller depth), with the root met and its distance along the mesh, and never acted on. A contact is a meeting.
 - **Classes are summaries,** derived from the intervals for diagnostics only: open (fluid before any WM), in WM (WM entered after cortex), neither within 8 mm. They decide nothing. The current code's split of WM ends into crossing and own-bank return at `SAME_MM` (5 mm along the mesh) goes; the distance is recorded instead.
-- The labels' fluid comes after stream 1's fluid relabel (step 2, fix kind 5), which relabels only channels that fill most of a voxel; narrower ones stay cortex, and the rays record them as meetings for stream 3.
+- Fluid in the labels follows the majority rule (3b): channels that fill most of a voxel are fluid; narrower ones, and any the labels miss, stay cortex, and the rays record them as meetings for stream 3.
 - **Doesn't work:** any threshold on bend angle, turn, or root separation along the surface. Each cuts a continuum: between 10° and 60°, 5–34 % of classes change. A 5 mm "same bank" fallback is wrong at both faces.
 
 #### Step 4: the ray sampler
@@ -707,7 +714,7 @@ Every method below followed the image through a field or grew a front from the s
   - It must be extended 1 voxel into fluid and 0.5 mm into WM, or it makes spurious turns at the pia.
   - pyamg needs local Jacobi weights to be deterministic (#40, #45).
 - **T's crest is the midline between the two WM surfaces, not the contact.** On the kissing phantom it sits 0.3 mm from the contact, even across a fluid gap (CP). The crest test (T rises into a voxel but not beyond, with a slope change above L²κ plus noise) needs no calibration.
-- **Crests on the aseg's errors.** Many crests sit on the aseg's fluid channels and vessels, so crest methods need those relabelled first. That relabelling (`pial_labels`: closed-form darkness at α = 10⁻³, fluid fraction above ½, a noise-bound component size, the stria trap) belongs to stream 1's step 2 as an automatic fix (#46, #49).
+- **Crests on the aseg's errors.** Many crests sit on the aseg's fluid channels and vessels, so crest methods needed those relabelled first (`pial_labels`, #46, #49; now a bootstrap check only, §3c, step 2).
 - **front** (the white mesh grown as one surface, directions coupled along the mesh at 2 voxels): the most accurate wherever folds are 0.64 mm or wider (contact p90 0.054 mm), and it reaches all 35 V1V2 points. Its swept volume matches equal volume within 0.2 %. It is worst at 0.32 mm crowns (p90 0.77 mm), because the coupling scale equals the crown radius.
 - **crest and traverse,** with the **fitted_blend start** (mesh normal at the root, blended into the field over 0.3 mm): the most accurate field tracers at tight fundi and contacts. The blended start removes the turn spike at 0.3 mm from the WM (turns fall from 11–16 % to 0.5–2.4 %).
   - **The crossing rule** (user, #52; `column_front.past_crest`), shared by traverse and front: climb ∇T; inside T's crest stencil, keep the heading; on leaving it, if T falls ahead, descend −∇T for good. **crest** cut at T's largest value instead, and one-pass had a turn rule and a fallback.
@@ -1128,7 +1135,7 @@ Samplers that belong to no stream (§1, Goals), computed on demand from publishe
 
 Problems in the current code that a restart should not inherit:
 
-- **A bug:** `mesh_graph.edge_graph` builds a COO matrix and `tocsr()` sums duplicates. An across-triangle edge that is also a mesh edge therefore gets twice its length (2.8 % of entries on a marching-tetrahedra ball). `column_traces` and `pial_labels` use it. #69 has the fix; it lands first, as its own PR with the shared `mesh_graph` port, before stream 1's fluid relabel, stream 2's meetings and the viewer's flat map (each in its phase 0) build on it.
+- **A bug:** `mesh_graph.edge_graph` builds a COO matrix and `tocsr()` sums duplicates. An across-triangle edge that is also a mesh edge therefore gets twice its length (2.8 % of entries on a marching-tetrahedra ball). `column_traces` and `pial_labels` use it. #69 has the fix; it lands first, as its own PR with the shared `mesh_graph` port, before stream 2's meetings and the viewer's flat map (each in its phase 0) build on it.
 - **Four white-mesh constructions.** The restart has one: `white-surf/1`.
 - **Scales hard-wired to 0.16 mm voxels:** the 0.04 mm sampling, the 1.5-voxel band width, the tapers, the 0.32 mm twicing and the 2-voxel coupling. Restate each as mm or as voxels on purpose, since 50 µm data changes the voxel.
 - **Streams coupled through code:**
@@ -1142,7 +1149,7 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 
 | Spec | Defines | Written in |
 |---|---|---|
-| `wm-dseg/1`, `wm-dseg-fixes/1` | The corrected segmentation and the fixes image (1 cut, 2 fill, 3 cavity, 4 manual, 5 fluid relabel, to be added); Betti before and after; each move. To be extended with the fix table and the sparse fix diff (stream 1, phase 1) and the margin (phase 3) | exists |
+| `wm-dseg/1`, `wm-dseg-fixes/1` | The corrected segmentation and the fixes image (1 cut, 2 fill, 3 cavity, 4 manual); Betti before and after; each move. To be extended with the fix table and the sparse fix diff (stream 1, phase 1) and the margin (phase 3) | exists |
 | `white-surf/1` | GIfTI with external data: float32 vertices in scanner mm, int32 triangles, float32 normals, float32 normal lengths (to be added), int64 edge keys, a block index in Morton order | exists |
 | `white-overview/1` | The decimated display mesh, its true-vertex ids and the true vertices each face carries; five guarantees | exists |
 | `wm-edits/1` | Exists as voxel-row diffs against a SHA-pinned aseg, with each answer's site and choice; to be revised so answers stand on their own (verified labels, valid for any input), in an append-only log where a correction supersedes and never rewrites | revision: stream 1, phase 1 |
