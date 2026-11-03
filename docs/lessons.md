@@ -239,7 +239,12 @@ The coupling that is real, decided once:
 
 #### Step 2: topology correction (`dseg`)
 
-- **The filled mask** (#61, #66, #67). Aseg 41 plus 43, 49–52 and 192 (right hemisphere), with cavities filled; the hippocampus is not filled. The deep structures (ventricle, thalamus, ...) belong in the mask, and imputed WM must be included, so that the edge of a cut does not become a false white surface (PL). A cut voxel takes the label of the nearest (mm) voxel outside the mask.
+- **Missing tissue and imputed WM** (PL). Blocks of tissue were cut out of the specimen before the scan. The FLASH is black there, but the purple-mri aseg labels these blocks as tissue anyway, as if they were present: WM where WM would have been ("imputed WM"), and cortex likewise. In V1V2 the missing tissue is 14.6 % of the cortex label.
+  - It is found from the image: FLASH below 0.25 × the cortex median after smoothing by 2 voxels, in blocks of at least 250 voxels, grown by 0.3 mm.
+  - It is an obstacle for columns, not a source.
+  - Today it is computed in the old box frame. It should become a published stream 1 output.
+- **The filled mask** (#61, #66, #67). Aseg 41 plus 43, 49–52 and 192 (right hemisphere), with cavities filled; the hippocampus is not filled. The deep structures (ventricle, thalamus, ...) belong in the mask. The imputed WM is kept in it, so that the cut face of an excised block does not become a false white surface. A cut voxel takes the label of the nearest (mm) voxel outside the mask.
+- **Missing tissue with our own segmentation.** Our network labels excised blocks as missing, so there is no imputed WM, and the filled mask ends at the cut face. Step 2 needs a rule for that face (open).
 - **Handle removal** (`handles.remove_handles`; #38, #48, #67):
   - Topology uses Kuhn adjacency, so it equals the mesh's (§2).
   - Object and background fronts grow by simple points. Each handle's wall is cut or filled, whichever changes fewer voxels; ties go to the cut, then to the lowest voxel index.
@@ -249,14 +254,12 @@ The coupling that is real, decided once:
   - The meeting wall need not be the smallest cut: one cut of 2,047 voxels ran along a thin strand.
   - Batching walls per pass changes the result, so don't.
 - **Handle removal with probabilities** (planned; plan phase 1). Without P, the fronts claim voxels in order of distance to the other phase. With P, the object front claims in order of decreasing P and the background front in order of increasing P, so each wall falls where P is closest to 0.5. That is right only if P is calibrated near 0.5. Each fix records its margin, the P along its wall, and the review queue ranks by it. P matters to the surface mainly here: it decides which side of a fused bank a cut falls.
-- **Missing tissue in the filled mask.** When the label marks excised blocks as missing, step 2 needs a rule for a filled mask that ends there (open).
 - **Tight folds (misfacing faces)** (#81, #85). On the purple-mri aseg the surface has 152 at 91 sites. Diagonal-only contacts in the label cause most of them: 74 of 90 sites have a checkerboard or corner-only contact within 4 voxels. A different segmentation may show a different pattern.
   - Thicken to 2s, widen gaps between surfaces, then make the mask well-composed, at s = 0.30 mm. This takes 90 sites to 5 and edges over 60° from 297 to 4, at a cost of +3.9 % area and a 90th-percentile neighbour angle of 5.4° against 3.9°.
   - s must not be a whole number of voxels along any axis: at 0.32 mm (exactly 2 voxels on one axis) the checkerboards rise from about 390 to 7,000. 0.26 mm is worse on every count; above 0.30 mm the bulk and area grow.
   - Synthetic antialiased phantoms make no misfacing faces, so fold tests need hand-built folds plus a hemisphere run.
   - Doesn't work: forcing cuts, with no fills into cortex (90 → 131 sites); voxel opening at 0.24–0.40 mm (worse at every radius, grows the area, cascades over passes).
   - Relaxing the level set needs a local "no new blade or gap voxel within s" test, or the thin-plate energy shrinks widened gaps and blades into slivers. With the test it keeps 95 % of the gain on crops, but misses tubes.
-- **Missing tissue** (PL): excised blocks the aseg labels as tissue but where the FLASH is black (below 0.25 × the cortex median after smoothing by 2 voxels, in blocks of at least 250 voxels, grown by 0.3 mm). It is an obstacle for columns, not a source. Today it is computed in the old box frame; it should become a published stream 1 output.
 
 #### Step 3: the surface (`mesh`)
 
