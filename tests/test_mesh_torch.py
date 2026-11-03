@@ -90,6 +90,24 @@ def test_smoothing_on_a_device_matches_numpy(name: str, offset: float) -> None:
 
 
 @pytest.mark.parametrize("name", DEVICES)
+def test_normal_length_on_a_device_matches_numpy(name: str) -> None:
+    """The length of the smoothed normal (a blade, whose length runs from
+    about 0.9 to 1) is the numpy one to float32 rounding, and the normals
+    are the ones that MeshOps.normals gives."""
+    g = np.zeros((24, 24, 24))
+    g[10:11, 4:20, 4:20] = 1.0
+    v, f, _ = marching_tetrahedra_blocks(g, 0.5, 8, np.float32)
+    ops = MeshOps(f, len(v), backend.device(name).torch)  # type: ignore[arg-type]
+    n, length = ops.normals_and_length(v)
+    nref, lref = S.smooth_normals_and_length(v, f)
+    assert length.dtype == np.float32 and length.shape == (len(v),)
+    assert lref.min() < 0.95
+    assert np.abs(length - lref).max() < 1e-4
+    assert np.abs(n - nref).max() < 1e-4
+    assert np.array_equal(n, ops.normals(v))
+
+
+@pytest.mark.parametrize("name", DEVICES)
 def test_smoothing_keeps_an_open_sheet_s_boundary(name: str) -> None:
     """An open sheet: its boundary vertices stay put, as in numpy."""
     i, j = np.meshgrid(np.arange(12), np.arange(12), indexing="ij")
