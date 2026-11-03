@@ -12,8 +12,9 @@ directory.
 | 3.2: a QPBO that is not GPL | `phase-3.2-qpbo.md` | nothing |
 | Shared: the `mesh_graph` duplicate-edge fix | `mesh-graph-fix.md` | nothing |
 | 1.5: the label set | `phase-1.5-label-set.md` | nothing (one stacked PR on 1.0) |
+| 4.0: the viewer on stream 1's outputs | `phase-4.0-viewer.md` | 1.0's split PR, the `mesh_graph` fix, 1.0's hemisphere outputs (each for one step only) |
 
-All four start at the same time. Each runs in its own session and its own
+The first four start at the same time. The user added 4.0 later. Each runs in its own session and its own
 worktree.
 
 ## Rules for every phase session
