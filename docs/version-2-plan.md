@@ -94,7 +94,7 @@ These bind every stream from its first version. A first version may be rough, bu
 ### Working rules
 
 - **Test, don't patch.** Diagnose first, then write a test with an exact answer that fails, then fix. Never move a threshold to hide a symptom.
-- **Diagnostics over criteria.** While a method is exploratory, design each checkpoint around views the user can read, not pass/fail numbers. The default image view is echo 2 with the depth trend removed.
+- **Diagnostics over criteria.** While a method is exploratory, design each checkpoint around views the user can read, not pass/fail numbers. The default image view is echo 2 minus its local cortex level (§3c, step 3).
 - **Keep principle, role and estimator apart.** Record each result against one estimator in one role. A failed estimator is not a failed principle.
 - **Feasibility, not speed,** for prototypes and interactive tools. Correctness checks still apply.
 - **Judge efficiency by analysis, not by wall time on the laptop.** For each algorithm, state:
@@ -213,7 +213,7 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 | Output | Spec | Used by |
 |---|---|---|
 | `_dseg`: labels in the FreeSurfer convention; excisions are outside | none yet | step 2 (the filled mask) |
-| `_label-WMfilled_probseg`: P(filled WM) | none yet | step 2 (where handle walls fall); step 4 (the antialiasing data term); step 6 (wall margins) |
+| `_label-WMfilled_probseg`: P(filled WM) | none yet | step 2 (where handle walls fall, and each fix's margin in the fix table, which step 6 reads); step 4 (the antialiasing data term) |
 | `_label-WMfilled_desc-foldsd_probseg`: the spread of P across folds | none yet | step 6 (ranking the queue) |
 | The model generation, in each sidecar | none yet | tracing a label to its model |
 
@@ -256,7 +256,7 @@ The coupling that is real, decided once:
 - Test regions are labelled from scratch and never trained on.
 - **Labelling happens in our own viewer** (stream 4): the test regions, the site answers and the scribbles. It reads the blocked formats we rely on (NIfTI-Zarr volumes, `white-surf/1` with its block index, the overview), so a person can label anywhere in a whole brain at full resolution, against the surface. ITK-SNAP and 3D Slicer load whole volumes into memory and read neither format, so at 50 µm they would only ever see exported crops. The viewer also writes answers directly as spec'd edits (`wm-edits/1`). ITK-SNAP stays only as an escape hatch for free painting on an exported crop.
 - **nnU-Net is an external tool, not a package dependency.** Only the export and import modules know about it: the export writes nnU-Net's raw dataset format, nnU-Net is called on it (on the cluster for training), and the import reads its predictions back into spec'd outputs.
-- Training runs on a compute cluster with CUDA GPUs; how to reach it is to be settled when training starts. Inference and data preparation can run on the laptop.
+- Training runs on a compute cluster with CUDA GPUs; how to reach it is to be settled when training starts. At 160 µm, inference and data preparation can run on the laptop; at 50 µm, inference runs on the cluster (scaling item 8).
 
 *Literature* (from memory; check before citing)
 
@@ -836,7 +836,7 @@ Where each layer lies along every column, read from the image's own contrast and
 - **A sampler, not a file.** The column volume is a fixed function of stream 2's rays (themselves a sampler) and the echoes, so it is computed per superblock when a step needs it, kept in memory while that step works on it, and never stored. It is published as a sampler (§1), because the viewer calls it too. Storing it would cost more than it saves: at 0.04 mm steps each column samples the 0.16 mm image about four times per voxel it crosses, and neighbouring columns overlap, so a stored column volume is larger than the echoes it came from (hundreds of GB per method at whole-brain scale), and reading it moves more bytes than reading the echo block and interpolating. Trilinear sampling on a given trace is exact, so recomputing gives the same samples every time. A per-run cache is allowed only if a measured cost shows it pays. Exact tests: samples on a linear image are exact; a straight trace through a slab gives the slab's profile.
 - **Extents per column.** The column volume samples each column between the extents stream 3 asks for (step 3), not the full caps: the echo samples, and the joint warp's search range over them, are the costly part, and cortex is 2–4.5 mm thick.
 - One trace per white-mesh vertex, sampled every 0.04 mm, each sample keeping its 3D position. It reads like a seismic section: the stria runs as a continuous band from open into fused cortex, and the far bank's stria appears mirrored past a contact (CP).
-- The voxels within 1 voxel of the WM or the pia are partial volume. They made half the data term and drew 30 % of band boundaries; leave them out (PL; #24).
+- Samples within 1 voxel of a label change along the ray (from the label intervals) are marked partial volume; the pia itself is found only in step 3. They made half the data term and drew 30 % of band boundaries; leave them out (PL; #24).
 
 #### Step 2: flattening
 
@@ -929,7 +929,7 @@ Where each layer lies along every column, read from the image's own contrast and
 | Input | From | Use |
 |---|---|---|
 | The joint warp and column tops | step 3 | thickness evidence |
-| Contacts and their lengths L | stream 2 | contact splits |
+| Contacts and their lengths L | step 3 (the far bank's WM entry, read from the intervals and the profile) | contact splits |
 | White-surface curvature | computed from stream 1's `white-surf/1` (shared code, §7), at the scale under test | the depth estimators |
 
 *Outputs*
@@ -949,7 +949,7 @@ Where each layer lies along every column, read from the image's own contrast and
   - **The closed form from white-surface curvature** (A/A₀ = (1 + κ₁s)(1 + κ₂s)): the evidence conflicts (open, below).
   - **Carried area / div u:** over-corrects about 2× and is noisy upwind (SF F6, F10; #23).
   - **The volume form of the level set:** its carried area is biased (LS).
-  - **The front's swept volume:** exact on phantoms, not yet tested against bands (CP).
+  - **The front's swept volume:** exact on phantoms, not yet tested against bands (CP). Fronts are not in the design (§4c); kept as a record.
   - **Two-surface forms with the pial curvature:** too noisy (PL).
 - On open V1, curvature moves depth between the deep and superficial parts while total thickness barely changes (Bok's effect).
 
@@ -960,7 +960,7 @@ Where each layer lies along every column, read from the image's own contrast and
 - Crowns are thicker than fundi everywhere measured: V1V2 slope +1.2 mm per (1/mm), M1S1 +2.7. Fit the slope per area, because M1S1 mixes an areal step with folding (SF F10).
 - Volume per unit white-surface area is the least conserved quantity against curvature (ρ 0.95). Equal-volume thickness does not absorb the curvature trend.
 - A stationary Matérn/SPDE field (on log thickness, about 2 mm long, on the white-mesh vertices) fits tightly at the evidence. But across the 1–2.5 mm without evidence before a contact it reverts to a broad mean and over-predicts the thin bank by 0.26–0.92 mm. The missing evidence is the sums t₁ + t₂ = L at contacts (F13–F16).
-- Thickness evidence is the front's own column tops, from roots at least 2 mm from any domain edge, with a guard against wandering tops. Convert to mm with the median, exp(m), not the lognormal mean (LS). Columns whose root normal cancelled (low \|n̄\|, thin blades) can be down-weighted as evidence; how is a choice of the likelihood.
+- Thickness evidence is each column's top and GM/WM transition levels from the joint warp (step 3), from roots at least 2 mm from any domain edge, with a guard against wandering tops. Convert to mm with the median, exp(m), not the lognormal mean (LS). Columns whose root normal cancelled (low \|n̄\|, thin blades) can be down-weighted as evidence; how is a choice of the likelihood.
 - Region-specific thickness priors are future work, as soft regions.
 
 **Contacts**
