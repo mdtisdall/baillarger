@@ -94,6 +94,7 @@ SURF_SPEC = SidecarSpec(
         Key("Pieces", "array of objects", True, "per connected piece"),
         Key("NormalsFile", "string", True, "the normals' GIfTI (name)"),
         Key("EdgeKeysFile", "string", True, "the vertices' edge keys (name)"),
+        Key("NormLenFile", "string", True, "the normals' length |n| (name)"),
         Key("GridShape", "array of integers", True, "the segmentation's grid"),
         Key("BlocksFile", "string", True, "the block index (name)"),
         Key("DataSHA256", "object", True, "SHA-256 of each .dat, by name"),
@@ -131,6 +132,9 @@ def surface_paths(out: Path, ents: dict[str, str], hemi: str) -> dict[str, Path]
         ),
         keys=derivative_path(
             out, ents, "white", ".func.gii", hemi=hemi, desc="edgekeys"
+        ),
+        normlen=derivative_path(
+            out, ents, "white", ".func.gii", hemi=hemi, desc="normlen"
         ),
         blocks=derivative_path(out, ents, "white", ".tsv", hemi=hemi, desc="blocks"),
         sidecar=derivative_path(out, ents, "white", ".json", hemi=hemi),
@@ -230,9 +234,11 @@ def write_white_surface(
         return out
 
     if dev.torch is None:
-        n = S.smooth_normals(v, f)
+        n, nlen = S.smooth_normals_and_length(v, f)
     else:
-        n = MeshOps(f, len(v), dev.torch).normals(v)
+        n, nlen = MeshOps(f, len(v), dev.torch).normals_and_length(v)
+    # an average of unit vectors: at most 1, but for rounding
+    nlen = np.minimum(nlen, 1)
     lap("normals")
     v_mm = as_written(v).astype("<f4")
     paths = surface_paths(out, entities(dseg), hemi)
@@ -253,6 +259,17 @@ def write_white_surface(
     ndat = write_external(
         paths["normals"],
         [DataArray(n.astype("<f4"), "NIFTI_INTENT_VECTOR", dict(Name="normals"))],
+        dict(AnatomicalStructurePrimary=STRUCTURE[hemi]),
+    )
+    ldat = write_external(
+        paths["normlen"],
+        [
+            DataArray(
+                nlen.astype("<f4"),
+                "NIFTI_INTENT_NONE",
+                dict(Name="normal length |n|, smoothed with no normalisation"),
+            )
+        ],
         dict(AnatomicalStructurePrimary=STRUCTURE[hemi]),
     )
     # int64 keys as (low, high) int32 words: GIfTI has no 64-bit integers
@@ -308,9 +325,10 @@ def write_white_surface(
             Pieces=pieces,
             NormalsFile=paths["normals"].name,
             EdgeKeysFile=paths["keys"].name,
+            NormLenFile=paths["normlen"].name,
             GridShape=[int(x) for x in img.shape[:3]],
             BlocksFile=paths["blocks"].name,
-            DataSHA256={d.name: file_sha256(d) for d in (dat, ndat, kdat)},
+            DataSHA256={d.name: file_sha256(d) for d in (dat, ndat, kdat, ldat)},
             Antialias=dict(
                 Method="thin-plate",
                 Band=AA.BAND,
@@ -322,7 +340,9 @@ def write_white_surface(
         ),
     )
     lap("sidecar (hashes)")
-    return SurfaceFiles(dict(paths, dat=dat, normals_dat=ndat, keys_dat=kdat))
+    return SurfaceFiles(
+        dict(paths, dat=dat, normals_dat=ndat, keys_dat=kdat, normlen_dat=ldat)
+    )
 
 
 @dataclass(frozen=True)
@@ -337,6 +357,8 @@ class WhiteSurface:
     """A white surface read from its files (write_white_surface), whole or
     one block: vertices (float32) in voxel coordinates of the
     segmentation's grid, faces into them, normals (float32, out of the WM),
+    normlen, the normals' length |n| (float32, in [0, 1]: the normals
+    smoothed with no normalisation; low where they cancel),
     vertex_ids, the vertices' indices in the whole mesh (for one block: the
     vertices its faces use), and vertex_key, their grid-edge keys
     (baillarger.mesh.MeshBlocks.vertex_key), which survive a remesh where
@@ -345,6 +367,7 @@ class WhiteSurface:
     v: Float
     f: Int
     normals: Float
+    normlen: Float
     vertex_ids: Int
     vertex_key: Int
     affine: Float
@@ -354,9 +377,9 @@ class WhiteSurface:
     def load(
         cls, surf: Path, block: tuple[int, int, int] | None = None
     ) -> "WhiteSurface":
-        """Read the .surf.gii at surf (and its sidecar, normals and block
-        index), memory-mapped; block: (i, j, k) of one block (a block the
-        surface does not cross gives an empty mesh)."""
+        """Read the .surf.gii at surf (and its sidecar, normals, normal
+        length and block index), memory-mapped; block: (i, j, k) of one block
+        (a block the surface does not cross gives an empty mesh)."""
         side = read_sidecar(sidecar_path(surf), SURF_SPEC)
         aff = np.asarray(side["VoxelToRAS"], np.float64).reshape(4, 4)
         g = GiftiImage.from_filename(str(surf), mmap=True)
@@ -365,6 +388,11 @@ class WhiteSurface:
             str(surf.with_name(side["NormalsFile"])), mmap=True
         )
         nrm = ng.darrays[0].data
+        lg = GiftiImage.from_filename(
+            str(surf.with_name(side["NormLenFile"])), mmap=True
+        )
+        # 1-D; files from before the 1-D writer hold n x 1, which reads the same
+        nlen = lg.darrays[0].data.reshape(-1)
         kg = GiftiImage.from_filename(
             str(surf.with_name(side["EdgeKeysFile"])), mmap=True
         )
@@ -385,7 +413,14 @@ class WhiteSurface:
         v = mm_to_voxel(pts[ids], aff)
         key = np.ascontiguousarray(words[ids], "<i4").view("<i8").ravel()
         return cls(
-            v, f, np.asarray(nrm[ids], np.float32), ids, key.astype(np.int64), aff, side
+            v,
+            f,
+            np.asarray(nrm[ids], np.float32),
+            np.asarray(nlen[ids], np.float32),
+            ids,
+            key.astype(np.int64),
+            aff,
+            side,
         )
 
     def check(self, dseg: Path) -> None:

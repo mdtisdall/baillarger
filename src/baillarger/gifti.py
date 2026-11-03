@@ -27,7 +27,7 @@ _DTYPES = {
 
 @dataclass(frozen=True)
 class DataArray:
-    """One GIfTI data array: 2-D data (float32, int32 or uint8), its intent
+    """One GIfTI data array: 1-D or 2-D data (float32, int32 or uint8), its intent
     (NIFTI_INTENT_*), metadata, and for a point set the 4 x 4 transform to
     scanner coordinates (identity when the points are already there)."""
 
@@ -64,8 +64,8 @@ def write_external(
     with dat.open("wb") as fh:
         for a in arrays:
             d = np.asarray(a.data)
-            if d.ndim != 2:
-                raise ValueError(f"{a.intent}: data must be 2-D, not {d.ndim}-D")
+            if d.ndim not in (1, 2):
+                raise ValueError(f"{a.intent}: data must be 1-D or 2-D, not {d.ndim}-D")
             d = np.ascontiguousarray(d, d.dtype.newbyteorder("<"))
             if d.dtype not in _DTYPES:
                 raise ValueError(f"{a.intent}: dtype {d.dtype} is not supported")
@@ -74,9 +74,8 @@ def write_external(
                 Intent=a.intent,
                 DataType=_DTYPES[d.dtype],
                 ArrayIndexingOrder="RowMajorOrder",
-                Dimensionality="2",
-                Dim0=str(d.shape[0]),
-                Dim1=str(d.shape[1]),
+                Dimensionality=str(d.ndim),
+                **{f"Dim{i}": str(k) for i, k in enumerate(d.shape)},
                 Encoding="ExternalFileBinary",
                 Endian="LittleEndian",
                 ExternalFileName=dat.name,
