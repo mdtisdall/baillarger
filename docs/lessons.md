@@ -181,15 +181,23 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 
 *Inputs*
 
-- The three FLASH echoes, as channels.
-- For training: the seed labels (bootstrapping only), the verified answers from step 5 (`wm-edits/1`) and the test regions (for evaluation only).
+| Input | From | Use |
+|---|---|---|
+| The three FLASH echoes | the scan | the network's channels |
+| Seed labels | the purple-mri aseg (bootstrapping only; 3d, phase 2) | weak training labels |
+| Verified answers (`wm-edits/1`) | step 5 | training labels |
+| Test regions | labelled from scratch (3d, phase 0) | evaluation only, never training |
 
-*Outputs* (no spec yet)
+*Outputs*
 
-- `_dseg`: labels in the FreeSurfer convention, missing tissue included.
-- `_label-WMfilled_probseg`: P(filled WM).
-- `_label-WMfilled_desc-foldsd_probseg`: the spread of P across folds.
-- Each sidecar records the model generation.
+| Output | Spec | Used by |
+|---|---|---|
+| `_dseg`: labels in the FreeSurfer convention, missing tissue included | none yet | step 2 (the filled mask) |
+| `_label-WMfilled_probseg`: P(filled WM) | none yet | step 2 (where handle walls fall); step 3 (the antialiasing data term); step 5 (wall margins) |
+| `_label-WMfilled_desc-foldsd_probseg`: the spread of P across folds | none yet | step 5 (ranking the queue) |
+| The model generation, in each sidecar | none yet | tracing a label to its model |
+
+*Design and lessons*
 
 *Aim.* The white surface needs per-voxel evidence from the FLASH itself: a probability of filled WM, improved wherever a person has answered. The network is the means to that, not a goal of its own.
 
@@ -202,13 +210,7 @@ Measured numbers in this section come from the one hemisphere we have, segmented
   - a choice, at each generation, of whether to rerun earlier hemispheres with it. A rerun changes everything downstream of the label.
 - **Bootstrapping.** The first generation trains on the purple-mri aseg as weak seed labels, and verified labels gradually take their place (3d, phase 2). Until the first generation exists, the surface steps are built and tested on that aseg.
 
-*What it gives the later steps*
-
-| Output | BIDS name | Read by | Use |
-|---|---|---|---|
-| Labels, FreeSurferColorLUT | `_dseg` | step 2 | the filled mask |
-| P(filled WM), float | `_label-WMfilled_probseg` | steps 2 and 3 | where handle walls fall; the antialiasing data term |
-| Fold spread of P | `_label-WMfilled_desc-foldsd_probseg` | step 5 | ranking the review queue |
+*Probabilities*
 
 - Steps 2 and 3 require labels and P; there is no labels-only path. Step 5 uses the fold spread when it exists; during bootstrapping it ranks without it.
 - During bootstrapping, P is a stand-in from purple-mri (3d, phase 1). That lets the surface steps run before the first generation exists, so the surface work does not wait for the network, and the network does not wait for the surface work.
@@ -242,15 +244,19 @@ The coupling that is real, decided once:
 
 *Inputs*
 
-- Step 1's `_dseg` and P.
-- The edits from step 5: `_desc-wmedits_edits.tsv` and its sidecar (`wm-edits/1`).
-- The FLASH, only if fixes chosen by intensity are adopted (Open).
+| Input | From | Use |
+|---|---|---|
+| `_dseg` and P | step 1 | the filled mask; handle removal ordered by P |
+| `_desc-wmedits_edits.tsv` and sidecar (`wm-edits/1`) | step 5 | edits applied before the correction |
+| The FLASH | the scan | fixes chosen by intensity, only if adopted (Open) |
 
-*Outputs* (`docs/formats/wm-dseg.md`)
+*Outputs*
 
-- `_desc-wmtopo_dseg`: the corrected labels (`wm-dseg/1`), on the input's grid. Its filled mask has Betti numbers (b0, 0, 0).
-- `_desc-wmtopofixes_dseg`: what changed and why (`wm-dseg-fixes/1`): 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit.
-- Planned, no spec yet: fills inside missing tissue as a value of their own, and each fix's margin in P.
+| Output | Spec | Used by |
+|---|---|---|
+| `_desc-wmtopo_dseg`: the corrected labels; filled mask with Betti (b0, 0, 0) | `wm-dseg/1` | step 3; step 5; stream 2 (masks and stops) |
+| `_desc-wmtopofixes_dseg`: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit | `wm-dseg-fixes/1` | step 5; the viewer |
+| Fills inside missing tissue as a value of their own; each fix's margin in P (planned) | none yet | step 5 |
 
 *Design and lessons*
 
@@ -285,16 +291,20 @@ The coupling that is real, decided once:
 
 *Inputs*
 
-- Step 2's `_desc-wmtopo_dseg`, from which the filled mask is taken.
-- Step 1's P, for the antialiasing data term.
+| Input | From | Use |
+|---|---|---|
+| `_desc-wmtopo_dseg` | step 2 | the filled mask; missing tissue for the cut-face flag |
+| P | step 1 | the antialiasing data term |
 
-*Outputs* (`white-surf/1`, `docs/formats/white-surf.md`)
+*Outputs*
 
-- `_hemi-<h>_white.surf.gii`: the vertices and triangles, with external binary data (`.dat`).
-- `_desc-normals_white.func.gii`: the unit normals.
-- `_desc-edgekeys_white.func.gii`: each vertex's grid-edge key.
-- `_desc-blocks_white.tsv`: the block index.
-- Planned, no spec yet: the cut-face flag per vertex, keyed by edge key.
+| Output | Spec | Used by |
+|---|---|---|
+| `_hemi-<h>_white.surf.gii` (+ `.dat`): vertices and triangles | `white-surf/1` | step 4; stream 2 (roots); stream 3 (column graph); the viewer |
+| `_desc-normals_white.func.gii`: unit normals | `white-surf/1` | stream 2 (ray directions) |
+| `_desc-edgekeys_white.func.gii`: each vertex's grid-edge key | `white-surf/1` | every per-vertex output downstream |
+| `_desc-blocks_white.tsv`: the block index | `white-surf/1` | blocked readers downstream |
+| The cut-face flag per vertex, keyed by edge key (planned) | none yet | stream 2 (no roots there) |
 
 *Design and lessons*
 
@@ -325,13 +335,17 @@ The coupling that is real, decided once:
 
 *Inputs*
 
-- Step 3's `white-surf/1`.
+| Input | From | Use |
+|---|---|---|
+| `white-surf/1` | step 3 | the mesh to decimate |
 
-*Outputs* (`white-overview/1`, `docs/formats/white-overview.md`)
+*Outputs*
 
-- `_desc-overview_white.surf.gii`: the decimated mesh.
-- `_desc-overviewids_white.func.gii`: the true vertex of each overview vertex.
-- `_desc-overviewcarry_white.func.gii`: the true vertices each face carries.
+| Output | Spec | Used by |
+|---|---|---|
+| `_desc-overview_white.surf.gii`: the decimated mesh | `white-overview/1` | the viewer |
+| `_desc-overviewids_white.func.gii`: the true vertex of each overview vertex | `white-overview/1` | the viewer (picks) |
+| `_desc-overviewcarry_white.func.gii`: the true vertices each face carries | `white-overview/1` | the viewer (mapping back) |
 
 *Design and lessons*
 
@@ -345,13 +359,18 @@ The coupling that is real, decided once:
 
 *Inputs*
 
-- Step 2's corrected labels and fixes image, and step 1's P and fold spread, to find and rank the sites.
-- For display: the FLASH, step 3's surface and step 4's overview.
+| Input | From | Use |
+|---|---|---|
+| Corrected labels and fixes image | step 2 | finding sites |
+| P and fold spread | step 1 | finding and ranking sites |
+| The FLASH, the surface, the overview | the scan; steps 3 and 4 | display in the viewer |
 
 *Outputs*
 
-- `wm-sites/1` (#81): the sites in the queue.
-- The answers: `_desc-wmedits_edits.tsv` and its sidecar (`wm-edits/1`, `docs/formats/wm-edits.md`), read by step 2 as edits and by step 1 as verified training labels.
+| Output | Spec | Used by |
+|---|---|---|
+| The sites in the queue | `wm-sites/1` (#81) | the viewer's review pane |
+| The answers: `_desc-wmedits_edits.tsv` and sidecar | `wm-edits/1` | step 2 (edits); step 1 (verified training labels) |
 
 *Design and lessons*
 
@@ -482,13 +501,17 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 
 *Inputs*
 
-- Stream 1's `white-surf/1`: vertices, normals, edge keys and block index.
-- Stream 1's cut-face flag per vertex (planned).
+| Input | From | Use |
+|---|---|---|
+| `white-surf/1`: vertices, normals, edge keys, block index | stream 1, step 3 | one root per vertex |
+| The cut-face flag (planned) | stream 1, step 3 | roots left out |
 
-*Outputs* (internal)
+*Outputs*
 
-- One root per unflagged vertex, keyed by edge key, with its position and normal.
-- The across-triangle mesh graph, for distances along the surface.
+| Output | Spec | Used by |
+|---|---|---|
+| Roots keyed by edge key, with position and normal | internal | steps 3–4 |
+| The across-triangle mesh graph | internal | distances along the surface (steps 3–4) |
 
 *Design and lessons*
 
@@ -500,14 +523,18 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 
 *Inputs*
 
-- The FLASH echoes (2 and 3, trend-removed log).
-- Stream 1's corrected labels (`_desc-wmtopo_dseg`): cortex for the convolution mask, WM for T = 0 and for signing the normal, fluid and missing tissue as obstacles.
-- Stream 1's edits that relabel fluid channels and vessels (planned, from `pial_labels`).
+| Input | From | Use |
+|---|---|---|
+| FLASH echoes 2 and 3 (trend-removed log) | the scan | the structure tensor |
+| `_desc-wmtopo_dseg` | stream 1, step 2 | cortex mask; WM for T = 0 and the sign; fluid and missing tissue as obstacles |
+| Relabelled fluid channels and vessels (planned, from `pial_labels`) | stream 1 (an edit) | crests off the label's errors |
 
-*Outputs* (internal, no spec yet)
+*Outputs*
 
-- The data normal, its coherence and its sign, per cortex voxel.
-- The fitted field T and its crests.
+| Output | Spec | Used by |
+|---|---|---|
+| The data normal, its coherence and sign | internal, no spec yet | step 3; stream 3 (planned checks) |
+| The field T and its crests | internal, no spec yet | steps 3 and 4 |
 
 *Design and lessons*
 
@@ -530,13 +557,17 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 
 *Inputs*
 
-- The roots (step 1).
-- The data normal and T (step 2), for the methods that follow the image.
-- Stream 1's corrected labels, for the stops: fluid, far WM, missing tissue.
+| Input | From | Use |
+|---|---|---|
+| Roots | step 1 | ray starts |
+| The data normal and T | step 2 | directions, for methods that follow the image |
+| `_desc-wmtopo_dseg` | stream 1, step 2 | stops: fluid, far WM, missing tissue |
 
-*Outputs* (internal)
+*Outputs*
 
-- Per root and method, one ray: its samples with 3D positions and arc length, and why it stopped.
+| Output | Spec | Used by |
+|---|---|---|
+| Per root and method, one ray: samples with 3D positions and arc length, and why it stopped | internal | steps 4 and 5 |
 
 *Design and lessons*
 
@@ -561,11 +592,16 @@ Measured at the marked points (CP; #47, #52, #58):
 
 *Inputs*
 
-- The rays (step 3), T's crests (step 2) and the other roots' rays.
+| Input | From | Use |
+|---|---|---|
+| The rays | step 3 | what each column meets |
+| T's crests | step 2 | `crest_at` |
 
-*Outputs* (internal)
+*Outputs*
 
-- Per column: `crest_at`, `meet_at`, `turn_at`, the root it meets, and its class.
+| Output | Spec | Used by |
+|---|---|---|
+| Per column: `crest_at`, `meet_at`, `turn_at`, the root it meets, its class | internal | step 5 |
 
 *Design and lessons*
 
@@ -577,11 +613,15 @@ Measured at the marked points (CP; #47, #52, #58):
 
 *Inputs*
 
-- Steps 3 and 4.
+| Input | From | Use |
+|---|---|---|
+| Rays and what they meet | steps 3 and 4 | the traces |
 
-*Outputs* (no spec yet)
+*Outputs*
 
-- The column traces, read by stream 3 and the viewer: keyed by edge key and method, with each sample's 3D position, the recorded meetings and the class, readable by block.
+| Output | Spec | Used by |
+|---|---|---|
+| Column traces keyed by edge key and method: each sample's 3D position, the meetings, the class; readable by block | none yet | stream 3; the viewer |
 
 *Design and lessons*
 
@@ -636,12 +676,16 @@ Where each layer lies along every column, read from the image's own contrast and
 
 *Inputs*
 
-- Stream 2's column traces.
-- The FLASH echoes.
+| Input | From | Use |
+|---|---|---|
+| Column traces | stream 2, step 5 | where to sample |
+| The FLASH echoes | the scan | the samples |
 
-*Outputs* (internal)
+*Outputs*
 
-- One trace per column: the echoes sampled every 0.04 mm, each sample with its 3D position, partial-volume samples marked.
+| Output | Spec | Used by |
+|---|---|---|
+| One trace per column, sampled every 0.04 mm, each sample with its 3D position; partial-volume samples marked | internal | steps 2–4 |
 
 *Design and lessons*
 
@@ -652,12 +696,16 @@ Where each layer lies along every column, read from the image's own contrast and
 
 *Inputs*
 
-- The column volume (step 1).
-- Neighbouring columns, from the mesh graph on `white-surf/1`.
+| Input | From | Use |
+|---|---|---|
+| The column volume | step 1 | the traces to align |
+| Neighbouring columns | the mesh graph on `white-surf/1` | which traces to compare |
 
-*Outputs* (internal)
+*Outputs*
 
-- Shifts between neighbouring traces, and the warp fitted to them.
+| Output | Spec | Used by |
+|---|---|---|
+| Shifts between neighbouring traces, and the fitted warp | internal | steps 3 and 4 |
 
 *Design and lessons*
 
@@ -672,13 +720,17 @@ Where each layer lies along every column, read from the image's own contrast and
 
 *Inputs*
 
-- The flattened traces and shifts (step 2).
-- Contacts and open tops, from stream 2's recorded meetings and stops.
-- Detected bands (step 4), when levels are placed at them.
+| Input | From | Use |
+|---|---|---|
+| Flattened traces and shifts | step 2 | conservation of shifts |
+| Contacts and open tops | stream 2 (meetings and stops) | ties and anchors |
+| Detected bands | step 4 | levels, when placed at them |
 
-*Outputs* (no spec yet)
+*Outputs*
 
-- Per column, a monotone depth map z(τ): the pial edge at τ = 1, and the GM/WM transition as one of its levels.
+| Output | Spec | Used by |
+|---|---|---|
+| Per column, a monotone depth map z(τ); the pial edge at τ = 1, the GM/WM transition one of its levels | none yet | steps 4–6; the viewer |
 
 *Design and lessons*
 
@@ -700,13 +752,17 @@ Where each layer lies along every column, read from the image's own contrast and
 
 *Inputs*
 
-- The traces in the flattened frame (steps 2 and 3).
-- The column graph.
+| Input | From | Use |
+|---|---|---|
+| Traces in the flattened frame | steps 2 and 3 | band search |
+| The column graph | stream 1's `white-surf/1` | stacking neighbours; regions |
 
-*Outputs* (no spec yet)
+*Outputs*
 
-- The bands per region: position in τ, bright or dark, width.
-- Which layer each band is, and where an area's pattern changes.
+| Output | Spec | Used by |
+|---|---|---|
+| Bands per region: position in τ, bright or dark, width | none yet | step 3 (levels); step 5; the viewer |
+| Which layer each band is, and where an area's pattern changes | none yet | step 5; the viewer |
 
 *Design and lessons*
 
@@ -722,15 +778,19 @@ Where each layer lies along every column, read from the image's own contrast and
 
 *Inputs*
 
-- The joint warp (step 3) and the columns' tops.
-- The contacts and their lengths L, from stream 2.
-- The white surface's curvature, for the depth estimators.
+| Input | From | Use |
+|---|---|---|
+| The joint warp and column tops | step 3 | thickness evidence |
+| Contacts and their lengths L | stream 2 | contact splits |
+| White-surface curvature | from stream 1's `white-surf/1` | the depth estimators |
 
-*Outputs* (no spec yet)
+*Outputs*
 
-- A thickness field on the white-surface vertices.
-- Each contact's split between its two banks, reported three ways.
-- Depth within each column, by the estimator chosen for that role.
+| Output | Spec | Used by |
+|---|---|---|
+| A thickness field on the white-surface vertices | none yet | contact splits; the viewer |
+| Each contact's split, reported three ways | none yet | step 6; the viewer |
+| Depth within each column, by the chosen estimator | none yet | the viewer |
 
 *Design and lessons*
 
@@ -771,11 +831,15 @@ Where each layer lies along every column, read from the image's own contrast and
 
 *Inputs*
 
-- The GM/WM transition and other levels (steps 3–5).
+| Input | From | Use |
+|---|---|---|
+| The GM/WM transition and other levels | steps 3–5 | the feedback |
 
-*Outputs* (no spec yet)
+*Outputs*
 
-- A spec'd input to stream 1. Its content and format are open.
+| Output | Spec | Used by |
+|---|---|---|
+| An input to stream 1; content and format open | none yet | stream 1, steps 1–2 |
 
 *Design and lessons*
 
@@ -827,12 +891,16 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
 
 *Inputs*
 
-- The paths of the published outputs to show.
+| Input | From | Use |
+|---|---|---|
+| Paths of the published outputs to show | the user | what the server loads |
 
 *Outputs*
 
-- Shared state (crosshair in world mm, selected true vertex) over POST /state and Server-Sent Events.
-- Binary arrays for the panes.
+| Output | Spec | Used by |
+|---|---|---|
+| Shared state (crosshair in world mm, selected true vertex) over POST /state and Server-Sent Events | internal | every pane and window |
+| Binary arrays | internal | the panes |
 
 *Design and lessons*
 
@@ -844,13 +912,17 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
 
 *Inputs*
 
-- Volumes (the FLASH, labels, P) through the one reader.
-- Stream 1's `white-surf/1` and `white-overview/1`.
-- Stream 2's column traces and stream 3's outputs, as their specs appear.
+| Input | From | Use |
+|---|---|---|
+| Volumes: the FLASH, labels, P | the scan; stream 1 | the volume pane |
+| `white-surf/1`, `white-overview/1` | stream 1 | surface, sections, inflation, flat map |
+| Column traces; stream 3's outputs | streams 2 and 3, as their specs appear | their panes |
 
 *Outputs*
 
-- Views, and picks written to the shared state.
+| Output | Spec | Used by |
+|---|---|---|
+| Views; picks written to the shared state | internal | the user; other panes |
 
 *Design and lessons*
 
@@ -865,11 +937,15 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
 
 *Inputs*
 
-- Each stage's queue and the data around each site: for stream 1, `wm-sites/1` with the labels, P and the surface.
+| Input | From | Use |
+|---|---|---|
+| Each stage's queue and the data round each site (stream 1: `wm-sites/1`, labels, P, surface) | the stage | site answers and scribbles |
 
 *Outputs*
 
-- Answers as spec'd edits: for stream 1, `wm-edits/1`.
+| Output | Spec | Used by |
+|---|---|---|
+| Answers as spec'd edits (stream 1: `wm-edits/1`) | the stage's edit spec | the stage that queued them |
 
 *Design and lessons*
 
