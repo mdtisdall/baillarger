@@ -213,15 +213,17 @@ class MeshOps:
         self, x: torch.Tensor, iters: int = 10
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """mesh_smoothing.smooth_normals_and_length: the unit normals and
-        their length before the last division."""
+        the length of the normal smoothed with no division."""
         if iters < 1:
             raise ValueError("iters must be at least 1")
         n = self.vertex_normals(x)
+        m = n
         for _ in range(iters):
             n = 0.5 * n + 0.5 * self.mean_neighbours(n)
             length = torch.linalg.vector_norm(n, dim=1, keepdim=True)
             n = n / (length + 1e-12)
-        return n, length[:, 0]
+            m = 0.5 * m + 0.5 * self.mean_neighbours(m)
+        return n, torch.linalg.vector_norm(m, dim=1)
 
     def smooth_normals(self, x: torch.Tensor, iters: int = 10) -> torch.Tensor:
         """mesh_smoothing.smooth_normals."""

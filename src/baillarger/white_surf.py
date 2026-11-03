@@ -267,7 +267,7 @@ def write_white_surface(
             DataArray(
                 nlen.astype("<f4"),
                 "NIFTI_INTENT_NONE",
-                dict(Name="normal length |n| before the last normalisation"),
+                dict(Name="normal length |n|, smoothed with no normalisation"),
             )
         ],
         dict(AnatomicalStructurePrimary=STRUCTURE[hemi]),
@@ -357,8 +357,8 @@ class WhiteSurface:
     """A white surface read from its files (write_white_surface), whole or
     one block: vertices (float32) in voxel coordinates of the
     segmentation's grid, faces into them, normals (float32, out of the WM),
-    normlen, the normals' length |n| before the last normalisation (float32,
-    in [0, 1]: the disagreement in the last smoothing step),
+    normlen, the normals' length |n| (float32, in [0, 1]: the normals
+    smoothed with no normalisation; low where they cancel),
     vertex_ids, the vertices' indices in the whole mesh (for one block: the
     vertices its faces use), and vertex_key, their grid-edge keys
     (baillarger.mesh.MeshBlocks.vertex_key), which survive a remesh where

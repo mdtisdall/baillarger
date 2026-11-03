@@ -1,5 +1,5 @@
 """Tests of edit_priority with exact answers.
-    nix develop --command uv run --with thinqpbo pytest -q prototypes/scripts/test_edit_priority.py
+    nix develop --command uv run pytest -q prototypes/scripts/test_edit_priority.py
 """
 
 import itertools

@@ -18,7 +18,7 @@ and `ses`, hemisphere `<h>` (`R` or `L`):
 | `sub-<sub>_ses-<ses>_hemi-<h>_white.dat` | Their data: the vertices, then the triangles |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-normals_white.func.gii` | GIfTI XML: the normals, as external binary data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-normals_white.dat` | Their data |
-| `sub-<sub>_ses-<ses>_hemi-<h>_desc-normlen_white.func.gii` | GIfTI XML: the length of each smoothed normal before the last normalisation, \|n̄\|, as external binary data |
+| `sub-<sub>_ses-<ses>_hemi-<h>_desc-normlen_white.func.gii` | GIfTI XML: the normal length \|n̄\| (the normals smoothed with no normalisation), as external binary data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-normlen_white.dat` | Their data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-edgekeys_white.func.gii` | GIfTI XML: each vertex's grid-edge key, as external binary data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-edgekeys_white.dat` | Their data |
@@ -63,23 +63,23 @@ the area-weighted vertex normals smoothed along the mesh (10 steps,
 `baillarger.mesh_smoothing.smooth_normals`), out of the WM.
 
 Each step of the smoothing sets n to 0.5 n + 0.5 × (the mean of n over the
-vertex's neighbours) and then divides n by its norm. The normal length
-\|n̄\| is that norm in the last step, before the division
-(`baillarger.mesh_smoothing.smooth_normals_and_length`). It is in [0, 1]
-(values above 1 from rounding are set to 1).
+vertex's neighbours) and then divides n by its norm.
 
-\|n̄\| measures only the disagreement in the last smoothing step: the
-disagreement between the vertex's normal and the mean normal of its
-neighbours, after 9 steps have already made the normals smooth. It is 1
-where they agree, as on a plane, and less than 1 where they point in
-different directions. It is not the cancellation of the normals over the
-whole smoothing support (the 10 steps without division). That measure is
-lower: on a thin blade, its two faces point in opposite directions and
-cancel over the support, but the last step sees only the remaining
-disagreement. On a blade phantom one voxel thick, the lowest \|n̄\| is
-0.93. A low \|n̄\| shows a normal that is not well defined: a small change
-of the surface can turn it far. Readers use it to give less weight to such
-vertices.
+The normal length \|n̄\| is the norm of m, where m starts as the same unit
+area-weighted normals and takes the same 10 steps with no division
+(`baillarger.mesh_smoothing.smooth_normals_and_length`). So m is a weighted
+mean of the unit normals over the smoothing support (about 10 edges), and
+\|n̄\| measures how much they cancel. It is in [0, 1] (values above 1 from
+rounding are set to 1). It is 1 where the normals agree, as on a plane, and
+falls towards 0 where they point in opposite directions, as on a thin blade
+whose two faces cancel. A low \|n̄\| shows a normal that is not well
+defined: a small change of the surface can turn it far. Readers use it to
+give less weight to such vertices.
+
+On the first hemisphere (INDD121850, R, 0.16 mm) \|n̄\| ran from 0.038 to
+1, with a median of 0.997; 1.8 % of the vertices were below 0.9. Its lowest
+values were on WM threads 1–2 voxels thick, the tips of thin strands, small
+loops and crumbs.
 
 The surface has no per-vertex cortex label: every vertex is a column root.
 Columns run out from the WM until they reach background (label 0) or a

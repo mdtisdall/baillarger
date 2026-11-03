@@ -8,8 +8,8 @@ unary costs, hard bounds and L1 hinges on differences of two depths, ties on
 their sum, and pairwise tables (baillarger.surfcut.model).
 
 - cut: the exact minimum of the submodular terms by one minimum s-t cut
-  (Ishikawa 2003), scipy's maximum flow.
-- qpbo: every term, ties included, by QPBO (thinqpbo): a partial labelling
+  (Ishikawa 2003), on an int64 maximum flow (baillarger.surfcut._flow).
+- qpbo: every term, ties included, by QPBO (our own): a partial labelling
   that agrees with some global minimum, each variable's interval of labels
   it could not rule out, a lower bound, and QPBO-I's completion. Exact on
   submodular models.
