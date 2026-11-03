@@ -104,6 +104,57 @@ These bind every stream from its first version. A first version may be rough, bu
   Evaluate both at whole-brain 50 µm on the target hardware. Laptop timings are supporting context only. A step that is quick on a 160 µm hemisphere can still be the wrong design if its cost grows badly, and a slow one can be right.
 - **Heavy runs go under `scripts/memguard`,** one at a time, with the cap at about 1.5× the run's peak.
 
+### Data for training, and for judging success
+
+**Success is that the user stops editing.** The proof is in the eating: a segmentation or a surface succeeds when the user no longer needs to edit it to get what they want from a hemisphere. The goal is not a system that needs no edits, but one that learns as fast as possible from the edits it gets. So there is no fixed held-out set and no labelled test region. Data is kept apart from training only where a step inside the system needs it, and each such place is listed here.
+
+**The rule that replaces a held-out set: score a model only on answers it has not trained on.** Every answer is made against one generation's output and carries its time, and every generation's weights are kept (§3d, phase 9). An answer made against generation g was not in g's training. So the answers, in time order, are a test set that grows by itself: each generation is scored on the answers made against it, before the next generation trains on them (prequential, train-then-test-on-next evaluation). Nothing is set aside, and no answer is withheld from training.
+
+**What learns from data, and what each needs**
+
+| Where | Learns or fits from | Produces | Needs data it did not train on? |
+|---|---|---|---|
+| nnU-Net generations (§3c, step 1; phases 7–9) | the seed labels (bootstrap only, with ignore bands) and the verified answers: site answers and scribbles | labels, P, fold spread | Yes, for three things: the fold spread, the calibration of P, and the scores of each generation. All three come from the folds and from answers not yet trained on (below), never from a fixed set |
+| The update schedule (§3c, step 1 Open; phase 9) | the replayed answer history | how often and how long to train, how much replay | Yes: each schedule is scored prequentially on the answers after each update. The replay holds the answers fixed, so it scores model quality per GPU hour, not reviewer effort saved |
+| σ and the fold spread (phase 10) | calibrated P; the folds | uncertainty for the queue, the antialias weights, per-vertex position | Yes: whether σ and the spread predict where edits change the labels is scored on answers made against that generation, not on answers it trained on |
+| The review queue (§3c, step 6) | nothing: it ranks by margin, spread and site kind | sites | No. Its length, and the answers that change voxels, are the success measure |
+| Constants set on the one hemisphere: the fold repair's s = 0.30 mm, the detectors' thresholds, `orient`'s σ, the band width limits | the counts and views on that hemisphere | fixed constants | Yes, once: each is checked unchanged on the next hemisphere. A constant that must be retuned per hemisphere was fitted to one specimen |
+| Bands per region (§5c, step 4) | the stacked traces | the number of bands K | Yes, inside the fit: 2-fold cross-validation over traces chooses K. This stays |
+| Thickness carried sideways (§5c, step 5) | own-bank evidence at visible tops and bottoms | the thickness field, and how far carry reaches | Yes, inside the fit: mask stretches of columns that do have own evidence, carry across them, and compare. This needs no labels and measures carry where the answer is known |
+| Equal-volume depth (§5c, step 5) | V(s) between two named levels | depth within a column | Yes: it is validated against visible bands, so a band that the warp used as a level cannot also validate it. Leave each band out of the levels in turn |
+| The joint warp's anchors (§5c, steps 3 and 7) | the profiles and the user's points | z(τ) per column | No training. Each answer is scored against the carried level it replaced, before the warp reads it; that is how far carry can reach (§5c, Open) |
+| A data-normal term in `antialias`, if adopted (§3c, Open) | the data normal | surface normals | Yes: agreement with the data normal is then no longer an independent check, so part of the evidence (one echo, or some regions) stays out of the term |
+
+**The kinds of data apart from training**
+
+1. **Training labels.** The seed labels during bootstrapping (phase 7), then only verified answers. Needed now. Every answer trains the next generation; none is withheld.
+2. **Data held apart inside a training run.** Needed from the first generation, for two reasons that are internal to training, not a test of success: a spread that ranks the queue, and the calibration of P. The number of models is not fixed.
+   - **The first generation uses nnU-Net's five folds:** each fold's model never sees its validation region. It has no answers yet, so both the spread and the calibration come from the folds.
+     - **The fold spread** is the disagreement of the five fold models, the epistemic uncertainty that ranks the queue (phase 10).
+     - **Calibration of P near 0.5.** A network is overconfident on its own training voxels, so P is calibrated, and if needed corrected (temperature scaling), on out-of-fold predictions only. The walls of handle removal and the queue's margins depend on it (§3c, step 1).
+   - **A later generation may use one model.** Five folds cost about 5× the training of one model, and that delays the time before the answers come back as a better model. So, on a later generation, compare the fold spread with a cheaper spread from one model: test-time augmentation (nnU-Net's mirroring and flips) or a checkpoint ensemble. The measure is how well each spread predicts where the answers made against that generation change the labels, on the same answers for both. If the cheaper spread ranks as well, change to one model with that spread, and calibrate P on the last out-of-fold set plus the prequential answers, which are out of sample by construction.
+   - **The limits of the prequential answers as calibration data:** they are sparse (hundreds of sites against millions of voxels), they are biased towards hard sites (the queue picks them; answers on random sites, below, are not), and the first generation has none.
+
+   Early stopping is not used: nnU-Net keeps its final checkpoint, and the schedule length is set by the retrospective replay. With one hemisphere the folds are contiguous Morton superblocks with an ignored gap one patch wide, because neighbouring voxels share their noise (correlation 0.5–0.67, §2) and a patch's context reaches across random splits; out-of-fold predictions next to a training voxel would look calibrated when they are not. With several hemispheres the folds split by hemisphere. Calibration near 0.5 needs verified labels at the boundary, since the seed labels are ignored there: for the first generation, trained on seed labels alone, it is read from views and from where P crosses 0.5 within purple-mri's ignore band; from the second, on the verified voxels in each fold's validation region. The fold scores (Dice and the like) are not success measures.
+3. **The operational measure.** Needed now, from the first review; it is the definition of success. The primary measure is the number of answers (site answers and scribbles) that change voxels of the `dseg`, per hemisphere and per generation. Reported with it: the voxels they change, the reviewer time, and the queue's length. How fast the primary measure falls, review session by review session as generations follow each other, is how fast the system learns. Leakage between neighbouring voxels helps here: a model that fixes the neighbours of an answer has learnt from it, and the user benefits. So this measures what the user experiences, not generalisation to a new specimen.
+
+   Two cautions. The queue picks hard sites (low margin, high spread), so scores on ranked site answers overstate the error elsewhere; scribbles, made wherever the reviewer sees an error, are less biased. **Random sites** remove the bias: the reviewer chooses, when an edit session starts, whether the queue includes random, unranked sites and what share; the plan fixes no default. Answers on random sites give the unbiased error rate and can find confident errors (wrong where the spread and the margin are small), so they are reported apart from the answers on ranked sites. And a model scored on answers it has already trained on measures only whether it learns what it is told: phase 9 reports the two apart.
+4. **A de novo hemisphere.** Deferred: its measure is decided when results are to be published, not now. It is the next-hemisphere reading done once, on a specimen no generation has trained on. Not having it costs nothing in the system. Four records are kept from the first generation on, so that it stays possible:
+   - **Training provenance per generation:** which hemispheres, and which answers by time, each generation trained on, so that an untouched hemisphere can be shown to be de novo.
+   - **Each generation's weights and settings,** kept and reproducible (the export, the nnU-Net plans and schedule, the code version).
+   - **The edit log** (`wm-edits/1`, append-only, each answer with its time and the SHA it was made against), which the prequential measure needs anyway. For each answer and scribble it records whether it changed voxels of the `dseg`, how many it changed, the reviewer time from opening the site to submitting the answer (logged by the review pane, stream 4, phase 2), and whether the site was random.
+   - **The first pass on each new hemisphere,** made by a generation that has seen none of its answers, with its queue, recorded before any of its answers trains. For research only: no decision, gate or queue step depends on it.
+5. **Other data.**
+   - **Exact tests** (phantoms, brute force, device equality) have known answers and need no held-out data (§1, working rules).
+   - **A 50 µm scan of a specimen already scanned at 160 µm** gives tissue fractions at 160 µm with no labelling: a test of P as a fraction at mixed voxels, and training data for the phase 11 fraction outputs. Later, when such a scan exists.
+
+**Consequences for the plan**
+
+- Phase 8's first generation uses five folds, for the spread and the out-of-fold calibration, not for validation. Whether later generations keep them is decided by the spread comparison (phase 10).
+- Phase 9's diagnostics score each generation on the answers made against it before it trained on them, and report the answers it trained on apart.
+- The retrospective replay scores each schedule prequentially.
+- The painting mode (stream 4, phase 1) stays out of the plan. Free painting has the `manual-paint` site answer and the ITK-SNAP escape hatch. It returns only if the de novo measure, when decided, needs dense labels.
+
 ## 2. Facts that cut across streams
 
 **The image** (CL; CP)
@@ -224,10 +275,10 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 
 - nnU-Net v2 (Apache-2.0), `3d_fullres` with a residual-encoder preset (M or L), trained on the three FLASH echoes as channels.
 - It is trained in generations, through continuous human-in-the-loop review. Each generation segments the hemispheres, the review queue corrects its output (step 6), and the verified answers join the training labels for the next generation. No number of hemispheres or generations is fixed in advance. This needs:
-  - the number of manual edits each hemisphere needs (the queue's length and the answers that change voxels), and views, so each generation can be compared with the last;
+  - the number of manual edits each hemisphere needs (the answers that change voxels, with the voxels changed, the reviewer time and the queue's length; §1), and views, so each generation can be compared with the last;
   - the model generation recorded in each output's sidecar, so a label can be traced to the model that made it;
   - a choice, at each generation, of whether to rerun earlier hemispheres with it. A rerun changes everything downstream of the label.
-- **Success** is that the user stops needing manual edits to get what they want from a hemisphere. No data is held out for validation. If a quantitative measure is wanted later, a de novo hemisphere provides it.
+- **Success** is that the user stops needing manual edits to get what they want from a hemisphere. No data is held out for validation; each generation is scored on the answers made against it before it trains on them, and a de novo hemisphere provides a quantitative measure if one is wanted later (§1, *Data for training, and for judging success*).
 - **Bootstrapping.** The first generation trains on the purple-mri aseg as weak seed labels, and verified labels gradually take their place (3d, phase 7). Until the first generation exists, the whole pipeline runs on that aseg (3d, phase 0).
 
 *Probabilities*
@@ -239,7 +290,7 @@ The coupling that is real, decided once:
 
 1. **The label set** (`label-set/1`, #89). The filled mask is `FILLED_LABELS`: WM, caudate, putamen, pallidum, thalamus, accumbens, ventral DC, vessel and CC. The lateral ventricles, the choroid plexus (it follows the lateral ventricle), the inferior lateral ventricle and the amygdala are outside the mask (step 2); WM hypointensities (77) are not in the set. One question is open: whether the hippocampus joins the mask (Open). The network must output at least these classes, and the hippocampus as a class of its own, separately from cortex and outside, or the surface changes.
 2. **Excisions are outside.** Blocks cut out before the scan are labelled outside, like any other Fomblin; the label set has no missing-tissue class. Where the data ends needs no label and no stored output (the rule for cut faces).
-3. **Calibration.** P must be calibrated near 0.5, because step 2 places walls by it. Calibration is a diagnostic of every generation.
+3. **Calibration.** P must be calibrated near 0.5, because step 2 places walls by it. Calibration is a diagnostic of every generation, measured on out-of-fold predictions only (§1, *Data for training, and for judging success*).
 4. **The defect count.** The number of handles and cavities before correction sets the length of the review queue (step 6). It is a diagnostic of every generation, not a target to optimise inside the network.
 5. **Partial volume: the majority rule.** A voxel takes the class that fills most of it. A fluid channel narrower than half a voxel, or two banks pressed pia to pia with no fluid, is therefore cortex in the labels.
    - Why: a label per voxel cannot hold two interfaces inside one voxel, whatever rule it follows. Forcing a channel open in the labels (the skeleton insertion of CRUISE's ACE and CIVET's CLASP) gets the topology right by moving each bank's pial edge by up to half a voxel, and it still fails where the banks touch with no fluid.
@@ -477,7 +528,8 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
   - fixes that override an answer (from phase 3);
   - the fixes with the smallest margin in P (from the fix table; from phase 8, when P exists);
   - the places with the largest fold spread, where the model is least sure (from phase 8);
-  - stream 3's sites, where the profiles disagree with the WM label (from stream 3's phase 6).
+  - stream 3's sites, where the profiles disagree with the WM label (from stream 3's phase 6);
+  - random, unranked sites, if the reviewer chooses them for the session, in the share chosen (§1, *Data for training, and for judging success*); each is marked as random.
 
   During bootstrapping the queue ranks by site kind and wall size; margins and fold spread join it from phase 8.
 - **Each answer serves twice:**
@@ -521,7 +573,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - Open decisions for our own segmentation:
   - **The hippocampus: inside the white surface or outside it.** To be decided once there is data, by looking at both on our own segmentation. If inside, stream 2 must also decide how to treat roots on the part of the surface that wraps it, which is not neocortex: a medial-wall label, or roots kept and judged later.
   - **How fast a generation follows a review.** nnU-Net can start from the previous weights (`-pretrained_weights`) with a short custom schedule, sampling patches mostly round the new verified labels and replaying the older labels so the model does not forget them. On a CUDA GPU that is hours, not days, so a generation could follow each review session. How often to train, how long, and how much replay are to be found by experiment, not chosen in advance (3d, phase 9):
-    - **Retrospective replay.** Every answer carries its time, and each generation's weights are kept, so the answer history can be replayed offline at different update frequencies (each session, every N answers, each hemisphere) and schedule lengths. For each, measure GPU hours against the generation diagnostics (3d, phase 9).
+    - **Retrospective replay.** Every answer carries its time, and each generation's weights are kept, so the answer history can be replayed offline at different update frequencies (each session, every N answers, each hemisphere) and schedule lengths. For each, measure GPU hours against the generation diagnostics (3d, phase 9), each model scored only on the answers made after its last update (prequential, §1).
     - **What replay cannot show.** A model updated more often changes which sites reach the queue, and so what reviewers would have answered. Replay holds the answers fixed, so it measures model quality per GPU hour, not reviewer effort saved. A partial estimate of the latter: how many later answers the more frequently updated model already gets right, and so would not have queued.
   - **Whether a different network would do better.** Probably not by architecture: in "nnU-Net revisited" (MICCAI 2024) careful benchmarking erased most claimed gains of transformer and Mamba models (Swin UNETR, nnFormer, U-Mamba); MedNeXt was on a par. The bottleneck is labels. Worth testing once there are several hemispheres: self-supervised pretraining of the residual-encoder nnU-Net on all our unlabelled FLASH volumes (DKFZ has tooling for this; check its state and licence).
 
@@ -539,8 +591,8 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
 - **Phase 1: the WM-distance sampler** (shared code, §7). Port `tissue_wm_distance` from `streamlines` as a sampler: the distance through tissue, capped at 8 mm, with fluid and outside as obstacles, per superblock with its halo (§2). Exact tests: the straight-line distance where nothing blocks the path, a path forced round a fluid obstacle, and the same value whichever superblock computes it. Phase 2 (`orient`) builds on it, for the sign of the data normal.
 - **Phase 2: `orient`** (step 3). Port the tensor tools from `streamlines` (torch, blocks) as an on-demand sampler of the local cortex level, the structure tensor and the signed data normal with its coherence, with exact tests (phantom planes and spheres), and add agreement of the surface normals with it to the surface diagnostics.
 - **Phase 3: the review's formats and code** on phase 0's output (the steps of the #80 plan, with #81 as its first PR). Everything here is stream 1's and needs no viewer; the viewer's review pane (stream 4, phase 2) is built on it, and the answers made there correct the hemisphere now and become the first verified training labels.
-  1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
-  2. `wm-edits/1` edited so that answers stand on their own, in an append-only log with supersession, including scribbles (one class per stroke); and `dseg` applies them by the rules of step 2: replayed in the order they were made, and the topology guarantee winning over an answer, with such a fix marked and queued.
+  1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81), including random, unranked sites drawn on request for a session, each marked as random (§1).
+  2. `wm-edits/1` edited so that answers stand on their own, in an append-only log with supersession, including scribbles (one class per stroke), each answer with whether it changed voxels of the `dseg`, how many, its reviewer time, and whether its site was random (§1); and `dseg` applies them by the rules of step 2: replayed in the order they were made, and the topology guarantee winning over an answer, with such a fix marked and queued.
   3. The site-answer choices (`remove-strand`, `thicken`, `fill-gap`, `widen-gap`, `leave`) as published code with a written contract: each a function of the current label and the site that returns the voxels it changes. The review pane calls them for its previews and writes what the reviewer picks; exact tests on phantoms.
   4. The ITK-SNAP escape hatch, as a command-line tool: export a crop, import the painted voxels as an answer.
   5. `dseg` publishes its fixes as a table and a sparse diff (step 2), under `wm-dseg-fixes/1`, with replay and revert tests; every run's diff is kept, keyed by its input SHAs.
@@ -560,22 +612,22 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
   - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset.
 - **Phase 8: the first generation.** Its labels and P replace the purple-mri aseg as stream 1's input, and the surface steps read P on the hemisphere for the first time; streams 2–4 rerun on the new outputs.
   - Then remove the labels-only path (distance ordering, smoothness-only antialiasing).
-  - Five folds, split by hemisphere when there are several. With one hemisphere, five spatial folds of contiguous Morton superblocks, with a gap one patch wide set to ignore between each fold's training and validation regions, so no patch straddles both. Spatial folds make the folds' accuracy an upper bound, and the fold spread then includes spatial variation as well as what more labels can fix. No data is held out for validation, so whether this fold design stays is open.
+  - Five folds, split by hemisphere when there are several; whether later generations keep them is decided in phase 10. With one hemisphere, five spatial folds of contiguous Morton superblocks, with a gap one patch wide set to ignore between each fold's training and validation regions, so no patch straddles both. The folds exist for the fold spread and for calibrating P on out-of-fold predictions, not for validation (§1, *Data for training, and for judging success*); their scores are not success measures. Spatial folds make the fold spread include spatial variation as well as what more labels can fix.
   - Inference writes the `_dseg`, the WM-filled `_probseg` and the fold spread, with sidecars.
   - Diagnostics against the purple-mri seed labels as a baseline, on the hemisphere: the length of the review queue and the number of manual edits it needs; calibration of P near 0.5; handles and cavities before correction; the phase 6 walls and their margins, with P ordering against the labels-only path's distance ordering (where the walls move, the normal metrics, views of the walls that move most); views of where ours and purple-mri's differ most.
   - With its data, mesh the hemisphere with the hippocampus inside and outside the filled mask, and decide from views of both (Open).
-- **Phase 9: generations through review.** As in step 6. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics: those of phase 8, among them the length of the queue and the number of manual edits per hemisphere; views; and where the generation's own prediction, before the answers are applied, disagrees with verified voxels (a view and a count: those places are already answered).
-  - Keep every generation's weights and the time of every answer, from the first generation on: the update-frequency experiment needs both.
+- **Phase 9: generations through review.** As in step 6. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics: those of phase 8, among them the length of the queue and the number of manual edits per hemisphere; views; and where the generation's own prediction, before the answers are applied, disagrees with verified voxels (a view and a count: those places are already answered), reported apart for answers it trained on (does it learn what it is told) and answers made against it (does it generalise; §1).
+  - Keep every generation's weights and settings, reproducibly, with the hemispheres and answers it trained on, and the time of every answer, from the first generation on: the update-frequency experiment and the prequential scores need them, and they keep a de novo measure possible (§1).
   - Once enough answers have accumulated, run the retrospective replay (step 1 Open) and set the update frequency, schedule length and replay from it.
 - **Phase 10: uncertainty.**
   - Two estimates that need no new network output:
-    - the fold spread, which is epistemic: what more labels can fix;
+    - the spread, which is epistemic: what more labels can fix. From the folds in the first generation; on a later generation, compared with a one-model spread (test-time augmentation, or a checkpoint ensemble) by how well each predicts where the answers made against that generation change the labels, on the same answers. If the one-model spread ranks as well, later generations train one model, and P is calibrated on the last out-of-fold set plus the prequential answers (§1);
     - σ from a calibrated P and a distance, which is aleatoric: what the image leaves open. If the boundary distance d at a voxel is Gaussian, d ~ N(μ, σ²), then P(inside) = Φ(−μ/σ).
   - Uses:
     - Rank the queue. A high-spread site is a good training label; a high-σ site is a judgment and is recorded as one.
     - Weight the antialias data term by 1/σ².
     - Give each white-surface vertex a position uncertainty.
-  - Diagnostic: does σ predict where the manual edits change the labels?
+  - Diagnostic: do σ and the spread predict where the manual edits change the labels, on answers made against that generation (§1)?
 - **Phase 11: only if the diagnostics ask for it.**
   - A signed-distance output (capped at about 5 voxels, L1, trained only where every voxel within the cap is labelled), or a Laplace head with β-NLL, if the σ derived from P is poorly calibrated or saturated where it matters.
   - N4 bias correction, if the network's errors (where the manual edits change its labels) follow position across the specimen or a smooth fit of WM intensity (§2).
@@ -1186,8 +1238,8 @@ Order: phase 0 needs stream 1's phase 0. Phases 1 and 2 follow phase 0 and can r
   - Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
   - Bring in the geodesic-patch flat map (#69), on the fixed `mesh_graph` (§7).
 - **Phase 0.5: overlays on the brick pane:** the labels, from a label-brick pyramid built like the echo's (the most common label of each 2×2×2 block in place of the mean), then mesh outlines. The review panes (phases 2 and 5) and the painting mode (phase 1) draw on the brick pane, not on NiiVue: NiiVue loads one box into the browser, which does not scale to 50 µm whole brain. Changed in round 1: split from phase 2, because phases 1, 2 and 5 all draw on these overlays.
-- **Phase 1: a painting mode** (brush and fill by class, slice by slice with 3D checks). Whether it is needed is open: scribbles and site answers are made in the review pane (phase 2), and no test regions are labelled. Changed in round 1: the phase existed to paint the test regions, which were dropped.
-- **Phase 2: the stream 1 review pane:** the queue from `wm-sites/1`, the site-answer choices with previews (calling stream 1's published choice code), and scribbles (one class per stroke), writing `wm-edits/1`. Stream 1's phase 3 publishes all three; the pane holds no stream 1 logic of its own. Changed in round 1: the brick-pane overlays moved to phase 0.5.
+- **Phase 1: a painting mode** (brush and fill by class, slice by slice with 3D checks): out of the plan. It has no evaluation role (§1, *Data for training, and for judging success*): scribbles and site answers are made in the review pane (phase 2), free painting has `manual-paint` and the ITK-SNAP escape hatch, and no test regions are labelled. It returns only if the de novo measure, when decided, needs dense labels. Changed in round 1: the phase existed to paint the test regions, which were dropped.
+- **Phase 2: the stream 1 review pane:** the queue from `wm-sites/1`, the site-answer choices with previews (calling stream 1's published choice code), and scribbles (one class per stroke), writing `wm-edits/1`. It logs each answer's reviewer time, from opening the site to submitting the answer, into the edit log (§1, *Data for training, and for judging success*). A session option, set when the session starts, includes random, unranked sites in the queue at a share the reviewer chooses, with no fixed default; each is marked as random in the edit log. Stream 1's phase 3 publishes all three; the pane holds no stream 1 logic of its own. Changed in round 1: the brick-pane overlays moved to phase 0.5.
 - **Phase 3: columns.** Rewrite against the ray sampler, calling it for what is on screen: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
 - **Phase 4: stream 3's outputs,** a pane for each as its spec appears: the columns sampled on request, z(τ) and its levels with their sources, bands, thickness, and the two banks' tops at contacts.
 - **Phase 5: the stream 3 review pane:** the queue from `laminar-sites/1`, each site shown on its columns and on sections through them, with the carried level drawn; the user places points on the pial edge or the GM/WM transition, written to `laminar-edits/1`. The pane holds no stream 3 logic; stream 3's warp reads the answers on its next run.
@@ -1283,7 +1335,7 @@ flowchart TB
   subgraph S4["Stream 4: viewer"]
     S4P0["4.0 viewer on stream 1's outputs"]
     S4P05["4.0.5 brick-pane overlays"]
-    S4P1["4.1 painting mode, if needed"]
+    S4P1["4.1 painting mode, out unless the de novo measure needs it"]
     S4P2["4.2 stream 1 review pane"]
     S4P3["4.3 columns"]
     S4P4["4.4 stream 3's outputs"]
@@ -1362,7 +1414,7 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | Stream 3 scaling track |  | 3.3, 3.5 | done before the first whole brain |
 | 4.0 | **Done** (#92, #97, #99, #114, #115, #116) | 1.0 | porting and merging need only 1.0's formats and split; the hemisphere outputs only for its hemisphere check |
 | 4.0.5 |  | 4.0 | split from 4.2 in round 1 |
-| 4.1 |  | 4.0.5 | the painting mode; whether it is needed is open |
+| 4.1 |  | 4.0.5 | the painting mode; out of the plan unless the de novo measure, when decided, needs dense labels |
 | 4.2 |  | 4.0.5, 1.3 | the review pane, on 1.3's formats and choice code |
 | 4.3 |  | 2.0, 4.0 | |
 | 4.4 |  | 3.3, 3.4, 4.0 | 3.5 adds panes when it publishes |
