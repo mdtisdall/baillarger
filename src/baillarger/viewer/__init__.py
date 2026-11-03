@@ -10,9 +10,9 @@ in step by the server.
   label's boundary in a box around it, and the TCK track format.
 - surface: the white surface for viewing (Surface): coordinates, graph, flat map,
   inflation, picking.
-- overview: the overview that the mesh command writes with a white surface, and a
+- overview: the overview of a white surface (baillarger.white_overview), and a
   Surface on it.
-- white_view: a white surface from the mesh command viewed alone (--white).
+- white_view: a white surface (baillarger.white_surf) viewed alone (--white).
 - data: a site's files, read for viewing (Site, which holds a Surface).
 - labels: the review of pial-side label proposals (baillarger.pial_labels).
 - server: the local web server, its shared state and the page (static/index.html).
