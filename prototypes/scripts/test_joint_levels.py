@@ -1,5 +1,5 @@
 """Tests of joint_levels' plumbing with exact answers.
-    nix develop --command uv run --with thinqpbo pytest -q prototypes/scripts/test_joint_levels.py
+    nix develop --command uv run pytest -q prototypes/scripts/test_joint_levels.py
 """
 
 import sys
