@@ -18,6 +18,7 @@ grid-aligned plane gets an 8-neighbour graph: at most 8.2 % (1 / cos 22.5
 deg) over the straight line.
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -26,6 +27,7 @@ from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.csgraph import dijkstra
 from scipy.spatial import cKDTree
 
+from baillarger.mesh import MeshBlocks
 from baillarger.mesh_smoothing import edges
 
 type Bool = npt.NDArray[np.bool_]
@@ -50,12 +52,10 @@ def _across(f: npt.NDArray[np.integer[Any]]) -> I64:
     return keep
 
 
-def edge_graph(
+def _graph(
     v: F64, f: npt.NDArray[np.integer[Any]], voxel_mm: npt.ArrayLike
 ) -> csr_matrix:
-    """The symmetric graph of a mesh with vertices v (voxel coordinates): its
-    edges and the edges across each pair of neighbouring triangles, weighted
-    by their straight-line lengths in mm."""
+    """The graph of edge_graph over len(v) nodes."""
     E = np.sort(np.concatenate([edges(f), _across(f)]), 1)
     E = np.unique(E, axis=0)  # a pair that occurs twice gets its length once
     vox = np.asarray(voxel_mm, np.float64)
@@ -66,6 +66,138 @@ def edge_graph(
         + coo_matrix((w, (E[:, 1], E[:, 0])), shape=n)
     ).tocsr()
     return out
+
+
+def edge_graph(
+    v: F64, f: npt.NDArray[np.integer[Any]], voxel_mm: npt.ArrayLike
+) -> csr_matrix:
+    """The symmetric graph of a mesh with vertices v (voxel coordinates): its
+    edges and the edges across each pair of neighbouring triangles, weighted
+    by their straight-line lengths in mm."""
+    return _graph(v, f, voxel_mm)
+
+
+@dataclass(frozen=True)
+class BlockIndex:
+    """The block index of a mesh as arrays, one row per block (white-surf's
+    block index): the block's index, the vertices it owns and its faces
+    ([start, stop) ranges), and the bounding box of the vertices its faces
+    use, in voxel coordinates."""
+
+    ijk: I64
+    vertex_start: I64
+    vertex_stop: I64
+    face_start: I64
+    face_stop: I64
+    box_min: F64
+    box_max: F64
+
+
+def block_index(
+    v: F64, f: npt.NDArray[np.integer[Any]], blocks: MeshBlocks
+) -> BlockIndex:
+    """The BlockIndex of a mesh made by marching_tetrahedra_blocks."""
+    k = len(blocks.origin)
+    lo = np.empty((k, 3))
+    hi = np.empty((k, 3))
+    for b in range(k):
+        used = v[np.unique(f[blocks.face_start[b] : blocks.face_stop[b]])]
+        lo[b], hi[b] = used.min(0), used.max(0)
+    return BlockIndex(
+        blocks.origin // blocks.cells,
+        blocks.vertex_start.astype(np.int64),
+        blocks.vertex_stop.astype(np.int64),
+        blocks.face_start.astype(np.int64),
+        blocks.face_stop.astype(np.int64),
+        lo,
+        hi,
+    )
+
+
+@dataclass(frozen=True)
+class LocalGraph:
+    """A superblock's local graph (local_graph)."""
+
+    #: the graph over the local vertices, weights in mm
+    graph: csr_matrix
+    #: (n,) global vertex id of each local vertex, ascending
+    vertex: I64
+    #: (n,) which local vertices are roots of the superblock with its halo
+    root: Bool
+
+
+def local_graph(
+    v: F64,
+    f: npt.NDArray[np.integer[Any]],
+    blocks: BlockIndex,
+    superblock: npt.ArrayLike,
+    level: int,
+    cells: int,
+    halo_mm: float,
+    voxel_mm: npt.ArrayLike,
+) -> LocalGraph:
+    """The part of edge_graph(v, f, voxel_mm) that a superblock with a halo
+    of halo_mm needs, from the faces of the blocks near it alone.
+
+    The superblock (I, J, K) at `level` m is the aligned cube of 2^m blocks a
+    side with block indices i // 2^m = I etc.; its cells span, on axis a,
+    voxels I_a 2^m C to (I_a + 1) 2^m C (C = cells). Its halo box is that
+    span widened by halo_mm / voxel_mm[a] on each axis. Its roots are the
+    vertices owned by its blocks and the other vertices inside the halo box.
+    v (n, 3, voxel coordinates; may be a memory map: only the rows used are
+    read) and f (m, 3) are the whole mesh. Only the faces of the blocks whose
+    bounding box meets the halo box are read (f is indexed by one slice for
+    each such block).
+
+    The graph is built as edge_graph builds it, on the vertices those faces
+    use; `vertex` gives their global ids and `root` marks the roots.
+
+    The distances from a root are exact up to halo_mm: for a root r of the
+    superblock and a vertex u with a whole-mesh graph distance d(r, u) <= L
+    <= halo_mm, the local graph's distance equals d(r, u) (exactly, in
+    floating point: the same path adds the same weights in the same order).
+    Every vertex x on a path of length <= L from r lies in the halo box (r is
+    in the superblock's span or in the halo box, and x is at most L away in
+    mm, so within L / voxel_mm[a] on each axis; for an owned root, the span
+    holds it, since it lies on an edge of a cell of the superblock). A face
+    that uses x belongs to a block whose bounding box contains x, so that
+    block meets the halo box and the face is read. A graph edge of the path
+    is a mesh edge (a triangle with both ends on the path) or an edge across
+    two triangles (both use path vertices); both triangles are read, so every
+    edge of the path is in the local graph, with the same weight. The local
+    graph has no edge that the whole graph lacks: its mesh edges are the
+    whole mesh's, and an edge across a pair of triangles that share an edge
+    is also across that pair in the whole mesh (on a manifold mesh the pair
+    is unique, as both triangles are read whenever the edge's vertices are
+    both inside). So local distances are never shorter than the whole
+    graph's, and not longer for the paths up to L. With a halo smaller than
+    L, a path can leave the halo box and its faces are missing.
+    """
+    vox = np.asarray(voxel_mm, np.float64)
+    sb = np.asarray(superblock, np.int64)
+    span = 1 << level
+    lo = sb * span * cells
+    hi = (sb + 1) * span * cells
+    h = halo_mm / vox
+    box_lo, box_hi = lo - h, hi + h
+    near = np.all((blocks.box_max >= box_lo) & (blocks.box_min <= box_hi), axis=1)
+    inside = np.all(blocks.ijk // span == sb, axis=1)
+    rows = [
+        f[a:b]
+        for a, b in zip(blocks.face_start[near], blocks.face_stop[near], strict=True)
+        if b > a
+    ]
+    fl = np.concatenate(rows) if rows else np.zeros((0, 3), np.int64)
+    vertex = np.unique(fl)
+    vl = np.asarray(v[vertex], np.float64)
+    local = np.searchsorted(vertex, fl)
+    graph = _graph(vl, local, vox)
+    root = np.all((vl >= box_lo) & (vl <= box_hi), axis=1)
+    for a, b in zip(
+        blocks.vertex_start[inside], blocks.vertex_stop[inside], strict=True
+    ):
+        root |= (vertex >= a) & (vertex < b)
+    return LocalGraph(graph, vertex, root)
 
 
 def geodesic_patches(graph: csr_matrix, spacing: float) -> tuple[I64, I64]:
