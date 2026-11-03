@@ -104,10 +104,37 @@ def detect(
     Computed in float32. Raises ValueError if the aseg has no voxel with
     the WM label or the cortex label of hemi."""
     a = np.asarray(aseg)
-    f = np.asarray(flash, np.float32)
-    gm_med = cortex_median(a, f, hemi)
+    cortex_median(a, flash, hemi)  # refuses a hemisphere without its labels
     wm, ctx = TISSUE_LABELS[hemi]
-    tis = (a == wm) | (a == ctx)
+    return dark_tissue(
+        (a == wm) | (a == ctx),
+        a == ctx,
+        flash,
+        voxel_mm,
+        frac,
+        sigma,
+        min_vox,
+        margin_mm,
+    )
+
+
+def dark_tissue(
+    tis: Bool,
+    cortex: Bool,
+    flash: npt.ArrayLike,
+    voxel_mm: tuple[float, float, float],
+    frac: float = FRAC,
+    sigma: float = SIGMA,
+    min_vox: int = MIN_VOX,
+    margin_mm: float = MARGIN_MM,
+) -> Bool:
+    """detect on masks of the tissue and the cortex, with no check of the
+    labels. Without cortex the reference level is not defined and the
+    result is empty."""
+    if not cortex.any():
+        return np.zeros(tis.shape, bool)
+    f = np.asarray(flash, np.float32)
+    gm_med = np.median(f[cortex])
     blk = tis & (ndi.gaussian_filter(f, sigma) < frac * gm_med)
     lab, n = ndi.label(blk)
     big = np.zeros(n + 1, bool)

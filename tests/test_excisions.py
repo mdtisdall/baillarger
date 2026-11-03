@@ -73,6 +73,20 @@ def test_frame_missing_tissue_is_the_detector() -> None:
     )
 
 
+def test_frame_missing_tissue_keeps_its_old_behaviour() -> None:
+    """The old callers get what they got before the port: a box without
+    cortex gives an empty mask (the old median was NaN), and a box without
+    WM is not refused (the detector works on the cortex)."""
+    aseg, flash, _ = excised_slab()
+    rim = np.select([aseg == 41, aseg == 42], [2, 3], 1).astype(np.int16)
+    no_cortex = np.where(rim == 3, 1, rim).astype(np.int16)
+    assert not fr.missing_tissue(no_cortex, flash, VOX).any()
+    no_wm = np.where(rim == 2, 1, rim).astype(np.int16)
+    want = old_missing_tissue(no_wm, flash, VOX)
+    assert want.any()
+    assert np.array_equal(fr.missing_tissue(no_wm, flash, VOX), want)
+
+
 def test_relabel_sets_the_mask_to_outside_in_a_copy() -> None:
     aseg, _, block = excised_slab()
     before = aseg.copy()
