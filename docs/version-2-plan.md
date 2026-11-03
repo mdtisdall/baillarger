@@ -494,7 +494,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
   - The data normal at the boundary comes from the deepest layers (WM has no laminar texture), where coherence may be lower.
   - Whether to use it is decided by stream 2's misalignment diagnostic (§4c, Open): misalignment set at the root and constant along the rays points here; misalignment that grows with depth points to steering the rays instead.
 
-  To be tested after phase 6, once stream 2's diagnostic has run. The data normal is not a network input: it is a fixed function of the echoes the network already sees, and nnU-Net's mirroring and rotation would treat its components as scalars and contradict the image.
+  Phase 11's work, if stream 2's diagnostic (2.2) calls for it. The data normal is not a network input: it is a fixed function of the echoes the network already sees, and nnU-Net's mirroring and rotation would treat its components as scalars and contradict the image.
 - **Whether a scribble also corrects the current hemisphere,** or only trains the next generation. A few strokes give no full-voxel edit, so the current correction needs something to spread them: a rerun after fine-tuning, or an interactive model. Candidates (from memory; check before choosing):
   - **nnInteractive** (DKFZ, 2025): a promptable 3D model from the nnU-Net team, taking points, scribbles, boxes and lassos, with no retraining. Code Apache-2.0; the weights are believed to be non-commercial and share-alike (CC BY-NC-SA), which must be read before use.
   - **MONAI Label with DeepEdit** (Apache-2.0): a U-Net with click inputs, whose server can train in the background as labels are saved. Fully permissive, but a looser fit with nnU-Net.
@@ -569,6 +569,7 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
   - Synthetic training images from label maps (SynthSeg, PostSynth), as augmentation, if the problem is generalising to other hemispheres or protocols.
   - Outputs that hold more than one interface per voxel, if stream 3's contacts need more than the profiles give: an unsigned distance to the pial interface (a channel narrower than a voxel is a valley that never reaches zero, which a signed distance cannot hold), or tissue fractions trained on 50 µm data averaged down to 160 µm, where the fractions are known.
   - A topology loss (clDice, Betti matching), if the queue is too long. It can only reduce defects; the guarantee stays in step 2's correction.
+  - A data-normal term in `antialias` (§3c Open), if stream 2's misalignment diagnostic (its phase 2) finds misalignment set at the root and constant along the rays.
 
 **Whole-brain scaling** (alongside phases 1–11; `docs/scaling.md`)
 
@@ -1249,7 +1250,7 @@ flowchart TB
   S1P2 --> S2P2
   S1P8 -.-> S2P2
   S2P2 -.-> S2P3
-  S2P2 -. "antialiasing term, if called for" .-> S1P6
+  S2P2 -. "antialiasing term, if called for" .-> S1P11
 
   S2P0 --> S3P0 --> S3P1 --> S3P2
   S3P1 --> S3P3
@@ -1278,12 +1279,12 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 1.3 | 1.0 | the formats and code the review pane (4.2) is built on; no viewer needed |
 | 1.4 | 1.0 | |
 | 1.5 | 1.0 | writes the test-region spec first; painting the regions waits for 4.1 |
-| 1.6 | 1.0 | code and phantom tests only; no P on the hemisphere until 1.8, which runs it there; may later add the data-normal term, if 2.2's diagnostic calls for it, in whichever phase is then current |
+| 1.6 | 1.0 | code and phantom tests only; no P on the hemisphere until 1.8, which runs it there |
 | 1.7 | 1.2, 1.5 | the `pial_labels` check reads 1.2's local cortex level; gains from the answers made in 4.2 |
 | 1.8 | 1.6, 1.7 | replaces the purple-mri aseg; first P on the hemisphere, then the labels-only path goes; streams 2–4 rerun; decides the hippocampus |
 | 1.9 | 1.8, 4.2 | queues 3.5's sites when they exist |
 | 1.10 | 1.8 | |
-| 1.11 | 1.9, 1.10 | only if their diagnostics ask |
+| 1.11 | each item when its own diagnostic asks: 1.9, 1.10; 2.2 for the antialiasing term | only if their diagnostics ask |
 | Scaling track | 1.0 | alongside 1.1–1.11; done before the first whole brain |
 | 2.0 | 1.0, 1.1 | writes the ray-sampler spec first |
 | 2.1 | 2.0 | |
