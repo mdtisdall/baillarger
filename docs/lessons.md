@@ -217,7 +217,7 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 
 The coupling that is real, decided once:
 
-1. **The label set.** The filled mask is `FILLED_LABELS` (WM, lateral ventricle, caudate, putamen, pallidum, thalamus, CC; not the hippocampus). The network must output at least these classes, separately from cortex, hippocampus and outside, or the surface changes.
+1. **The label set.** The filled mask is `FILLED_LABELS` (WM, lateral ventricle, caudate, putamen, pallidum, thalamus, hippocampus, CC). The network must output at least these classes, separately from cortex and outside, or the surface changes.
 2. **Missing tissue.** Blocks cut out before the scan are labelled as missing tissue, a class of its own (proposed), or ignored in training. Step 2 gives the rule for the surface.
 3. **Calibration.** P must be calibrated near 0.5, because step 2 places walls by it. Calibration is a diagnostic of every generation.
 4. **The defect count.** The number of handles and cavities before correction sets the length of the review queue (step 5). It is a diagnostic of every generation, not a target to optimise inside the network.
@@ -265,7 +265,7 @@ The coupling that is real, decided once:
 - **Missing tissue** (PL). Blocks of tissue were cut out of the specimen before the scan, and the FLASH is black there. In V1V2 the missing tissue is 14.6 % of the cortex label.
   - It can be found from the image: FLASH below 0.25 × the cortex median after smoothing by 2 voxels, in blocks of at least 250 voxels, grown by 0.3 mm. This detector supplies the class for the seed labels, since the purple-mri aseg labels the blocks as if the tissue were there.
   - It is an obstacle for columns, not a source.
-- **The filled mask** (#61, #66, #67). Aseg 41 plus 43, 49–52 and 192 (right hemisphere), with cavities filled; the hippocampus is not filled. The deep structures (ventricle, thalamus, ...) belong in the mask. Missing tissue counts as outside (rule below). A voxel cut from the mask takes the label of the nearest (mm) voxel outside it.
+- **The filled mask** (#61, #66, #67). Aseg 41 plus 43, 49–52, 53 and 192 (right hemisphere; 2, 4, 10–13, 17 and 192 left), with cavities filled. The deep structures (ventricle, thalamus, ...) and the hippocampus belong in the mask. The code's `FILLED_LABELS` still leaves the hippocampus out and must add it (3d). The surface results in this section were measured without it. Missing tissue counts as outside (rule below). A voxel cut from the mask takes the label of the nearest (mm) voxel outside it.
 - **The rule for missing tissue** (proposed). The cut face is treated as a domain edge: close the surface there, invent nothing, and mark exactly which vertices lie on it.
   1. Missing tissue is a published stream 1 label.
   2. For the filled mask, missing tissue counts as outside. The mask stops at the cut face, and the surface runs along it.
@@ -411,7 +411,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - **The bootstrap's stand-in P.** If purple-mri cannot save its probabilities, the surface steps need another stand-in P before the first generation exists.
 - Open decisions for our own segmentation:
   - Missing tissue: a class of its own (proposed, with the rule in step 2) or ignored in training.
-  - Whether the hippocampus stays outside the filled mask.
+  - How stream 2 treats roots on the part of the white surface that wraps the hippocampus, which is not neocortex: a medial-wall label, or roots kept and judged later.
   - nnU-Net as a package dependency, or an external tool that only the export and import modules know about. Proposed: external.
   - **How fast a generation follows a review.** nnU-Net can start from the previous weights (`-pretrained_weights`) with a short custom schedule, sampling patches mostly round the new verified labels and replaying the older labels so the model does not forget them. On a CUDA GPU that is hours, not days, so a generation could follow each review session. To choose: the schedule length, and how much replay is needed (measured on the test regions).
   - **Whether a different network would do better.** Probably not by architecture: in "nnU-Net revisited" (MICCAI 2024) careful benchmarking erased most claimed gains of transformer and Mamba models (Swin UNETR, nnFormer, U-Mamba); MedNeXt was on a par. The bottleneck is labels. Worth testing once there are several hemispheres: self-supervised pretraining of the residual-encoder nnU-Net on all our unlabelled FLASH volumes (DKFZ has tooling for this; check its state and licence).
@@ -422,6 +422,7 @@ Three tracks that can run in parallel: the surface steps, our own segmentation, 
 
 **Surface steps (2–4)**
 
+- Add the hippocampus (53 right, 17 left) to `FILLED_LABELS`, with a test that it is filled.
 - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
 - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
 - Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
