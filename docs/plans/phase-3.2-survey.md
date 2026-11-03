@@ -1,4 +1,4 @@
-# Phase 3.2: survey of solvers, and a proposal
+# Phase 3.2: survey of solvers, decision and results
 
 This file is part of phase 3.2 (`phase-3.2-qpbo.md`). The coordinator asked
 for it before the solver PR. It has four parts:
@@ -6,7 +6,7 @@ for it before the solver PR. It has four parts:
 1. a finding on the box that changes the plan;
 2. libraries;
 3. algorithms, with GPU support, whole-brain scale and determinism;
-4. a proposal: what to adopt now, what to test, and what to keep for the
+4. the decision, the results of the comparison, and what to keep for the
    whole-brain phase.
 
 The full survey texts are in the shared notes folder of round 1
@@ -50,23 +50,50 @@ valid lower bound cannot be above the energy.
 - The plan's lesson "capacities below 2³⁰" (§5c step 3, §2) is correct for
   scipy, but scipy is the wrong engine for this model.
 
-### Test of the fix (light box, scratch experiment)
+### Test of the fix (light box)
 
-The same solver, with the max flow on OR-Tools `SimpleMaxFlow` (int64
-capacities), costs × 10⁹ and rounded down:
+Five rules, each with the same solver. The test sets were the light V1V2 box
+(0.3 mm), its fine pass, and 300 small models with brute force (costs near
+0.002 and near 10⁻⁶).
 
-| light V1V2 box (0.3 mm), fine pass | scipy, int32, ×1000, rounded | OR-Tools, int64, ×10⁹, rounded down |
-|---|---|---|
-| bound − E(labels) | +2.68 (not valid) | −5·10⁻⁵ (valid) |
-| final energy | 1907.766 | 1907.366 |
-| certified | 100 % | 100 % |
-| time of the whole run | 149 s | 68 s |
-| peak memory | 3.6 GB | 4.1 GB |
+| rule | bound − E(labels), light box | final energy | time | small models |
+|---|---|---|---|---|
+| int32, ×1000, nearest (the plan) | +2.68 (not valid) | 1907.766 | 149 s | bound above the minimum; wrong labels |
+| int32, ×1000, down | −54.76 (valid, loose) | 1909.285 | 262 s | wrong weak labels on 91 of 300 |
+| int32, down, scale from a feasible cut (3.69·10⁵) | −0.243 | 1907.375 | 649 s | clean |
+| int64, ×10⁹, nearest | +3.3·10⁻⁶ (not valid) | 1907.428 | 109 s | bound above the minimum by up to 1.6·10⁻⁹ |
+| **int64, ×10⁹, down (adopted)** | **−5·10⁻⁵** | **1907.366** | **68 s** | **clean** |
+
+The adopted rule had a peak of 4.1 GB. All five rules certified 100 % of
+the nodes on the light box.
 
 When the costs are rounded down, every flow of the rounded graph is a flow
 of the true graph. So the bound is a valid lower bound of the true energy by
-weak duality, at every scale. At ×10⁹ it costs at most about 10⁻⁹ for each
-active term.
+weak duality, at every scale. The bound is below the true one by at most the
+total rounding error, which the log now reports. At ×10⁹ this is at most
+10⁻⁹ for each arc.
+
+### Certified labels and ties
+
+A certified label is persistent for the rounded energy. For the true
+energy, a labelling with the other value can be better than the labelling
+found by at most the total rounding error. Where two true minima differ only
+on one variable, the rounding can break the tie. In that case the solver
+labels the variable strongly, at one of the two values. This was found in a
+comparison with dwave's roof duality on costs with 3 decimals: the two
+solvers broke one tie in opposite directions (model of 51 variables,
+total rounding error 8.8·10⁻⁸). Every solver that rounds the costs to integers
+has this property.
+
+### 100 % certified on the V1V2 box: a possible effect of the rounding
+
+The report's thinqpbo runs certified 96.6 % of the V1V2 box. The int32 run in
+this phase certified 100 % in the fine pass. The int32 rounding sets 2.6 M
+small costs to 0, and this can remove frustrated cycles. Thus the 100 %
+can be an effect of the rounding, not of the solver. On the light box, the
+int64 rule also certifies 100 %. This does not settle the question, because
+thinqpbo's 96.6 % is for the full-density box. A full-density V1V2 run with
+the int64 rule settles it.
 
 ## 2. Libraries
 
@@ -164,39 +191,70 @@ internal copies. A lean CSR with an int32 head, an int32 reverse-arc index
 and an int64 residual capacity needs about 16 B/arc plus about 24 B per
 node.
 
-## 4. Proposal
+## 4. Decision and results
 
-### Now, in phase 3.2
+### Decided, in phase 3.2
 
-1. **Keep our own QPBO and QPBO-I.** It passes every exact test, and the
-   box shows that its labels and bound are correct for the energy that it
-   receives.
-2. **Change the max-flow engine to int64.** Use OR-Tools `SimpleMaxFlow`
-   (Apache-2.0, push-relabel, int64, numpy bulk API, already in the
-   environment as a dev dependency). This moves `ortools` from the dev group
-   to the main dependencies. `cut()` uses the same engine.
-3. **Quantise once, rounded down, at a large scale.** Costs × 10⁹ (a
-   parameter with a default), rounded down to int64. The hard cost is 1 +
-   the total of the finite capacities. Raise `ValueError` if it reaches 2⁶¹.
-   Rounding down makes the bound a valid lower bound of the true energy.
-   Record the scale and the largest rounding error in the log.
-4. **Update PR #96** (integer capacities) to this rule before it is merged.
+1. **Keep our own QPBO and QPBO-I.** They pass every exact test. On the box,
+   their labels and bound are correct for the energy that they receive.
+2. **int64 capacities.** Costs × 10⁹ (`SCALE`, a parameter), rounded down.
+   The hard cost is 1 + the total of the finite capacities. `ValueError` if
+   it reaches 2⁶¹. The log gives the scale, the hard cost, the largest
+   rounding error of one arc and the total rounding error.
+3. **The engine: OR-Tools `SimpleMaxFlow`** (Apache-2.0, push-relabel,
+   int64), behind one function, `_flow.max_flow`. `ortools` moves to the
+   main dependencies. `cut()` uses the same engine. **For the user to
+   confirm.** The alternative is our own int64 max flow in numba now. It is
+   more work now, but it is also the first step to the blocked max flow of
+   the whole-brain phase.
+4. PR #96 has the rule and the exact tests that fail under int32. The solver
+   PR is stacked on it.
 
-The alternative to item 2 is our own int64 max flow (for example
-push-relabel in numba, which is already a dependency). It is more work now,
-but it is also the first step to candidate 1 and to a GPU version. I
-recommend OR-Tools now and our own blocked max flow in the whole-brain phase.
+### Results of the comparison
 
-### Comparison to run in phase 3.2
+| check | models | result |
+|---|---|---|
+| brute force (`test_roof.py`, `test_qpbo_solver.py`) | 2–12 binary variables, random tables, forbidden entries | bound ≤ minimum; strong labels agree with every minimum; weak labels with some minimum |
+| dwave-preprocessing `roof_duality` (Apache-2.0, an independent implementation) | 300 models of up to 60 variables | the same strong labels and bounds (difference ≤ 1.8·10⁻⁸); with integer costs, an exact match (test `test_roof_against_dwave`) |
+| HiGHS local-polytope LP (scipy `linprog`) | 300 models of up to 80 variables | LP − roof bound between −7·10⁻¹⁵ and 2.1·10⁻⁸: the same bound, as the theory says (test `test_roof_bound_is_the_local_polytope_bound`) |
+| CP-SAT exact optimum (`test_surfcut.py`) | folded two-bank models with ties | unchanged from the report: the energy is never below the optimum; the certified labels lie on an optimum |
+| determinism | the report's benchmark model (21,600 binary nodes), two runs with `np.random` and `random` seeded differently | the same labels, intervals, certified labels, bound (522.629) and energy (524.395) |
 
-| Test set | Our QPBO (int64) | dwave-preprocessing `roof_duality` | HiGHS local-polytope LP | CP-SAT or toulbar2 |
-|---|---|---|---|---|
-| brute force (2–12 binary variables; `random_model`) | bound, labels, persistency | the same roof-dual bound and strong persistencies (an independent check) | LP bound ≥ roof-dual bound? | exact optimum |
-| CP-SAT models (`folded_model`, 24 × 14, ties) | as above | as above | as above | exact optimum, and the optimum with the certified labels fixed |
-| boxes (V1V2, M1S1 at 0.16 mm) | energy, bound, certified, time, memory | bound only, if memory allows | no (size) | no (size); the sizes of the uncertified parts only |
+The LP must merge the tables of each pair first. With separate tables for
+one pair, the LP is looser than the roof dual. A first version of the test
+did not merge them, and its bound was below the minimum by 0.25.
 
-dwave-preprocessing, HiGHS and toulbar2 would be test-only (dev)
-dependencies. CP-SAT is in OR-Tools.
+dwave-preprocessing (with dimod) is a dev dependency only. The LP uses
+scipy's HiGHS, which does not clash with OR-Tools (see below), so no new
+dependency is necessary for it.
+
+### The HiGHS clash
+
+When the HiGHS of the `highspy` package is loaded first, OR-Tools fails to
+import ("Symbol not found"). This is true for `SimpleMaxFlow` and for
+CP-SAT. When OR-Tools is imported first, both work. scipy's own HiGHS
+(`linprog`, `milp`) does not clash. `highspy` and `cvxpy` stay in
+`tests/reference`, which has its own environment.
+
+### Earlier solver work in this repository
+
+- **#14, scipy's `maximum_flow`.** It was chosen because PyMaxflow is GPL.
+  With int64 capacities, scipy returned a flow of 0 on a test graph. The cut
+  was checked against PyMaxflow on 1,130 boundaries. That model was
+  submodular, with costs that the int32 scaling did not damage.
+- **CP-SAT.** It was never a production solver. It is the exact reference in
+  the tests. On the benchmark model, QPBO-I was better than CP-SAT after
+  60 s (energy 1022.9 against 1029.2 with 8 workers).
+- **#32, the hard cost.** thinqpbo's bound was sometimes above the energy
+  until the hard cost became 1 + the finite total.
+- **#33, determinism.** thinqpbo's QPBO-I used C `rand()`. Our QPBO-I uses
+  `numpy.random.Generator(PCG64(seed))` and no global state.
+- **Dual decomposition by subgradient.** It was tried and dropped: within
+  0.015 of the LP bound after 3,000 iterations on small models, and the
+  Polyak step cycled.
+- **`tv.py`.** A CPU float64 Chambolle–Pock solver for total variation.
+  It is not a cut solver.
+- **#61.** The GPU work (torch) is for the antialiasing solver only.
 
 ### Later: the whole-brain phase (§5d, scaling item 2)
 
