@@ -63,7 +63,7 @@ class ColumnVolumeSampler:
         self.echo_affines = tuple(np.asarray(a, dtype=np.float64) for a in echo_affines)
         self.grid_shape = grid_shape
 
-    def sample(self, rays: Rays) -> ColumnVolume:
+    def sample(self, rays: Rays, device: str | None = None) -> ColumnVolume:
         """The echoes at the samples of rays, with the validity and the
         partial-volume mark of each sample."""
         raise NotImplementedError(PENDING)

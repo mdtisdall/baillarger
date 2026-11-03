@@ -49,7 +49,7 @@ The sampler reads the echoes through the chunked reader
 ```python
 # rays: the output of RaySampler.sample. echoes: one Source for each echo.
 sampler = ColumnVolumeSampler(echoes, voxel_to_ras, echo_affines, grid_shape)
-volume = sampler.sample(rays)
+volume = sampler.sample(rays, device=None)
 ```
 
 `echoes` is a sequence of sources. `echo_affines` is a sequence of the
@@ -108,7 +108,12 @@ interpolation of the voxel values, with the rule below.
 The sampler does no filtering other than step 4. At a step smaller than a
 voxel, neighbouring samples are not independent.
 
-A device implementation gives the same values to float32 rounding. With
+`device` is a name of `baillarger.backend` (default: `$BAILLARGER_DEVICE`,
+else the best device here). `numpy` is the reference. On another device
+only the weighted sum of step 5 runs on the device, in float32. The
+coordinates, `valid`, `partial` and `reach` are computed in float64 on the
+host, so they are the same on every device. The values equal the reference
+to float32 rounding. With
 `torch.nn.functional.grid_sample`, the convention is `align_corners=True`,
 because the centre of a voxel is at an integer.
 
