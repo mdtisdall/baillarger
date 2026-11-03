@@ -265,7 +265,7 @@ def write_white_surface(
         paths["normlen"],
         [
             DataArray(
-                nlen.astype("<f4")[:, None],
+                nlen.astype("<f4"),
                 "NIFTI_INTENT_NONE",
                 dict(Name="normal length |n| before the last normalisation"),
             )
@@ -391,6 +391,7 @@ class WhiteSurface:
         lg = GiftiImage.from_filename(
             str(surf.with_name(side["NormLenFile"])), mmap=True
         )
+        # 1-D; files from before the 1-D writer hold n x 1, which reads the same
         nlen = lg.darrays[0].data.reshape(-1)
         kg = GiftiImage.from_filename(
             str(surf.with_name(side["EdgeKeysFile"])), mmap=True
