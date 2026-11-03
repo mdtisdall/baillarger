@@ -3,9 +3,8 @@
 
 A sampler computes its output on demand from the rays of the ray sampler
 (ray-sampler/1) and the echoes; nothing is stored. Each sample of a column
-keeps the value of every echo (trilinear, as acquired), a validity flag and
-the partial-volume mark. A column is the same, bit for bit, whichever
-superblock computes it.
+keeps the value of every echo (trilinear, as acquired) and a validity flag.
+A column is the same, bit for bit, whichever superblock computes it.
 
 This version gives the types and the call; the sampler itself comes with
 Part B of phase 3.0.
@@ -42,33 +41,11 @@ class ColumnVolume:
     echo: F32
     #: (N,) true where the interpolation rule gives a value
     valid: Bool
-    #: (N,) true for a partial-volume sample
-    partial: Bool
-    #: (n,) w of each column, mm
-    reach: F32
 
 
 #: the largest difference between two affines, as a fraction of the largest
 #: entry: float32 rounding
 AFFINE_RTOL = 1e-5
-
-
-def reach_of(normal: F32, voxel_to_ras: npt.NDArray[np.float64]) -> F32:
-    """w of each column, mm: the chord of a voxel along the unit normal."""
-    m_inv = np.linalg.inv(voxel_to_ras[:3, :3])
-    n = normal.astype(np.float64)
-    # elementwise sums, not a matrix product: the result must not depend on
-    # the number of columns
-    u = np.stack(
-        [
-            (m_inv[a, 0] * n[:, 0] + m_inv[a, 1] * n[:, 1]) + m_inv[a, 2] * n[:, 2]
-            for a in range(3)
-        ],
-        axis=1,
-    )
-    with np.errstate(divide="ignore"):
-        chord = np.where(u != 0.0, 1.0 / np.abs(u), np.inf)
-    return chord.min(axis=1).astype(np.float32)
 
 
 def take_columns(rays: Rays, lo: int, hi: int) -> Rays:
@@ -157,12 +134,12 @@ class ColumnVolumeSampler:
         )
 
     def sample(self, rays: Rays, device: str | None = None) -> ColumnVolume:
-        """The echoes at the samples of rays, with the validity and the
-        partial-volume mark of each sample. device is a name of
+        """The echoes at the samples of rays, with the validity of
+        each sample. device is a name of
         baillarger.backend ("numpy" is the reference; the default is
         $BAILLARGER_DEVICE, else the best device here). Only the weighted
         sum runs on the device, in float32; the coordinates, the validity,
-        the weights' inputs and the mark are float64 on the host, so they
+        and the weights' inputs are float64 on the host, so they
         are the same on every device."""
         dev = backend.device(device)
         v = self.voxel_coordinates(rays.position)
@@ -171,11 +148,7 @@ class ColumnVolumeSampler:
         echo = np.full((len(v), len(self.echoes)), np.nan, dtype=np.float32)
         if valid.any():
             echo[valid] = self._interpolate(v[valid], dev)
-        reach = reach_of(rays.roots.normal, self.voxel_to_ras)
-        partial = _partial(rays, reach)
-        return ColumnVolume(
-            rays=rays, echo=echo, valid=valid, partial=partial, reach=reach
-        )
+        return ColumnVolume(rays=rays, echo=echo, valid=valid)
 
     def _interpolate(self, v: npt.NDArray[np.float64], dev: backend.Device) -> F32:
         """The trilinear values at valid voxel coordinates (spec,
@@ -206,25 +179,6 @@ class ColumnVolumeSampler:
                 acc = acc + w * data[rel[:, 0] + di, rel[:, 1] + dj, rel[:, 2] + dk]
             out[:, e] = acc.astype(np.float32)
         return out
-
-
-def _partial(rays: Rays, reach: F32) -> Bool:
-    """The partial-volume mark (spec, "The partial-volume mark")."""
-    n = len(rays.sample_start) - 1
-    counts = np.diff(rays.sample_start)
-    column = np.repeat(np.arange(n), counts)
-    s = rays.s.astype(np.float64)
-    w = reach.astype(np.float64)[column]
-    first = rays.interval_start[:-1]
-    n_changes = np.diff(rays.interval_start) - 1
-    partial = np.zeros(len(s), dtype=np.bool_)
-    s0 = rays.interval_s0.astype(np.float64)
-    for j in range(int(n_changes.max(initial=0))):
-        has = n_changes > j
-        b = np.full(n, np.inf)
-        b[has] = s0[first[has] + 1 + j]
-        partial |= np.abs(s - b[column]) <= w
-    return partial
 
 
 def _weighted_sum_torch(

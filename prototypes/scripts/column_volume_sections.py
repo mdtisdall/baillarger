@@ -4,7 +4,7 @@ One superblock that holds a marked point, at a level, with a halo in mm: the ray
 the columns (extents from the label intervals), the column-volume sampler gives the echoes in
 batches of columns. For each point, one section: the columns whose root lies in a slab of one
 voxel round the point, ordered along the slab's long axis, echo 2 against s, with
-(a) the echo, (b) the partial-volume marks and the label changes, (c) the class of the label.
+(a) the echo, (b) the label changes, (c) the class of the label.
 
 Extents (from the label intervals, only to set the demonstration): outward to the first
 OUTSIDE interval after the cortex plus 0.3 mm (to the end of the cortex plus 0.3 mm if no
@@ -129,27 +129,25 @@ def main() -> None:
     wanted = {int(c): None for sec in sections for c in sec}
 
     t = time.time()
-    got: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
-    n_valid = n_partial = 0
+    got: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    n_valid = 0
     for lo in range(0, n, A.batch):
         hi = min(n, lo + A.batch)
         part = take_columns(rays, lo, hi)
         cv = smp.sample(part, None)
         n_valid += int(cv.valid.sum())
-        n_partial += int(cv.partial.sum())
         for c in range(lo, hi):
             if c in wanted:
                 a, b = part.sample_start[c - lo], part.sample_start[c - lo + 1]
                 got[c] = (
                     part.s[a:b].copy(),
                     cv.echo[a:b, 1].copy(),
-                    cv.partial[a:b].copy(),
                 )
     t_cv = time.time() - t
     N = len(rays.s)
     say(
         f"column volume: {N} samples in {t_cv:.1f}s ({N / t_cv / 1e6:.2f} Msamples/s); "
-        f"valid {n_valid / N:.4f}, partial {n_partial / N:.4f}"
+        f"valid {n_valid / N:.4f}"
     )
 
     cmap = ListedColormap(["#222222", "#e8e8e8", "#c0392b", "#2a78d6", "#f1c40f"])
@@ -158,14 +156,12 @@ def main() -> None:
         k0 = int(rays.k_in.max())
         K = k0 + int(rays.k_out.max()) + 1
         ec = np.full((len(sec), K), np.nan)
-        pm = np.zeros((len(sec), K), bool)
         cl = np.full((len(sec), K), np.nan)
         chg = np.full((len(sec), K), False)
         for x, c in enumerate(sec):
-            s, e2, pa = got[int(c)]
+            s, e2 = got[int(c)]
             ki = np.rint(s / step).astype(int) + k0
             ec[x, ki] = e2
-            pm[x, ki] = pa
             q0, q1 = rays.interval_start[c], rays.interval_start[c + 1]
             s0, s1, cls = (
                 rays.interval_s0[q0:q1],
@@ -206,12 +202,9 @@ def main() -> None:
             aspect="auto",
             interpolation="nearest",
         )
-        ov = np.zeros(pm.T.shape + (4,))
-        ov[pm.T] = [1, 0.2, 0.2, 0.55]
-        ax[1].imshow(ov, extent=ext, aspect="auto", interpolation="nearest")
         yy, xx = np.nonzero(chg.T)
         ax[1].plot(xx, s_axis[yy], ".", color="#30d5ff", ms=2)
-        ax[1].set_title("partial-volume samples (red) and the label changes (cyan)")
+        ax[1].set_title("echo 2 and the label changes (cyan)")
         ax[2].imshow(
             np.ma.masked_invalid(cl.T),
             cmap=cmap,
@@ -242,7 +235,6 @@ def main() -> None:
         seconds_rays=round(t_rays, 1),
         seconds_column_volume=round(t_cv, 1),
         valid_fraction=n_valid / N,
-        partial_fraction=n_partial / N,
         mean_extent_out_mm=float(e_out.mean()),
         max_rss_gb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e9,
         total_seconds=round(time.time() - T0, 1),
