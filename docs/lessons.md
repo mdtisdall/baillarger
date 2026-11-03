@@ -78,7 +78,7 @@ These bind every stream from its first version. A first version may be rough, bu
 - **No GPL dependencies,** with no exceptions. Where only a GPL library fits, use a permissive one or write the piece ourselves. State the licence when proposing a library.
 - **FreeSurfer is the model.** Its topology correction, pretess and strand thickening are the defaults to follow. Deviate only with cause and data. We do not run FreeSurfer, even as a benchmark.
 - **A person decides only where the data cannot.** Places that need judgment go into one review queue per stage. Each answer is a replayable edit: the automatic result is correct without it, and the review refines it.
-- **The WM label comes from our own segmentation,** which gives labels in the FreeSurfer convention and P(filled WM) (§3). The surface steps require both; there is no labels-only path once stream 1's phase 3 is done (§3d). The label is still an input with its own errors: take evidence from the echoes, not from the quirks of the labels.
+- **The WM label comes from our own segmentation** (from stream 1's phase 5; until then the purple-mri aseg, with a stand-in P from phase 3), which gives labels in the FreeSurfer convention and P(filled WM) (§3). The surface steps require both; there is no labels-only path once stream 1's phase 3 is done (§3d). The label is still an input with its own errors: take evidence from the echoes, not from the quirks of the labels.
 
 ### Working rules
 
@@ -130,7 +130,7 @@ The restart does not work on boxes. Two things from them still matter:
 - **Vertex identity is the grid-edge key:** lin(p) × 7 + (4 s_i + 2 s_j + s_k − 1), in int64. It survives remeshing, so anything stored per vertex keys on it.
 - **The block layout:** the grid starts at voxel 0, with 64-voxel blocks in Morton order (i at bit 3b+2, j at 3b+1, k at 3b). A vertex is owned by the first block that uses it.
 - **Precision:** mesh steps run in float32, with float64 only for the affine, area sums and intersection tests. Torch kernels use no float64, no CSR and no atomics, so each run gives the same result. An unavailable device is an error.
-- **Manual inputs** are replayable inputs, applied before the automatic step and never baked into the source (`wm-edits/1`, #78). Feedback from a later stream enters as review sites, so it reaches the labels only through a person's answer.
+- **Manual inputs** are replayable and never baked into the source (`wm-edits/1`, #78). Answers at sites are edits, applied before the automatic step; scribbles are verified training labels only, too sparse to apply, and reach the labels through the next generation. Feedback from a later stream enters as review sites, so it reaches the labels only through a person's answer.
 
 **Licences**
 
@@ -498,7 +498,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
   - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
   - The rule for cut faces (step 2): relabel the purple-mri aseg's excisions to outside with the detector, and keep its excision map as a test set. Phantom tests: an excision through WM that leaves a tunnel (fixed by a plug), and one that cuts a piece off (b0 rises).
-  - Rewrite `pial_labels` as step 2's fluid relabel (fix kind 5): keep its noise estimators and detector, and record its changes in the fixes image as an automatic fix. Stream 2's crossings depend on it (§4c, step 2). It follows the majority rule (3b): its test is a fluid fraction above ½, so channels narrower than that stay cortex.
+  - Rewrite `pial_labels` as step 2's fluid relabel (fix kind 5): keep its noise estimators and detector, and record its changes in the fixes image as an automatic fix. Stream 2's crossings depend on it (§4c, step 2). It builds on the fixed `mesh_graph` (§7). It follows the majority rule (3b): its test is a fluid fraction above ½, so channels narrower than that stay cortex.
 - **Phase 1: review and fold repair** on phase 0's output (the steps of the #80 plan, with #81 and #82 as its first PRs). Its answers correct the hemisphere now and become the first verified training labels.
   1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
   2. The volume pane in `--white` mode (#82).
@@ -742,7 +742,7 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0. Phase 2 needs 
   - Write the ray-sampler spec first: it is the interface stream 3 and the viewer wait on.
   - Rewrite `column_traces` as the sampler: roots on `white-surf/1` vertices by edge key; rays of fixed extent (d inward, 8 mm outward) with no stops; label intervals and meetings; classes derived for diagnostics, without the bank split. The inward extension is new.
   - The **normal** method: straight rays along the smoothed white normal (`streamlines.ray`, `first_fall`, `tissue_wm_distance`).
-  - Port `mesh_graph` in a local form, with the duplicate-edge bug fixed (§7).
+  - Port `mesh_graph` in a local form, on the duplicate-edge fix (§7).
   - Work by superblock, with halos in mm (§2, domain edges): 8 mm for the labels each ray samples, 16 mm for the rays it may meet. Read the labels through the chunked reader and its cache. Give the analysis that picks the superblock level. Test that a column is identical whichever superblock computes it.
 - **Phase 1: equivolume depth.** Add **equivolume** (`offset_equivolume`) to the sampler.
 - **Phase 2: the open questions** (4c, Open), on the hemisphere away from domain edges:
@@ -1091,7 +1091,7 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 is the same work as stream 1's 
   - Port with changes: `viewer.server`, `viewer.overview`, `viewer.white_view`, `viewer.surface` (the parts that already read published outputs).
   - Port as is: `viewer.flatmap`, `viewer.inflation`, `viewer.sections`.
   - Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
-  - Bring in the geodesic-patch flat map (#69), with its `edge_graph` fix split out.
+  - Bring in the geodesic-patch flat map (#69), on the fixed `mesh_graph` (§7).
 - **Phase 1: the stream 1 review pane,** with site answers and scribbles, writing `wm-edits/1`.
 - **Phase 2: columns.** Rewrite against the ray sampler, calling it for what is on screen: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
 - **Phase 3: stream 3's outputs,** a pane for each as its spec appears: the columns sampled on request, z(τ) and its levels, bands, thickness and contacts.
@@ -1113,7 +1113,7 @@ Samplers that belong to no stream (§1, Goals), computed on demand from publishe
 
 Problems in the current code that a restart should not inherit:
 
-- **A bug:** `mesh_graph.edge_graph` builds a COO matrix and `tocsr()` sums duplicates. An across-triangle edge that is also a mesh edge therefore gets twice its length (2.8 % of entries on a marching-tetrahedra ball). `column_traces` and `pial_labels` use it. #69 has the fix.
+- **A bug:** `mesh_graph.edge_graph` builds a COO matrix and `tocsr()` sums duplicates. An across-triangle edge that is also a mesh edge therefore gets twice its length (2.8 % of entries on a marching-tetrahedra ball). `column_traces` and `pial_labels` use it. #69 has the fix; it lands first, as its own PR with the shared `mesh_graph` port, before stream 1's fluid relabel, stream 2's meetings and the viewer's flat map (each in its phase 0) build on it.
 - **Four white-mesh constructions.** The restart has one: `white-surf/1`.
 - **Scales hard-wired to 0.16 mm voxels:** the 0.04 mm sampling, the 1.5-voxel band width, the tapers, the 0.32 mm twicing and the 2-voxel coupling. Restate each as mm or as voxels on purpose, since 50 µm data changes the voxel.
 - **Streams coupled through code:**
