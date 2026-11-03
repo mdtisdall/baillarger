@@ -36,8 +36,9 @@ The sampler refuses an echo (`ValueError`) if:
    (an absolute difference of at most 1e-5 × the largest entry of the
    affine on every entry).
 
-The caller gives `voxel_to_ras` (the `VoxelToRAS` of the sidecar of
-`white-surf/1`) and the header affine of each echo (`echo_affines`). So a
+The caller gives `voxel_to_ras` and `grid_shape` (the `VoxelToRAS` and
+`GridShape` of the sidecar of `white-surf/1`) and the header affine of each
+echo (`echo_affines`). So a
 `voxel_to_ras` that does not match the echoes is an error.
 
 The sampler reads the echoes through the chunked reader
@@ -47,7 +48,7 @@ The sampler reads the echoes through the chunked reader
 
 ```python
 # rays: the output of RaySampler.sample. echoes: one Source for each echo.
-sampler = ColumnVolumeSampler(echoes, voxel_to_ras, echo_affines)
+sampler = ColumnVolumeSampler(echoes, voxel_to_ras, echo_affines, grid_shape)
 volume = sampler.sample(rays)
 ```
 

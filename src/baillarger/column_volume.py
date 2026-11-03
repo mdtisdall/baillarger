@@ -49,17 +49,19 @@ class ColumnVolume:
 class ColumnVolumeSampler:
     """The column-volume sampler on echoes (one source for each echo, on the
     grid of wm-dseg/1), the VoxelToRAS affine of that grid, and the header
-    affine of each echo."""
+    affine of each echo, and the GridShape of white-surf/1."""
 
     def __init__(
         self,
         echoes: Sequence[Source],
         voxel_to_ras: npt.ArrayLike,
         echo_affines: Sequence[npt.ArrayLike],
+        grid_shape: tuple[int, int, int],
     ) -> None:
         self.echoes = tuple(echoes)
         self.voxel_to_ras = np.asarray(voxel_to_ras, dtype=np.float64)
         self.echo_affines = tuple(np.asarray(a, dtype=np.float64) for a in echo_affines)
+        self.grid_shape = grid_shape
 
     def sample(self, rays: Rays) -> ColumnVolume:
         """The echoes at the samples of rays, with the validity and the
