@@ -794,7 +794,7 @@ Where each layer lies along every column, read from the image's own contrast and
 
 1. **The column volume.** Sample the echoes along the columns of a block, each sample keeping its 3D position: computed on demand, never stored.
 2. **Flatten.** Estimate shifts between neighbouring traces and fit a warp, so that layers become level.
-3. **The joint warp.** One monotone depth map per column, tied across contacts and anchored at open tops. The pial edge is its top level (τ = 1), and the GM/WM transition one of its levels.
+3. **The joint warp.** One monotone depth map per column, tied across contacts and anchored where the profile shows a clear top or bottom. Its levels are ordered, with no absolute zero: the pial edge and the GM/WM transition are two named levels, and every other level lies between them.
 4. **Bands and layer identity.** Find the bands in the flattened frame, and tell which layer each is, including where an area's pattern changes.
 5. **Thickness and contacts.** Carry thickness sideways from where it is visible, and place each contact between two banks.
 6. **Feed back** to stream 1 as a spec'd input.
@@ -870,18 +870,18 @@ Where each layer lies along every column, read from the image's own contrast and
 
 | Output | Spec | Used by |
 |---|---|---|
-| Per column, a monotone depth map z(τ); the pial edge at τ = 1, the GM/WM transition one of its levels | none yet | steps 4–6; the viewer |
+| Per column, the position along its ray (arc length s) of each ordered level, with each level's censoring; the pial edge and the GM/WM transition are named among them | none yet | steps 4–6; the viewer |
 
 *Design and lessons*
 
-- One monotone z(τ) per column, z(1) = the pia, solved by QPBO at a few levels and then filled between them.
-- Its terms: conservation of shifts between columns whose roots are neighbours on the white mesh, the two-sided tie c_A + c_B = L at contacts (the user's choice), robust open-top anchors, weak lateral smoothness, a vertical prior and hard ordering.
+- One monotone z(τ) per column. τ only orders the levels and has no zero; z is arc length along the ray, whose origin (the root) is a coordinate, not a depth or a level. Solved by QPBO at a few levels and then filled between them.
+- Its terms: conservation of shifts between columns whose roots are neighbours on the white mesh, the two-sided tie c_A + c_B = L at contacts (the user's choice), robust anchors at open tops and at clear bottoms (the profile's flat, textureless WM plateau where a WM interval of the labels agrees), weak lateral smoothness, a vertical prior and hard ordering.
 - **Readings that were once stream 2's stops.** Stream 2's rays never stop, so this step reads from the profile and the label intervals: the pial edge (a fluid interval is evidence, not a decision); an open top, where the profile and a fluid interval agree with no WM beyond within reach; and the far bank's WM entry for the tie's L, chosen among the WM intervals together with the profile.
 - **Extents by censoring.** Each column's trace starts from extents read off its label intervals: outward to the end of the cortex interval and inward to the start of the label's WM, each with a margin. A level that the warp places at the end of its trace is censored: the data stop there, and the true level may lie beyond. Wherever a top or a bottom is censored, the region's extents grow and its warp is solved again; a level found inside the trace, by more than the warp's resolution, is left alone. Since a sample does not depend on the extent, growing it changes no level that was already inside. Levels censored at the 8 mm caps are recorded as censored and never extended. The extents are deterministic, from the labels and this rule, so the ray sampler stays a function of published files and call parameters.
 - It certifies 96.6–100 % of variables, so the remaining errors belong to the model.
-- The vertical prior must be the chain form, |z_ℓ − (τ_ℓ/τ_ℓ₊₁) z_ℓ₊₁|.
+- **The vertical prior has no origin.** It is written on consecutive intervals, |(z_ℓ₊₁ − z_ℓ) − r_ℓ (z_ℓ − z_ℓ₋₁)|, with r_ℓ from the spacing of the levels. The earlier lesson, that it must be the chain form |z_ℓ − (τ_ℓ/τ_ℓ₊₁) z_ℓ₊₁|, held for a model that measured z from an absolute zero (the WM stop); the levels now have none. Retest the relative form against the results below, which were measured with the anchored one.
 - Levels placed at detected bands tighten the stria's spread by about 40 %. It reaches 0.08 mm at both M1/S1 and V1V2.
-- The first pial surface is a level of the joint warp (τ = 1), not a separate cut. The fill between levels uses distance until an equal-volume estimator is validated; the equal-volume candidate normalises stream 2's V(s) between the GM/WM transition and the pial edge.
+- The first pial surface is the joint warp's top named level, not a separate cut. The fill between levels uses distance until an equal-volume estimator is validated; the equal-volume candidate normalises stream 2's V(s) between the GM/WM transition and the pial edge.
 - **QPBO engineering** (#30–#33):
   - Hard costs must be 1 + the finite total, not 1000×.
   - QPBO-I must reseed rand() for determinism.
@@ -949,6 +949,8 @@ Where each layer lies along every column, read from the image's own contrast and
 
 **Thickness carried sideways (role 2)**
 
+- Thickness is the arc length between a column's GM/WM transition and pial edge levels.
+
 - Crowns are thicker than fundi everywhere measured: V1V2 slope +1.2 mm per (1/mm), M1S1 +2.7. Fit the slope per area, because M1S1 mixes an areal step with folding (SF F10).
 - Volume per unit white-surface area is the least conserved quantity against curvature (ρ 0.95). Equal-volume thickness does not absorb the curvature trend.
 - A stationary Matérn/SPDE field (on log thickness, about 2 mm long, on the white-mesh vertices) fits tightly at the evidence. But across the 1–2.5 mm without evidence before a contact it reverts to a broad mean and over-predicts the thin bank by 0.26–0.92 mm. The missing evidence is the sums t₁ + t₂ = L at contacts (F13–F16).
@@ -1011,7 +1013,7 @@ Order: phase 0 needs stream 2's phase 0. Phases 1 and 2 follow in order; phase 3
 - **Phase 2: the joint warp.**
   - Port `surfcut.model` and `surfcut.cut`; replace `surfcut.qpbo` with a QPBO that is not GPL (our own, or a permissive library).
   - Extents by censoring (5c, step 3): first extents from the label intervals, regions re-solved where a top or bottom is censored; each level's censoring is reported. Views of where the levels lie against the trace ends, by region.
-  - Publish z(τ) per column, with the pial edge at τ = 1 and the GM/WM transition as one of its levels, and each level's censoring. Write its spec.
+  - Publish z(τ) per column: ordered levels with no absolute zero, the pial edge and the GM/WM transition named among them, each with its censoring. Write its spec.
 - **Phase 3: bands and layer identity.**
   - Rewrite `bands` (DP with the cross-validated K) and `gain` only if they are needed.
   - Salvage the layer-maps diagnostics from #56 (isopachs, pinch-outs, facies; `layer_maps_lib.py` and its tests).
@@ -1182,7 +1184,7 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | The column volume (sampler) | Each column's echoes sampled along its ray, with 3D positions and partial-volume marks (§5c, step 1) | stream 3, phase 0 |
 | WM distance through tissue (sampler) | §7 | stream 1, phase 1 |
 | Curvature (sampler) | §7 | with its first reader: stream 3, phase 4 |
-| z(τ) | Depth maps per column: the pial edge at τ = 1, the GM/WM transition as a level | stream 3, phase 2 |
+| z(τ) | Depth maps per column: ordered levels with no absolute zero, the pial edge and the GM/WM transition named among them, each with its censoring | stream 3, phase 2 |
 | Bands; thickness and contacts | Bands per region and layer identity; the thickness field and contact splits | stream 3, phases 3–4 |
 | Feedback to stream 1 | Sites in `wm-sites/1` (no spec of its own) | stream 3, phase 5 |
 
