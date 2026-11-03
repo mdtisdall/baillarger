@@ -13,8 +13,10 @@ directory.
 | Shared: the `mesh_graph` duplicate-edge fix | `mesh-graph-fix.md` | nothing |
 | 1.5: the label set | `phase-1.5-label-set.md` | nothing (one stacked PR on 1.0) |
 | 4.0: the viewer on stream 1's outputs | `phase-4.0-viewer.md` | 1.0's split PR, the `mesh_graph` fix, 1.0's hemisphere outputs (each for one step only) |
+| 2.0: the ray sampler and the chunked reader | `phase-2.0-rays.md` | 1.0's outputs for the hemisphere run only |
+| 3.0: the column-volume sampler | `phase-3.0-column-volume.md` | holds until 2.0's spec PR is open; stacks on it |
 
-The first four start at the same time. The user added 4.0 later. Each runs in its own session and its own
+The first four start at the same time. The user added 4.0, 2.0 and 3.0 later. Each runs in its own session and its own
 worktree.
 
 ## Rules for every phase session
