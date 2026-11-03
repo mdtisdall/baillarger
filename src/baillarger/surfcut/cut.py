@@ -127,7 +127,7 @@ def cut(M: Model, extra_unary: dict[int, Float] | None = None) -> Int:
     part of the tables (ties and positive second differences left out).
     extra_unary: costs added to some variables' unary terms. Returns the
     labels (n,). Raises ValueError if the hard bounds are infeasible, or if
-    the capacities reach the int32 limit. Costs are rounded to 1 / SCALE
+    the hard cost reaches 2^61. Costs are rounded down to 1 / SCALE
     (baillarger.surfcut._flow)."""
     rows, cols, caps, start, s, t_ = graph(M, extra_unary)
     N = s
