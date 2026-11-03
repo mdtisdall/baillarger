@@ -94,7 +94,8 @@ def _graph(
         i, j = c // n, c % n
         indices[a : a + _CHUNK] = j
         data[a : a + _CHUNK] = np.linalg.norm((v[i] - v[j]) * vox, axis=1)
-    out = csr_matrix((data, indices, indptr), shape=(n, n))
+    parts: Any = (data, indices, indptr)  # scipy's stubs have no CSR triple
+    out: csr_matrix = csr_matrix(parts, shape=(n, n))
     return out
 
 
