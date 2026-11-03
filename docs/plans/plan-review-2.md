@@ -28,12 +28,12 @@ any definition chosen later can be computed from the history.
 | A5 | §4b standing decisions | The 8 mm cap is justified by "cortex is at most about 4.5 mm thick … crosses a fused contact into the far bank's WM even when the ray meets it at an angle". Two 4.5 mm banks face to face need 9 mm, more at an angle (1/cos θ). | open (wave 2: 1.1) |
 | A6 | §5b standing decisions; §5c step 4 | "Only bands of at least 2–3 voxels; the stria is at this limit" against step 4's 1.5-voxel minimum, chosen because the stria is 1.67 voxels and a 2.5-voxel threshold drops it. | deferred to 3.4 |
 | A7 | §6c step 3 (PE lesson); §3c step 2; §5c step 7 | "Edits … replay exactly in any order" against stream 1 and stream 3 answers that replay in time order, the later winning. | open (wave 2: 1.3) |
-| A8 | §3c Open, enclosed ventricles | One option keeps an enclosed ventricle as "an inner surface piece, b2 > 0", but `dseg` refuses to write unless Betti is (b0, 0, 0), and §3a and `wm-dseg/1` require genus-0 pieces with no cavities. The option needs a spec change that the plan does not state. | open (wave 2: 1.0.5) |
+| A8 | §3c Open, enclosed ventricles | One option keeps an enclosed ventricle as "an inner surface piece, b2 > 0", but `dseg` refuses to write unless Betti is (b0, 0, 0), and §3a and `wm-dseg/1` require genus-0 pieces with no cavities. The option needs a spec change that the plan does not state. | fixed |
 | A9 | §3c step 1 coupling 4; §1 data table; step 6 | "The number of handles and cavities … sets the length of the review queue", but the queue also holds folds, margins, spread, stream 3 sites and random sites. It ranks with no threshold, so nothing sets its length, yet the data table calls its length a success measure. | deferred to 1.9 |
 | A10 | §5b standing decisions; §5c steps 3 and 5 | "Where there is none, depth follows equal volume" against "the current estimator is distance, until an equal-volume estimator is validated". | deferred to 3.5 |
 | A11 | §1 Goals; §3c step 4 | "Whatever can be computed locally from published files is a sampler, not a file", but normals and \|n̄\| are local functions of `white-surf/1` and are published as files. Curvature follows the rule. | open (wave 2: 2.1) |
-| A12 | §6c flat map (#118); §3c steps 2 and 4; `docs/plans/phase-1.0-pipeline.md` | The number of white-surface pieces disagrees: 21 WM islands kept as closed pieces (#118); "b0 = 28 … the excision step removes them"; "one closed genus-0 piece" (antialias result); "b0 is 2" (phase 1.0 plan). Every island vertex is a column root, so the count matters to streams 2 and 3 too. | open (wave 2: 1.0.5) |
-| A13 | §3c step 2, the filled mask | FreeSurfer's rule keeps "the largest 18-connected component per hemisphere", which would delete the islands of A12. The plan does not say which connectivity ours uses (§2 allows only Kuhn adjacency) or why islands stay. | open (wave 2: 1.0.5) |
+| A12 | §6c flat map (#118); §3c steps 2 and 4; `docs/plans/phase-1.0-pipeline.md` | The number of white-surface pieces disagrees: 21 WM islands kept as closed pieces (#118); "b0 = 28 … the excision step removes them"; "one closed genus-0 piece" (antialias result); "b0 is 2" (phase 1.0 plan). Every island vertex is a column root, so the count matters to streams 2 and 3 too. | fixed |
+| A13 | §3c step 2, the filled mask | FreeSurfer's rule keeps "the largest 18-connected component per hemisphere", which would delete the islands of A12. The plan does not say which connectivity ours uses (§2 allows only Kuhn adjacency) or why islands stay. | fixed |
 
 ## B. Circularities and loops
 
@@ -74,7 +74,7 @@ any definition chosen later can be computed from the history.
 | D6 | §3c step 4; §5c step 1; §7 | Scales fixed in mesh steps or mm: the 10 normal-smoothing steps (and so \|n̄\|), the 0.04 mm column step. §7 asks to restate hard-wired scales on purpose. | deferred to scaling track |
 | D7 | §3c step 3 outputs | Names "stream 3 (planned checks of laminar orientation)"; §5 has no such check. | open (wave 2: 1.2) |
 | D8 | §7 drop list; §3c step 2 | `wellcomposed` is dropped, but fold repair "makes the mask well-composed". Nothing in `src/` uses it; #85 is not merged. | deferred to 1.4 |
-| D9 | §6c flat map (#118) | "The `exp` patch method" is named but defined nowhere in the plan. #55's slit was "written for the box flat map", so it may need a port that §6d does not list. | open (wave 2: 1.0.5) |
+| D9 | §6c flat map (#118) | "The `exp` patch method" is named but defined nowhere in the plan. #55's slit was "written for the box flat map", so it may need a port that §6d does not list. | fixed |
 
 ## E. Not current
 
