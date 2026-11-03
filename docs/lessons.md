@@ -149,9 +149,10 @@ A closed surface without handles near the grey/white-matter boundary of each hem
 
 1. **Segment the WM.** Our own nnU-Net segmentation of the FLASH gives labels in the FreeSurfer convention, a probability of filled WM and its spread across folds. It is trained in generations through human review, starting from the purple-mri aseg as seed labels.
 2. **Correct the topology (`dseg`).** Apply the edits, fill the WM mask, then remove handles and cavities and repair tight folds, automatically.
-3. **Make the surface (`mesh`).** Antialias the corrected mask and contour it by blocked marching tetrahedra into `white-surf/1`.
-4. **Make an overview for display (`overview`).** A decimated mesh that maps every pick back to true vertices.
-5. **Review.** Gather the places that need judgment into one queue per hemisphere. Each answer becomes an edit for step 2 and a training label for step 1.
+3. **Orientation from the image (`orient`).** The structure tensor of the echoes over cortex, and from it the data normal and its coherence: the image's own cortical normal, against which the surface is judged and along which stream 2 traces.
+4. **Make the surface (`mesh`).** Antialias the corrected mask and contour it by blocked marching tetrahedra into `white-surf/1`.
+5. **Make an overview for display (`overview`).** A decimated mesh that maps every pick back to true vertices.
+6. **Review.** Gather the places that need judgment into one queue per hemisphere. Each answer becomes an edit for step 2 and a training label for step 1.
 
 **The flow runs one way. Feedback enters only as inputs.**
 
@@ -161,12 +162,12 @@ A closed surface without handles near the grey/white-matter boundary of each hem
 - The loop closes through inputs. A person's answer, or later stream 3's feedback, becomes an edit: the verified label of each voxel it covers, valid for any input. Stream 1 then reruns from the start.
   - Edits are kept apart from the automatic changes, so they apply again when the correction changes.
   - `DecidedAgainst` records the SHA of the `dseg` the person looked at, so a rerun can list the answers whose context changed (`wm-edits/1`, #78).
-- Steps 2–4 must not depend on which generation produced the label.
+- Steps 2–5 must not depend on which generation produced the label.
 
 **Standing decisions**
 
 - **The white surface exists for its normals, not its position.** Columns start on it and run along its normals. There is no pial surface and no "true GM/WM boundary": the GM/WM transition is aligned afterwards like any other layer.
-  - Judge methods by normal quality: neighbour-angle spread, misfacing faces, cancellation in thin blades, and agreement with the data normal from the image (published by stream 2, §4c step 2).
+  - Judge methods by normal quality: neighbour-angle spread, misfacing faces, cancellation in thin blades, and agreement with the data normal from the image (step 3).
   - The surface may move into GM or WM to make normals well defined, as long as it keeps the topology and does not self-intersect.
 - The input label is never rewritten. Corrections are derivatives, and manual edits are replayable inputs applied before the automatic correction.
 - The generator fixes topology automatically, with no question per handle. Review refines a result that is already correct.
@@ -185,7 +186,7 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 |---|---|---|
 | The three FLASH echoes | the scan | the network's channels |
 | Seed labels | the purple-mri aseg (bootstrapping only; 3d, phase 4) | weak training labels |
-| Verified answers (`wm-edits/1`) | step 5 | training labels |
+| Verified answers (`wm-edits/1`) | step 6 | training labels |
 | Test regions | labelled from scratch (3d, phase 2) | evaluation only, never training |
 
 *Outputs*
@@ -193,8 +194,8 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 | Output | Spec | Used by |
 |---|---|---|
 | `_dseg`: labels in the FreeSurfer convention, missing tissue included | none yet | step 2 (the filled mask) |
-| `_label-WMfilled_probseg`: P(filled WM) | none yet | step 2 (where handle walls fall); step 3 (the antialiasing data term); step 5 (wall margins) |
-| `_label-WMfilled_desc-foldsd_probseg`: the spread of P across folds | none yet | step 5 (ranking the queue) |
+| `_label-WMfilled_probseg`: P(filled WM) | none yet | step 2 (where handle walls fall); step 4 (the antialiasing data term); step 6 (wall margins) |
+| `_label-WMfilled_desc-foldsd_probseg`: the spread of P across folds | none yet | step 6 (ranking the queue) |
 | The model generation, in each sidecar | none yet | tracing a label to its model |
 
 *Design and lessons*
@@ -204,7 +205,7 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 *What it is*
 
 - nnU-Net v2 (Apache-2.0), `3d_fullres` with a residual-encoder preset (M or L), trained on the three FLASH echoes as channels.
-- It is trained in generations, through continuous human-in-the-loop review. Each generation segments the hemispheres, the review queue corrects its output (step 5), and the verified answers join the training labels for the next generation. No number of hemispheres or generations is fixed in advance. This needs:
+- It is trained in generations, through continuous human-in-the-loop review. Each generation segments the hemispheres, the review queue corrects its output (step 6), and the verified answers join the training labels for the next generation. No number of hemispheres or generations is fixed in advance. This needs:
   - held-out test regions that never enter training, so each generation can be compared with the last;
   - the model generation recorded in each output's sidecar, so a label can be traced to the model that made it;
   - a choice, at each generation, of whether to rerun earlier hemispheres with it. A rerun changes everything downstream of the label.
@@ -212,7 +213,7 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 
 *Probabilities*
 
-- Steps 2 and 3 require labels and P; there is no labels-only path. The one exception is phase 0, which runs the current code's labels-only path on the purple-mri aseg until phase 3 replaces it. Step 5 uses the fold spread when it exists; during bootstrapping it ranks without it.
+- Steps 2 and 4 require labels and P; there is no labels-only path. The one exception is phase 0, which runs the current code's labels-only path on the purple-mri aseg until phase 3 replaces it. Step 6 uses the fold spread when it exists; during bootstrapping it ranks without it.
 - During bootstrapping, P is a stand-in from purple-mri (3d, phase 3). That lets the surface steps run before the first generation exists, so the surface work does not wait for the network, and the network does not wait for the surface work.
 
 The coupling that is real, decided once:
@@ -220,12 +221,12 @@ The coupling that is real, decided once:
 1. **The label set.** The filled mask is `FILLED_LABELS` (WM, lateral ventricle, caudate, putamen, pallidum, thalamus, CC; whether the hippocampus joins them is open). The network must output at least these classes, and the hippocampus as a class of its own, separately from cortex and outside, or the surface changes.
 2. **Missing tissue.** Blocks cut out before the scan are labelled as missing tissue, a class of its own (proposed), or ignored in training. Step 2 gives the rule for the surface.
 3. **Calibration.** P must be calibrated near 0.5, because step 2 places walls by it. Calibration is a diagnostic of every generation.
-4. **The defect count.** The number of handles and cavities before correction sets the length of the review queue (step 5). It is a diagnostic of every generation, not a target to optimise inside the network.
+4. **The defect count.** The number of handles and cavities before correction sets the length of the review queue (step 6). It is a diagnostic of every generation, not a target to optimise inside the network.
 
 *Decisions taken*
 
 - The network gives evidence. Topology is guaranteed after it, by our own code (`handles`, `antialias`), never by the network.
-- Steps 2 and 3 require P as well as labels.
+- Steps 2 and 4 require P as well as labels.
 - Only verified labels train later generations.
 - Test regions are labelled from scratch and never trained on.
 - **Labelling happens in our own viewer** (stream 4): the test regions, the site answers and the scribbles. It reads the blocked formats we rely on (NIfTI-Zarr volumes, `white-surf/1` with its block index, the overview), so a person can label anywhere in a whole brain at full resolution, against the surface. ITK-SNAP and 3D Slicer load whole volumes into memory and read neither format, so at 50 µm they would only ever see exported crops. The viewer also writes answers directly as spec'd edits (`wm-edits/1`). ITK-SNAP stays only as an escape hatch for free painting on an exported crop.
@@ -250,16 +251,16 @@ The coupling that is real, decided once:
 | Input | From | Use |
 |---|---|---|
 | `_dseg` and P | step 1 | the filled mask; handle removal ordered by P |
-| `_desc-wmedits_edits.tsv` and sidecar (`wm-edits/1`) | step 5 | edits applied before the correction |
+| `_desc-wmedits_edits.tsv` and sidecar (`wm-edits/1`) | step 6 | edits applied before the correction |
 | The FLASH | the scan | fixes chosen by intensity, only if adopted (Open) |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
-| `_desc-wmtopo_dseg`: the corrected labels; filled mask with Betti (b0, 0, 0) | `wm-dseg/1` | step 3; step 5; stream 2 (masks and stops) |
-| `_desc-wmtopofixes_dseg`: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit | `wm-dseg-fixes/1` | step 5; the viewer |
-| Fills inside missing tissue as a value of their own; each fix's margin in P (planned) | none yet | step 5 |
+| `_desc-wmtopo_dseg`: the corrected labels; filled mask with Betti (b0, 0, 0) | `wm-dseg/1` | steps 3, 4 and 6; stream 2 (masks and stops) |
+| `_desc-wmtopofixes_dseg`: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit | `wm-dseg-fixes/1` | step 6; the viewer |
+| Fills inside missing tissue as a value of their own; each fix's margin in P (planned) | none yet | step 6 |
 
 *Design and lessons*
 
@@ -290,7 +291,32 @@ The coupling that is real, decided once:
   - Doesn't work: forcing cuts, with no fills into cortex (90 → 131 sites); voxel opening at 0.24–0.40 mm (worse at every radius, grows the area, cascades over passes).
   - Relaxing the level set needs a local "no new blade or gap voxel within s" test, or the thin-plate energy shrinks widened gaps and blades into slivers. With the test it keeps 95 % of the gain on crops, but misses tubes.
 
-#### Step 3: the surface (`mesh`)
+#### Step 3: orientation from the image (`orient`)
+
+*Inputs*
+
+| Input | From | Use |
+|---|---|---|
+| FLASH echoes 2 and 3 (trend-removed log) | the scan | the structure tensor |
+| `_desc-wmtopo_dseg` | step 2 | cortex mask for the convolution; WM distance through tissue for the sign, with fluid and missing tissue as obstacles |
+
+*Outputs*
+
+| Output | Spec | Used by |
+|---|---|---|
+| The structure tensor per cortex voxel (6 unique components, float32), at derivative scale 1 voxel and integration scale 2 voxels | none yet | the data normal and coherence below; stream 3 (planned checks of laminar orientation) |
+| The data normal (the tensor's leading eigenvector, signed by WM distance through tissue) and its coherence | none yet | step 4 (judging the surface's normals; a term only if adopted, Open); stream 2, steps 2 and 3 (the field T and the methods that follow the image) |
+
+*Design and lessons*
+
+- **The data normal** (SF F1): structure tensor of trend-removed log echoes 2 and 3, at derivative scale 1 voxel and integration scale 2 voxels, by masked normalized convolution over cortex.
+  - For about 91 % of interior cortex the echoes agree within 10°.
+  - Coherence falls to 0.05–0.38 at contacts and fundi, which is where most column failures happen.
+  - The normal has no sign. Sign it by the WM distance through tissue, with fluid as an obstacle. A straight-line distance flips the sign beside open sulci (CP; #46).
+- It needs only the echoes and the corrected labels, not the surface, so it can run beside step 4. It belongs to stream 1 so that both the surface's check and stream 2's tracing read one published output, and no stream waits on another in a cycle.
+- **Doesn't work:** tracing step by step along the raw tensor normal: no field, no stop, so paths stall and run on (SF F3). Stream 2 fits a field to the data normal instead.
+
+#### Step 4: the surface (`mesh`)
 
 *Inputs*
 
@@ -298,13 +324,13 @@ The coupling that is real, decided once:
 |---|---|---|
 | `_desc-wmtopo_dseg` | step 2 | the filled mask; missing tissue for the cut-face flag |
 | P | step 1 | the antialiasing data term |
-| The data normal and its coherence | stream 2, step 2 | diagnostics only: agreement of the surface normals with the image (a term in the surface only if adopted, Open) |
+| The data normal and its coherence | step 3 | diagnostics only: agreement of the surface normals with the image (a term in the surface only if adopted, Open) |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
-| `_hemi-<h>_white.surf.gii` (+ `.dat`): vertices and triangles | `white-surf/1` | step 4; stream 2 (roots); stream 3 (column graph); the viewer |
+| `_hemi-<h>_white.surf.gii` (+ `.dat`): vertices and triangles | `white-surf/1` | step 5; stream 2 (roots); stream 3 (column graph); the viewer |
 | `_desc-normals_white.func.gii`: unit normals | `white-surf/1` | stream 2 (ray directions) |
 | `_desc-edgekeys_white.func.gii`: each vertex's grid-edge key | `white-surf/1` | every per-vertex output downstream |
 | `_desc-blocks_white.tsv`: the block index | `white-surf/1` | blocked readers downstream |
@@ -335,13 +361,13 @@ The coupling that is real, decided once:
     A smooth surface, by contrast, gave no wrong signs, a foot-map jump p95 of 1.05 steps, and a spread of 0.013 mm. A finer grid only reduces the solver's own error, so it is worth having only once the start surface is accurate below a voxel.
   - **Taking inside/outside from the closest face's normal.** A signed distance to a mesh needs the sign of each point: inside or outside. Reading it from the normal of the face that holds the closest point fails when the closest point lies on an edge or a vertex, which is common on a staircase-like surface: on the 2× grid, points sat exactly in a face's plane, the dot product with its normal was 0, and they got distance 0 with no sign. Use the angle-weighted pseudonormal of the closest feature (face, edge or vertex; Bærentzen and Aanæs 2005), which gives the right sign on any closed mesh. An exact test covers this case.
 
-#### Step 4: the overview (`overview`)
+#### Step 5: the overview (`overview`)
 
 *Inputs*
 
 | Input | From | Use |
 |---|---|---|
-| `white-surf/1` | step 3 | the mesh to decimate |
+| `white-surf/1` | step 4 | the mesh to decimate |
 
 *Outputs*
 
@@ -359,7 +385,7 @@ The coupling that is real, decided once:
 - Map anything back to true vertices with the decimation's own carried-vertex map. A nearest-face search lands on the wrong side of thin sheets.
 - For display only: nothing is measured on it.
 
-#### Step 5: review
+#### Step 6: review
 
 *Inputs*
 
@@ -367,7 +393,7 @@ The coupling that is real, decided once:
 |---|---|---|
 | Corrected labels and fixes image | step 2 | finding sites |
 | P and fold spread | step 1 | finding and ranking sites |
-| The FLASH, the surface, the overview | the scan; steps 3 and 4 | display in the viewer |
+| The FLASH, the surface, the overview | the scan; steps 4 and 5 | display in the viewer |
 
 *Outputs*
 
@@ -401,9 +427,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - Whether T = 0 should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Finding hidden fluid gaps from the image before columns are traced: a thin, slowly decaying dark strip inside labelled cortex (SF F21).
 - **How `dseg` applies standalone answers** to a new generation's labels: whether a verified voxel always overrides the input, and how to show the reviewer where a new generation disagrees with an earlier answer.
-- **Whether antialiasing should align the surface with the data normal.** A data term in step 3 would pull the surface normals towards the data normal near the boundary, weighted by its coherence (high in most cortex, low at contacts and fundi). The sign constraints stay, so the topology stays guaranteed. Two costs:
-  - Agreement with the data normal would stop being an independent check of the surface. Keep part of the evidence out of the term (one echo, or held-out regions), or judge the surface by something else, such as how straight the columns run.
-  - The data normal would have to be computed in stream 1, between steps 2 and 3, since it needs only the echoes and the corrected labels; stream 2 would then read it rather than make it, so the streams do not depend on each other in a cycle.
+- **Whether antialiasing should align the surface with the data normal.** A data term in step 4 would pull the surface normals towards step 3's data normal near the boundary, weighted by its coherence (high in most cortex, low at contacts and fundi). The sign constraints stay, so the topology stays guaranteed. The cost: agreement with the data normal would stop being an independent check of the surface. Keep part of the evidence out of the term (one echo, or held-out regions), or judge the surface by something else, such as how straight the columns run.
 
   To be tested after phase 3. The data normal is not a network input: it is a fixed function of the echoes the network already sees, and nnU-Net's mirroring and rotation would treat its components as scalars and contradict the image.
 - **Whether a scribble also corrects the current hemisphere,** or only trains the next generation. A few strokes give no full-voxel edit, so the current correction needs something to spread them: a rerun after fine-tuning, or an interactive model. Candidates (from memory; check before choosing):
@@ -441,7 +465,8 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   3. The review pane, with site answers and scribbles.
   4. The ITK-SNAP escape hatch: export a crop, import the painted voxels as an answer.
   5. `wm-edits/1` edited so that answers stand on their own.
-  6. Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
+  6. Step 3, `orient`: port the tensor tools from `streamlines` (torch, blocks), publish the structure tensor and the signed data normal with its coherence, and add agreement of the surface normals with it to the surface diagnostics.
+  7. Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
 - **Phase 2: data, label set, test regions.**
   - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 8 is needed.
   - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, missing tissue, and other labels only if a later stage needs them.
@@ -464,7 +489,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   - Inference writes the `_dseg`, the WM-filled `_probseg` and the fold spread, with sidecars.
   - Diagnostics against the purple-mri seed labels as a baseline, on the test regions and the hemisphere: boundary distance and Dice on the test regions; calibration of P near 0.5; handles and cavities before correction; the phase 3 walls and their margins; views of where ours and purple-mri's differ most.
   - With its data, mesh the hemisphere with the hippocampus inside and outside the filled mask, and decide from views of both (Open).
-- **Phase 6: generations through review.** As in step 5. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics are on the test regions only: those of phase 5, plus the length of the queue.
+- **Phase 6: generations through review.** As in step 6. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics are on the test regions only: those of phase 5, plus the length of the queue.
   - Keep every generation's weights and the time of every answer, from the first generation on: the update-frequency experiment needs both.
   - Once enough answers have accumulated, run the retrospective replay (step 1 Open) and set the update frequency, schedule length and replay from it.
 - **Phase 7: uncertainty.**
@@ -502,7 +527,7 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 ### 4b. High-level design
 
 1. **Roots.** One root per `white-surf/1` vertex, keyed by edge key, with rays both inward and outward.
-2. **Orientation evidence.** The data normal from the echoes' structure tensor, and a field T fitted to it, for the methods that follow the image (phase 1). The normal rays of phase 0 do not use it. The data normal is also published, so that stream 1 can judge its surface normals against it.
+2. **The fitted field T.** A field fitted to stream 1's data normal, for the methods that follow the image (phase 1). The normal rays of phase 0 do not use it.
 3. **Trace complete rays.** A small set of simple methods that differ in one respect each and share the rest. Some follow no field: straight rays along the surface normal, or the surface grown along its own normals at a curvature-driven (equivolume) speed. The others follow the field T and share one frozen rule for crossing its crest.
 4. **Record what each ray meets.** Crests, meetings with other fronts, turns, and the class of each column. Nothing is cut here: the cut is read from the profile in stream 3.
 5. **Publish the column traces** in a spec'd format that stream 3 and the viewer read.
@@ -524,8 +549,8 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 
 | Input | From | Use |
 |---|---|---|
-| `white-surf/1`: vertices, normals, edge keys, block index | stream 1, step 3 | one root per vertex |
-| The cut-face flag (planned) | stream 1, step 3 | roots left out |
+| `white-surf/1`: vertices, normals, edge keys, block index | stream 1, step 4 | one root per vertex |
+| The cut-face flag (planned) | stream 1, step 4 | roots left out |
 
 *Outputs*
 
@@ -540,38 +565,31 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 - **Distances on the mesh** need the edges across neighbouring triangles: 8.2 % bound on a plane, against 41 % along edges alone (#10, #45).
 - **Theory** (SF; shock theory): because the WM is connected, every collision is a front meeting itself. A fold and a contact differ only in how far apart the meeting roots lie along the surface, which is a continuum, so no pointwise quantity separates them.
 
-#### Step 2: orientation evidence
+#### Step 2: the fitted field T
 
 *Inputs*
 
 | Input | From | Use |
 |---|---|---|
-| FLASH echoes 2 and 3 (trend-removed log) | the scan | the structure tensor |
-| `_desc-wmtopo_dseg` | stream 1, step 2 | cortex mask; WM for T = 0 and the sign; fluid and missing tissue as obstacles |
+| The data normal and its coherence | stream 1, step 3 | the direction T's gradient is fitted to |
+| `_desc-wmtopo_dseg` | stream 1, step 2 | WM for T = 0; fluid and missing tissue for the extension and obstacles |
 | Relabelled fluid channels and vessels (planned, from `pial_labels`) | stream 1 (an edit) | crests off the label's errors |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
-| The structure tensor per cortex voxel (6 unique components, float32), at derivative scale 1 voxel and integration scale 2 voxels | none yet | the data normal and coherence below; stream 3 (planned checks of laminar orientation) |
-| The data normal (the tensor's leading eigenvector, signed by WM distance through tissue) and its coherence | none yet | step 3; stream 1, step 3 (judging the surface's normals; an antialiasing term only if adopted, §3c Open) |
 | The field T and its crests | internal, no spec yet | steps 3 and 4 |
 
 *Design and lessons*
 
-- **The data normal** (SF F1): structure tensor of trend-removed log echoes 2 and 3, at derivative scale 1 voxel and integration scale 2 voxels, by masked normalized convolution over cortex.
-  - For about 91 % of interior cortex the echoes agree within 10°.
-  - Coherence falls to 0.05–0.38 at contacts and fundi, which is where most failures happen.
-  - The normal has no sign. Sign it by the WM distance through tissue, with fluid as an obstacle. A straight-line distance flips the sign beside open sulci (CP; #46).
-- **The fitted field T** (Lomask-style least squares of ∇T against the normal, T = 0 on WM) has no stalls and bridges fused gaps.
+- **The fitted field T** (Lomask-style least squares of ∇T against the data normal, T = 0 on WM) has no stalls and bridges fused gaps.
   - T is not a distance: it under-reads long columns.
   - It must be extended 1 voxel into fluid and 0.5 mm into WM, or it makes spurious turns at the pia.
   - pyamg needs local Jacobi weights to be deterministic (#40, #45).
 - **T's crest is the midline between the two WM surfaces, not the contact.** On the kissing phantom it sits 0.3 mm from the contact, even across a fluid gap (CP). The crest test (T rises into a voxel but not beyond, with a slope change above L²κ plus noise) needs no calibration.
 - **Crests on the aseg's errors.** Many crests sit on the aseg's fluid channels and vessels, so crest methods need those relabelled first. That relabelling (`pial_labels`: closed-form darkness at α = 10⁻³, fluid fraction above ½, a noise-bound component size, the stria trap) belongs to stream 1 as a spec'd input (#46, #49).
 - **Doesn't work:**
-  - Tracing step by step along the raw tensor normal: no field, no stop, so paths stall and run on (SF F3).
   - Laplace streamlines: they make fused cortex look open (49 k open against 348 crossing at V1V2) and need the outer boundary first.
   - A single all-WM field cannot place an unequal contact: its ridge is the geometric midline (F11).
 
@@ -582,7 +600,8 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 | Input | From | Use |
 |---|---|---|
 | Roots | step 1 | ray starts |
-| The data normal and T | step 2 | directions, for methods that follow the image |
+| The data normal | stream 1, step 3 | directions, for methods that follow the image |
+| T | step 2 | directions and crests, for the field methods |
 | `_desc-wmtopo_dseg` | stream 1, step 2 | stops: fluid, far WM, missing tissue |
 
 *Outputs*
@@ -662,7 +681,7 @@ Measured at the marked points (CP; #47, #52, #58):
 
 The stream proceeds in phases, as stream 1 does. Phase 0 gives stream 3 and the viewer real column traces early; later phases add the methods that follow the image and settle the open questions, keeping the published format (extended in place, never replaced). Whenever stream 1 publishes a new white surface (its phases 1, 3 and 5), the traces are rerun. Each phase is one or more PRs.
 
-Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0 and also needs stream 1's `pial_labels` edits. Phase 2 needs phase 1.
+Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0 and also needs stream 1's `pial_labels` edits and its data normal (stream 1, phase 1). Phase 2 needs phase 1.
 
 - **Phase 0: normal rays on stream 1's phase 0 surface.**
   - Write the spec for column traces first: it is the interface stream 3 and the viewer wait on.
@@ -671,7 +690,7 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0 and also needs 
   - Port `mesh_graph` in a local form, with the duplicate-edge bug fixed (§7).
   - Size each block's halo to the 8 mm length cap (§2, domain edges).
 - **Phase 1: the methods that follow the image.**
-  - Port with changes: the `streamlines` integrators and tensor tools (torch, blocks), for the data normal.
+  - Port with changes: the `streamlines` integrators (torch, blocks). The tensor tools go to stream 1's `orient` (step 3).
   - Rewrite `fitted_field` as a blocked or multigrid solve, if T stays.
   - Port `column_front` per mesh block, with `past_crest` byte for byte, and add **front**, **crest** and **traverse** (with the fitted_blend start) to the published traces, keeping the frozen crossing rule.
   - Leave `fronts` (the one-pass march) at box scale; do not build a whole-brain step on it.
@@ -997,7 +1016,7 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
   - Edits are stored as data (world mm, roots) that replay exactly in any order. A vertex drag must be saved as that vertex.
   - An edit reaches about 1 mm, so the base matters most, and an editor needs a worklist over every doubtful site.
   - A surface built as heights over crossing columns tangles. A contoured base cannot cross itself.
-- The stream 1 review pane is described in §3c, step 5.
+- The stream 1 review pane is described in §3c, step 6.
 
 #### Open
 
@@ -1053,7 +1072,7 @@ The specs in `docs/formats/` stay at version 1 until a release. Each is enforced
 There is no spec yet for:
 
 - column traces (stream 2's output, which stream 3 and the viewer need);
-- the data normal, its coherence and sign (stream 2's step 2; stream 1 judges its surface against it);
+- the structure tensor and the data normal with its coherence (stream 1's step 3; stream 1 judges its surface against it, and stream 2 traces with it);
 - pial-label changes;
 - the missing-tissue mask;
 - any stream 3 output, including feedback to stream 1;
