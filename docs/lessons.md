@@ -124,7 +124,7 @@ The restart does not work on boxes. Two things from them still matter:
 - **Vertex identity is the grid-edge key:** lin(p) × 7 + (4 s_i + 2 s_j + s_k − 1), in int64. It survives remeshing, so anything stored per vertex keys on it.
 - **The block layout:** the grid starts at voxel 0, with 64-voxel blocks in Morton order (i at bit 3b+2, j at 3b+1, k at 3b). A vertex is owned by the first block that uses it.
 - **Precision:** mesh steps run in float32, with float64 only for the affine, area sums and intersection tests. Torch kernels use no float64, no CSR and no atomics, so each run gives the same result. An unavailable device is an error.
-- **Manual and feedback inputs** are diffs against a SHA-pinned input, applied before the automatic step and never baked into the source (`wm-edits/1`, #78).
+- **Manual and feedback inputs** are replayable inputs, applied before the automatic step and never baked into the source (`wm-edits/1`, #78).
 
 **Licences**
 
@@ -147,21 +147,21 @@ A closed surface without handles near the grey/white-matter boundary of each hem
 
 ### 3b. High-level design
 
-1. **Segment the WM.** Today the WM label is the aseg we received from purple-mri. The plan is our own segmentation of the FLASH (nnU-Net), trained in generations through human review. Either way, the label is in the FreeSurfer convention, with an optional probability map.
+1. **Segment the WM.** Our own nnU-Net segmentation of the FLASH gives labels in the FreeSurfer convention, a probability of filled WM and its spread across folds. It is trained in generations through human review, starting from the purple-mri aseg as seed labels.
 2. **Correct the topology (`dseg`).** Apply the edits, fill the WM mask, then remove handles and cavities and repair tight folds, automatically.
 3. **Make the surface (`mesh`).** Antialias the corrected mask and contour it by blocked marching tetrahedra into `white-surf/1`.
 4. **Make an overview for display (`overview`).** A decimated mesh that maps every pick back to true vertices.
-5. **Review.** Gather the places that need judgment into one queue per hemisphere. Each answer becomes an edit for step 2 and, with our own segmentation, a training label for step 1.
+5. **Review.** Gather the places that need judgment into one queue per hemisphere. Each answer becomes an edit for step 2 and a training label for step 1.
 
 **The flow runs one way. Feedback enters only as inputs.**
 
 - The flow: input label + edits → `dseg` (automatic correction, with a fixes image) → white surface.
   - No later step writes back into the input label or into `dseg`. The surface stage never changes the label it read.
   - The automatic fixes (cuts, fills, thickening) stay in the derivative and its fixes image. They never become part of the input.
-- The loop closes through inputs. A person's answer, or later stream 3's feedback, becomes an edit against the input label, and stream 1 reruns from the start.
+- The loop closes through inputs. A person's answer, or later stream 3's feedback, becomes an edit: the verified label of each voxel it covers, valid for any input. Stream 1 then reruns from the start.
   - Edits are kept apart from the automatic changes, so they apply again when the correction changes.
   - `DecidedAgainst` records the SHA of the `dseg` the person looked at, so a rerun can list the answers whose context changed (`wm-edits/1`, #78).
-- Steps 2–4 must not depend on which segmentation produced the label.
+- Steps 2–4 must not depend on which generation produced the label.
 
 **Standing decisions**
 
@@ -175,23 +175,11 @@ A closed surface without handles near the grey/white-matter boundary of each hem
 
 ### 3c. Implementation design
 
-#### Step 1: the WM label
+#### Step 1: our own WM segmentation
 
-**Today: the purple-mri aseg, taken as given**
+Measured numbers in this section come from the one hemisphere we have, segmented by purple-mri, whose aseg bootstraps our model. Read them as evidence about methods: our own labels may show other defects. That aseg's own errors are in §2.
 
-- **Where it comes from.** purple-mri segments the 160 µm FLASH at native resolution. Its network was trained on 7 T T2w at 0.3 mm, and it gives labels without probabilities.
-- **What it costs.** Every stream 1 number in this section was measured on this aseg. Its repeatable errors are listed in §2.
-
-**Planned: our own segmentation of the FLASH** (also on #86, as `PLAN_WM_SEGMENTATION.md`)
-
-*Why*
-
-- purple-mri's accuracy on the 160 µm FLASH is not established, and it gives only labels (the argmax), not the probabilities behind them.
-- Its own topology steps don't help us:
-  - its WM topology fix is FreeSurfer's `mris_fix_topology` on its own mesh, never written back to the labels;
-  - its buried-sulcus removal is a second network on the labels alone, with no topology guarantee.
-- On the current aseg, `white dseg` still makes 48 handle cuts, 29 handle fills and 140 cavity fills.
-- The aim is not a better network for its own sake. It is the evidence the white surface needs: a probability of filled WM per voxel, from the FLASH itself, improved wherever a person has answered.
+*Aim.* The white surface needs per-voxel evidence from the FLASH itself: a probability of filled WM, improved wherever a person has answered. The network is the means to that, not a goal of its own.
 
 *What it is*
 
@@ -200,29 +188,28 @@ A closed surface without handles near the grey/white-matter boundary of each hem
   - held-out test regions that never enter training, so each generation can be compared with the last;
   - the model generation recorded in each output's sidecar, so a label can be traced to the model that made it;
   - a choice, at each generation, of whether to rerun earlier hemispheres with it. A rerun changes everything downstream of the label.
+- **Bootstrapping.** The first generation trains on the purple-mri aseg as weak seed labels, and verified labels gradually take their place (3d, phase 2). Until the first generation exists, the surface steps are built and tested on that aseg.
 
 *What it gives the later steps*
 
-| Output | BIDS name | Read by | Without it |
+| Output | BIDS name | Read by | Use |
 |---|---|---|---|
-| Labels, FreeSurferColorLUT | `_dseg` | step 2 | nothing works: every segmentation must give labels |
-| P(filled WM), float | `_label-WMfilled_probseg` | steps 2 and 3 | handle removal orders by distance; antialiasing uses smoothness alone |
-| Fold spread of P | `_label-WMfilled_desc-foldsd_probseg` | step 5 | the queue ranks without it |
+| Labels, FreeSurferColorLUT | `_dseg` | step 2 | the filled mask |
+| P(filled WM), float | `_label-WMfilled_probseg` | steps 2 and 3 | where handle walls fall; the antialiasing data term |
+| Fold spread of P | `_label-WMfilled_desc-foldsd_probseg` | step 5 | ranking the review queue |
 
-- Our own segmentation gives all three. The later steps use P and the fold spread when they are present and fall back when they are not, so a segmentation that gives only labels (purple-mri today, or any other tool) still fits.
-- So the surface work does not wait for the network, and the network does not wait for the surface work.
+- Steps 2–4 also run from labels alone: handle removal then orders by distance, and antialiasing uses smoothness alone. That lets the surface steps run on the bootstrap labels, so the surface work does not wait for the network, and the network does not wait for the surface work.
 
 The coupling that is real, decided once:
 
 1. **The label set.** The filled mask is `FILLED_LABELS` (WM, lateral ventricle, caudate, putamen, pallidum, thalamus, CC; not the hippocampus). The network must output at least these classes, separately from cortex, hippocampus and outside, or the surface changes.
-2. **Missing tissue.** purple-mri invents labels in the blocks cut out before the scan. Our network labels them as missing, or they are ignored in training.
+2. **Missing tissue.** Blocks cut out before the scan are labelled as missing tissue, a class of its own (proposed), or ignored in training. Step 2 gives the rule for the surface.
 3. **Calibration.** P must be calibrated near 0.5, because step 2 places walls by it. Calibration is a diagnostic of every generation.
 4. **The defect count.** The number of handles and cavities before correction sets the length of the review queue (step 5). It is a diagnostic of every generation, not a target to optimise inside the network.
 
 *Decisions taken*
 
 - The network gives evidence. Topology is guaranteed after it, by our own code (`handles`, `antialias`), never by the network.
-- Steps 2–4 keep working from labels alone.
 - Only verified labels train later generations.
 - Test regions are labelled from scratch and never trained on.
 
@@ -235,16 +222,15 @@ The coupling that is real, decided once:
 - Distance outputs: Xue et al., AAAI 2020; Navarro et al., MLMI 2019; Ma et al., MIDL 2020; for cortex, SegRecon (Gopinath et al. 2021), DeepCSR (Cruz et al., CVPR 2021), recon-all-clinical (Gopinath et al. 2024).
 - Uncertainty: Kendall and Gal, NeurIPS 2017; β-NLL, Seitzer et al., ICLR 2022.
 - Topology losses: Hu et al., NeurIPS 2019; clDice (Shit et al., CVPR 2021); Betti matching (Stucki et al., ICML 2023).
-- purple-mri: Khandelwal et al., *Imaging Neuroscience* 2024; the purple-mri repository (topology notes and surface scripts).
+- purple-mri, the bootstrap labels: Khandelwal et al., *Imaging Neuroscience* 2024; the purple-mri repository (topology notes and surface scripts).
 
 #### Step 2: topology correction (`dseg`)
 
-- **Missing tissue and imputed WM** (PL). Blocks of tissue were cut out of the specimen before the scan. The FLASH is black there, but the purple-mri aseg labels these blocks as tissue anyway, as if they were present: WM where WM would have been ("imputed WM"), and cortex likewise. In V1V2 the missing tissue is 14.6 % of the cortex label.
-  - It is found from the image: FLASH below 0.25 × the cortex median after smoothing by 2 voxels, in blocks of at least 250 voxels, grown by 0.3 mm.
+- **Missing tissue** (PL). Blocks of tissue were cut out of the specimen before the scan, and the FLASH is black there. In V1V2 the missing tissue is 14.6 % of the cortex label.
+  - It can be found from the image: FLASH below 0.25 × the cortex median after smoothing by 2 voxels, in blocks of at least 250 voxels, grown by 0.3 mm. This detector supplies the class for the seed labels, since the purple-mri aseg labels the blocks as if the tissue were there.
   - It is an obstacle for columns, not a source.
-  - Today it is computed in the old box frame. It should become a published stream 1 output.
-- **The filled mask** (#61, #66, #67). Aseg 41 plus 43, 49–52 and 192 (right hemisphere), with cavities filled; the hippocampus is not filled. The deep structures (ventricle, thalamus, ...) belong in the mask. Today the imputed WM is kept in it, so that the cut face of an excised block does not become a false white surface. The proposed rule below replaces this: the cut face stays, flagged. A cut voxel takes the label of the nearest (mm) voxel outside the mask.
-- **The rule for missing tissue** (proposed). The cut face is treated as a domain edge: close the surface there, invent nothing, and mark exactly which vertices lie on it. The same rule applies to every source: with our own segmentation missing tissue is a class, and with the purple-mri aseg the detector above supplies it and overrides the imputed labels.
+- **The filled mask** (#61, #66, #67). Aseg 41 plus 43, 49–52 and 192 (right hemisphere), with cavities filled; the hippocampus is not filled. The deep structures (ventricle, thalamus, ...) belong in the mask. Missing tissue counts as outside (rule below). A voxel cut from the mask takes the label of the nearest (mm) voxel outside it.
+- **The rule for missing tissue** (proposed). The cut face is treated as a domain edge: close the surface there, invent nothing, and mark exactly which vertices lie on it.
   1. Missing tissue is a published stream 1 label.
   2. For the filled mask, missing tissue counts as outside. The mask stops at the cut face, and the surface runs along it.
   3. Handle removal and the cavity fill then run as usual, and fixes may fill into missing tissue, by the usual rule (whichever changes fewer voxels). A plug where there is no data alters nothing real, whereas forbidding it would force cuts through real WM. Such fills are recorded in the fixes image as fills inside missing tissue. Missing tissue enclosed by WM cannot be a real excision, since excisions open to the outside, so filling it is right in any case.
@@ -256,11 +242,11 @@ The coupling that is real, decided once:
   - Object and background fronts grow by simple points. Each handle's wall is cut or filled, whichever changes fewer voxels; ties go to the cut, then to the lowest voxel index.
   - Walls that block each other are claimed as sets (Mayer–Vietoris), or voxels are stranded.
   - Fills of one piece can touch another piece, so check the union's Betti numbers and refuse to write unless b1 = b2 = 0.
-  - On the purple-mri aseg: Betti (1, 111, 182) → (1, 0, 0) in 3.4 min at about 22 GB. Most moves are 1–2 voxels.
+  - On the hemisphere: Betti (1, 111, 182) → (1, 0, 0) in 3.4 min at about 22 GB. Most moves are 1–2 voxels.
   - The meeting wall need not be the smallest cut: one cut of 2,047 voxels ran along a thin strand.
   - Batching walls per pass changes the result, so don't.
 - **Handle removal with probabilities** (planned; plan phase 1). Without P, the fronts claim voxels in order of distance to the other phase. With P, the object front claims in order of decreasing P and the background front in order of increasing P, so each wall falls where P is closest to 0.5. That is right only if P is calibrated near 0.5. Each fix records its margin, the P along its wall, and the review queue ranks by it. P matters to the surface mainly here: it decides which side of a fused bank a cut falls.
-- **Tight folds (misfacing faces)** (#81, #85). On the purple-mri aseg the surface has 152 at 91 sites. Diagonal-only contacts in the label cause most of them: 74 of 90 sites have a checkerboard or corner-only contact within 4 voxels. A different segmentation may show a different pattern.
+- **Tight folds (misfacing faces)** (#81, #85). On the hemisphere the surface has 152 at 91 sites. Diagonal-only contacts in the label cause most of them: 74 of 90 sites have a checkerboard or corner-only contact within 4 voxels.
   - Thicken to 2s, widen gaps between surfaces, then make the mask well-composed, at s = 0.30 mm. This takes 90 sites to 5 and edges over 60° from 297 to 4, at a cost of +3.9 % area and a 90th-percentile neighbour angle of 5.4° against 3.9°.
   - s must not be a whole number of voxels along any axis: at 0.32 mm (exactly 2 voxels on one axis) the checkerboards rise from about 390 to 7,000. 0.26 mm is worse on every count; above 0.30 mm the bulk and area grow.
   - Synthetic antialiased phantoms make no misfacing faces, so fold tests need hand-built folds plus a hemisphere run.
@@ -297,22 +283,19 @@ The coupling that is real, decided once:
 
 #### Step 5: review
 
-**Today** (`wm-edits/1`, #78; the review plan in #80; the site finder in #81)
+The design follows `wm-edits/1` (#78), the review plan in #80 and the site finder in #81.
 
-- The pipeline finds the sites that need judgment, such as tight folds (`wm-sites/1`) and large handle fixes. It gathers them into one queue per hemisphere, after the automatic result.
-- For each site the viewer offers a few concrete choices with previews: `remove-strand`, `thicken`, `fill-gap`, `widen-gap`, `leave`, `manual-paint`. Each choice is a function of the input label that returns the voxels it changes. ITK-SNAP is the escape hatch for free painting.
-- Each answer is saved as voxel diffs against the input label, with its site, choice, time and the `dseg` SHA. An answer with no voxels (`leave`) is recorded too, so the site counts as answered.
-
-**With our own segmentation**
-
-- Each answer serves twice:
+- **The queue.** The pipeline finds the sites that need judgment and gathers them into one queue per hemisphere, after the automatic result:
+  - tight folds (`wm-sites/1`) and large handle fixes;
+  - the topology walls with the smallest margin in P;
+  - the places with the largest fold spread, where the model is least sure.
+- **Each answer serves twice:**
   - as an edit that corrects this hemisphere now;
   - as a verified label for training the next generation.
-- **Answers stand on their own.** Each is the verified label of each voxel it covers, valid for any input, not a diff against one segmentation. That way answers survive from one generation to the next. `wm-edits/1` is to be edited in place to say so.
+- **Answers stand on their own.** Each is the verified label of each voxel it covers, valid for any input, not a diff against one segmentation. That way answers survive from one generation to the next. Each records its site (if any), choice, time and the SHA of the `dseg` the person looked at. An answer with no voxels (`leave`) is recorded too, so the site counts as answered.
 - **Two kinds of answer:**
-  - **Site answers:** a choice among options at a site from the queue, as above.
+  - **Site answers:** at a site from the queue, the viewer offers a few concrete choices with previews: `remove-strand`, `thicken`, `fill-gap`, `widen-gap`, `leave`, `manual-paint`. Each choice is a function of the current label that returns the voxels it changes. ITK-SNAP is the escape hatch for free painting.
   - **Scribbles:** a few strokes marking voxels as WM or not WM, wherever the reviewer sees an error, including errors no site finder flags. Everything unmarked stays unlabelled, so nnU-Net trains on the strokes with its ignore label. Scribbles cost little per answer.
-- The queue also takes the places where the model is least sure: the largest spread across folds, and the topology walls with the smallest margin in P.
 - Only verified labels train the model. Automatic fixes and the model's own predictions never do.
 - The held-out test regions are labelled from scratch, apart from the queue.
 
@@ -326,16 +309,17 @@ The coupling that is real, decided once:
 - **Whether a scribble also corrects the current hemisphere,** or only trains the next generation. A few strokes give no full-voxel edit, so the current correction might need the model rerun (or an interactive model, such as nnInteractive) to spread them.
 - Whether an automatic fix that a reviewer accepted (`leave`) counts as verified, and so trains the model.
 - How stream 3's feedback (for example, the GM/WM transition found along columns) becomes a stream 1 input. Does it edit the label, or adjust the surface stage?
+- **Whether steps 2–4 keep a labels-only path** once our segmentation exists, or require P. If they require it, §1's "Assume no particular aseg source" no longer holds and the fallbacks can go.
 - Open decisions for our own segmentation:
   - Where to train. nnU-Net needs CUDA for training; inference runs on the laptop.
   - The labelling tool for the test regions and the answers: our viewer, or ITK-SNAP / 3D Slicer with nnInteractive (Apache-2.0 code; check the licence of its weights, which may be non-commercial). Whichever it is must support scribbles as well as site answers.
   - Missing tissue: a class of its own (proposed, with the rule in step 2) or ignored in training.
-  - Whether the hippocampus stays outside the filled mask when our labels replace purple-mri's.
+  - Whether the hippocampus stays outside the filled mask.
   - nnU-Net as a package dependency, or an external tool that only the export and import modules know about. Proposed: external.
 
 ### 3d. Implementation plan
 
-Three tracks that can run in parallel: the surface steps, our own segmentation, and the review loop.
+Three tracks that can run in parallel: the surface steps, our own segmentation, and the review loop. Until the first generation exists, the surface steps run on the purple-mri aseg, the bootstrap labels.
 
 **Surface steps (2–4)**
 
@@ -343,7 +327,7 @@ Three tracks that can run in parallel: the surface steps, our own segmentation, 
 - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
 - Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
 - Make missing tissue a published label, and the cut-face flag a published per-vertex output keyed by edge key (neither has a spec yet). Then apply the missing-tissue rule in `dseg`, with phantom tests: an excised block that leaves a tunnel (fixed by a plug, flagged), one that cuts a piece off (b0 rises), and enclosed missing tissue (filled).
-- Rewrite `pial_labels` as a stream 1 input: keep its noise estimators and detector, and have it emit spec'd edits that relabel the aseg's fluid channels and vessels, which crest methods in stream 2 need (§4c, step 2).
+- Rewrite `pial_labels` as a stream 1 input: keep its noise estimators and detector, and have it emit spec'd edits that relabel fluid channels and vessels that the label marks as cortex, which crest methods in stream 2 need (§4c, step 2).
 - Scale to whole brains, in this order (`docs/scaling.md`):
   1. The midline cut (the corpus callosum joins the hemispheres).
   2. `dseg` in blocks: blocked connected components with a merge, Euler sums per block, the cavity fill, and handle removal as "find globally, fix in local boxes". That last part needs a design and a prototype first: one piece is about 43 GB, and whole-array `dseg` at 50 µm is about 1 TB.
@@ -356,24 +340,24 @@ Three tracks that can run in parallel: the surface steps, our own segmentation, 
 
 - **Phase 0: data, label set, test regions.**
   - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 6 is needed.
-  - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, missing tissue, and the rest of purple-mri's labels only if a later stage needs them.
-  - Test regions: a few boxes per hemisphere (start with V1V2, PCC_SPL, M1S1, and the V1V2 seam review points). They are labelled from scratch, not by correcting purple-mri, so purple-mri does not anchor them, and they are never used in training. Format: a BIDS `_dseg` with a versioned sidecar spec that records the box and the labeller.
+  - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, missing tissue, and other labels only if a later stage needs them.
+  - Test regions: a few boxes per hemisphere (start with V1V2, PCC_SPL, M1S1, and the V1V2 seam review points). They are labelled from scratch, not by correcting the seed labels, so the seed does not anchor them, and they are never used in training. Format: a BIDS `_dseg` with a versioned sidecar spec that records the box and the labeller.
 - **Phase 1: the surface steps read probabilities.** Independent of the network; exact-answer tests on phantoms first.
   1. `handles.remove_handles` takes an optional priority volume. With P, the object front claims in order of decreasing P and the background front in order of increasing P, so the walls fall where P is closest to 0.5. Distance ordering stays the default. Phantom test: a handle whose bridge has a known low-P place away from its thinnest place; the cut must fall there.
   2. `antialias` takes an optional data term: near the boundary, φ is pulled towards a smooth function of P − 0.5, weighted by a per-voxel confidence. The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. Phantom test: a plane at a known sub-voxel offset, with P a blurred step across it; the vertices must recover the offset.
   3. Each fix in `desc-wmtopofixes` records its margin, the P along its wall. The review queue ranks by it.
-  4. A stand-in P on the real hemisphere until our own exists: purple-mri rerun with its probabilities saved (nnU-Net `--save_probabilities`), summed over `FILLED_LABELS`. Ask the purple-mri authors whether their container can do this.
+  4. Bootstrapping: a stand-in P on the real hemisphere until our own exists: purple-mri rerun with its probabilities saved (nnU-Net `--save_probabilities`), summed over `FILLED_LABELS`. Ask the purple-mri authors whether their container can do this.
   5. Diagnostics, P ordering against distance ordering on the hemisphere: where the walls move, the normal metrics, and views of the walls that move most.
 - **Phase 2: training data.**
   - Export to nnU-Net's raw dataset format: the three echoes as channels `_0000`–`_0002`, with labels that use an ignore label.
-  - purple-mri's labels as weak seed labels: its labels in the interiors; ignore in a band of about 2 voxels each side of every purple-mri boundary, in the missing blocks, and where a simple FLASH check disagrees with purple-mri (the check to be chosen on the test regions).
+  - Bootstrapping: purple-mri's labels as weak seed labels. Its labels in the interiors; the missing blocks from the step 2 detector; ignore in a band of about 2 voxels each side of every purple-mri boundary, and where a simple FLASH check disagrees with purple-mri (the check to be chosen on the test regions).
   - The existing `wm-edits` answers as verified labels, never ignored.
   - Verified labels are kept apart from seed labels, with provenance, so a generation can be retrained with or without the seed.
   - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset (proposed).
 - **Phase 3: the first generation.**
   - Five folds, split by hemisphere when there are several, by box otherwise. A split by box makes the folds' accuracy an upper bound.
   - Inference writes the `_dseg`, the WM-filled `_probseg` and the fold spread, with sidecars.
-  - Diagnostics against purple-mri, on the test regions and the hemisphere: boundary distance and Dice on the test regions; calibration of P near 0.5; handles and cavities before correction; the phase 1 walls and their margins; views of where ours and purple-mri's differ most.
+  - Diagnostics against the purple-mri seed labels as a baseline, on the test regions and the hemisphere: boundary distance and Dice on the test regions; calibration of P near 0.5; handles and cavities before correction; the phase 1 walls and their margins; views of where ours and purple-mri's differ most.
 - **Phase 4: the review loop.** As in step 5. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics are on the test regions only: those of phase 3, plus the length of the queue.
 - **Phase 5: uncertainty.**
   - Two estimates that need no new network output:
@@ -396,8 +380,6 @@ Three tracks that can run in parallel: the surface steps, our own segmentation, 
 3. The review pane, with site answers and scribbles.
 4. The ITK-SNAP escape hatch.
 5. `wm-edits/1` edited so that answers stand on their own.
-
-The queue's size estimate in #80 (about 60 sites per hemisphere) predates #85; after its fold repair about 5 sites remain.
 
 ## 4. Stream 2: columns
 
