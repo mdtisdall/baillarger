@@ -196,31 +196,6 @@ def test_excise_drops_fragments_then_sets_crumbs_to_outside(
     assert ex.dseg[20, 20, 14] == aseg[20, 20, 14] == 41
     assert ex.fragments == dict(Pieces=1, Voxels=1)
     assert ex.crumbs == dict(Pieces=1, Voxels=48)
-    assert ex.wm_islands == dict(Pieces=0, Voxels=0)
-
-
-def test_excise_gives_cut_off_wm_islands_the_cortex_label(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A small WM piece that the excision cuts off inside cortex, which is
-    still attached, becomes cortex. A small WM island away from the
-    excision, and the large WM, keep their label."""
-    aseg = np.zeros((40, 40, 30), np.int16)
-    aseg[2:38, 2:38, 2:20] = 42
-    aseg[6:34, 6:34, 6:12] = 41  # the large WM
-    aseg[8:11, 8:11, 14:17] = 41  # 27 voxels of WM on the excision
-    aseg[26:29, 26:29, 15:18] = 41  # 27 voxels of WM away from it
-    found = np.zeros(aseg.shape, bool)
-    found[6:20, 6:20, 12:14] = True  # cuts the small WM from the large
-    monkeypatch.setattr(excisions, "detect", lambda *a, **k: found)
-    ex = excisions.excise(aseg, np.ones(aseg.shape, np.float32), VOX, "R")
-    want = aseg.copy()
-    want[found] = 0
-    want[8:11, 8:11, 14:17] = 42
-    assert np.array_equal(ex.dseg, want)
-    assert np.array_equal(ex.mask, found)
-    assert ex.crumbs == dict(Pieces=0, Voxels=0)
-    assert ex.wm_islands == dict(Pieces=1, Voxels=27)
 
 
 def old_missing_tissue(
@@ -320,7 +295,6 @@ def test_the_command_writes_the_bids_files(tmp_path: Path) -> None:
         )
         assert side["Fragments"] == dict(Pieces=0, Voxels=0)
         assert side["Crumbs"] == dict(Pieces=0, Voxels=0)
-        assert side["WMIslands"] == dict(Pieces=0, Voxels=0)
         assert side["CortexMedian"] == pytest.approx(
             float(np.median(read(f)[aseg == 42]))
         )

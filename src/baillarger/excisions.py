@@ -41,9 +41,8 @@ from baillarger.bids import (
     sources,
     write_sidecar,
 )
-from baillarger.handles import kuhn_structure
 from baillarger.timing import Laps, log_to_stderr
-from baillarger.white_dseg import FILLED_LABELS, LUT_NAMES
+from baillarger.white_dseg import LUT_NAMES
 
 type Bool = npt.NDArray[np.bool_]
 type Labels = npt.NDArray[np.integer[Any]]
@@ -73,7 +72,6 @@ EXCISIONS_SPEC = SidecarSpec(
         Key("Components", "integer", True, "components of the excision map"),
         Key("Fragments", "object", True, "excision-map pieces dropped"),
         Key("Crumbs", "object", True, "cut-off tissue pieces set to 0"),
-        Key("WMIslands", "object", True, "cut-off WM pieces set to cortex"),
     ),
 )
 
@@ -201,7 +199,6 @@ class Excised:
     mask: Bool
     fragments: dict[str, int]
     crumbs: dict[str, int]
-    wm_islands: dict[str, int]
 
 
 def excise(
@@ -221,10 +218,7 @@ def excise(
     2. drop the pieces of the result of less than fragment_mm3;
     3. relabel (set the rest to 0);
     4. set to 0 each tissue piece (WM or cortex label of hemi, face
-       adjacency) of less than crumb_mm3 that touches the map of step 3;
-    5. give the cortex label of hemi to each piece of the WM mask
-       (white_dseg.FILLED_LABELS, Kuhn adjacency) of less than crumb_mm3
-       that touches the map of steps 3 and 4.
+       adjacency) of less than crumb_mm3 that touches the map of step 3.
     The excision map is the voxels of steps 3 and 4. Raises ValueError if
     the aseg has no voxel with the WM label or the cortex label of hemi."""
     a = np.asarray(aseg)
@@ -234,17 +228,11 @@ def excise(
     wm, ctx = TISSUE_LABELS[hemi]
     crumb, ncrumb = cut_off((x == wm) | (x == ctx), miss, voxel_mm, crumb_mm3)
     x[crumb] = 0
-    mask = miss | crumb
-    island, nisland = cut_off(
-        np.isin(x, FILLED_LABELS[hemi]), mask, voxel_mm, crumb_mm3, kuhn_structure()
-    )
-    x[island] = ctx
     return Excised(
         x,
-        mask,
+        miss | crumb,
         dict(Pieces=nfrag, Voxels=vfrag),
         dict(Pieces=ncrumb, Voxels=int(crumb.sum())),
-        dict(Pieces=nisland, Voxels=int(island.sum())),
     )
 
 
@@ -348,7 +336,6 @@ def write_excisions(
         Components=int(ncomp),
         Fragments=ex.fragments,
         Crumbs=ex.crumbs,
-        WMIslands=ex.wm_islands,
     )
     write_sidecar(
         sidecar_path(p["dseg"]),

@@ -66,19 +66,9 @@ hemisphere `H`:
    next to it (26-adjacency). These are crumbs that an excision cut off. A
    small piece that no excision touches is not changed.
 
-9. Find the connected components of the WM mask that `white_dseg` uses
-   (the labels `FilledLabels` of `docs/formats/wm-dseg.md`, Kuhn
-   adjacency). Give the cortex label to each component that is smaller
-   than `CrumbMM3` mm³ and touches the voxels of steps 7 and 8 (26-adjacency).
-   These are WM islands that an excision cut off inside cortex that is still
-   attached to the brain. Outside would make a hole in the cortex, so they
-   become cortex.
-
-The excision map is the voxels that steps 7 and 8 set to 0. Step 9 changes
-labels but sets nothing to 0, so its voxels are not in the map. The command
+The excision map is the voxels that steps 7 and 8 set to 0. The command
 changes no other voxel. Labels other than the WM and cortex labels (for
-example the deep structures) are never set to 0. Step 9 can change a deep
-label of the WM mask to cortex.
+example the deep structures) are never set to 0.
 
 The defaults: `FragmentMM3` 0.1, `CrumbMM3` 1.0. On the first hemisphere
 (INDD121850, R, 0.16 mm), the fragments were 1–6 voxels (at most 0.025 mm³)
@@ -104,4 +94,3 @@ the WM mask was 0.53 mm³.
 | `Components` | integer | yes | Connected components of the excision map (face adjacency) |
 | `Fragments` | object | yes | The pieces that step 6 dropped: `Pieces` (integer), `Voxels` (integer) |
 | `Crumbs` | object | yes | The tissue pieces that step 8 set to 0: `Pieces` (integer), `Voxels` (integer) |
-| `WMIslands` | object | yes | The WM pieces that step 9 gave the cortex label: `Pieces` (integer), `Voxels` (integer) |
