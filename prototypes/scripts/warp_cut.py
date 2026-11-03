@@ -24,6 +24,7 @@ import numpy as np
 
 import baillarger.surfcut as SC
 
+
 @dataclass
 class Model:
     K: np.ndarray  # (n,) labels per variable
