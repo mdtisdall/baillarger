@@ -1,5 +1,5 @@
-"""The viewer's overview of a white surface written by the mesh command: the
-overview that the command writes with the surface (baillarger.white.WhiteOverview,
+"""The viewer's overview of a white surface: the overview that the overview
+command writes next to the surface (baillarger.white_overview.WhiteOverview,
 docs/formats/white-overview.md), and a Surface (baillarger.viewer.surface) on it.
 
 The true surface is too large for the panes and for the viewer's whole-mesh steps (the
@@ -21,7 +21,8 @@ import numpy as np
 
 from baillarger.bids import file_sha256
 from baillarger.viewer.surface import Surface
-from baillarger.white import WhiteOverview, WhiteSurface, overview_paths
+from baillarger.white_overview import WhiteOverview, overview_paths
+from baillarger.white_surf import WhiteSurface
 
 #: bumped when the viewer's use of the overview changes, so that caches are remade
 VERSION = 1
@@ -38,14 +39,14 @@ def overview_surface(
     """A Surface on the overview of the white surface at surf (its graph, inflation
     and picking; the inflation cached), the overview and the true surface
     (memory-mapped). Raises FileNotFoundError if the overview was not written
-    (python -m baillarger.white overview SURF), ValueError if it was made from
+    (python -m baillarger.white_overview SURF), ValueError if it was made from
     other data."""
     W = WhiteSurface.load(surf)
     path = overview_paths(surf)["overview"]
     if not path.exists():
         raise FileNotFoundError(
             f"{path.name}: no overview; write it with "
-            f"python -m baillarger.white overview {surf}"
+            f"python -m baillarger.white_overview {surf}"
         )
     ov = WhiteOverview.load(path)
     ov.check(W)

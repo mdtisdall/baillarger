@@ -1,5 +1,5 @@
 """Tests for baillarger.wm_edits (manual label edits of the aseg) and their use by
-the dseg command (baillarger.white.wm_topo, write_wm_topo)."""
+the dseg command (baillarger.white_dseg.wm_topo, write_wm_topo)."""
 
 import json
 from pathlib import Path
@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from test_white_dseg import FILLED, VOX, synthetic_aseg
 
-from baillarger import bids, white
+from baillarger import bids, white_dseg
 from baillarger import wm_edits as E
 from baillarger.handles import kuhn_betti
 
@@ -80,7 +80,7 @@ def test_edits_that_do_not_fit_are_refused(tmp_path: Path) -> None:
 def test_an_edit_replaces_the_automatic_cut() -> None:
     """Removing the rod by hand leaves the ring without its handle: the automatic
     correction no longer cuts it, and the fixes show the edit."""
-    t = white.wm_topo(synthetic_aseg(), VOX, remove_rod())
+    t = white_dseg.wm_topo(synthetic_aseg(), VOX, remove_rod())
     assert t.betti_before == (2, 1, 1) and t.betti_after == (2, 0, 0)
     assert kuhn_betti(np.isin(t.dseg, FILLED)) == (2, 0, 0)
     assert all(t.dseg[v] == 0 and t.fixes[v] == 4 for v in ROD)
@@ -95,7 +95,7 @@ def test_no_edit_can_leave_a_handle() -> None:
     e = E.Edits().with_answer(
         E.Answer(1, DRILL[0], "drill"), DRILL, [41] * len(DRILL), [42] * len(DRILL)
     )
-    t = white.wm_topo(synthetic_aseg(), VOX, e)
+    t = white_dseg.wm_topo(synthetic_aseg(), VOX, e)
     assert t.betti_before == (2, 3, 1) and t.betti_after == (2, 0, 0)
     assert kuhn_betti(np.isin(t.dseg, FILLED)) == (2, 0, 0)
     drilled = np.zeros(t.fixes.shape, bool)
@@ -110,10 +110,10 @@ def test_the_dseg_command_takes_edits(tmp_path: Path) -> None:
     out = tmp_path / "deriv"
     path = E.edits_path(out, bids.entities(src))
     E.write_edits(path, src, remove_rod())
-    white.main(["dseg", str(src), "--edits", str(path), "--out", str(out)])
+    white_dseg.main([str(src), "--edits", str(path), "--out", str(out)])
     anat = out / "sub-T01" / "ses-S1" / "anat"
     side = bids.read_sidecar(
-        anat / "sub-T01_ses-S1_desc-wmtopo_dseg.json", white.DSEG_SPEC
+        anat / "sub-T01_ses-S1_desc-wmtopo_dseg.json", white_dseg.DSEG_SPEC
     )
     want = [str(p.resolve()) for p in (src, path, bids.sidecar_path(path))]
     assert side["Sources"] == want and set(side["SourcesSHA256"]) == set(want)
@@ -126,10 +126,10 @@ def test_the_dseg_command_takes_edits(tmp_path: Path) -> None:
     tsv = (anat / "sub-T01_ses-S1_desc-wmtopofixes_dseg.tsv").read_text()
     assert "4\tmanual_edit" in tsv
     # without edits: ManualVoxels 0 and the aseg alone in Sources
-    white.main(["dseg", str(src), "--out", str(tmp_path / "plain")])
+    white_dseg.main([str(src), "--out", str(tmp_path / "plain")])
     plain = bids.read_sidecar(
         tmp_path / "plain/sub-T01/ses-S1/anat/sub-T01_ses-S1_desc-wmtopo_dseg.json",
-        white.DSEG_SPEC,
+        white_dseg.DSEG_SPEC,
     )
     assert plain["ManualVoxels"] == 0 and plain["Sources"] == [str(src.resolve())]
 
@@ -142,4 +142,4 @@ def test_edits_against_another_aseg_are_refused(tmp_path: Path) -> None:
     a[0, 0, 0] = 42  # the aseg changed after the edits were made
     nib.save(nib.nifti1.Nifti1Image(a, np.diag([*VOX, 1.0])), src)
     with pytest.raises(ValueError, match="not against"):
-        white.write_wm_topo(src, tmp_path / "deriv", path)
+        white_dseg.write_wm_topo(src, tmp_path / "deriv", path)

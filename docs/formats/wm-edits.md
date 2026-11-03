@@ -2,8 +2,8 @@
 
 SpecVersion `wm-edits/1`. Written by `baillarger.wm_edits.write_edits` (for
 example by a review queue: one answer per site), read by
-`python -m baillarger.white dseg ASEG --edits EDITS --out DERIV`
-(`baillarger.white.write_wm_topo`); the keys are enforced by
+`python -m baillarger.white_dseg ASEG --edits EDITS --out DERIV`
+(`baillarger.white_dseg.write_wm_topo`); the keys are enforced by
 `baillarger.wm_edits.EDITS_SPEC`, and `tests/test_bids.py` checks that the
 table below lists the same keys, types and requirements.
 
