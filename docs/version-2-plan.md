@@ -377,7 +377,7 @@ The coupling that is real, decided once:
 |---|---|---|
 | `_hemi-<h>_white.surf.gii` (+ `.dat`): vertices and triangles | `white-surf/1` | step 5; stream 2 (roots); stream 3 (column graph); the viewer |
 | `_desc-normals_white.func.gii`: unit normals | `white-surf/1` | stream 2 (ray directions) |
-| `_desc-normlen_white.func.gii`: the length of the averaged normal before renormalising, \|n̄\| in [0, 1] (planned) | `white-surf/1` | stream 2 (recorded per column); stream 3 (weighing evidence) |
+| `_desc-normlen_white.func.gii`: the length of the averaged normal before renormalising, \|n̄\| in [0, 1] (phase 0) | `white-surf/1` | stream 2 (recorded per column); stream 3 (weighing evidence) |
 | `_desc-edgekeys_white.func.gii`: each vertex's grid-edge key | `white-surf/1` | every per-vertex output downstream |
 | `_desc-blocks_white.tsv`: the block index | `white-surf/1` | blocked readers downstream |
 
@@ -515,6 +515,7 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
 - **Phase 0: the pipeline on the purple-mri aseg.** Labels only, with the current code's labels-only path (handle removal ordered by distance, antialiasing by smoothness alone). The aim is the published outputs streams 2–4 need: `wm-dseg/1`, `white-surf/1`, `white-overview/1`.
   - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
   - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
+  - Add the normal length \|n̄\| to `white-surf/1` (`_desc-normlen_white.func.gii`) and its spec, since stream 2's phase 0 records it on each column. Exact tests: 1 on a plane; falling towards 0 at the crest of a thin blade.
   - The rule for cut faces (step 2): relabel the purple-mri aseg's excisions to outside with the detector, and keep its excision map as a test set. Phantom tests: an excision through WM that leaves a tunnel (fixed by a plug), and one that cuts a piece off (b0 rises).
 - **Phase 1: the WM-distance sampler** (shared code, §7). Port `tissue_wm_distance` from `streamlines` as a sampler: the distance through tissue, capped at 8 mm, with fluid and outside as obstacles, per superblock with its halo (§2). Exact tests: the straight-line distance where nothing blocks the path, a path forced round a fluid obstacle, and the same value whichever superblock computes it. Stream 2's phase 0 (`first_fall`) and phase 2 (`orient`'s sign) build on it.
 - **Phase 2: `orient`** (step 3). Port the tensor tools from `streamlines` (torch, blocks) as an on-demand sampler of the local cortex level, the structure tensor and the signed data normal with its coherence, with exact tests (phantom planes and spheres), and add agreement of the surface normals with it to the surface diagnostics.
@@ -1169,7 +1170,7 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | Spec | Defines | Written in |
 |---|---|---|
 | `wm-dseg/1`, `wm-dseg-fixes/1` | The corrected segmentation and the fixes image (1 cut, 2 fill, 3 cavity, 4 manual); Betti before and after; each move. To be extended with the fix table and the sparse fix diff (stream 1, phase 3) and the margin (phase 6) | exists |
-| `white-surf/1` | GIfTI with external data: float32 vertices in scanner mm, int32 triangles, float32 normals, float32 normal lengths (to be added), int64 edge keys, a block index in Morton order | exists |
+| `white-surf/1` | GIfTI with external data: float32 vertices in scanner mm, int32 triangles, float32 normals, float32 normal lengths (added in stream 1, phase 0), int64 edge keys, a block index in Morton order | exists |
 | `white-overview/1` | The decimated display mesh, its true-vertex ids and the true vertices each face carries; five guarantees | exists |
 | `wm-edits/1` | Exists as voxel-row diffs against a SHA-pinned aseg, with each answer's site and choice; to be revised so answers stand on their own (verified labels, valid for any input), in an append-only log where a correction supersedes and never rewrites | revision: stream 1, phase 3 |
 | `wm-sites/1` | The review queue's sites | stream 1, phase 3 (#81) |
