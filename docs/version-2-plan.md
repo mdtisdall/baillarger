@@ -89,7 +89,7 @@ These bind every stream from its first version. A first version may be rough, bu
 - **No GPL dependencies,** with no exceptions. Where only a GPL library fits, use a permissive one or write the piece ourselves. State the licence when proposing a library.
 - **FreeSurfer is the model.** Its topology correction, pretess and strand thickening are the defaults to follow. Deviate only with cause and data. We do not run FreeSurfer, even as a benchmark.
 - **A person decides only where the data cannot.** Places that need judgment go into one review queue per stage. Each answer is a replayable edit: the automatic result is correct without it, and the review refines it.
-- **The WM label comes from our own segmentation** (from stream 1's phase 5; until then the purple-mri aseg, with a stand-in P from phase 3), which gives labels in the FreeSurfer convention and P(filled WM) (§3). The surface steps require both; there is no labels-only path once stream 1's phase 3 is done (§3d). The label is still an input with its own errors: take evidence from the echoes, not from the quirks of the labels.
+- **The WM label comes from our own segmentation** (from stream 1's phase 8; until then the purple-mri aseg, with a stand-in P from phase 6), which gives labels in the FreeSurfer convention and P(filled WM) (§3). The surface steps require both; there is no labels-only path once stream 1's phase 6 is done (§3d). The label is still an input with its own errors: take evidence from the echoes, not from the quirks of the labels.
 
 ### Working rules
 
@@ -115,7 +115,7 @@ These bind every stream from its first version. A first version may be rough, bu
   - R2\* proxies from two echoes are too noisy to use.
 - **The noise is spatially correlated:** neighbouring voxels correlate at 0.5–0.67, even in deep WM. What works is a white-noise model with the same gradient power: the median smallest structure-tensor eigenvalue, corrected by the derivative filter's gain and the Wishart min-eigenvalue bias (0.68 at n_eff = 39). It needs no calibration (actual over predicted noise is 1.0–1.6).
 - Laminar structure is planar at 160 µm everywhere, M1 included (median λ2/λ1 ≤ 0.20). Radial and tangential fibres give the same tensor signature.
-- **No bias-field correction.** B1 fields at 7 T vary over about 18–60 mm (the bias FWHMs used with SPM and N4 at 7 T). Every intensity comparison here is local, over a few mm, or against Fomblin's near-zero level, and in the log a bias is additive with a negligible gradient at a voxel's scale, so the field cancels. The one global comparison is the network's per-image normalization; whether its errors follow position across the specimen is a diagnostic (3d, phase 8), and N4 (Apache-2.0) is added only if they do.
+- **No bias-field correction.** B1 fields at 7 T vary over about 18–60 mm (the bias FWHMs used with SPM and N4 at 7 T). Every intensity comparison here is local, over a few mm, or against Fomblin's near-zero level, and in the log a bias is additive with a negligible gradient at a voxel's scale, so the field cancels. The one global comparison is the network's per-image normalization; whether its errors follow position across the specimen is a diagnostic (3d, phase 11), and N4 (Apache-2.0) is added only if they do.
 
 **The aseg we have, from purple-mri, errs in repeatable ways** (CP; SF F21; #46, #49)
 
@@ -203,9 +203,9 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 | Input | From | Use |
 |---|---|---|
 | The three FLASH echoes | the scan | the network's channels |
-| Seed labels | the purple-mri aseg (bootstrapping only; 3d, phase 4) | weak training labels |
+| Seed labels | the purple-mri aseg (bootstrapping only; 3d, phase 7) | weak training labels |
 | Verified answers (`wm-edits/1`) | step 6 | training labels |
-| Test regions | labelled from scratch (3d, phase 2) | evaluation only, never training |
+| Test regions | labelled from scratch (3d, phase 5) | evaluation only, never training |
 
 *Outputs*
 
@@ -227,12 +227,12 @@ Measured numbers in this section come from the one hemisphere we have, segmented
   - held-out test regions that never enter training, so each generation can be compared with the last;
   - the model generation recorded in each output's sidecar, so a label can be traced to the model that made it;
   - a choice, at each generation, of whether to rerun earlier hemispheres with it. A rerun changes everything downstream of the label.
-- **Bootstrapping.** The first generation trains on the purple-mri aseg as weak seed labels, and verified labels gradually take their place (3d, phase 4). Until the first generation exists, the whole pipeline runs on that aseg (3d, phase 0).
+- **Bootstrapping.** The first generation trains on the purple-mri aseg as weak seed labels, and verified labels gradually take their place (3d, phase 7). Until the first generation exists, the whole pipeline runs on that aseg (3d, phase 0).
 
 *Probabilities*
 
-- Steps 2 and 4 require labels and P; there is no labels-only path. The one exception is phase 0, which runs the current code's labels-only path on the purple-mri aseg until phase 3 replaces it. Step 6 uses the fold spread when it exists; during bootstrapping it ranks without it.
-- During bootstrapping, P is a stand-in from purple-mri (3d, phase 3). That lets the surface steps run before the first generation exists, so the surface work does not wait for the network, and the network does not wait for the surface work.
+- Steps 2 and 4 require labels and P; there is no labels-only path. The one exception is phase 0, which runs the current code's labels-only path on the purple-mri aseg until phase 6 replaces it. Step 6 uses the fold spread when it exists; during bootstrapping it ranks without it.
+- During bootstrapping, P is a stand-in from purple-mri (3d, phase 6). That lets the surface steps run before the first generation exists, so the surface work does not wait for the network, and the network does not wait for the surface work.
 
 The coupling that is real, decided once:
 
@@ -277,7 +277,7 @@ The coupling that is real, decided once:
 
 | Input | From | Use |
 |---|---|---|
-| `_dseg` and P | step 1; until phase 5, the purple-mri aseg, with no P in phase 0 and a stand-in P from phase 3 | the filled mask; handle removal ordered by P |
+| `_dseg` and P | step 1; until phase 8, the purple-mri aseg, with no P in phase 0 and a stand-in P from phase 6 | the filled mask; handle removal ordered by P |
 | `_desc-wmedits_edits.tsv` and sidecar (`wm-edits/1`) | step 6 | edits applied before the correction |
 | The FLASH | the scan | fixes chosen by intensity, only if adopted (Open) |
 
@@ -308,10 +308,10 @@ The coupling that is real, decided once:
   - On the hemisphere: Betti (1, 111, 182) → (1, 0, 0) in 3.4 min at about 22 GB. Most moves are 1–2 voxels.
   - The meeting wall need not be the smallest cut: one cut of 2,047 voxels ran along a thin strand.
   - Batching walls per pass changes the result, so don't.
-- **Handle removal by probability** (planned; 3d, phase 3). The fronts claim voxels by P, not by distance to the other phase as the current code does: the object front claims in order of decreasing P and the background front in order of increasing P, so each wall falls where P is closest to 0.5. That is right only if P is calibrated near 0.5. Each fix records its margin in the fix table, and the review queue ranks by it. P matters to the surface mainly here: it decides which side of a fused bank a cut falls.
+- **Handle removal by probability** (planned; 3d, phase 6). The fronts claim voxels by P, not by distance to the other phase as the current code does: the object front claims in order of decreasing P and the background front in order of increasing P, so each wall falls where P is closest to 0.5. That is right only if P is calibrated near 0.5. Each fix records its margin in the fix table, and the review queue ranks by it. P matters to the surface mainly here: it decides which side of a fused bank a cut falls.
 - **Fluid channels and vessels in purple-mri's cortex** (`pial_labels`, #46, #49). Purple-mri fills thin fluid channels of collapsed sulci, and superficial vessels, with cortex (§2). A detector finds them: closed-form darkness against the local cortex level at α = 10⁻³ (step 3), fluid fraction above ½ (the majority rule, 3b), a noise-bound component size, the stria trap. At V1V2, relabelling them took the columns crossing fused banks from 6,001 to 717.
-  - It is a patch for one source's error, so it is a **bootstrap tool only**, like the excision detector: where it fires inside purple-mri's cortex, the seed labels are set to ignore (3d, phase 4). It never writes fluid into a published label, so the network is trained neither on purple-mri's error nor on the detector's guess.
-  - Past the bootstrap, channels are the labels' job: visible channels are fluid under the majority rule, the network learns them from verified labels, and stream 3 reads the pial edge from the profile where a channel is missed. The diagnostic: recall of thin fluid channels on the test regions, per generation (phase 8 holds the remedy for thin structures if it stays poor).
+  - It is a patch for one source's error, so it is a **bootstrap tool only**, like the excision detector: where it fires inside purple-mri's cortex, the seed labels are set to ignore (3d, phase 7). It never writes fluid into a published label, so the network is trained neither on purple-mri's error nor on the detector's guess.
+  - Past the bootstrap, channels are the labels' job: visible channels are fluid under the majority rule, the network learns them from verified labels, and stream 3 reads the pial edge from the profile where a channel is missed. The diagnostic: recall of thin fluid channels on the test regions, per generation (phase 11 holds the remedy for thin structures if it stays poor).
 - **Fixes are kept as a diff** (planned). `dseg`'s change from what it read (the input labels with the edits applied) to what it wrote is published split into fixes: a table with one row per fix, and a sparse diff with each changed voxel's fix id, old label and new label, in Morton order (12–16 bytes per changed voxel; about a megabyte for a hemisphere).
   - **The margin** of a fix is the mean of P over its wall (its own voxels), signed so that a positive value supports the choice: 0.5 − mean P for a cut, mean P − 0.5 for a fill. `dseg` computes it while it has the wall; the queue ranks the most negative first, with the wall size beside it.
   - **Replay and revert.** Input labels, edits and diff reproduce `desc-wmtopo` exactly, and a rerun checks that it reproduces the stored diff (a test of determinism across devices too). Any one fix can be reverted for inspection.
@@ -388,7 +388,7 @@ The coupling that is real, decided once:
   - Each vertex stays on its own grid edge, so the surface has no self-intersections by construction and keeps the edge keys.
   - A tilted plane's normals come out within 0.5° (the raw staircase is 31° off).
   - On the hemisphere: one closed genus-0 piece, 12.7 M vertices, 25.3 M faces, no self-intersecting faces; CPU and MPS identical bit for bit; 1,651 iterations, 16 min on MPS, peak 20–24 GB.
-- **Antialiasing with probability** (planned; 3d, phase 3). Besides thin-plate smoothness, a data term pulls φ near the boundary towards a smooth function of P − 0.5, weighted by a per-voxel confidence (1/σ², once σ exists). The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. This smooths the staircase where P carries sub-voxel information; position finer than a voxel is a by-product, not a goal.
+- **Antialiasing with probability** (planned; 3d, phase 6). Besides thin-plate smoothness, a data term pulls φ near the boundary towards a smooth function of P − 0.5, weighted by a per-voxel confidence (1/σ², once σ exists). The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. This smooths the staircase where P carries sub-voxel information; position finer than a voxel is a by-product, not a goal.
 - **Smoothing is the wrong tool here:**
   - Smoothing the label and then contouring loses 2-voxel WM blades: at σ = 1 voxel it loses 16 % of V1V2's thin WM, shrinks convex surfaces by about σ²κ, and makes slivers.
   - Taubin λ|μ smoothing is unstable at short cutoffs. Tukey twicing never amplifies.
@@ -489,7 +489,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
   - The data normal at the boundary comes from the deepest layers (WM has no laminar texture), where coherence may be lower.
   - Whether to use it is decided by stream 2's misalignment diagnostic (§4c, Open): misalignment set at the root and constant along the rays points here; misalignment that grows with depth points to steering the rays instead.
 
-  To be tested after phase 3, once stream 2's diagnostic has run. The data normal is not a network input: it is a fixed function of the echoes the network already sees, and nnU-Net's mirroring and rotation would treat its components as scalars and contradict the image.
+  To be tested after phase 6, once stream 2's diagnostic has run. The data normal is not a network input: it is a fixed function of the echoes the network already sees, and nnU-Net's mirroring and rotation would treat its components as scalars and contradict the image.
 - **Whether a scribble also corrects the current hemisphere,** or only trains the next generation. A few strokes give no full-voxel edit, so the current correction needs something to spread them: a rerun after fine-tuning, or an interactive model. Candidates (from memory; check before choosing):
   - **nnInteractive** (DKFZ, 2025): a promptable 3D model from the nnU-Net team, taking points, scribbles, boxes and lassos, with no retraining. Code Apache-2.0; the weights are believed to be non-commercial and share-alike (CC BY-NC-SA), which must be read before use.
   - **MONAI Label with DeepEdit** (Apache-2.0): a U-Net with click inputs, whose server can train in the background as labels are saved. Fully permissive, but a looser fit with nnU-Net.
@@ -502,7 +502,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - **The bootstrap's stand-in P.** If purple-mri cannot save its probabilities, the surface steps need another stand-in P before the first generation exists.
 - Open decisions for our own segmentation:
   - **The hippocampus: inside the white surface or outside it.** To be decided once there is data, by looking at both on our own segmentation. If inside, stream 2 must also decide how to treat roots on the part of the surface that wraps it, which is not neocortex: a medial-wall label, or roots kept and judged later.
-  - **How fast a generation follows a review.** nnU-Net can start from the previous weights (`-pretrained_weights`) with a short custom schedule, sampling patches mostly round the new verified labels and replaying the older labels so the model does not forget them. On a CUDA GPU that is hours, not days, so a generation could follow each review session. How often to train, how long, and how much replay are to be found by experiment, not chosen in advance (3d, phase 6):
+  - **How fast a generation follows a review.** nnU-Net can start from the previous weights (`-pretrained_weights`) with a short custom schedule, sampling patches mostly round the new verified labels and replaying the older labels so the model does not forget them. On a CUDA GPU that is hours, not days, so a generation could follow each review session. How often to train, how long, and how much replay are to be found by experiment, not chosen in advance (3d, phase 9):
     - **Retrospective replay.** Every answer carries its time, and each generation's weights are kept, so the answer history can be replayed offline at different update frequencies (each session, every N answers, each hemisphere) and schedule lengths. For each, measure GPU hours against the test-region diagnostics.
     - **What replay cannot show.** A model updated more often changes which sites reach the queue, and so what reviewers would have answered. Replay holds the answers fixed, so it measures model quality per GPU hour, not reviewer effort saved. A partial estimate of the latter: how many later answers the more frequently updated model already gets right, and so would not have queued.
   - **Whether a different network would do better.** Probably not by architecture: in "nnU-Net revisited" (MICCAI 2024) careful benchmarking erased most claimed gains of transformer and Mamba models (Swin UNETR, nnFormer, U-Mamba); MedNeXt was on a par. The bottleneck is labels. Worth testing once there are several hemispheres: self-supervised pretraining of the residual-encoder nnU-Net on all our unlabelled FLASH volumes (DKFZ has tooling for this; check its state and licence).
@@ -511,47 +511,47 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 
 The whole stream proceeds in phases. Phase 0 runs the pipeline on the purple-mri aseg as it is, so the other streams get real outputs early; each later phase refines a step (the segmentation, the surface, the review) keeping the published formats (extended in place, never replaced), and downstream streams rerun on the new outputs. Each phase is one or more PRs.
 
-Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase 4 needs phase 2 (and gains from phase 1's answers); phase 5 needs phases 3 and 4; phase 6 needs phases 1 and 5. Whole-brain scaling is a track of its own, alongside phases 1–8, and must be done before the first whole brain.
+Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each other, and phase 2 follows phase 1. The viewer builds on two of them: its painting mode (stream 4, phase 1) on phase 5's test-region spec, and its review pane (stream 4, phase 2) on phase 3. Labelling the test regions waits for the painting mode, and answers exist only once the review pane does. Phase 7 needs phases 2 and 5 (and gains from phase 3's answers); phase 8 needs phases 6 and 7; phase 9 needs phase 8 and the review pane (stream 4, phase 2); phase 10 needs phase 8; phase 11 only if the diagnostics of phases 9 and 10 ask for it. Whole-brain scaling is a track of its own, alongside phases 1–11, and must be done before the first whole brain.
 
 - **Phase 0: the pipeline on the purple-mri aseg.** Labels only, with the current code's labels-only path (handle removal ordered by distance, antialiasing by smoothness alone). The aim is the published outputs streams 2–4 need: `wm-dseg/1`, `white-surf/1`, `white-overview/1`.
   - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
   - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
   - The rule for cut faces (step 2): relabel the purple-mri aseg's excisions to outside with the detector, and keep its excision map as a test set. Phantom tests: an excision through WM that leaves a tunnel (fixed by a plug), and one that cuts a piece off (b0 rises).
-- **Phase 1: review and fold repair** on phase 0's output (the steps of the #80 plan, with #81 and #82 as its first PRs). Its answers correct the hemisphere now and become the first verified training labels.
+- **Phase 1: the WM-distance sampler** (shared code, §7). Port `tissue_wm_distance` from `streamlines` as a sampler: the distance through tissue, capped at 8 mm, with fluid and outside as obstacles, per superblock with its halo (§2). Exact tests: the straight-line distance where nothing blocks the path, a path forced round a fluid obstacle, and the same value whichever superblock computes it. Stream 2's phase 0 (`first_fall`) and phase 2 (`orient`'s sign) build on it.
+- **Phase 2: `orient`** (step 3). Port the tensor tools from `streamlines` (torch, blocks) as an on-demand sampler of the local cortex level, the structure tensor and the signed data normal with its coherence, with exact tests (phantom planes and spheres), and add agreement of the surface normals with it to the surface diagnostics.
+- **Phase 3: the review's formats and code** on phase 0's output (the steps of the #80 plan, with #81 as its first PR). Everything here is stream 1's and needs no viewer; the viewer's review pane (stream 4, phase 2) is built on it, and the answers made there correct the hemisphere now and become the first verified training labels.
   1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
-  2. The volume pane in `--white` mode (#82).
-  3. The review pane, with site answers and scribbles (one class per stroke).
-  4. The ITK-SNAP escape hatch: export a crop, import the painted voxels as an answer.
-  5. `wm-edits/1` edited so that answers stand on their own, in an append-only log with supersession.
-  6. `dseg` publishes its fixes as a table and a sparse diff (step 2), under `wm-dseg-fixes/1`, with replay and revert tests; every run's diff is kept, keyed by its input SHAs.
-  7. Step 3, `orient`: port the tensor tools from `streamlines` (torch, blocks) as an on-demand sampler of the structure tensor and the signed data normal with its coherence, with exact tests (phantom planes and spheres), and add agreement of the surface normals with it to the surface diagnostics.
-  8. Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
-- **Phase 2: data, label set, test regions.**
-  - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 8 is needed.
+  2. `wm-edits/1` edited so that answers stand on their own, in an append-only log with supersession, including scribbles (one class per stroke).
+  3. The site-answer choices (`remove-strand`, `thicken`, `fill-gap`, `widen-gap`, `leave`) as published code with a written contract: each a function of the current label and the site that returns the voxels it changes. The review pane calls them for its previews and writes what the reviewer picks; exact tests on phantoms.
+  4. The ITK-SNAP escape hatch, as a command-line tool: export a crop, import the painted voxels as an answer.
+  5. `dseg` publishes its fixes as a table and a sparse diff (step 2), under `wm-dseg-fixes/1`, with replay and revert tests; every run's diff is kept, keyed by its input SHAs.
+- **Phase 4: fold repair.** Finish the fold repair of #85 on phase 0's output: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
+- **Phase 5: data, label set, test regions.**
+  - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 11 is needed.
   - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, and other labels only if a later stage needs them. Check `FILLED_LABELS` against FreeSurfer's fill (`mri_edit_wm_with_aseg`) and decide each label it omits, with the reason recorded: accumbens (26/58), ventral DC (28/60), the inferior lateral ventricle (5/44), choroid plexus (31/63), vessel (30/62). Write the label-set spec with the majority rule for partial volume (3b), as the rule labellers follow.
   - Test regions: a few boxes per hemisphere (start with V1V2, PCC_SPL, M1S1, and the V1V2 seam review points). They are labelled from scratch, not by correcting the seed labels, so the seed does not anchor them, and they are never used in training. Format: a BIDS `_dseg` with a versioned sidecar spec that records the box and the labeller. They are painted in the viewer's painting mode (stream 4, phase 1).
-- **Phase 3: the surface steps read probabilities.** Independent of the network; exact-answer tests on phantoms first.
+- **Phase 6: the surface steps read probabilities.** Independent of the network; exact-answer tests on phantoms first.
   1. `handles.remove_handles` takes a required priority volume, P: the object front claims in order of decreasing P and the background front in order of increasing P, so the walls fall where P is closest to 0.5. Distance ordering goes. Phantom test: a handle whose bridge has a known low-P place away from its thinnest place; the cut must fall there.
   2. `antialias` takes a required data term: near the boundary, φ is pulled towards a smooth function of P − 0.5, weighted by a per-voxel confidence. The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. Phantom test: a plane at a known sub-voxel offset, with P a blurred step across it; the vertices must recover the offset.
   3. The fix table gains each fix's signed margin in P (step 2). The review queue ranks by it.
   4. Bootstrapping: a stand-in P on the real hemisphere until our own exists: purple-mri rerun with its probabilities saved (nnU-Net `--save_probabilities`), summed over `FILLED_LABELS`. Ask the purple-mri authors whether their container can do this.
   5. Diagnostics, P ordering against phase 0's distance ordering on the hemisphere: where the walls move, the normal metrics, and views of the walls that move most.
   6. Then remove the labels-only path (distance ordering, smoothness-only antialiasing).
-- **Phase 4: training data.**
+- **Phase 7: training data.**
   - Export to nnU-Net's raw dataset format: the three echoes as channels `_0000`–`_0002`, with labels that use an ignore label.
-  - Bootstrapping: purple-mri's labels as weak seed labels. Its labels in the interiors; excisions relabelled to outside, from the detector, confirmed by the reviewer; ignore in a band of about 2 voxels each side of every purple-mri boundary (so the network never learns purple-mri's choices at mixed voxels), and where the bootstrap detector of fluid channels and vessels fires inside purple-mri's cortex (`pial_labels` ported as that check, step 2; checked on the test regions).
-  - Phase 1's answers (`wm-edits`) as verified labels, never ignored.
+  - Bootstrapping: purple-mri's labels as weak seed labels. Its labels in the interiors; excisions relabelled to outside, from the detector, confirmed by the reviewer; ignore in a band of about 2 voxels each side of every purple-mri boundary (so the network never learns purple-mri's choices at mixed voxels), and where the bootstrap detector of fluid channels and vessels fires inside purple-mri's cortex (`pial_labels` ported as that check, step 2, on phase 2's local cortex level; checked on the test regions).
+  - The answers made so far (`wm-edits`, phase 3's format, through the review pane) as verified labels, never ignored.
   - Verified labels are kept apart from seed labels, with provenance, so a generation can be retrained with or without the seed.
   - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset.
-- **Phase 5: the first generation.** Its labels and P replace the purple-mri aseg and the stand-in P as stream 1's input; streams 2–4 rerun on the new outputs.
+- **Phase 8: the first generation.** Its labels and P replace the purple-mri aseg and the stand-in P as stream 1's input; streams 2–4 rerun on the new outputs.
   - Five folds, split by hemisphere when there are several. With one hemisphere, five spatial folds of contiguous Morton superblocks, with a gap one patch wide set to ignore between each fold's training and validation regions, so no patch straddles both; the test regions are in no fold. Spatial folds make the folds' accuracy an upper bound, and the fold spread then includes spatial variation as well as what more labels can fix.
   - Inference writes the `_dseg`, the WM-filled `_probseg` and the fold spread, with sidecars.
-  - Diagnostics against the purple-mri seed labels as a baseline, on the test regions and the hemisphere: boundary distance and Dice on the test regions; calibration of P near 0.5; handles and cavities before correction; the phase 3 walls and their margins; views of where ours and purple-mri's differ most.
+  - Diagnostics against the purple-mri seed labels as a baseline, on the test regions and the hemisphere: boundary distance and Dice on the test regions; calibration of P near 0.5; handles and cavities before correction; the phase 6 walls and their margins; views of where ours and purple-mri's differ most.
   - With its data, mesh the hemisphere with the hippocampus inside and outside the filled mask, and decide from views of both (Open).
-- **Phase 6: generations through review.** As in step 6. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics are on the test regions only: those of phase 5, plus the length of the queue.
+- **Phase 9: generations through review.** As in step 6. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics are on the test regions only: those of phase 8, plus the length of the queue.
   - Keep every generation's weights and the time of every answer, from the first generation on: the update-frequency experiment needs both.
   - Once enough answers have accumulated, run the retrospective replay (step 1 Open) and set the update frequency, schedule length and replay from it.
-- **Phase 7: uncertainty.**
+- **Phase 10: uncertainty.**
   - Two estimates that need no new network output:
     - the fold spread, which is epistemic: what more labels can fix;
     - σ from a calibrated P and a distance, which is aleatoric: what the image leaves open. If the boundary distance d at a voxel is Gaussian, d ~ N(μ, σ²), then P(inside) = Φ(−μ/σ).
@@ -560,14 +560,14 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
     - Weight the antialias data term by 1/σ².
     - Give each white-surface vertex a position uncertainty.
   - Diagnostic: does σ predict the boundary errors on the test regions?
-- **Phase 8: only if the diagnostics ask for it.**
+- **Phase 11: only if the diagnostics ask for it.**
   - A signed-distance output (capped at about 5 voxels, L1, trained only where every voxel within the cap is labelled), or a Laplace head with β-NLL, if the σ derived from P is poorly calibrated or saturated where it matters.
   - N4 bias correction, if the network's errors on the test regions follow position across the specimen or a smooth fit of WM intensity (§2).
   - Synthetic training images from label maps (SynthSeg, PostSynth), as augmentation, if the problem is generalising to other hemispheres or protocols.
   - Outputs that hold more than one interface per voxel, if stream 3's contacts need more than the profiles give: an unsigned distance to the pial interface (a channel narrower than a voxel is a valley that never reaches zero, which a signed distance cannot hold), or tissue fractions trained on 50 µm data averaged down to 160 µm, where the fractions are known.
   - A topology loss (clDice, Betti matching), if the queue is too long. It can only reduce defects; the guarantee stays in step 2's correction.
 
-**Whole-brain scaling** (alongside phases 1–8; `docs/scaling.md`)
+**Whole-brain scaling** (alongside phases 1–11; `docs/scaling.md`)
 
 In this order:
 
@@ -759,9 +759,9 @@ Every method below followed the image through a field or grew a front from the s
 
 ### 4d. Implementation plan
 
-The stream proceeds in phases, as stream 1 does. Phase 0 gives stream 3 and the viewer a real ray sampler early; later phases add equivolume depth and settle the open questions, keeping the sampler's contract (extended in place, never replaced). Whenever stream 1 publishes a new white surface or labels (its phases 1, 3 and 5), the sampler gives new columns on the next call: nothing has to be rerun. Each phase is one or more PRs.
+The stream proceeds in phases, as stream 1 does. Phase 0 gives stream 3 and the viewer a real ray sampler early; later phases add equivolume depth and settle the open questions, keeping the sampler's contract (extended in place, never replaced). Whenever stream 1 publishes a new white surface or labels (its phases 3, 4, 6 and 8, and each generation after), the sampler gives new columns on the next call: nothing has to be rerun. Each phase is one or more PRs.
 
-Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0. Phase 2 needs phase 1 and stream 1's data normal (its phase 1). Phase 3 only if phase 2 shows something obvious was missed.
+Order: phase 0 needs stream 1's phases 0 and 1 (the surface and the WM-distance sampler). Phase 1 follows phase 0. Phase 2 needs phase 1 and stream 1's `orient` (its phase 2). Phase 3 only if phase 2 shows something obvious was missed.
 
 - **Phase 0: the ray sampler, with normal rays, on stream 1's phase 0 surface.**
   - Write the ray-sampler spec first: it is the interface stream 3 and the viewer wait on.
@@ -776,7 +776,7 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0. Phase 2 needs 
   - rays that cross neither fluid nor WM within 8 mm;
   - column outcomes and the misalignment diagnostic against the root's normal length \|n̄\| (thin blades);
   - radial fibres;
-  - with stream 1's hippocampus decision (its phase 5), how roots on the surface round the hippocampus are treated.
+  - with stream 1's hippocampus decision (its phase 8), how roots on the surface round the hippocampus are treated.
 - **Phase 3, only if phase 2 shows something was missed, and the deflected normal ray does not cover it: revisit fields and fronts** (4c, *Later-phase methods*). Nothing of `fitted_field`, `past_crest`, `column_front` or `fronts` is ported before then; they stay in git, with the lessons above.
 
 ## 5. Stream 3: laminar profiles, contacts and alignment
@@ -1118,16 +1118,17 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
 
 The viewer proceeds in phases that follow the other streams: each phase adds panes for outputs that have just been published. It reads only published outputs, so it never waits on another stream's internals. Each phase is one or more PRs.
 
-Order: phase 0 needs stream 1's phase 0. Phase 1 is the same work as stream 1's phase 1, items 2–3. Phase 2 needs stream 2's phase 0, and phase 3 needs stream 3's published outputs.
+Order: phase 0 needs stream 1's phase 0. Phases 1 and 2 follow phase 0 and can run alongside each other: phase 1 needs stream 1's test-region spec (its phase 5, which writes the spec first), and phase 2 needs stream 1's review formats and code (its phase 3). Phase 3 needs stream 2's phase 0, and phase 4 needs stream 3's published outputs.
 
 - **Phase 0: the viewer on stream 1's outputs.**
   - Port with changes: `viewer.server`, `viewer.overview`, `viewer.white_view`, `viewer.surface` (the parts that already read published outputs).
   - Port as is: `viewer.flatmap`, `viewer.inflation`, `viewer.sections`.
   - Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
   - Bring in the geodesic-patch flat map (#69), on the fixed `mesh_graph` (§7).
-- **Phase 1: the stream 1 review pane,** with site answers and scribbles (one class per stroke), writing `wm-edits/1`; and a **painting mode** for labelling test regions from scratch (brush and fill by class, slice by slice with 3D checks), writing the test-region `_dseg` with the box and labeller in its sidecar, which stream 1's phase 2 needs.
-- **Phase 2: columns.** Rewrite against the ray sampler, calling it for what is on screen: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
-- **Phase 3: stream 3's outputs,** a pane for each as its spec appears: the columns sampled on request, z(τ) and its levels, bands, thickness and contacts.
+- **Phase 1: a painting mode** for labelling test regions from scratch (brush and fill by class, slice by slice with 3D checks), writing the test-region `_dseg` with the box and labeller in its sidecar, to the spec of stream 1's phase 5.
+- **Phase 2: the stream 1 review pane:** the queue from `wm-sites/1`, the site-answer choices with previews (calling stream 1's published choice code), and scribbles (one class per stroke), writing `wm-edits/1`. Stream 1's phase 3 publishes all three; the pane holds no stream 1 logic of its own.
+- **Phase 3: columns.** Rewrite against the ray sampler, calling it for what is on screen: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
+- **Phase 4: stream 3's outputs,** a pane for each as its spec appears: the columns sampled on request, z(τ) and its levels, bands, thickness and contacts.
 
 ## 7. Shared code
 
@@ -1142,7 +1143,7 @@ Each stream's plan lists its own modules. These are shared, or belong to no stre
 Samplers that belong to no stream (§1, Goals), computed on demand from published files, so every reader gets the same answer from the same code:
 
 - **Curvature of `white-surf/1`** at a scale given in mm, with smoothing that keeps mass (§3c, step 4). Readers: stream 3 (depth estimators), the viewer.
-- **The WM distance through tissue,** capped at 8 mm, with fluid and outside as obstacles, per superblock with its halo (§2). Readers: stream 1's `orient` (the sign of the data normal), stream 2 (`first_fall`). Today it is `tissue_wm_distance` in `streamlines`. It lands first, as its own PR straight after stream 1's phase 0, before stream 2's `first_fall` and `orient` build on it.
+- **The WM distance through tissue,** capped at 8 mm, with fluid and outside as obstacles, per superblock with its halo (§2). Readers: stream 1's `orient` (the sign of the data normal), stream 2 (`first_fall`). Today it is `tissue_wm_distance` in `streamlines`. It is stream 1's phase 1, a PR of its own straight after its phase 0, before stream 2's `first_fall` and `orient` build on it.
 
 Problems in the current code that a restart should not inherit:
 
@@ -1160,18 +1161,18 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 
 | Spec | Defines | Written in |
 |---|---|---|
-| `wm-dseg/1`, `wm-dseg-fixes/1` | The corrected segmentation and the fixes image (1 cut, 2 fill, 3 cavity, 4 manual); Betti before and after; each move. To be extended with the fix table and the sparse fix diff (stream 1, phase 1) and the margin (phase 3) | exists |
+| `wm-dseg/1`, `wm-dseg-fixes/1` | The corrected segmentation and the fixes image (1 cut, 2 fill, 3 cavity, 4 manual); Betti before and after; each move. To be extended with the fix table and the sparse fix diff (stream 1, phase 3) and the margin (phase 6) | exists |
 | `white-surf/1` | GIfTI with external data: float32 vertices in scanner mm, int32 triangles, float32 normals, float32 normal lengths (to be added), int64 edge keys, a block index in Morton order | exists |
 | `white-overview/1` | The decimated display mesh, its true-vertex ids and the true vertices each face carries; five guarantees | exists |
-| `wm-edits/1` | Exists as voxel-row diffs against a SHA-pinned aseg, with each answer's site and choice; to be revised so answers stand on their own (verified labels, valid for any input), in an append-only log where a correction supersedes and never rewrites | revision: stream 1, phase 1 |
-| `wm-sites/1` | The review queue's sites | stream 1, phase 1 (#81) |
-| Test regions | Labelled boxes, with the box and the labeller | stream 1, phase 2 |
-| Training export | The nnU-Net dataset, with seed and verified labels kept apart, with provenance | stream 1, phase 4 |
-| Our `_dseg`, P, fold spread | The network's outputs, with the model generation in each sidecar | stream 1, phase 5 |
-| `orient` (sampler) | The structure tensor, the signed data normal and its coherence, for a superblock and its halo (§3c, step 3) | stream 1, phase 1 |
+| `wm-edits/1` | Exists as voxel-row diffs against a SHA-pinned aseg, with each answer's site and choice; to be revised so answers stand on their own (verified labels, valid for any input), in an append-only log where a correction supersedes and never rewrites | revision: stream 1, phase 3 |
+| `wm-sites/1` | The review queue's sites | stream 1, phase 3 (#81) |
+| Test regions | Labelled boxes, with the box and the labeller | stream 1, phase 5 |
+| Training export | The nnU-Net dataset, with seed and verified labels kept apart, with provenance | stream 1, phase 7 |
+| Our `_dseg`, P, fold spread | The network's outputs, with the model generation in each sidecar | stream 1, phase 8 |
+| `orient` (sampler) | The structure tensor, the signed data normal and its coherence, for a superblock and its halo (§3c, step 3) | stream 1, phase 2 |
 | The ray sampler | Per column, keyed by edge key and method: samples from −d to 8 mm, label intervals, meetings, normal length (§4c, step 4) | stream 2, phase 0, first: stream 3 and the viewer wait on it |
 | The column volume (sampler) | Each column's echoes sampled along its ray, with 3D positions and partial-volume marks (§5c, step 1) | stream 3, phase 0 |
-| WM distance through tissue (sampler) | §7 | its own PR after stream 1, phase 0; before 2.0 and `orient` |
+| WM distance through tissue (sampler) | §7 | stream 1, phase 1 |
 | Curvature (sampler) | §7 | with its first reader: stream 3, phase 4 |
 | z(τ) | Depth maps per column: the pial edge at τ = 1, the GM/WM transition as a level | stream 3, phase 2 |
 | Bands; thickness and contacts | Bands per region and layer identity; the thickness field and contact splits | stream 3, phases 3–4 |
@@ -1179,20 +1180,23 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 
 ## 9. Dependencies between phases
 
-Each stream's plan (§3d, §4d, §5d, §6d) gives its own order. This section puts the four together. Stream 1's phase 0 gates everything: once it has published the white surface, each other stream can start its phase 0.
+Each stream's plan (§3d, §4d, §5d, §6d) gives its own order. This section puts the four together. Stream 1's phase 0 gates everything: once it has published the white surface, each other stream can start its phase 0 (stream 2's also needs the WM-distance sampler, 1.1).
 
 ```mermaid
 flowchart TB
   subgraph S1["Stream 1: WM segmentation and surface"]
     S1P0["1.0 pipeline on the purple-mri aseg"]
-    S1P1["1.1 review and fold repair; orient"]
-    S1P2["1.2 data, label set, test regions"]
-    S1P3["1.3 surface steps read P"]
-    S1P4["1.4 training data"]
-    S1P5["1.5 first generation"]
-    S1P6["1.6 generations through review"]
-    S1P7["1.7 uncertainty"]
-    S1P8["1.8 only if diagnostics ask"]
+    S1P1["1.1 WM-distance sampler (shared)"]
+    S1P2["1.2 orient"]
+    S1P3["1.3 review formats and code"]
+    S1P4["1.4 fold repair"]
+    S1P5["1.5 data, label set, test regions"]
+    S1P6["1.6 surface steps read P"]
+    S1P7["1.7 training data"]
+    S1P8["1.8 first generation"]
+    S1P9["1.9 generations through review"]
+    S1P10["1.10 uncertainty"]
+    S1P11["1.11 only if diagnostics ask"]
     S1SC["whole-brain scaling track"]
   end
   subgraph S2["Stream 2: columns"]
@@ -1212,62 +1216,64 @@ flowchart TB
   end
   subgraph S4["Stream 4: viewer"]
     S4P0["4.0 viewer on stream 1's outputs"]
-    S4P1["4.1 stream 1 review pane"]
-    S4P2["4.2 columns"]
-    S4P3["4.3 stream 3's outputs"]
+    S4P1["4.1 painting mode"]
+    S4P2["4.2 stream 1 review pane"]
+    S4P3["4.3 columns"]
+    S4P4["4.4 stream 3's outputs"]
   end
 
-  S1P0 --> S1P1 & S1P2 & S1P3 & S1SC
-  S1P2 --> S1P4
-  S1P1 -.-> S1P4
-  S1P3 & S1P4 --> S1P5
-  S1P1 & S1P5 --> S1P6
-  S1P5 --> S1P7
-  S1P6 & S1P7 -.-> S1P8
+  S1P0 --> S1P1 --> S1P2
+  S1P0 --> S1P3 & S1P4 & S1P5 & S1P6 & S1SC
+  S1P2 & S1P5 --> S1P7
+  S4P2 -. "first answers" .-> S1P7
+  S1P6 & S1P7 --> S1P8
+  S1P8 & S4P2 --> S1P9
+  S1P8 --> S1P10
+  S1P9 & S1P10 -.-> S1P11
 
-  SHW["WM-distance sampler (shared)"]
-  S1P0 --> SHW --> S2P0 & S1P1
-  S1P0 --> S2P0 --> S2P1 --> S2P2
-  S1P1 --> S2P2
-  S1P5 -.-> S2P2
+  S1P0 & S1P1 --> S2P0 --> S2P1 --> S2P2
+  S1P2 --> S2P2
+  S1P8 -.-> S2P2
   S2P2 -.-> S2P3
-  S2P2 -. "antialiasing term, if called for" .-> S1P3
-  S4P1 --> S1P2
+  S2P2 -. "antialiasing term, if called for" .-> S1P6
 
   S2P0 --> S3P0 --> S3P1 --> S3P2
   S3P1 --> S3P3
   S3P3 -.-> S3P2
   S3P2 --> S3P4 & S3P5
   S2P1 -.-> S3P4
-  S3P5 -.-> S1P6
+  S3P5 -.-> S1P9
   S3P2 & S3P4 --> S3SC
 
-  S1P0 --> S4P0 --> S4P1
-  S4P1 --- S1P1
-  S4P0 --> S1P1
-  S2P0 & S4P0 --> S4P2
-  S3P2 & S3P3 --> S4P3
-  S3P4 -.-> S4P3
+  S1P0 --> S4P0 --> S4P1 & S4P2
+  S1P5 --> S4P1
+  S4P1 -. "painting the test regions" .-> S1P5
+  S1P3 --> S4P2
+  S2P0 & S4P0 --> S4P3
+  S3P2 & S3P3 --> S4P4
+  S3P4 -.-> S4P4
 ```
 
-A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or feedback that enters as an input. The plain line joins two names for the same work.
+A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or feedback that enters as an input. Phase 1.5 and the painting mode meet in two steps: 1.5 writes the test-region spec, which 4.1 needs, and the regions are painted once 4.1 exists.
 
 | Phase | Needs | Notes |
 |---|---|---|
 | 1.0 | — | gates every stream |
-| 1.1 | 1.0; 4.0 (the review pane) | 4.1 is the same work (the review pane); also `orient`, the data normal |
-| 1.2 | 1.0; 4.1 (painting mode) | |
-| 1.3 | 1.0 | stand-in P from purple-mri; may later add the data-normal term, if 2.2's diagnostic calls for it, in whichever phase is then current |
-| 1.4 | 1.2 | gains from 1.1's answers |
-| 1.5 | 1.3, 1.4 | replaces the purple-mri aseg; streams 2–4 rerun; decides the hippocampus |
-| 1.6 | 1.1, 1.5 | queues 3.5's sites when they exist |
-| 1.7 | 1.5 | |
-| 1.8 | 1.6, 1.7 | only if their diagnostics ask |
-| Scaling track | 1.0 | alongside 1.1–1.8; done before the first whole brain |
-| WM-distance sampler | 1.0 | shared (§7); before 2.0 and `orient` |
-| 2.0 | 1.0, the WM-distance sampler | writes the ray-sampler spec first |
+| 1.1 | 1.0 | shared code (§7); stream 2's `first_fall` and `orient`'s sign build on it |
+| 1.2 | 1.1 | `orient`: the local cortex level, the data normal and its coherence |
+| 1.3 | 1.0 | the formats and code the review pane (4.2) is built on; no viewer needed |
+| 1.4 | 1.0 | |
+| 1.5 | 1.0 | writes the test-region spec first; painting the regions waits for 4.1 |
+| 1.6 | 1.0 | stand-in P from purple-mri; may later add the data-normal term, if 2.2's diagnostic calls for it, in whichever phase is then current |
+| 1.7 | 1.2, 1.5 | the `pial_labels` check reads 1.2's local cortex level; gains from the answers made in 4.2 |
+| 1.8 | 1.6, 1.7 | replaces the purple-mri aseg; streams 2–4 rerun; decides the hippocampus |
+| 1.9 | 1.8, 4.2 | queues 3.5's sites when they exist |
+| 1.10 | 1.8 | |
+| 1.11 | 1.9, 1.10 | only if their diagnostics ask |
+| Scaling track | 1.0 | alongside 1.1–1.11; done before the first whole brain |
+| 2.0 | 1.0, 1.1 | writes the ray-sampler spec first |
 | 2.1 | 2.0 | |
-| 2.2 | 2.1; 1.1 (data normal) | the hippocampus roots wait on 1.5; its diagnostic decides between steering the rays here and stream 1's antialiasing term |
+| 2.2 | 2.1; 1.2 (data normal) | the hippocampus roots wait on 1.8; its diagnostic decides between steering the rays here and stream 1's antialiasing term |
 | 2.3 | 2.2 | only if 2.2 shows something was missed |
 | 3.0 | 2.0 | |
 | 3.1 | 3.0 | |
@@ -1277,10 +1283,11 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 3.5 | 3.2 | feeds stream 1 as review sites |
 | Stream 3 scaling track | 3.2, 3.4 | done before the first whole brain |
 | 4.0 | 1.0 | |
-| 4.1 | 4.0 | the same work as 1.1's review pane |
-| 4.2 | 2.0, 4.0 | |
-| 4.3 | 3.2, 3.3, 4.0 | 3.4 adds panes when it publishes |
+| 4.1 | 4.0; 1.5's test-region spec | the painting mode |
+| 4.2 | 4.0, 1.3 | the review pane, on 1.3's formats and choice code |
+| 4.3 | 2.0, 4.0 | |
+| 4.4 | 3.2, 3.3, 4.0 | 3.4 adds panes when it publishes |
 
-**Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.1, 1.3, 1.5 and each generation in 1.6; a new version of a sampler), the stored outputs that read it rerun on it: stream 1's own, and stream 3's z(τ), bands and thickness. Samplers need no rerun: they compute from whatever is published on the next call. Nothing waits for a new version: each phase works on whatever is published.
+**Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.4, 1.6, 1.8, each review's answers and each generation in 1.9; a new version of a sampler), the stored outputs that read it rerun on it: stream 1's own, and stream 3's z(τ), bands and thickness. Samplers need no rerun: they compute from whatever is published on the next call. Nothing waits for a new version: each phase works on whatever is published.
 
-**The first complete pass** through all four streams: 1.0; then 2.0 and 4.0 in parallel; then 3.0, 3.1 and 3.2, with 4.2 alongside. It gives a white surface, columns, the viewer, and the first depth maps with a pial edge.
+**The first complete pass** through all four streams: 1.0 and 1.1; then 2.0 and 4.0 in parallel; then 3.0, 3.1 and 3.2, with 4.3 alongside. It gives a white surface, columns, the viewer, and the first depth maps with a pial edge.
