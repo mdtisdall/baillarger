@@ -653,13 +653,27 @@ Measured at the marked points (CP; #47, #52, #58):
 
 ### 4d. Implementation plan
 
-- Write the spec for column traces first: it is the interface stream 3 and the viewer wait on.
-- Rewrite `column_traces` to root on `white-surf/1` vertices by edge key and trace by mesh blocks, keeping the methods, classes, constants and the frozen rule.
-- Port with changes: the `streamlines` integrators and tensor tools (torch, blocks); `column_front` per mesh block, with `past_crest` byte for byte; `mesh_graph` in a local form, with the duplicate-edge bug fixed (§7).
-- Rewrite `fitted_field` as a blocked or multigrid solve, if T stays.
-- Size each block's halo to the 8 mm length cap (§2, domain edges).
-- Leave `fronts` at box scale; do not build a whole-brain step on it.
-- Run the open experiments above on the hemisphere, away from box faces.
+The stream proceeds in phases, as stream 1 does. Phase 0 gives stream 3 and the viewer real column traces early; later phases add the methods that follow the image and settle the open questions, keeping the published format (extended in place, never replaced). Whenever stream 1 publishes a new white surface (its phases 1, 3 and 5), the traces are rerun. Each phase is one or more PRs.
+
+Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0 and also needs stream 1's `pial_labels` edits. Phase 2 needs phase 1.
+
+- **Phase 0: normal rays on stream 1's phase 0 surface.**
+  - Write the spec for column traces first: it is the interface stream 3 and the viewer wait on.
+  - Rewrite `column_traces` to root on `white-surf/1` vertices by edge key and trace by mesh blocks, keeping the classes and constants, and leaving out roots on the cut-face flag.
+  - The **normal** method only: straight rays along the smoothed white normal, needing no field and no image, stopped by stream 1's labels. It keeps the right class on every phantom, so it is the safe first trace.
+  - Port `mesh_graph` in a local form, with the duplicate-edge bug fixed (§7).
+  - Size each block's halo to the 8 mm length cap (§2, domain edges).
+- **Phase 1: the methods that follow the image.**
+  - Port with changes: the `streamlines` integrators and tensor tools (torch, blocks), for the data normal.
+  - Rewrite `fitted_field` as a blocked or multigrid solve, if T stays.
+  - Port `column_front` per mesh block, with `past_crest` byte for byte, and add **front**, **crest** and **traverse** (with the fitted_blend start) to the published traces, keeping the frozen crossing rule.
+  - Leave `fronts` (the one-pass march) at box scale; do not build a whole-brain step on it.
+- **Phase 2: the open questions** (4c, Open), on the hemisphere away from domain edges:
+  - which paths are right in real cortex, by phantoms with curved, equivolume true columns;
+  - what the crests inside thick cortex are;
+  - the cost ratio across the layer normal, and `fronts` accuracy under a tilted metric;
+  - radial fibres;
+  - with stream 1's hippocampus decision (its phase 5), how roots on the surface round the hippocampus are treated.
 
 ## 5. Stream 3: laminar profiles, contacts and alignment
 
@@ -873,13 +887,20 @@ Where each layer lies along every column, read from the image's own contrast and
 
 ### 5d. Implementation plan
 
-- Wait for the column-trace spec (stream 2) and build the column volume on it, by blocks.
-- Port `flatten` with a blocked or local solve, and a torch version if it stays heavy.
-- Port `surfcut.model` and `surfcut.cut`; replace `surfcut.qpbo` with a QPBO that is not GPL (our own, or a permissive library).
-- Rewrite `bands` (DP with the cross-validated K) and `gain` only if they are needed. Drop the old patch pipeline (`columns`, `regions`, `surfaces`, `bottom`, `tv`, `refine`, `output`): it needs a pial exit and writes no BIDS output.
-- Salvage the layer-maps diagnostics from #56 (isopachs, pinch-outs, facies; `layer_maps_lib.py` and its tests) once columns exist on the hemisphere.
-- Write specs for every output, including the feedback to stream 1.
-- Resolve the two conflicts above on one shared set of hemisphere columns, away from domain edges.
+The stream proceeds in phases, as streams 1 and 2 do: each phase adds one design step on the column volume, keeping earlier outputs' formats (extended in place, never replaced). Whenever stream 2 publishes new traces, the stream reruns. Each phase is one or more PRs. The old patch pipeline (`columns`, `regions`, `surfaces`, `bottom`, `tv`, `refine`, `output`) is not ported: it needs a pial exit and writes no BIDS output.
+
+Order: phase 0 needs stream 2's phase 0. Phases 1 and 2 follow in order; phase 3 can run alongside phase 2 (its bands become the joint warp's levels); phase 4 needs phase 2 and gains from stream 2's phase 1; phase 5 needs phase 2.
+
+- **Phase 0: the column volume** on stream 2's phase 0 traces, by blocks: the echoes sampled every 0.04 mm along each column, each sample with its 3D position. Write its spec.
+- **Phase 1: flattening.** Port `flatten` with a blocked or local solve, and a torch version if it stays heavy.
+- **Phase 2: the joint warp.**
+  - Port `surfcut.model` and `surfcut.cut`; replace `surfcut.qpbo` with a QPBO that is not GPL (our own, or a permissive library).
+  - Publish z(τ) per column, with the pial edge at τ = 1 and the GM/WM transition as one of its levels. Write its spec.
+- **Phase 3: bands and layer identity.**
+  - Rewrite `bands` (DP with the cross-validated K) and `gain` only if they are needed.
+  - Salvage the layer-maps diagnostics from #56 (isopachs, pinch-outs, facies; `layer_maps_lib.py` and its tests).
+- **Phase 4: thickness and contacts.** Resolve the two conflicts (5c, Open) on one shared set of hemisphere columns, away from domain edges, then publish the thickness field and the contact splits with their specs.
+- **Phase 5: feedback to stream 1.** Decide what it says and write its spec, as an input stream 1 reads like its edits.
 
 ## 6. Stream 4: the viewer
 
@@ -979,13 +1000,18 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
 
 ### 6d. Implementation plan
 
-- Port with changes: `viewer.server`, `viewer.overview`, `viewer.white_view`, `viewer.surface` (the parts that already read published outputs).
-- Port as is: `viewer.flatmap`, `viewer.inflation`, `viewer.sections`.
-- Rewrite against published specs: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
-- Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
-- Bring in the geodesic-patch flat map (#69), with its `edge_graph` fix split out.
-- Build the stream 1 review pane, with site answers and scribbles.
-- Add panes for stream 2 and 3 outputs as their specs appear.
+The viewer proceeds in phases that follow the other streams: each phase adds panes for outputs that have just been published. It reads only published outputs, so it never waits on another stream's internals. Each phase is one or more PRs.
+
+Order: phase 0 needs stream 1's phase 0. Phase 1 is the same work as stream 1's phase 1, items 2–3. Phase 2 needs stream 2's phase 0, and phase 3 needs stream 3's published outputs.
+
+- **Phase 0: the viewer on stream 1's outputs.**
+  - Port with changes: `viewer.server`, `viewer.overview`, `viewer.white_view`, `viewer.surface` (the parts that already read published outputs).
+  - Port as is: `viewer.flatmap`, `viewer.inflation`, `viewer.sections`.
+  - Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
+  - Bring in the geodesic-patch flat map (#69), with its `edge_graph` fix split out.
+- **Phase 1: the stream 1 review pane,** with site answers and scribbles, writing `wm-edits/1`.
+- **Phase 2: column traces.** Rewrite against the column-trace spec: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
+- **Phase 3: stream 3's outputs,** a pane for each as its spec appears: the column volume, z(τ) and its levels, bands, thickness and contacts.
 
 ## 7. Shared code
 
