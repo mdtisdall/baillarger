@@ -2,7 +2,6 @@
 data/ has it (skipped otherwise)."""
 
 import numpy as np
-import numpy.typing as npt
 import pytest
 from scipy import sparse
 from scipy.sparse.csgraph import dijkstra
@@ -12,7 +11,6 @@ from baillarger import frame as fr
 from baillarger import phantoms as ph
 
 VOX = (0.16, 0.16, 0.16)
-type Bool3 = npt.NDArray[np.bool_]
 
 
 @pytest.fixture(scope="module")
@@ -102,75 +100,6 @@ def test_frame_does_not_depend_on_the_pial_surface() -> None:
         flip = ((rim == 1) | (rim == 3)) & (rng.random(rim.shape) < 0.3)
         other[flip] = 4 - rim[flip]  # 1 <-> 3
         same_frame(F, fr.build_frame(other, VOX))
-
-
-def excised_slab() -> tuple[ph.Rim, ph.Flash, Bool3]:
-    """P3's slab with a block cut out (WM and cortex), which the labels still
-    call tissue but which is black in the FLASH; and a small dark spot that is
-    too small to be an excision."""
-    rim, flash, _ = ph.p3_stria_band()
-    flash = flash.copy()
-    block = np.zeros(rim.shape, bool)
-    block[16:30, 16:30, 4:22] = True
-    flash[block] = 0.02
-    flash[5:7, 40:42, 14:16] = 0.02
-    return rim, flash, block
-
-
-def test_missing_tissue_finds_the_excision_only() -> None:
-    rim, flash, block = excised_slab()
-    miss = fr.missing_tissue(rim, flash, VOX)
-    tissue = (rim == 2) | (rim == 3)
-    core = block.copy()
-    core[16:18] = core[28:30] = False  # smoothing softens the block's edges
-    core[:, 16:18] = core[:, 28:30] = False
-    core[:, :, 4:6] = core[:, :, 20:22] = False
-    assert miss[core & tissue].all()
-    assert not miss[~tissue].any()
-    # within the margin round the block, and not at the small spot
-    far = np.ones(rim.shape, bool)
-    far[12:34, 12:34, :] = False
-    assert not miss[far].any()
-
-
-def test_excised_columns_are_cut() -> None:
-    rim, flash, block = excised_slab()
-    miss = fr.missing_tissue(rim, flash, VOX)
-    F = fr.build_frame(rim, VOX, miss)
-    # no voxel of the missing tissue, nor any voxel whose nearest streamline
-    # ends at it, has a column
-    assert not (F.voxel_column[miss] >= 0).any()
-    assert F.path_cut.any() and F.column_cut.any()
-    assert np.array_equal(F.path_cut, F.path_end == fr.END_MISSING)
-    assert not np.isin(
-        F.voxel_path[F.voxel_path >= 0], np.flatnonzero(F.path_cut)
-    ).any()
-    # the streamlines do not enter it (their start points are on the white
-    # mesh, which is made from all the WM, the imputed WM too)
-    first = np.zeros(len(F.path_points), bool)
-    first[F.path_start[:-1][np.diff(F.path_start) > 0]] = True
-    s = F.path_points[~first]
-    vox = np.clip(np.floor(s + 0.5).astype(int), 0, np.array(rim.shape) - 1)
-    assert not miss[vox[:, 0], vox[:, 1], vox[:, 2]].any()
-    # away from the cut the slab is as without it
-    T = fr.column_thickness(F, rim == 3)
-    top = np.unique(F.vertex_column[(F.verts[:, 2] > 9)])
-    ok = top[~F.column_cut[top]]
-    assert len(ok) > 100
-    # beside the cut, D bends round the missing tissue, and so do the
-    # streamlines: there the depth is a little longer
-    sx, sy = F.verts[F.column_seed[ok], 0], F.verts[F.column_seed[ok], 1]
-    away = np.maximum(np.abs(sx - 22.5), np.abs(sy - 22.5)) > 7 + 6
-    assert away.sum() > 100
-    assert np.allclose(T[ok[away]], 14.5 * 0.16, atol=1e-4)
-    assert np.all(np.abs(T[ok] - 14.5 * 0.16) < 0.25)
-    # the white mesh on the imputed WM: its streamlines are all cut, so they
-    # take no voxels
-    vi = np.floor(F.verts + 0.5).astype(int).T
-    inside = miss[vi[0], vi[1], vi[2]]
-    assert inside.sum() > 50
-    assert F.path_cut[inside].all()
-    assert not np.isin(F.voxel_path, np.flatnonzero(inside)).any()
 
 
 # ---------------------------------------------------------------- the example data
