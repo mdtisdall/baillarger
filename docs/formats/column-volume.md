@@ -17,7 +17,6 @@ edited in place (plan, §8).
 | sample | One point on a column, at s = k × step. The ray sampler makes the samples. The column volume gives them values |
 | echo | One FLASH volume of one echo time, on the grid of `wm-dseg/1` |
 | voxel coordinates | A⁻¹ applied to a position in scanner mm. A is the `VoxelToRAS` affine. The centre of voxel (i, j, k) is at (i, j, k) |
-| chord | The length of a straight line through the centre of a voxel, along a direction, from one face of the voxel to the opposite face on that line. It is the extent of the voxel along the direction |
 
 ## Data inputs
 
@@ -102,8 +101,7 @@ interpolation of the voxel values, with the rule below.
    does not extend the grid and does not clamp the coordinates.
    The ray sampler gives a label to the half voxel beyond the last voxel
    centre, from n_a − 1 to n_a − 0.5 (the voxel is a cube round its centre).
-   There, `valid` is false although a label exists. A reader expects this. The sample keeps its position, its s and its partial-volume
-   mark.
+   There, `valid` is false although a label exists. A reader expects this. The sample keeps its position and its s.
 
 The sampler does no filtering other than step 4. At a step smaller than a
 voxel, neighbouring samples are not independent.
@@ -111,7 +109,7 @@ voxel, neighbouring samples are not independent.
 `device` is a name of `baillarger.backend` (default: `$BAILLARGER_DEVICE`,
 else the best device here). `numpy` is the reference. On another device
 only the weighted sum of step 5 runs on the device, in float32. The
-coordinates, `valid`, `partial` and `reach` are computed in float64 on the
+coordinates and `valid` are computed in float64 on the
 host, so they are the same on every device. The values equal the reference
 to float32 rounding. With
 `torch.nn.functional.grid_sample`, the convention is `align_corners=True`,
@@ -128,38 +126,16 @@ float32 before the interpolation. The value has no log, no removal of a
 trend, no normalisation and no masking. Those are steps of a reader, not of
 the sampler.
 
-## The partial-volume mark
+## No partial-volume mark
 
-A sample is **partial** if it is near a label change on its column.
-
-1. The label changes of a column are the ends of its label intervals that
-   are not an end of the caps. That is, the start s of every interval
-   except the first. Two intervals that follow each other have different
-   labels (ray sampler, "The rule for an interval boundary"), so each such
-   start is a label change. The classes of the two labels do not matter:
-   a change from label 41 to label 49 is a label change.
-2. A boundary where one label is −1 (off the grid) is a label change.
-3. The reach w of a column is the chord of a voxel along the column's unit
-   normal n:
-
-       w = min over the axes a with u_a ≠ 0 of 1 / |u_a|,   u = M⁻¹ n
-
-   M is the 3 × 3 part of A. The unit of u is voxels per mm, so w is in mm.
-   For a ray along a voxel axis, w is the voxel size on that axis. For
-   an oblique ray, w is the length of the ray inside the voxel that the ray
-   crosses through its centre. A ray with u = 0 does not exist, because n
-   is a unit vector.
-4. A sample at s is partial if |s − b| ≤ w for at least one label change b
-   of its column. s and b are the float32 values of the ray sampler,
-   compared in float64. w is float64.
-
-The mark uses the label intervals over the full caps, so a sample near the
-end of its extent is marked if a label change lies just beyond the end. The
-mark does not depend on the extents.
-
-The mark does not say that the sample is wrong. It says that its value
-mixes tissues. Readers choose what to do with it: the plan leaves the marked
-samples out of the data term of the joint warp.
+The sampler does not mark partial volume. A label change of the ray
+sampler is not a tissue edge: the pia comes from the profile of each
+column (plan, §5c, step 3), and the white surface may lie inside real
+cortex (the topology fixes can thicken the WM). A mark that comes from the
+label changes could flag clean samples and miss blends. The fits (phases
+3.1 and 3.2) handle partial volume. A fit may leave out the samples near a
+label change. It reads the label intervals of `rays` for that, and it
+chooses the distance.
 
 ## Outputs
 
@@ -173,18 +149,10 @@ number of samples, and E the number of echoes.
 | `rays` | `Rays` | | The rays of the call. They hold the edge key, the owned flag, the position, s and the label intervals of each sample and column. The column volume does not copy them |
 | `echo` | float32 | (N, E) | The value of each echo at each sample. NaN where the sample is not valid |
 | `valid` | bool | (N,) | True where the rule of "Interpolation" gives a value |
-| `partial` | bool | (N,) | True for a partial-volume sample |
-| `reach` | float32 | (n,) | w of each column, mm |
 
 The samples of column c are the rows `rays.sample_start[c]` to
-`rays.sample_start[c + 1]` of `echo`, `valid` and `partial`, as for the
+`rays.sample_start[c + 1]` of `echo` and `valid`, as for the
 fields of `Rays`.
-
-`reach` is w of "The partial-volume mark" (step 3): the chord of a voxel
-along the unit normal of the column, in mm, rounded to float32. It is the
-reach in s of the mark on each side of a label change. It does not depend
-on the extents. `reach` is given so that a reader can find the distance in voxels from a
-label change without the affine.
 
 ## Determinism
 
@@ -197,8 +165,8 @@ label change without the affine.
    halo column of another. The sampler must read the voxel values it needs
    from the echoes, and not from a block that depends on the superblock.
 3. On the CPU, in numpy, there is one code path. A device implementation
-   gives the values to float32 rounding, and the mark and `valid` equal
-   those of the CPU, except for a sample whose test is within float32
+   gives the values to float32 rounding, and `valid` equals
+   that of the CPU, except for a sample whose test is within float32
    rounding of its limit.
 
 ## Reads
