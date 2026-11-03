@@ -1,6 +1,6 @@
 """The pia editor's replay gives the same levels as the live steps, whatever the C rand() state
 (QPBO-I's visiting order). Uses the V1V2 data; skipped without them.
-    nix develop --command uv run --with thinqpbo pytest -q prototypes/scripts/test_pia_editor.py
+    nix develop --command uv run pytest -q prototypes/scripts/test_pia_editor.py
 """
 
 import ctypes
