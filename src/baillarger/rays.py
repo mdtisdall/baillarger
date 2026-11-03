@@ -25,7 +25,7 @@ from nibabel.gifti.gifti import GiftiImage
 from baillarger import labels as L
 from baillarger._jit import njit, prange
 from baillarger.bids import file_sha256, read_sidecar, sidecar_path
-from baillarger.blocks import Source, morton, open_volume
+from baillarger.blocks import CACHE_BYTES, CHUNK, ChunkedSource, morton, open_volume
 from baillarger.white_surf import BLOCK_COLUMNS, SURF_SPEC
 
 VERSION = "ray-sampler/1"
@@ -118,9 +118,11 @@ class RaySampler:
     """The ray sampler on one white surface and its segmentation: surf, the
     _white.surf.gii of white-surf/1; dseg, the _desc-wmtopo_dseg of
     wm-dseg/1 that the surface was made from. The surface's arrays stay
-    memory-mapped; a call reads only the blocks and the labels it needs."""
+    memory-mapped; a call reads only the blocks and the labels it needs, the
+    labels through a chunk cache of cache_bytes, so that calls on superblocks
+    in Morton order read each chunk about once."""
 
-    def __init__(self, surf: Path, dseg: Path, labels: Source | None = None) -> None:
+    def __init__(self, surf: Path, dseg: Path, cache_bytes: int = CACHE_BYTES) -> None:
         self.surf = Path(surf)
         self.dseg = Path(dseg)
         side = read_sidecar(sidecar_path(self.surf), SURF_SPEC)
@@ -130,15 +132,14 @@ class RaySampler:
         self.affine = np.asarray(side["VoxelToRAS"], np.float64).reshape(4, 4)
         self.shape = tuple(int(n) for n in side["GridShape"])
         self.cells = int(side["BlockCells"])
-        vol = labels if labels is not None else open_volume(self.dseg)
+        vol = open_volume(self.dseg)
         if tuple(vol.shape) != self.shape:
             raise ValueError(f"{self.dseg.name}: grid {vol.shape}, not {self.shape}")
-        aff = getattr(vol, "affine", None)
-        if aff is not None and not np.array_equal(
-            np.asarray(aff, np.float32), self.affine.astype(np.float32)
+        if not np.array_equal(
+            vol.affine.astype(np.float32), self.affine.astype(np.float32)
         ):
             raise ValueError(f"{self.dseg.name}: the affine is not VoxelToRAS")
-        self.labels = vol
+        self.labels = ChunkedSource(vol, CHUNK, cache_bytes)
         self.inverse = np.linalg.inv(self.affine)
         self.voxel_mm = np.linalg.norm(self.affine[:3, :3], axis=0)
         filled = np.asarray(side["FilledLabels"], np.int64)

@@ -543,3 +543,15 @@ def test_the_normal_length_is_the_roots(
     assert np.all((r.roots.normal_length >= 0) & (r.roots.normal_length <= 1.0001))
     assert np.all(r.roots.normal_length[top_face(r, 19.5)] > 0.999)
     assert r.roots.normal_length.min() < 0.99
+
+
+def test_the_labels_come_through_the_chunk_cache(
+    phantom: dict[str, tuple[rays.RaySampler, Any]],
+) -> None:
+    """A call reads its label box through the cache: a second call on the
+    same superblock reads no chunk again."""
+    sampler = phantom["ball"][0]
+    sampler.sample((1, 1, 1), 1, halo_mm=1.0)
+    before = sampler.labels.reads
+    sampler.sample((1, 1, 1), 1, halo_mm=1.0)
+    assert before > 0 and sampler.labels.reads == before
