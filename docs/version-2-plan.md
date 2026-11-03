@@ -35,16 +35,18 @@ This document states current knowledge only. How the project got here is in git,
 - FS is `reports/Fused sulci and thickness priors.md`.
 - PL is `PLAN_LAYER_REFINE.md`.
 
-Open PRs the plan builds on (all open as of 2026-11-02):
+Open PRs the plan builds on (all open as of 2026-11-03):
 
 | PR | What the plan takes from it |
 |---|---|
-| #69 | The geodesic-patch flat map (the `edge_graph` fix is #94, §7) |
+| #55 | A fix for closed mesh pieces in the flat map (§6c, Flat map) |
+| #56 | The layer-maps diagnostics (stream 3, phase 4) |
 | #80 | The review plan for tight folds (§3c, step 6) |
 | #81 | The site finder and `wm-sites/1` |
-| #82 | The `--white` volume pane |
-| #84 | The brick volume viewer and its `BrickSource` |
+| #83 | `dseg` options that vary the handle fixes (stream 1, phase 4) |
 | #85 | The fold repair and the initial white surface for normals |
+
+Phase 4.0 brought in the geodesic-patch flat map (#69), the `--white` volume pane (#82) and the brick volume viewer (#84); those PRs are closed.
 
 **The data behind every result:**
 
@@ -598,7 +600,7 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
   3. The site-answer choices (`remove-strand`, `thicken`, `fill-gap`, `widen-gap`, `leave`) as published code with a written contract: each a function of the current label and the site that returns the voxels it changes. The review pane calls them for its previews and writes what the reviewer picks; exact tests on phantoms.
   4. The ITK-SNAP escape hatch, as a command-line tool: export a crop, import the painted voxels as an answer.
   5. `dseg` publishes its fixes as a table and a sparse diff (step 2), under `wm-dseg-fixes/1`, with replay and revert tests; every run's diff is kept, keyed by its input SHAs.
-- **Phase 4: fold repair.** Finish the fold repair of #85 on phase 0's output: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
+- **Phase 4: fold repair.** Finish the fold repair of #85 on phase 0's output: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold. To compare the fixes, start from #83: its `dseg` options (fill cost, thickening of cuts and fills, thread trimming) vary the handle fixes and are off by default. Run the variants on the hemisphere and compare the tight-fold sites by kind (GM or fluid, near a fix or not), the voxels changed and the surface area. The comparison answers the Open item on fills through cortex against thickening (3c).
 - **Phase 5: the label set.** **Done** (#89, #95, #117), except the hippocampus (phase 8). Changed in round 1: the phase was "data, label set, test regions". The list of hemispheres was dropped: there are many, and the models improve as they train on them. The test regions were dropped: no data is held out (§1). The ventricles were moved outside (step 2).
   - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, and other labels only if a later stage needs them. Check `FILLED_LABELS` against FreeSurfer's fill (`mri_edit_wm_with_aseg`) and decide each label it treats differently, with the reason recorded. Write the label-set spec with the majority rule for partial volume (3b), as the rule labellers follow. Done: `label-set/1` and `labels.py` (#89, #95); the decisions are in 3b and step 2. Open: the hippocampus (phase 8). The ventricles are outside (step 2) (`labels.py` and `label-set/1`, #117).
 - **Phase 6: the surface steps read probabilities.** Code and exact-answer tests on phantoms only: there is no P on the real hemisphere until phase 8, which runs it there.
@@ -1198,6 +1200,7 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
   - **Result (#115):** with the metric term (weight 1, length-aware edge weights, area-weighted moments), the area collapsed below 2^-10 at a diffusion length of 40 mm goes from 3,243 mm² to 0, and the needles of 3 mm or more go from 18 to 5 (about 4 mm). The inflation is 10× faster (3 s for three levels) and about half as strong (median displacement 5.4 mm against 9.8 mm). The weight is 1, not FreeSurfer's 0.1, from a force balance: the hoop strain of a thin part is about h / (weight · r), and 0.1 kept only 7 % of a phantom finger's area.
   - References: Fischl, Sereno & Dale 1999, *NeuroImage* 9:195–207 (`mris_inflate`, the distance term; FreeSurfer's own licence, the idea is free to reuse); Desbrun, Meyer, Schröder & Barr 1999, SIGGRAPH (implicit fairing; the umbrella distorts irregular meshes); Taubin 1995, SIGGRAPH (λ|μ smoothing); Kazhdan, Solomon & Ben-Chen 2012, *CGF* 31:1745–1754 (cMCF); Angenent et al. 1999, *IEEE TMI* 18:700–711, and Gu et al. 2004, *IEEE TMI* 23:949–958 (conformal brain maps); Zhao et al. 2013, *IEEE TVCG* 19:2838–2850 (optimal mass transport); Choi & Rycroft 2018, *SIAM J Imaging Sci* 11:1134–1178 (density-equalising maps); Drury et al. 1996, *J Cogn Neurosci* 8:1–28, and Van Essen 2005, *NeuroImage* 28:635–662 (Caret; GPL, ideas only).
 - **Flat map:** per geodesic patch round a selection (LSCM, R ≤ 5 mm in 0.1–0.44 s). A whole-hemisphere flat map is out of scope. `splu` with MMD and no pivoting; pyamg does not converge on LSCM; CHOLMOD is GPL.
+  - **Known case: closed pieces.** The white surface keeps the WM islands (the excision step does not relabel them; 21 on the bootstrap hemisphere), and each island is a closed piece of the mesh. A patch that covers a whole island has no boundary, and `lscm` stops ("LSCM needs a boundary"). Found by reading the code; not yet run on an island. Options: #55's slit, which opens a closed piece before LSCM (written for the box flat map); the `exp` patch method, if it handles a closed piece; or no flat map for a closed piece. Decide when the hemisphere viewer first uses the patch flat map.
 - **NiiVue 0.69 pitfalls:** load it from the pinned `+esm` URL; `readTCK` drops the first line (start the data with a NaN row); `loadMeshes`/`removeMesh` race (use `addMeshFromUrl`); catch keys in the capture phase.
 
 #### Step 3: review panes
