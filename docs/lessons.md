@@ -503,14 +503,14 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 
 1. **Roots.** One root per `white-surf/1` vertex, keyed by edge key, with rays both inward and outward.
 2. **Orientation evidence.** The data normal from the echoes' structure tensor, and a field T fitted to it, for the methods that follow the image (phase 1). The normal rays of phase 0 do not use it. The data normal is also published, so that stream 1 can judge its surface normals against it.
-3. **Trace complete rays.** A small set of simple methods that differ in one respect each and share the rest, including one frozen crossing rule.
+3. **Trace complete rays.** A small set of simple methods that differ in one respect each and share the rest. Some follow no field: straight rays along the surface normal, or the surface grown along its own normals at a curvature-driven (equivolume) speed. The others follow the field T and share one frozen rule for crossing its crest.
 4. **Record what each ray meets.** Crests, meetings with other fronts, turns, and the class of each column. Nothing is cut here: the cut is read from the profile in stream 3.
 5. **Publish the column traces** in a spec'd format that stream 3 and the viewer read.
 
 **Standing decisions**
 
 - **Columns are complete rays.** They stop only at fluid, far WM, missing tissue, the domain edge or a length cap (8 mm), never where two fronts meet.
-- **The crossing rule is frozen** (user, #52; `column_front.past_crest`): climb ∇T; inside T's crest stencil, keep the heading; on leaving it, if T falls ahead, descend −∇T for good. Methods that differ in one respect share it.
+- **The crossing rule is frozen, for the methods that follow ∇T** (user, #52; `column_front.past_crest`): climb ∇T; inside T's crest stencil, keep the heading; on leaving it, if T falls ahead, descend −∇T for good. **traverse** and **front** use it. The methods with no field (**normal**, **equivolume**, **front-equivolume**) never meet T and need no crossing rule: their rays pass through a contact as they pass anything else, and the meeting is recorded (`crest_at`, `meet_at`). **crest** and **one-pass** have rules of their own and are kept for comparison.
 - **Column rules stay simple.** A field artefact is recorded in a test, never patched with a new clause.
 - Normal rays stay straight (user, #47).
 - No step uses the fixes image to decide where to search, or re-finds a boundary as the depth origin.
