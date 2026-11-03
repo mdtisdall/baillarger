@@ -464,7 +464,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
   - fixes that override an answer (from phase 3);
   - the fixes with the smallest margin in P (from the fix table; from phase 8, when P exists);
   - the places with the largest fold spread, where the model is least sure (from phase 8);
-  - stream 3's sites, where the profiles disagree with the WM label (from stream 3's phase 5).
+  - stream 3's sites, where the profiles disagree with the WM label (from stream 3's phase 6).
 
   During bootstrapping the queue ranks by site kind and wall size; margins and fold spread join it from phase 8.
 - **Each answer serves twice:**
@@ -482,7 +482,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 
 - Fixes chosen by intensity (FreeSurfer's cut or fill by intensity; #85 step 2); the tube case; the size threshold for exceptions; whether fills through cortex are as acceptable as thickening.
 - Cut faces: how far a cut face bends the normals of vertices near it but not on it.
-- **The fallback for excisions through cortex, if stream 3's profiles cannot find their tops:** cut seeds, points in scanner mm placed by the reviewer and replayable like edits. A seed in the bite grows through outside voxels, kept inside the specimen's envelope (a closing of tissue, radius R) and out of sulci (an opening, radius r); a seed on a flat face grows over the tissue boundary while it stays close to a plane fitted as it grows. The faces are derived on each run, so they follow the current labels. Whether flat faces are planar enough is unknown. Decided by stream 3's cut-top test (its phase 4); the work is phase 11's.
+- **The fallback for excisions through cortex, if stream 3's profiles cannot find their tops:** cut seeds, points in scanner mm placed by the reviewer and replayable like edits. A seed in the bite grows through outside voxels, kept inside the specimen's envelope (a closing of tissue, radius R) and out of sulci (an opening, radius r); a seed on a flat face grows over the tissue boundary while it stays close to a plane fitted as it grows. The faces are derived on each run, so they follow the current labels. Whether flat faces are planar enough is unknown. Decided by stream 3's cut-top test (its phase 5); the work is phase 11's.
 - Whether depth 0 (the column roots) should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Hidden fluid gaps (a thin, slowly decaying dark strip inside labelled cortex; SF F21): under the majority rule they stay cortex, and stream 3 finds them along the columns. Open: whether a detector before tracing is still worth having, as a diagnostic or to rank review sites.
 - Whether normal smoothing should stop at blade crests (feature-preserving smoothing, such as bilateral normal filtering, Zheng et al. 2011) instead of letting the two faces cancel.
@@ -570,7 +570,7 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
   - Outputs that hold more than one interface per voxel, if stream 3's contacts need more than the profiles give: an unsigned distance to the pial interface (a channel narrower than a voxel is a valley that never reaches zero, which a signed distance cannot hold), or tissue fractions trained on 50 µm data averaged down to 160 µm, where the fractions are known.
   - A topology loss (clDice, Betti matching), if the queue is too long. It can only reduce defects; the guarantee stays in step 2's correction.
   - A data-normal term in `antialias` (§3c Open), if stream 2's misalignment diagnostic (its phase 2) finds misalignment set at the root and constant along the rays.
-  - Cut seeds for excisions through cortex (§3c Open), if stream 3's cut-top test (its phase 4) finds that profiles cannot find them.
+  - Cut seeds for excisions through cortex (§3c Open), if stream 3's cut-top test (its phase 5) finds that profiles cannot find them.
 
 **Whole-brain scaling** (alongside phases 1–11; `docs/scaling.md`)
 
@@ -662,7 +662,7 @@ Measured at the marked points (CP; #47, #52, #58):
   - 0.18–0.41 mm path error against the phantoms' curved true columns at crowns (0.25 mm at kissing pairs).
 - **equivolume** (normal's rays, with the column's cross-section A(s) and volume V(s) measured on the rays: the cross-section is its root's dual area with every vertex of its 1-ring moved along its own normal). The same paths as normal, with a volume that follows the neighbouring rays. It needs only the root's 1-ring, so it is local.
 - **Bok's measure** for a vertex is the exact flux of its dual cell. Equivolume depth is (V(s) − V(s₀)) / (V(s₁) − V(s₀)), with s₀ the GM/WM transition and s₁ the pial edge.
-  - Neither end is known here: both are read in stream 3 (its phase 2). So the sampler publishes A(s) and V(s), and stream 3 normalises.
+  - Neither end is known here: both are read in stream 3 (its phase 3). So the sampler publishes A(s) and V(s), and stream 3 normalises.
   - V(s) is measured from the ray's inward end, V(−e_in) = 0, and never falls along the ray. The root is not the GM/WM boundary, so it is not an origin of anything; only differences of V enter the depth, so the origin cancels.
   - Where A(s) reaches zero (the 1-ring's rays meet at a focal point, about one radius of curvature from a tight fundus outward, or inside a thin blade inward), V(s) stops rising. The sampler marks those samples, and stream 3 decides what they mean.
 - **The inward extension** (s from −e_in to 0) runs back along −n into the WM under the root, so the profile covers the GM/WM transition wherever the surface sits: the surface may lie in GM or in WM, and stream 3 reads the transition as a level of z(τ).
@@ -893,7 +893,7 @@ Where each layer lies along every column, read from the image's own contrast and
   - QPBO-I must reseed rand() for determinism.
   - No term may depend on a window's centre (that made the passes cycle).
   - scipy's `maximum_flow` takes int32 capacities only; keep the total below 2³⁰.
-  - The QPBO in use (`thinqpbo`) is GPL-3 and has to be replaced.
+  - The QPBO in use (`thinqpbo`) is GPL-3 and has to be replaced (5d, phase 2).
 - **Doesn't work:** a single darkness horizon for the pia. Where the dark line fades it jumps to the far bank's stria, a mirrored decoy (CP).
 
 #### Step 4: bands and layer identity
@@ -998,7 +998,7 @@ Where each layer lies along every column, read from the image's own contrast and
 
 #### Open
 
-- **Cut tops from profiles alone.** An excision through cortex is outside in the labels, so its column looks like one reaching the pia. Do the profiles flag it (a thickness that drops against its neighbours, or a layer sequence that ends early), and how large are the errors where they do not? Tested in phase 4 (§5d), against the bootstrap detector's excision map (§3c, step 2). If not, stream 1 adds cut seeds (its phase 11; §3c, Open).
+- **Cut tops from profiles alone.** An excision through cortex is outside in the labels, so its column looks like one reaching the pia. Do the profiles flag it (a thickness that drops against its neighbours, or a layer sequence that ends early), and how large are the errors where they do not? Tested in phase 5 (§5d), against the bootstrap detector's excision map (§3c, step 2). If not, stream 1 adds cut seeds (its phase 11; §3c, Open).
 - **Conflict: the equal-volume closed form from white-surface curvature.** PL (#23) adopted it with curvature smoothed at 1 mm (no stria trend); SF F10 lists it as failed with curvature at 0.32–0.80 mm (over-corrects on open V1, ρ −0.69, because the pia is flatter than a parallel shell). The tests differ in curvature scale, columns and measure, so the dependence on scale is unresolved. Normal rays (#47) use it at 0.5 mm, unvalidated.
 - **Conflict: the best M1/S1 estimator depends on the paths and the score.** The field prior alone on crossing paths gives 0.07–0.12 mm, against 0.26–0.33 mm in other scores. The profile split misses by 0.5–0.8 mm on tensor paths but gets 0.17 mm on normal rays. The crossing path's L and the column arc lengths were never reconciled. Compare estimators only on one shared set of paths with one score.
 - The joint fit of the thickness field to visible tops and to the contact sums L, and whether it converges.
@@ -1012,27 +1012,31 @@ Where each layer lies along every column, read from the image's own contrast and
 
 The stream proceeds in phases, as streams 1 and 2 do: each phase adds one design step on the column volume, keeping earlier outputs' formats (extended in place, never replaced). Whenever stream 1 or 2 publishes a new surface, labels or sampler version, the stream reruns on it. Each phase is one or more PRs. The old patch pipeline (`columns`, `regions`, `surfaces`, `bottom`, `tv`, `refine`, `output`) is not ported: it needs a pial exit and writes no BIDS output.
 
-Order: phase 0 needs stream 2's phase 0. Phases 1 and 2 follow in order; phase 3 can run alongside phase 2 (its bands become the joint warp's levels); phase 4 needs phase 2 and gains from stream 2's phase 1; phase 5 needs phase 2.
+Order: phase 0 needs stream 2's phase 0, and phase 1 follows it. Phase 2 needs nothing and can start at once, so the solver is off the critical path. Phase 3 needs phases 1 and 2; phase 4 needs phase 1 and can run alongside phase 3 (its bands become the joint warp's levels); phase 5 needs phase 3 and gains from stream 2's phase 1; phase 6 needs phase 3.
 
 - **Phase 0: the column-volume sampler** on stream 2's ray sampler: the column volume of a superblock and its halo (in mm, §2), computed on demand through the chunked reader and its cache, between extents given per column, with exact tests. No file; a sampler contract (§1), since the viewer calls it too.
 - **Phase 1: flattening.** Port `flatten` with a blocked or local solve, and a torch version if it stays heavy.
-- **Phase 2: the joint warp.**
-  - Port `surfcut.model` and `surfcut.cut`; replace `surfcut.qpbo` with a QPBO that is not GPL (our own, or a permissive library).
+- **Phase 2: a QPBO that is not GPL.** It replaces `thinqpbo` (GPL-3) under `surfcut.qpbo`, and needs nothing from any other phase.
+  - QPBO and QPBO-I, our own on scipy's `maximum_flow` (BSD), or a permissive library whose licence has been read.
+  - Exact tests: brute force on small problems; on submodular problems it must equal the plain min-cut; the same answer on every run. No GPL code, not even as a test reference.
+  - The engineering lessons of 5c, step 3: hard costs of 1 + the finite total, no term that depends on a window's centre, capacities below 2³⁰, and determinism without a global random state.
+- **Phase 3: the joint warp.**
+  - Port `surfcut.model` and `surfcut.cut`, on phase 2's QPBO.
   - Extents by censoring (5c, step 3): first extents from the label intervals, regions re-solved where a top or bottom is censored; each level's censoring is reported. Views of where the levels lie against the trace ends, by region.
   - Publish z(τ) per column: ordered levels with no absolute zero, the pial edge and the GM/WM transition named among them, each with its censoring. Write its spec.
-- **Phase 3: bands and layer identity.**
+- **Phase 4: bands and layer identity.**
   - Rewrite `bands` (DP with the cross-validated K) and `gain` only if they are needed.
   - Salvage the layer-maps diagnostics from #56 (isopachs, pinch-outs, facies; `layer_maps_lib.py` and its tests).
-- **Phase 4: thickness and contacts.** Resolve the two conflicts (5c, Open) on one shared set of hemisphere columns, away from domain edges, then publish the thickness field and the contact splits with their specs.
+- **Phase 5: thickness and contacts.** Resolve the two conflicts (5c, Open) on one shared set of hemisphere columns, away from domain edges, then publish the thickness field and the contact splits with their specs.
   - The cut-top test (5c, Open): views of tops and thickness against the bootstrap excision map. If the profiles cannot find the cut tops, stream 1 adds cut seeds (its phase 11).
-- **Phase 5: feedback to stream 1.** Write the site finder for disagreements between the GM/WM transition and the WM label, publishing sites in `wm-sites/1`.
+- **Phase 6: feedback to stream 1.** Write the site finder for disagreements between the GM/WM transition and the WM label, publishing sites in `wm-sites/1`.
 
-**Whole-brain scaling** (alongside phases 2–4; done before the first whole brain)
+**Whole-brain scaling** (alongside phases 3–5; done before the first whole brain)
 
 The column volume and the shift estimates are local, but three solves are global, and each needs a blocked design, with the efficiency analysis, in the phase that builds it:
 
 1. The flattening warp fit: a blocked or multigrid least-squares solve.
-2. The joint warp: QPBO is a graph cut over every column, tied across contacts, and a graph cut cannot be split into blocks exactly. Solve on overlapping superblocks and check that neighbouring solutions agree in the overlap, or use a dual decomposition; design and prototype it before the first whole brain. It is the largest scaling risk in the plan.
+2. The joint warp: QPBO is a graph cut over every column, tied across contacts, and a graph cut cannot be split into blocks exactly. Solve on overlapping superblocks and check that neighbouring solutions agree in the overlap, or use a dual decomposition, on phase 2's solver; design and prototype it before the first whole brain. It is the largest scaling risk in the plan.
 3. The thickness field (Matérn/SPDE on the white mesh): a multigrid or blocked sparse solver.
 
 ## 6. Stream 4: the viewer
@@ -1190,10 +1194,10 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | The ray sampler | Per column, keyed by edge key and method: samples between the requested extents, up to 2 mm inward and 8 mm outward (positions, arc length, A(s) and V(s)); label intervals and meetings over the full caps, each meeting with its side of each root; normal length (§4c, step 4) | stream 2, phase 0, first: stream 3 and the viewer wait on it |
 | The column volume (sampler) | Each column's echoes sampled along its ray, with 3D positions and partial-volume marks (§5c, step 1) | stream 3, phase 0 |
 | WM distance through tissue (sampler) | §7 | stream 1, phase 1 |
-| Curvature (sampler) | §7 | with its first reader: stream 3, phase 4 |
-| z(τ) | Depth maps per column: ordered levels with no absolute zero, the pial edge and the GM/WM transition named among them, each with its censoring | stream 3, phase 2 |
-| Bands; thickness and contacts | Bands per region and layer identity; the thickness field and contact splits | stream 3, phases 3–4 |
-| Feedback to stream 1 | Sites in `wm-sites/1` (no spec of its own) | stream 3, phase 5 |
+| Curvature (sampler) | §7 | with its first reader: stream 3, phase 5 |
+| z(τ) | Depth maps per column: ordered levels with no absolute zero, the pial edge and the GM/WM transition named among them, each with its censoring | stream 3, phase 3 |
+| Bands; thickness and contacts | Bands per region and layer identity; the thickness field and contact splits | stream 3, phases 4–5 |
+| Feedback to stream 1 | Sites in `wm-sites/1` (no spec of its own) | stream 3, phase 6 |
 
 ## 9. Dependencies between phases
 
@@ -1225,10 +1229,11 @@ flowchart TB
   subgraph S3["Stream 3: laminar profiles"]
     S3P0["3.0 column-volume sampler"]
     S3P1["3.1 flattening"]
-    S3P2["3.2 joint warp"]
-    S3P3["3.3 bands and layer identity"]
-    S3P4["3.4 thickness and contacts"]
-    S3P5["3.5 feedback to stream 1"]
+    S3P2["3.2 QPBO that is not GPL"]
+    S3P3["3.3 joint warp"]
+    S3P4["3.4 bands and layer identity"]
+    S3P5["3.5 thickness and contacts"]
+    S3P6["3.6 feedback to stream 1"]
     S3SC["stream 3 scaling track"]
   end
   subgraph S4["Stream 4: viewer"]
@@ -1254,22 +1259,23 @@ flowchart TB
   S2P2 -.-> S2P3
   S2P2 -. "antialiasing term, if called for" .-> S1P11
 
-  S2P0 --> S3P0 --> S3P1 --> S3P2
-  S3P1 --> S3P3
-  S3P3 -.-> S3P2
-  S3P2 --> S3P4 & S3P5
-  S2P1 -.-> S3P4
-  S3P5 -.-> S1P9
-  S3P2 & S3P4 --> S3SC
+  S2P0 --> S3P0 --> S3P1 --> S3P3
+  S3P2 --> S3P3
+  S3P1 --> S3P4
+  S3P4 -.-> S3P3
+  S3P3 --> S3P5 & S3P6
+  S2P1 -.-> S3P5
+  S3P6 -.-> S1P9
+  S3P3 & S3P5 --> S3SC
 
   S1P0 --> S4P0 --> S4P1 & S4P2
   S1P5 --> S4P1
   S4P1 -. "painting the test regions" .-> S1P5
   S1P3 --> S4P2
   S2P0 & S4P0 --> S4P3
-  S3P2 & S3P3 --> S4P4
-  S3P4 -.-> S4P4
-  S3P4 -. "cut seeds, if needed" .-> S1P11
+  S3P3 & S3P4 --> S4P4
+  S3P5 -.-> S4P4
+  S3P5 -. "cut seeds, if needed" .-> S1P11
 ```
 
 A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or feedback that enters as an input. Phase 1.5 and the painting mode meet in two steps: 1.5 writes the test-region spec, which 4.1 needs, and the regions are painted once 4.1 exists.
@@ -1285,9 +1291,9 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 1.6 | 1.0 | code and phantom tests only; no P on the hemisphere until 1.8, which runs it there |
 | 1.7 | 1.2, 1.5 | the `pial_labels` check reads 1.2's local cortex level; gains from the answers made in 4.2 |
 | 1.8 | 1.6, 1.7 | replaces the purple-mri aseg; first P on the hemisphere, then the labels-only path goes; streams 2–4 rerun; decides the hippocampus |
-| 1.9 | 1.8, 4.2 | queues 3.5's sites when they exist |
+| 1.9 | 1.8, 4.2 | queues 3.6's sites when they exist |
 | 1.10 | 1.8 | |
-| 1.11 | each item when its own diagnostic asks: 1.9, 1.10; 2.2 for the antialiasing term; 3.4 for cut seeds | only if their diagnostics ask |
+| 1.11 | each item when its own diagnostic asks: 1.9, 1.10; 2.2 for the antialiasing term; 3.5 for cut seeds | only if their diagnostics ask |
 | Scaling track | 1.0 | alongside 1.1–1.11; done before the first whole brain |
 | 2.0 | 1.0, 1.1 | writes the ray-sampler spec first |
 | 2.1 | 2.0 | |
@@ -1295,17 +1301,18 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 2.3 | 2.2 | only if 2.2 shows something was missed |
 | 3.0 | 2.0 | |
 | 3.1 | 3.0 | |
-| 3.2 | 3.1 | gains from 3.3 (bands as levels) |
-| 3.3 | 3.1 | alongside 3.2 |
-| 3.4 | 3.2 | gains from 2.1 (V(s), for equal-volume depth); tests cut tops against the excision map |
-| 3.5 | 3.2 | feeds stream 1 as review sites |
-| Stream 3 scaling track | 3.2, 3.4 | done before the first whole brain |
+| 3.2 | — | the QPBO solver; can start at once, off the critical path |
+| 3.3 | 3.1, 3.2 | gains from 3.4 (bands as levels) |
+| 3.4 | 3.1 | alongside 3.3 |
+| 3.5 | 3.3 | gains from 2.1 (V(s), for equal-volume depth); tests cut tops against the excision map |
+| 3.6 | 3.3 | feeds stream 1 as review sites |
+| Stream 3 scaling track | 3.3, 3.5 | done before the first whole brain |
 | 4.0 | 1.0 | |
 | 4.1 | 4.0; 1.5's test-region spec | the painting mode |
 | 4.2 | 4.0, 1.3 | the review pane, on 1.3's formats and choice code |
 | 4.3 | 2.0, 4.0 | |
-| 4.4 | 3.2, 3.3, 4.0 | 3.4 adds panes when it publishes |
+| 4.4 | 3.3, 3.4, 4.0 | 3.5 adds panes when it publishes |
 
 **Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.4, 1.8, each review's answers and each generation in 1.9; a new version of a sampler), the stored outputs that read it rerun on it: stream 1's own, and stream 3's z(τ), bands and thickness. Samplers need no rerun: they compute from whatever is published on the next call. Nothing waits for a new version: each phase works on whatever is published.
 
-**The first complete pass** through all four streams: 1.0 and 1.1; then 2.0 and 4.0 in parallel; then 3.0, 3.1 and 3.2, with 4.3 alongside. It gives a white surface, columns, the viewer, and the first depth maps with a pial edge.
+**The first complete pass** through all four streams: 1.0 and 1.1; then 2.0 and 4.0 in parallel; then 3.0, 3.1 and 3.3, with 4.3 alongside, and 3.2 written from the start. It gives a white surface, columns, the viewer, and the first depth maps with a pial edge.
