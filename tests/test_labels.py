@@ -52,7 +52,7 @@ def test_every_label_has_a_name_and_the_right_hemisphere() -> None:
         assert labels.HIPPOCAMPUS_LABEL[hemi] not in labels.FILLED_LABELS[hemi]
 
 
-def test_followers_are_filled_with_the_ventricle() -> None:
-    for hemi in ("R", "L"):
-        assert labels.VENTRICLE_LABEL[hemi] in labels.FILLED_LABELS[hemi]
-        assert set(labels.FOLLOWS_VENTRICLE[hemi]) <= set(labels.FILLED_LABELS[hemi])
+def test_the_ventricles_are_outside() -> None:
+    for hemi, (lv, cp) in (("R", (43, 63)), ("L", (4, 31))):
+        assert lv not in labels.FILLED_LABELS[hemi]
+        assert cp not in labels.FILLED_LABELS[hemi]

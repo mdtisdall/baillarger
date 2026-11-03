@@ -21,14 +21,14 @@ VOX = (0.2, 0.16, 0.2)
 
 def phantom_aseg() -> npt.NDArray[np.int16]:
     """An aseg with two WM components: a block drilled by a 2 x 2 tunnel (a
-    fill of 4 voxels) and holding a ventricle, inside cortex; and a ring 5
+    fill of 4 voxels) and holding a thalamus, inside cortex; and a ring 5
     voxels wide closed by a one-voxel rod across a slit of background (a cut
     of 1)."""
     a = np.zeros(SHAPE, np.int16)
     a[8:24, 6:22, 4:20] = data.ASEG_CORTEX
     a[10:22, 8:20, 6:18] = data.ASEG_WM
     a[15:17, 13:15, 6:18] = data.ASEG_CORTEX  # the tunnel
-    a[11:13, 9:11, 8:10] = 43  # a ventricle inside the WM
+    a[11:13, 9:11, 8:10] = 49  # a thalamus inside the WM
     a[25:37, 3:33, 22:28] = data.ASEG_WM  # 5 wide round a 2 x 20 hole
     a[30:32, 8:28, 22:28] = 0
     a[25:30, 16:18, 22:28] = 0  # the slit
