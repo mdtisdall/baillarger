@@ -95,16 +95,19 @@ has no case for the corpus callosum. So FreeSurfer's own evidence for the label
 
 The aseg of the purple-mri hemisphere
 (`sub-INDD121850_ses-7THemix20250516_aseg.nii.gz`, right) holds only the
-labels 0, 41, 42, 43, 49, 50, 51, 52, 53 and 192. So every decision below
-has 0 voxels in this aseg and changes no output now. The decisions apply to
-later labels, from the network or from a person.
+labels 0, 41, 42, 43, 49, 50, 51, 52, 53 and 192. It holds the right lateral
+ventricle (43): about 3.18 million voxels, 13.1 cm³. So the ventricle
+decision changes the output on this aseg. The other decisions below have 0
+voxels in this aseg and change no output now. They apply to later labels,
+from the network or from a person.
 
 | Label | Decision | Reason |
 |---|---|---|
+| Lateral ventricle (43, 4) | In. Decided by the user on 2026-11-03 | FreeSurfer fills it (`-fillven`). Phase 1.0 measured the white surface with the ventricle set to outside. The ventricle, open through the medial cut, then adds 5.9 % vertices and 4,743 mm² of wall that is not grey/white. It also adds 33 topology fixes and nearly 3 times the overview repairs. Filled, the surface has no inner wall. |
 | Accumbens (58, 26) | In. Decided | FreeSurfer fills it. It is deep grey matter inside the basal forebrain. |
 | Ventral DC (60, 28) | In. Decided | FreeSurfer fills it. It touches the brainstem. At the whole-brain stage, the cut that separates the hemispheres and the brainstem must separate the ventral DC from the midbrain. |
 | Vessel (62, 30) | In. Decided | FreeSurfer fills it. A vessel that is left out makes a cavity in the mask. |
-| Choroid plexus (63, 31) | Follows the lateral ventricle. Decided | It has the same class as the lateral ventricle. While the lateral ventricle is filled, the choroid plexus is filled. If the user makes the ventricles outside (after a measurement in phase 1.0), the choroid plexus is outside with them. FreeSurfer uses a neighbourhood rule, which a class set cannot hold. |
+| Choroid plexus (63, 31) | Follows the lateral ventricle. Decided | It has the same class as the lateral ventricle, so it is filled for the same reason (the row above). If the user makes the ventricles outside, the choroid plexus is outside with them. FreeSurfer uses a neighbourhood rule, which a class set cannot hold. |
 | Inferior lateral ventricle (44, 5) | Out. Decided | FreeSurfer does not fill the voxel. It is the temporal horn beside the hippocampus, and the hippocampus is not in the mask. |
 | Amygdala (54, 18) | Out. Decided | FreeSurfer has no case for it. |
 | WM hypointensities (77) | Not in the label set. Decided | The network labels them as WM, which is filled. Add 77 only if a later analysis needs it as its own class. |
