@@ -24,6 +24,12 @@ the map.
    its singular values s1 >= s2 give the area factor 1 / (s1 s2) and the conformal
    distortion s1 / s2.
 
+5. A patch round one vertex (patch_flat_map), for a mesh too big to flatten whole:
+   the geodesic ball of radius R along the mesh graph (dijkstra with a limit, faces
+   from a vertex -> face table; the caller builds both once), flattened by LSCM
+   (free boundary, so a ball with more than one boundary loop is fine) or by a
+   discrete exponential map (geodesic polar coordinates, Schmidt et al. 2006).
+
 site_flat_map runs flatten on a mesh and returns the arrays and the summary that the
 viewer keeps (baillarger.viewer.surface caches them).
 """
@@ -35,7 +41,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.sparse import block_diag, coo_matrix, csr_matrix
 from scipy.sparse.csgraph import connected_components, dijkstra, minimum_spanning_tree
-from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import splu
 
 type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.integer[Any]]
@@ -370,7 +376,11 @@ def cot_laplacian(v: Float, f: Faces) -> csr_matrix:
 def lscm(v: Float, f: Faces, pins: Any = None) -> Float:
     """Least-squares conformal map of one connected genus-0 mesh with a boundary (mm
     in, mm out). pins: two vertex ids (default: two far-apart vertices), mapped to
-    (0, 0) and (|v_p - v_q|, 0). Returns uv (n, 2)."""
+    (0, 0) and (|v_p - v_q|, 0). Returns uv (n, 2).
+    The pinned system is symmetric positive definite (the energy is a sum of squares
+    per face), so it is factored without pivoting in a symmetric ordering: partial
+    pivoting with that ordering is 10 to 50 times slower on irregular meshes, where
+    negative cotangent weights are common."""
     n = len(v)
     Lc = cot_laplacian(v, f)
     bl = boundary_loops(f)
@@ -398,7 +408,12 @@ def lscm(v: Float, f: Faces, pins: Any = None) -> Float:
     rhs = -(Q[free][:, fixed] @ up)
     u = np.zeros(2 * n)
     u[fixed] = up
-    u[free] = spsolve(Qff, rhs)
+    u[free] = splu(
+        Qff,
+        permc_spec="MMD_AT_PLUS_A",
+        diag_pivot_thresh=0.0,
+        options=dict(SymmetricMode=True),
+    ).solve(rhs)
     uv: Float = np.c_[u[:n], u[n:]]
     return uv
 
@@ -540,6 +555,162 @@ def flatten(
         area3=a3,
         uv_v=uv_v,
         T_v=T_v,
+    )
+
+
+# ------------------------------------------------------------ a patch round a vertex
+
+
+def rows_of(ptr: Int, idx: Int, rows: Int) -> Int:
+    """The entries of a CSR table (ptr, idx) in the given rows, concatenated."""
+    start, n = ptr[rows], ptr[rows + 1] - ptr[rows]
+    off = np.repeat(start - np.r_[0, np.cumsum(n)[:-1]], n)
+    out: Int = idx[off + np.arange(int(n.sum()))]
+    return out
+
+
+def geodesic_patch(
+    G: csr_matrix, vf: tuple[Int, Int], f: Faces, v0: int, R: float
+) -> tuple[Faces, Int, Float]:
+    """The geodesic ball of radius R (mm along G) round vertex v0, as a surface: the
+    faces whose three vertices are in the ball, the piece (connected across edges)
+    that holds v0's faces. A vertex where two fans of the ball meet only at that
+    vertex is split, one copy per fan (as cut does).
+    G: a symmetric graph of the mesh. baillarger.mesh_graph.edge_graph adds the edges
+    across neighbouring triangles, which keep a voxel mesh's graph distance within
+    8 % of the geodesic (along the mesh edges alone it can be 41 % longer). dijkstra
+    runs with directed=True, since directed=False transposes the whole graph on each
+    call. vf: the vertex -> face table (indptr, indices; inflation.vertex_faces).
+    Returns local faces, orig (patch vertex -> mesh vertex; copy 0 is v0) and the
+    graph distance from v0 (per patch vertex)."""
+    d = dijkstra(G, directed=True, indices=v0, limit=R)
+    vid = np.flatnonzero(np.isfinite(d))
+    fk = np.unique(rows_of(*vf, vid))
+    fk = fk[np.isfinite(d[f[fk]]).all(1)]
+    assert fk.size, "no face in the ball: R is below the edge length"
+    f2, o = cut(np.searchsorted(vid, f[fk]), np.zeros((0, 2), np.int64))
+    lab = pieces(f2, len(o))[1]
+    i0 = int(np.searchsorted(vid, v0))
+    f2 = f2[lab == lab[np.flatnonzero((o[f2] == i0).any(1))[0]]]
+    used = np.unique(f2)
+    # v0's copy first
+    c0 = used[o[used] == i0]
+    assert c0.size == 1, "v0 split"
+    used = np.r_[c0, used[used != c0[0]]]
+    loc = -np.ones(len(o), np.int64)
+    loc[used] = np.arange(used.size)
+    orig: Int = vid[o[used]]
+    return loc[f2], orig, d[orig]
+
+
+def exp_map(v: Float, f: Faces, root: int = 0) -> Float:
+    """Discrete exponential map round root (geodesic polar coordinates; the upwind
+    form of Schmidt et al. 2006): a shortest-edge-path tree from root; each vertex q
+    with parent p gets U(q) = U(p) + the edge p -> q projected on p's tangent plane,
+    kept at its length, in p's frame; frames are carried down the tree by the
+    smallest rotation between the vertex normals (area-weighted face normals).
+    Returns uv (n, 2), mm; root at (0, 0)."""
+    n = len(v)
+    fn = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
+    nv = np.zeros((n, 3))
+    for c in range(3):
+        for j in range(3):
+            nv[:, j] += np.bincount(f[:, c], fn[:, j], minlength=n)
+    nv /= np.linalg.norm(nv, axis=1, keepdims=True)
+    E, _ = edges_of(f)
+    w = np.maximum(np.linalg.norm(v[E[:, 0]] - v[E[:, 1]], axis=1), 1e-9)
+    Gp = csr_matrix((w, (E[:, 0], E[:, 1])), shape=(n, n))
+    _, pred = dijkstra(Gp, directed=False, indices=root, return_predecessors=True)
+    e1 = np.zeros((n, 3))
+    ax = np.eye(3)[np.argmin(np.abs(nv[root]))]
+    e1[root] = ax - (ax @ nv[root]) * nv[root]
+    e1[root] /= np.linalg.norm(e1[root])
+    uv = np.zeros((n, 2))
+    done = np.zeros(n, bool)
+    done[root] = True
+    lev = np.zeros(n, bool)
+    lev[root] = True
+    has_p = pred >= 0
+    while True:
+        q = np.flatnonzero(has_p & ~done & lev[np.where(has_p, pred, 0)])
+        if not q.size:
+            break
+        p = pred[q]
+        a, b = nv[p], nv[q]
+        # rotation taking a to b, applied to e1[p]
+        k = np.cross(a, b)
+        x = e1[p]
+        kx = np.cross(k, x)
+        x = x + kx + np.cross(k, kx) / (1 + np.einsum("ij,ij->i", a, b))[:, None]
+        x -= np.einsum("ij,ij->i", x, b)[:, None] * b
+        e1[q] = x / np.linalg.norm(x, axis=1, keepdims=True)
+        # the edge in p's tangent plane, at its length
+        dv = v[q] - v[p]
+        t = dv - np.einsum("ij,ij->i", dv, a)[:, None] * a
+        t *= (np.linalg.norm(dv, axis=1) / np.linalg.norm(t, axis=1))[:, None]
+        e2p = np.cross(a, e1[p])
+        uv[q] = (
+            uv[p]
+            + np.c_[np.einsum("ij,ij->i", t, e1[p]), np.einsum("ij,ij->i", t, e2p)]
+        )
+        done[q] = True
+        lev[:] = False
+        lev[q] = True
+    assert done.all(), "patch not connected"
+    return uv
+
+
+def patch_flat_map(
+    v: Float,
+    f: Faces,
+    G: csr_matrix,
+    vf: tuple[Int, Int],
+    v0: int,
+    R: float,
+    method: str = "lscm",
+) -> dict[str, Any]:
+    """Flat map of the geodesic ball of radius R (mm) round vertex v0 (geodesic_patch,
+    with G and vf built once per mesh). method "lscm": the free-boundary LSCM (any
+    number of boundary loops), scaled to the patch's 3D area; "exp": exp_map, in mm
+    as it is. v0 maps to (0, 0); the map is turned to its principal axes.
+    Returns a dict: f_cut (patch faces), orig (patch vertex -> mesh vertex, copy 0 is
+    v0), dist (graph distance from v0), uv, T, s1, s2, signed_area, area3 (per patch
+    face, as flatten; distortion() reads them), T_v (per patch vertex: the area-weighted
+    mean T of its faces), boundary_loops (their count)."""
+    fp, orig, dist = geodesic_patch(G, vf, f, v0, R)
+    vp = v[orig]
+    if method == "lscm":
+        uv = lscm(vp, fp)
+        A3, A2 = face_areas(vp, fp).sum(), np.abs(tangent_maps(vp, fp, uv)[3]).sum()
+        uv = (uv - uv[0]) * np.sqrt(A3 / A2)
+    elif method == "exp":
+        uv = exp_map(vp, fp, 0)
+    else:
+        raise ValueError(method)
+    _, U = np.linalg.eigh(np.cov(uv.T))
+    Rot = U[:, ::-1]
+    if np.linalg.det(Rot) < 0:
+        Rot[:, 1] *= -1
+    uv = uv @ Rot
+    T, s1, s2, sa = tangent_maps(vp, fp, uv)
+    a3 = face_areas(vp, fp)
+    acc = np.zeros((len(vp), 3, 2))
+    wsum = np.zeros(len(vp))
+    for c in range(3):
+        np.add.at(acc, fp[:, c], np.nan_to_num(T) * a3[:, None, None])
+        wsum += np.bincount(fp[:, c], a3, minlength=len(vp))
+    return dict(
+        f_cut=fp,
+        orig=orig,
+        dist=dist,
+        uv=uv,
+        T=T,
+        s1=s1,
+        s2=s2,
+        signed_area=sa,
+        area3=a3,
+        T_v=acc / np.maximum(wsum, 1e-30)[:, None, None],
+        boundary_loops=len(boundary_loops(fp)),
     )
 
 

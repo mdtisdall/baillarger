@@ -22,6 +22,8 @@ import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 
+from baillarger.labels import CORTEX_LABEL, OUTSIDE, WM_LABEL
+
 type Box = tuple[int, int, int]
 
 SUBJECT = "sub-INDD121850_ses-7THemix20250516"
@@ -30,7 +32,7 @@ _ECHO = SUBJECT + (
 )
 _ASEG = SUBJECT + "_aseg.nii.gz"
 
-ASEG_OUTSIDE, ASEG_WM, ASEG_CORTEX = 0, 41, 42
+ASEG_OUTSIDE, ASEG_WM, ASEG_CORTEX = OUTSIDE, WM_LABEL["R"], CORTEX_LABEL["R"]
 RIM_OTHER, RIM_OUTSIDE, RIM_WM, RIM_CORTEX = 0, 1, 2, 3
 
 #: Patch boxes (lo, hi) in voxels of the full grid: the boundary points plus
