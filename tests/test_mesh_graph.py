@@ -6,7 +6,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
 from baillarger import mesh_graph as G
-from baillarger.mesh import marching_tetrahedra
+from baillarger.mesh import MeshBlocks, marching_tetrahedra, marching_tetrahedra_blocks
 from baillarger.mesh_smoothing import edges, smooth_normals
 
 VOX = (0.16, 0.16, 0.16)
@@ -121,3 +121,155 @@ def test_on_a_thin_blade_the_two_sides_are_far_apart_and_kept_apart() -> None:
     d = np.array([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]])
     j = G.crossing_vertex(v, n, x, d, VOX)
     assert v[j[0], 0] < 19.5 and v[j[1], 0] > 19.5
+
+
+# --- local form: a superblock with a halo ---------------------------------
+
+CELLS = 8
+
+
+def phantom() -> tuple[np.ndarray, np.ndarray, G.BlockIndex, MeshBlocks]:
+    """A ball of radius 17.3 voxels on a 40-voxel grid in blocks of 8 cells
+    (5 blocks a side, 37 or so crossed): vertices, faces, block index."""
+    c = np.indices((41, 41, 41)).astype(float) - 20.0
+    r = np.linalg.norm(c, axis=0) + 1.5 * np.sin(c[0] / 3.0) * np.cos(c[1] / 4.0)
+    v, f, mb = marching_tetrahedra_blocks(r, 17.3, CELLS)
+    return v, f, G.block_index(v, f, mb), mb
+
+
+def _superblocks(
+    blocks: G.BlockIndex, level: int, count: int
+) -> list[tuple[int, int, int]]:
+    sup = blocks.ijk // (1 << level)
+    ids = sorted({(int(a), int(b), int(c)) for a, b, c in sup})
+    step = max(1, len(ids) // count)
+    return ids[::step][:count]
+
+
+def _owned(blocks: G.BlockIndex, sb: tuple[int, int, int], level: int) -> np.ndarray:
+    ins = np.all(blocks.ijk // (1 << level) == np.array(sb), axis=1)
+    return np.concatenate(
+        [
+            np.arange(a, b)
+            for a, b in zip(
+                blocks.vertex_start[ins], blocks.vertex_stop[ins], strict=True
+            )
+        ]
+        or [np.zeros(0, np.int64)]
+    )
+
+
+def _scatter(lg: G.LocalGraph, d: np.ndarray, n: int) -> np.ndarray:
+    out = np.full((len(d), n), np.inf)
+    out[:, lg.vertex] = d
+    return out
+
+
+def _exactness(vox: tuple[float, float, float], L: float, halo: float) -> list[bool]:
+    """Per (level, superblock, owned root sample): is the local distance
+    array equal to the whole graph's (inf beyond L)?"""
+    v, f, blocks, _ = phantom()
+    whole = G.edge_graph(v, f, vox)
+    rng = np.random.default_rng(3)
+    same = []
+    for level in (0, 1):
+        for sb in _superblocks(blocks, level, 4):
+            lg = G.local_graph(v, f, blocks, sb, level, CELLS, halo, vox)
+            owned = _owned(blocks, sb, level)
+            assert owned.size
+            src = rng.choice(owned, min(12, owned.size), replace=False)
+            assert lg.root[np.searchsorted(lg.vertex, src)].all()
+            dw = dijkstra(whole, indices=src, limit=L)
+            dl = dijkstra(lg.graph, indices=np.searchsorted(lg.vertex, src), limit=L)
+            same.append(np.array_equal(dw, _scatter(lg, dl, len(v))))
+    return same
+
+
+def test_local_distances_equal_the_whole_graphs_up_to_the_halo() -> None:
+    L = 0.9
+    for vox in ((0.16, 0.16, 0.16), (0.16, 0.16, 0.32)):
+        v, f, blocks, _ = phantom()
+        whole = G.edge_graph(v, f, vox)
+        rng = np.random.default_rng(1)
+        for level in (0, 1):
+            for sb in _superblocks(blocks, level, 4):
+                for halo in (L, L + 0.3):
+                    lg = G.local_graph(v, f, blocks, sb, level, CELLS, halo, vox)
+                    owned = _owned(blocks, sb, level)
+                    src = rng.choice(owned, min(15, owned.size), replace=False)
+                    dw = dijkstra(whole, indices=src, limit=L)
+                    assert np.isfinite(dw).sum() > len(src) * 10
+                    loc = np.searchsorted(lg.vertex, src)
+                    dl = dijkstra(lg.graph, indices=loc, limit=L)
+                    np.testing.assert_array_equal(dw, _scatter(lg, dl, len(v)))
+
+
+def test_a_halo_smaller_than_the_limit_can_miss_vertices() -> None:
+    """With no halo, a root near the superblock's face has neighbours within
+    L that the local graph lacks: this is why the halo must be >= L."""
+    L = 0.9
+    same = _exactness((0.16, 0.16, 0.16), L, 0.0)
+    assert not all(same)
+
+
+def test_local_graph_is_a_subgraph_of_the_whole() -> None:
+    v, f, blocks, _ = phantom()
+    vox = (0.16, 0.16, 0.32)
+    whole = G.edge_graph(v, f, vox).toarray()
+    sb = _superblocks(blocks, 1, 3)[1]
+    lg = G.local_graph(v, f, blocks, sb, 1, CELLS, 0.5, vox)
+    a = lg.graph.toarray()
+    assert lg.vertex.size < len(v)
+    assert np.array_equal(lg.vertex, np.unique(lg.vertex))
+    sub = whole[np.ix_(lg.vertex, lg.vertex)]
+    assert np.all((a == 0) | (a == sub))
+
+
+def test_roots_are_the_owned_and_the_halo_box_vertices() -> None:
+    v, f, blocks, _ = phantom()
+    vox = np.array((0.16, 0.16, 0.32))
+    for level in (0, 1):
+        for sb in _superblocks(blocks, level, 4):
+            halo = 0.6
+            lg = G.local_graph(v, f, blocks, sb, level, CELLS, halo, vox)
+            span = (1 << level) * CELLS
+            lo = np.array(sb) * span - halo / vox
+            hi = (np.array(sb) + 1) * span + halo / vox
+            want = np.zeros(len(v), bool)
+            want[_owned(blocks, sb, level)] = True
+            want |= np.all((v >= lo) & (v <= hi), axis=1)
+            # every wanted root is a local vertex, and only they are roots
+            assert np.isin(np.flatnonzero(want), lg.vertex).all()
+            np.testing.assert_array_equal(lg.vertex[lg.root], np.flatnonzero(want))
+
+
+class _Spy:
+    """A face array that records the row ranges read from it."""
+
+    def __init__(self, f: np.ndarray) -> None:
+        self.f = f
+        self.read: list[tuple[int, int]] = []
+
+    def __getitem__(self, s: slice) -> np.ndarray:
+        assert isinstance(s, slice)
+        self.read.append((int(s.start), int(s.stop)))
+        return self.f[s]
+
+
+def test_only_the_faces_of_blocks_meeting_the_halo_box_are_read() -> None:
+    v, f, blocks, _ = phantom()
+    vox = np.array((0.16, 0.16, 0.16))
+    sb, level, halo = _superblocks(blocks, 0, 5)[2], 0, 0.5
+    spy = _Spy(f)
+    G.local_graph(v, spy, blocks, sb, level, CELLS, halo, vox)  # type: ignore[arg-type]
+    lo = np.array(sb) * CELLS - halo / vox
+    hi = (np.array(sb) + 1) * CELLS + halo / vox
+    meets = np.all((blocks.box_max >= lo) & (blocks.box_min <= hi), axis=1)
+    assert 0 < meets.sum() < len(meets)
+    want = np.zeros(len(f), bool)
+    for a, b in zip(blocks.face_start[meets], blocks.face_stop[meets], strict=True):
+        want[a:b] = True
+    got = np.zeros(len(f), bool)
+    for a, b in spy.read:
+        got[a:b] = True
+    np.testing.assert_array_equal(got, want)
