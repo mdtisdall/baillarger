@@ -9,9 +9,9 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from baillarger import column_volume
+from baillarger import backend, column_volume
 from baillarger import rays as R
-from baillarger.blocks import ArraySource
+from baillarger.blocks import ArraySource, ChunkedSource
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "formats" / "column-volume.md"
 
@@ -244,3 +244,75 @@ def test_the_sampler_refuses_a_bad_grid() -> None:
         cls([vol], AFFINE, [shifted], SHAPE)
     # float32 rounding of the affine is accepted
     cls([vol], AFFINE, [AFFINE.astype(np.float32)], SHAPE)
+
+
+@pytest.fixture(autouse=True)
+def numpy_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The exact tests run on the numpy reference; the device tests name
+    their device."""
+    monkeypatch.setenv("BAILLARGER_DEVICE", "numpy")
+
+
+DEVICES = [d for d in backend.available() if d != "numpy"]
+
+
+def random_case() -> tuple[npt.NDArray[np.float32], R.Rays]:
+    rng = np.random.default_rng(7)
+    vol = rng.random(SHAPE).astype(np.float32)
+    roots = to_mm(rng.uniform([-1, -1, -1], [25, 21, 17], (40, 3)))
+    iv = [[(-2.0, 0.3, 41), (0.3, 1.1, 49), (1.1, 8.0, 0)] for _ in range(40)]
+    return vol, make_rays(roots, rng.normal(size=(40, 3)), iv, e_in=0.4, e_out=1.2)
+
+
+@pytest.mark.parametrize("name", DEVICES)
+def test_a_device_matches_numpy_to_float32_rounding(name: str) -> None:
+    vol, rays = random_case()
+    ref = sampler(vol).sample(rays, "numpy")
+    got = sampler(vol).sample(rays, name)
+    assert ref.valid.any()
+    assert not ref.valid.all()
+    assert np.array_equal(got.valid, ref.valid)
+    assert np.array_equal(got.partial, ref.partial)
+    assert np.array_equal(got.reach, ref.reach)
+    assert np.array_equal(np.isnan(got.echo), np.isnan(ref.echo))
+    np.testing.assert_allclose(got.echo, ref.echo, rtol=0, atol=4 * 2.0**-24)
+
+
+@pytest.mark.parametrize("name", DEVICES)
+def test_a_device_gives_the_same_result_every_time(name: str) -> None:
+    vol, rays = random_case()
+    a = sampler(vol).sample(rays, name)
+    b = sampler(vol).sample(rays, name)
+    assert np.array_equal(a.echo, b.echo, equal_nan=True)
+
+
+def test_grid_sample_with_align_corners_is_the_convention() -> None:
+    """The spec fixes align_corners=True: the centre of voxel i is at the
+    normalised coordinate 2 i / (n - 1) - 1. grid_sample then equals the
+    numpy reference at the valid samples."""
+    torch = pytest.importorskip("torch")
+    vol, rays = random_case()
+    ref = sampler(vol).sample(rays, "numpy")
+    v = sampler(vol).voxel_coordinates(rays.position)
+    n = np.asarray(SHAPE, np.float64)
+    g = 2.0 * v / (n - 1.0) - 1.0
+    # grid_sample takes (x, y, z) = (last axis, ..., first axis)
+    grid = torch.as_tensor(g[:, ::-1].copy(), dtype=torch.float32).reshape(
+        1, -1, 1, 1, 3
+    )
+    img = torch.as_tensor(vol).reshape(1, 1, *SHAPE)
+    out = torch.nn.functional.grid_sample(
+        img, grid, mode="bilinear", padding_mode="zeros", align_corners=True
+    ).reshape(-1)
+    k = ref.valid
+    np.testing.assert_allclose(out.numpy()[k], ref.echo[k, 0], rtol=0, atol=1e-5)
+
+
+def test_reading_through_the_chunked_reader_changes_nothing() -> None:
+    vol, rays = random_case()
+    plain = sampler(vol).sample(rays, "numpy")
+    chunked = ChunkedSource(ArraySource(vol), chunk=5, max_bytes=4000)
+    smp = column_volume.ColumnVolumeSampler([chunked], AFFINE, [AFFINE], SHAPE)
+    got = smp.sample(rays, "numpy")
+    assert np.array_equal(got.echo, plain.echo, equal_nan=True)
+    assert chunked.reads > 0

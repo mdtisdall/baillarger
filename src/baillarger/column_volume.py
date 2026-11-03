@@ -16,7 +16,9 @@ from dataclasses import dataclass
 
 import numpy as np
 import numpy.typing as npt
+import torch
 
+from baillarger import backend
 from baillarger.blocks import Source
 from baillarger.rays import Rays
 
@@ -120,22 +122,28 @@ class ColumnVolumeSampler:
             axis=1,
         )
 
-    def sample(self, rays: Rays) -> ColumnVolume:
+    def sample(self, rays: Rays, device: str | None = None) -> ColumnVolume:
         """The echoes at the samples of rays, with the validity and the
-        partial-volume mark of each sample."""
+        partial-volume mark of each sample. device is a name of
+        baillarger.backend ("numpy" is the reference; the default is
+        $BAILLARGER_DEVICE, else the best device here). Only the weighted
+        sum runs on the device, in float32; the coordinates, the validity,
+        the weights' inputs and the mark are float64 on the host, so they
+        are the same on every device."""
+        dev = backend.device(device)
         v = self.voxel_coordinates(rays.position)
         top = np.asarray(self.grid_shape, dtype=np.float64) - 1.0
         valid = np.all((v >= 0.0) & (v <= top), axis=1)
         echo = np.full((len(v), len(self.echoes)), np.nan, dtype=np.float32)
         if valid.any():
-            echo[valid] = self._interpolate(v[valid])
+            echo[valid] = self._interpolate(v[valid], dev)
         reach = reach_of(rays.roots.normal, self.voxel_to_ras)
         partial = _partial(rays, reach)
         return ColumnVolume(
             rays=rays, echo=echo, valid=valid, partial=partial, reach=reach
         )
 
-    def _interpolate(self, v: npt.NDArray[np.float64]) -> F32:
+    def _interpolate(self, v: npt.NDArray[np.float64], dev: backend.Device) -> F32:
         """The trilinear values at valid voxel coordinates (spec,
         "Interpolation"). One box read for each echo."""
         n = np.asarray(self.grid_shape, dtype=np.int64)
@@ -148,6 +156,11 @@ class ColumnVolumeSampler:
         rel = i0 - lo
         out = np.empty((len(v), len(self.echoes)), dtype=np.float32)
         for e, src in enumerate(self.echoes):
+            if dev.torch is not None:
+                out[:, e] = _weighted_sum_torch(
+                    np.asarray(src.read(box)), rel, t, dev.torch
+                )
+                continue
             data = np.asarray(src.read(box)).astype(np.float64)
             acc = np.zeros(len(v), dtype=np.float64)
             for d in range(8):
@@ -178,3 +191,30 @@ def _partial(rays: Rays, reach: F32) -> Bool:
         b[has] = s0[first[has] + 1 + j]
         partial |= np.abs(s - b[column]) <= w
     return partial
+
+
+def _weighted_sum_torch(
+    data: npt.NDArray[np.generic],
+    rel: npt.NDArray[np.int64],
+    t: npt.NDArray[np.float64],
+    tdev: torch.device,
+) -> F32:
+    """The trilinear sum on a device, in float32: the 8 corners of each
+    sample are gathered by index and added in the order of the spec (a gather,
+    no atomic addition, so a run gives the same result every time)."""
+    flat = torch.as_tensor(np.ascontiguousarray(data, np.float32), device=tdev).reshape(
+        -1
+    )
+    nj, nk = data.shape[1], data.shape[2]
+    base = (rel[:, 0] * nj + rel[:, 1]) * nk + rel[:, 2]
+    tt = torch.as_tensor(t.astype(np.float32), device=tdev)
+    acc = torch.zeros(len(t), dtype=torch.float32, device=tdev)
+    for d in range(8):
+        di, dj, dk = (d >> 2) & 1, (d >> 1) & 1, d & 1
+        idx = torch.as_tensor(base + (di * nj + dj) * nk + dk, device=tdev)
+        w = (
+            (tt[:, 0] if di else 1.0 - tt[:, 0]) * (tt[:, 1] if dj else 1.0 - tt[:, 1])
+        ) * (tt[:, 2] if dk else 1.0 - tt[:, 2])
+        acc = acc + w * flat[idx]
+    result: F32 = acc.cpu().numpy()
+    return result
