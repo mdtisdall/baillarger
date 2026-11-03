@@ -222,6 +222,12 @@ The coupling that is real, decided once:
 2. **Missing tissue.** Blocks cut out before the scan are labelled as missing tissue, a class of its own (proposed), or ignored in training. Step 2 gives the rule for the surface.
 3. **Calibration.** P must be calibrated near 0.5, because step 2 places walls by it. Calibration is a diagnostic of every generation.
 4. **The defect count.** The number of handles and cavities before correction sets the length of the review queue (step 6). It is a diagnostic of every generation, not a target to optimise inside the network.
+5. **Partial volume: the majority rule.** A voxel takes the class that fills most of it. A fluid channel narrower than half a voxel, or two banks pressed pia to pia with no fluid, is therefore cortex in the labels.
+   - Why: a label per voxel cannot hold two interfaces inside one voxel, whatever rule it follows. Forcing a channel open in the labels (the skeleton insertion of CRUISE's ACE and CIVET's CLASP) gets the topology right by moving each bank's pial edge by up to half a voxel, and it still fails where the banks touch with no fluid.
+   - The majority rule keeps P close to a tissue fraction at mixed voxels. Step 2 places walls where P is 0.5 and step 4 reads P − 0.5 as a position finer than a voxel; both assume this.
+   - It is the same rule at every resolution: at 50 µm the narrower channels are resolved and the rule does not change.
+   - Separating the banks across such a channel is not the labels' job. Stream 2 passes through it and records the meeting, and stream 3 places the pial edge there from the profiles (§5c, step 5, *Contacts*). This follows FreeSurfer, whose labels fuse the banks and whose surfaces keep them apart; here the columns keep them apart.
+   - Labellers (test regions, scribbles, site answers) follow the rule, and the label-set spec states it.
 
 *Decisions taken*
 
@@ -241,6 +247,8 @@ The coupling that is real, decided once:
 - Topology correction from probabilities: Han, Xu and Prince (topology-preserving level sets); Bazin and Pham (fast-marching topology correction, TOADS); Ségonne et al. (FreeSurfer's defect correction).
 - Distance outputs: Xue et al., AAAI 2020; Navarro et al., MLMI 2019; Ma et al., MIDL 2020; for cortex, SegRecon (Gopinath et al. 2021), DeepCSR (Cruz et al., CVPR 2021), recon-all-clinical (Gopinath et al. 2024).
 - Uncertainty: Kendall and Gal, NeurIPS 2017; β-NLL, Seitzer et al., ICLR 2022.
+- Partial volume: mixel models (Santago and Gage, 1993); Shattuck et al. 2001 (BrainSuite); Van Leemput et al., IEEE TMI 2003; FSL FAST (Zhang et al. 2001); Tohka et al. 2004; PV-SynthSeg (Billot et al., MICCAI 2020).
+- Thin sulci: CRUISE and its ACE (Han et al., *NeuroImage* 2004); CLASP in CIVET (Kim et al., *NeuroImage* 2005); FreeSurfer's pial surface and its self-intersection constraint (Dale, Fischl and Sereno 1999; Fischl and Dale 2000).
 - Topology losses: Hu et al., NeurIPS 2019; clDice (Shit et al., CVPR 2021); Betti matching (Stucki et al., ICML 2023).
 - purple-mri, the bootstrap labels: Khandelwal et al., *Imaging Neuroscience* 2024; the purple-mri repository (topology notes and surface scripts).
 
@@ -313,6 +321,7 @@ The coupling that is real, decided once:
   - For about 91 % of interior cortex the echoes agree within 10°.
   - Coherence falls to 0.05–0.38 at contacts and fundi, which is where most column failures happen.
   - The normal has no sign. Sign it by the WM distance through tissue, with fluid as an obstacle. A straight-line distance flips the sign beside open sulci (CP; #46).
+  - Under the majority rule (3b), a fused sulcus is cortex in the mask, so a window there can take in both banks. Coherence already falls at contacts, which marks those voxels; whether the window should also stop where the two banks' WM-distance fronts meet is open.
 - It needs only the echoes and the corrected labels, not the surface, so it can run beside step 4. It belongs to stream 1 so that both the surface's check and stream 2's tracing read one published output, and no stream waits on another in a cycle.
 - **Doesn't work:** tracing step by step along the raw tensor normal: no field, no stop, so paths stall and run on (SF F3). Stream 2's rays use no field (§4c).
 
@@ -425,7 +434,8 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - Fixes chosen by intensity (FreeSurfer's cut or fill by intensity; #85 step 2); the tube case; the size threshold for exceptions; whether fills through cortex are as acceptable as thickening.
 - Missing tissue: how far the cut face bends the normals of vertices near it but not on it, and whether stream 2 should use distance along the mesh from flagged vertices; whether the viewer needs the cut face as a surface label of its own; how much the detector's errors (dark vessels or fluid taken for missing tissue) matter now that the mask follows it.
 - Whether depth 0 (the column roots) should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
-- Finding hidden fluid gaps from the image before columns are traced: a thin, slowly decaying dark strip inside labelled cortex (SF F21).
+- Hidden fluid gaps (a thin, slowly decaying dark strip inside labelled cortex; SF F21): under the majority rule they stay cortex, and stream 3 finds them along the columns. Open: whether a detector before tracing is still worth having, as a diagnostic or to rank review sites.
+- Whether `orient`'s window should stop where the WM-distance fronts of two banks meet, so that it never spans a fused sulcus (step 3).
 - **How `dseg` applies standalone answers** to a new generation's labels: whether a verified voxel always overrides the input, and how to show the reviewer where a new generation disagrees with an earlier answer.
 - **Whether antialiasing should align the surface with the data normal.** A data term in step 4 would pull the surface normals towards step 3's data normal near the boundary, weighted by its coherence (high in most cortex, low at contacts and fundi). The sign constraints stay, so the topology stays guaranteed. The cost: agreement with the data normal would stop being an independent check of the surface. Keep part of the evidence out of the term (one echo, or held-out regions), or judge the surface by something else, such as how straight the columns run.
   - Its reach is limited: the sign constraints keep the surface within about half a voxel of the mask, so the term can smooth the staircase and short-wavelength tilt, but cannot turn a region whose mask faces the wrong way; that needs a different label.
@@ -461,7 +471,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
   - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
   - Make missing tissue a published label (from the image-based detector of step 2), and the cut-face flag a published per-vertex output keyed by edge key (neither has a spec yet). Then apply the missing-tissue rule in `dseg`, with phantom tests: an excised block that leaves a tunnel (fixed by a plug, flagged), one that cuts a piece off (b0 rises), and enclosed missing tissue (filled).
-  - Rewrite `pial_labels` as a stream 1 input: keep its noise estimators and detector, and have it emit spec'd edits that relabel fluid channels and vessels that the label marks as cortex, which stream 2's crossings depend on (§4c, step 2).
+  - Rewrite `pial_labels` as a stream 1 input: keep its noise estimators and detector, and have it emit spec'd edits that relabel fluid channels and vessels that the label marks as cortex, which stream 2's crossings depend on (§4c, step 2). It follows the majority rule (3b): its test is a fluid fraction above ½, so channels narrower than that stay cortex.
 - **Phase 1: review and fold repair** on phase 0's output (the steps of the #80 plan, with #81 and #82 as its first PRs). Its answers correct the hemisphere now and become the first verified training labels.
   1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
   2. The volume pane in `--white` mode (#82).
@@ -472,7 +482,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   7. Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
 - **Phase 2: data, label set, test regions.**
   - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 8 is needed.
-  - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, missing tissue, and other labels only if a later stage needs them.
+  - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, missing tissue, and other labels only if a later stage needs them. Write the label-set spec with the majority rule for partial volume (3b), as the rule labellers follow.
   - Test regions: a few boxes per hemisphere (start with V1V2, PCC_SPL, M1S1, and the V1V2 seam review points). They are labelled from scratch, not by correcting the seed labels, so the seed does not anchor them, and they are never used in training. Format: a BIDS `_dseg` with a versioned sidecar spec that records the box and the labeller.
 - **Phase 3: the surface steps read probabilities.** Independent of the network; exact-answer tests on phantoms first.
   1. `handles.remove_handles` takes a required priority volume, P: the object front claims in order of decreasing P and the background front in order of increasing P, so the walls fall where P is closest to 0.5. Distance ordering goes. Phantom test: a handle whose bridge has a known low-P place away from its thinnest place; the cut must fall there.
@@ -483,7 +493,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   6. Then remove the labels-only path (distance ordering, smoothness-only antialiasing).
 - **Phase 4: training data.**
   - Export to nnU-Net's raw dataset format: the three echoes as channels `_0000`–`_0002`, with labels that use an ignore label.
-  - Bootstrapping: purple-mri's labels as weak seed labels. Its labels in the interiors; the missing blocks from the step 2 detector; ignore in a band of about 2 voxels each side of every purple-mri boundary, and where a simple FLASH check disagrees with purple-mri (the check to be chosen on the test regions).
+  - Bootstrapping: purple-mri's labels as weak seed labels. Its labels in the interiors; the missing blocks from the step 2 detector; ignore in a band of about 2 voxels each side of every purple-mri boundary (so the network never learns purple-mri's choices at mixed voxels), and where a simple FLASH check disagrees with purple-mri (the check to be chosen on the test regions).
   - Phase 1's answers (`wm-edits`) as verified labels, never ignored.
   - Verified labels are kept apart from seed labels, with provenance, so a generation can be retrained with or without the seed.
   - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset.
@@ -507,6 +517,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
 - **Phase 8: only if the diagnostics ask for it.**
   - A signed-distance output (capped at about 5 voxels, L1, trained only where every voxel within the cap is labelled), or a Laplace head with β-NLL, if the σ derived from P is poorly calibrated or saturated where it matters.
   - Synthetic training images from label maps (SynthSeg, PostSynth), as augmentation, if the problem is generalising to other hemispheres or protocols.
+  - Outputs that hold more than one interface per voxel, if stream 3's contacts need more than the profiles give: an unsigned distance to the pial interface (a channel narrower than a voxel is a valley that never reaches zero, which a signed distance cannot hold), or tissue fractions trained on 50 µm data averaged down to 160 µm, where the fractions are known.
   - A topology loss (clDice, Betti matching), if the queue is too long. It can only reduce defects; the guarantee stays in phase 3's decoding.
 
 **Whole-brain scaling** (alongside phases 1–8; `docs/scaling.md`)
@@ -539,7 +550,7 @@ Rays that follow a field fitted to the image (T) are not part of the design. On 
 
 **Standing decisions**
 
-- **Columns are complete rays.** They stop only at fluid, far WM, missing tissue, the domain edge or a length cap (8 mm), never where two fronts meet. A ray passes through a contact as it passes anything else, and the meeting is recorded.
+- **Columns are complete rays.** They stop only at fluid, far WM, missing tissue, the domain edge or a length cap (8 mm), never where two fronts meet. A ray passes through a contact as it passes anything else, and the meeting is recorded. Fluid means the fluid label, by stream 1's majority rule (3b): a channel narrower than half a voxel, or pia touching pia, is not a stop but a contact.
 - **Column rules stay simple.** An artefact is recorded in a test, never patched with a new clause.
 - Normal rays stay straight (user, #47).
 - No step uses the fixes image to decide where to search, or re-finds a boundary as the depth origin.
@@ -596,7 +607,7 @@ Measured at the marked points (CP; #47, #52, #58):
 - **front-equivolume** (the white mesh grown along its own smoothed normals at speed A₀/A, so the fronts are the equivolume layers and the columns bend to stay normal to them): bends 0.25–0.31 mm off the straight ray, ends many columns at the caps, splits poorly at M1/S1 (0.55 mm), and runs 8–9× slower. Which paths are right is untested.
 - **Bok's measure** for a vertex is the exact flux of its dual cell. Equivolume depth is (V(s) − V(s₀)) / (V(s₁) − V(s₀)).
 - Where a normal ray passes another bank's front is where the WM distance through tissue stops rising along it (`first_fall`); the front methods record where a column meets another front at a smaller depth (`meet_at`).
-- The crossings depend on a cortex label without fluid channels and vessels, so tracing reads stream 1's `pial_labels` edits.
+- The crossings depend on a cortex label without fluid channels and vessels, so tracing reads stream 1's `pial_labels` edits. Those relabel only channels that fill most of a voxel; narrower ones stay cortex, and the rays record them as meetings for stream 3.
 
 #### Step 3: recording what each ray meets
 
@@ -881,6 +892,7 @@ Where each layer lies along every column, read from the image's own contrast and
 
 **Contacts**
 
+- **Contacts are where the labels cannot separate the banks.** Under stream 1's majority rule (3b), a fluid channel narrower than half a voxel and pia touching pia are cortex in the labels. The split places the pial edge there: from the profile's partial-volume dip where there is one (V1V2's residual dark line), and from the thickness of the two sides where there is none (M1/S1).
 - **M1/S1 is genuinely unequal:** 2.0 mm against 3.2–3.3 mm. At its contact two layer I's meet with no fluid gap, and the superficial layers are 0.1–0.15 mm thinner per side than at open pia (F12, F13, F17).
 - V1V2's banks are near equal (2.18 and 2.31 mm) and sit on a residual dark line, which explains much of every estimator's success there.
 - Equal arrival is right only for near-equal banks: at M1/S1 it misses by 0.63–0.68 mm.
