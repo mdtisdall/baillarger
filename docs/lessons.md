@@ -514,7 +514,7 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 - **Column rules stay simple.** A field artefact is recorded in a test, never patched with a new clause.
 - Normal rays stay straight (user, #47).
 - No step uses the fixes image to decide where to search, or re-finds a boundary as the depth origin.
-- Banks are told apart by distance along the white mesh, using the across-triangle graph (`SAME_MM` 5 mm), so the two sides of a thin blade stay apart.
+- **No step labels banks.** A column belongs to its root, and nothing more. Where a ray ends in WM or meets another column, the distance along the white mesh between the two roots is recorded as a number, never thresholded into "same bank" or "other bank": a fold and a contact differ only along that continuum (step 1, Theory). The distance uses the across-triangle graph, so the two sides of a thin blade stay far apart.
 
 ### 4c. Implementation design
 
@@ -628,7 +628,7 @@ Measured at the marked points (CP; #47, #52, #58):
 *Design and lessons*
 
 - Meetings are recorded on the column (`crest_at`, `meet_at`, `turn_at`) and never acted on.
-- Classes: open, crossing, own-bank return, to-contact, failed.
+- Classes by how the ray ends, not by bank: in fluid (open), in WM, at a contact, at the cap or a domain edge, failed. The current code splits the WM ends into crossing and own-bank return at `SAME_MM` (5 mm along the mesh); the restart drops that split and records the distance instead.
 - **Doesn't work:** any threshold on bend angle, turn, or root separation along the surface. Each cuts a continuum: between 10° and 60°, 5–34 % of classes change. A 5 mm "same bank" fallback is wrong at both faces.
 
 #### Step 5: the published traces
@@ -666,7 +666,7 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0 and also needs 
 
 - **Phase 0: normal rays on stream 1's phase 0 surface.**
   - Write the spec for column traces first: it is the interface stream 3 and the viewer wait on.
-  - Rewrite `column_traces` to root on `white-surf/1` vertices by edge key and trace by mesh blocks, keeping the classes and constants, and leaving out roots on the cut-face flag.
+  - Rewrite `column_traces` to root on `white-surf/1` vertices by edge key and trace by mesh blocks, keeping the constants and the classes by ending (4c, step 4), without the bank split, and leaving out roots on the cut-face flag.
   - The **normal** method only: straight rays along the smoothed white normal, needing no field and no image, stopped by stream 1's labels. It keeps the right class on every phantom, so it is the safe first trace.
   - Port `mesh_graph` in a local form, with the duplicate-edge bug fixed (§7).
   - Size each block's halo to the 8 mm length cap (§2, domain edges).
