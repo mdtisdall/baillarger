@@ -1,10 +1,10 @@
 # white-surf: the white surface of a hemisphere
 
 SpecVersion `white-surf/1`. Written by
-`python -m baillarger.white mesh DSEG --out DERIV [--block-cells B] [--device D]`
-(`baillarger.white.write_white_surface`) from a corrected segmentation
-(`wm-dseg/1`); read by `baillarger.white.WhiteSurface.load`. The sidecar's
-keys are enforced by `baillarger.white.SURF_SPEC`, and `tests/test_bids.py`
+`python -m baillarger.white_surf DSEG --out DERIV [--block-cells B] [--device D]`
+(`baillarger.white_surf.write_white_surface`) from a corrected segmentation
+(`wm-dseg/1`); read by `baillarger.white_surf.WhiteSurface.load`. The sidecar's
+keys are enforced by `baillarger.white_surf.SURF_SPEC`, and `tests/test_bids.py`
 checks that the table below lists the same keys, types and requirements.
 
 ## Files
@@ -23,8 +23,9 @@ and `ses`, hemisphere `<h>` (`R` or `L`):
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-blocks_white.tsv` | The block index |
 | `sub-<sub>_ses-<ses>_hemi-<h>_white.json` | Sidecar, `white-surf/1` |
 
-The mesh command then writes the surface's overview next to these files
-(`desc-overview`, `desc-overviewids`): see `white-overview.md`.
+The next command, `python -m baillarger.white_overview`, writes the surface's
+overview next to these files (`desc-overview`, `desc-overviewids`,
+`desc-overviewcarry`): see `white-overview.md`.
 
 `DERIV/dataset_description.json` (`DatasetType` `derivative`) is written if
 it is not there. BIDS has no settled rule for surface derivatives; the names

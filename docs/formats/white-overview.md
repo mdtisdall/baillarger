@@ -1,12 +1,11 @@
 # white-overview: a white surface decimated for viewing
 
 SpecVersion `white-overview/1`. Written by
-`python -m baillarger.white mesh DSEG --out DERIV [--overview-eps MM] [--workers N]`,
-right after the white surface (`white-surf/1`), or for a surface already written by
-`python -m baillarger.white overview SURF [--eps MM] [--workers N]`
-(`baillarger.white.write_white_overview`); read by
-`baillarger.white.WhiteOverview.load`. The sidecar's keys are enforced by
-`baillarger.white.OVERVIEW_SPEC`, and `tests/test_bids.py` checks that the
+`python -m baillarger.white_overview SURF [--eps MM] [--workers N]`
+(`baillarger.white_overview.write_white_overview`) from a white surface
+(`white-surf/1`, written by `python -m baillarger.white_surf`); read by
+`baillarger.white_overview.WhiteOverview.load`. The sidecar's keys are enforced by
+`baillarger.white_overview.OVERVIEW_SPEC`, and `tests/test_bids.py` checks that the
 table below lists the same keys, types and requirements.
 
 The overview is for display and navigation only (the viewer's surface panes,

@@ -201,7 +201,7 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--box", type=int, nargs=3)
     ap.add_argument("--points")
-    ap.add_argument("--dseg", help="the corrected segmentation (python -m baillarger.white dseg)")
+    ap.add_argument("--dseg", help="the corrected segmentation (python -m baillarger.white_dseg)")
     ap.add_argument("--phantoms", action="store_true")
     ap.add_argument("--noise", type=float, default=1.0)
     A = ap.parse_args()

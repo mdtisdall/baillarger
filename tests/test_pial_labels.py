@@ -10,7 +10,7 @@ from test_white import read_labels, write_data
 
 from baillarger import column_traces as CT
 from baillarger import pial_labels as PL
-from baillarger import white
+from baillarger import white_dseg
 from baillarger.data import RIM_CORTEX, RIM_OUTSIDE, RIM_WM, Patch
 
 VOX = 0.16
@@ -345,6 +345,6 @@ def test_the_command_reads_its_labels_from_a_dseg(
     argv = ["propose", "--out", str(out), "--name", "blk", "--dseg", str(p)]
     PL.main(argv + ["--lo", *map(str, lo), "--hi", *map(str, hi)])
     sl = tuple(slice(q, r) for q, r in zip(lo, hi, strict=True))
-    mask = np.isin(read_labels(p), white.filled_labels(p))[sl]
+    mask = np.isin(read_labels(p), white_dseg.filled_labels(p))[sl]
     rim = read_labels(out / "pial_labels_blk_labels.nii.gz")
     assert np.array_equal(rim == RIM_WM, mask)

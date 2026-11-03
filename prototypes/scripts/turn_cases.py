@@ -48,7 +48,7 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--box", type=int, nargs=3, required=True)
     ap.add_argument("--size", type=int, default=141)
-    ap.add_argument("--dseg", help="the corrected segmentation (python -m baillarger.white dseg)")
+    ap.add_argument("--dseg", help="the corrected segmentation (python -m baillarger.white_dseg)")
     ap.add_argument("--examples", type=int, default=6)
     A = ap.parse_args()
     Z = np.load(f"{A.work}/turn_diag_{A.name}.npz")

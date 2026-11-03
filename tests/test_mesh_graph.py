@@ -2,11 +2,12 @@
 vertex a path crossed, on meshes with known geodesics."""
 
 import numpy as np
+from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
 from baillarger import mesh_graph as G
 from baillarger.mesh import marching_tetrahedra
-from baillarger.mesh_smoothing import smooth_normals
+from baillarger.mesh_smoothing import edges, smooth_normals
 
 VOX = (0.16, 0.16, 0.16)
 
@@ -24,6 +25,51 @@ def test_edge_graph_weights_are_straight_line_lengths_in_mm() -> None:
     assert np.allclose(g.data, np.linalg.norm(d, axis=1))
     A = G.edge_graph(v, f, VOX).toarray()
     assert np.array_equal(A, A.T)
+
+
+def ball() -> tuple[np.ndarray, np.ndarray]:
+    """A small ball of radius 4.3 voxels: vertices (voxels), faces."""
+    c = np.indices((13, 13, 13)).astype(float) - 6.0
+    return marching_tetrahedra(np.linalg.norm(c, axis=0), 4.3)
+
+
+def _lengths(g: csr_matrix, v: np.ndarray, vox: tuple[float, ...]) -> np.ndarray:
+    c = g.tocoo()
+    d: np.ndarray = np.linalg.norm((v[c.row] - v[c.col]) * np.asarray(vox), axis=1)
+    return d
+
+
+def test_edge_graph_weights_on_a_tetrahedron() -> None:
+    """Each edge of a tetrahedron is a mesh edge and also the edge across a
+    pair of faces: no weight is the sum of two."""
+    v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], float)
+    f = np.array([[0, 2, 1], [0, 1, 3], [1, 2, 3], [0, 3, 2]])
+    vox = (0.16, 0.2, 0.32)
+    g = G.edge_graph(v, f, vox)
+    assert g.nnz == 12
+    assert np.allclose(g.data, _lengths(g, v, vox))
+
+
+def test_edge_graph_weights_on_a_ball() -> None:
+    """On this ball, some edges across a pair of faces occur twice in the
+    same order (the bug doubled their weights)."""
+    v, f = ball()
+    E = np.concatenate([edges(f), G._across(f)])
+    assert len(E) - len(np.unique(E, axis=0)) > 0
+    g = G.edge_graph(v, f, VOX)
+    assert np.allclose(g.data, _lengths(g, v, VOX), rtol=1e-12, atol=0)
+
+
+def test_edge_graph_edge_set_is_the_mesh_edges_and_the_edges_across() -> None:
+    v, f = ball()
+    g = G.edge_graph(v, f, VOX)
+    n = len(v)
+    E = np.concatenate([edges(f), G._across(f)])
+    want = np.zeros((n, n), bool)
+    want[E[:, 0], E[:, 1]] = True
+    want |= want.T
+    got = g.toarray() > 0
+    assert np.array_equal(got, want)
 
 
 def test_geodesics_on_a_plane_are_within_the_8_neighbour_bound() -> None:
