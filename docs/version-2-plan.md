@@ -1161,7 +1161,7 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
 
 #### Open
 
-- Overlays, mesh outlines and the 3D tile on the brick viewer.
+- The 3D tile on the brick viewer.
 - Placing points from the volume pane.
 - A camera shared between windows.
 
@@ -1177,7 +1177,7 @@ Order: phase 0 needs stream 1's phase 0. Phases 1 and 2 follow phase 0 and can r
   - Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
   - Bring in the geodesic-patch flat map (#69), on the fixed `mesh_graph` (§7).
 - **Phase 1: a painting mode** (brush and fill by class, slice by slice with 3D checks). Whether it is needed is open: scribbles and site answers are made in the review pane (phase 2), and no test regions are labelled.
-- **Phase 2: the stream 1 review pane:** the queue from `wm-sites/1`, the site-answer choices with previews (calling stream 1's published choice code), and scribbles (one class per stroke), writing `wm-edits/1`. Stream 1's phase 3 publishes all three; the pane holds no stream 1 logic of its own.
+- **Phase 2: the stream 1 review pane.** First, overlays on the brick pane: the labels, from a label-brick pyramid built like the echo's (the most common label of each 2×2×2 block in place of the mean), then mesh outlines. The review panes (this phase and phase 5) and the painting mode (phase 1) draw on the brick pane, not on NiiVue: NiiVue loads one box into the browser, which does not scale to 50 µm whole brain. Then the pane: the queue from `wm-sites/1`, the site-answer choices with previews (calling stream 1's published choice code), and scribbles (one class per stroke), writing `wm-edits/1`. Stream 1's phase 3 publishes all three; the pane holds no stream 1 logic of its own.
 - **Phase 3: columns.** Rewrite against the ray sampler, calling it for what is on screen: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
 - **Phase 4: stream 3's outputs,** a pane for each as its spec appears: the columns sampled on request, z(τ) and its levels with their sources, bands, thickness, and the two banks' tops at contacts.
 - **Phase 5: the stream 3 review pane:** the queue from `laminar-sites/1`, each site shown on its columns and on sections through them, with the carried level drawn; the user places points on the pial edge or the GM/WM transition, written to `laminar-edits/1`. The pane holds no stream 3 logic; stream 3's warp reads the answers on its next run.
