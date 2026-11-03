@@ -1,4 +1,4 @@
-# Lessons for the restart
+# Plan for restart of baillarger
 
 ## The approach
 
@@ -766,7 +766,7 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0. Phase 2 needs 
 - **Phase 0: the ray sampler, with normal rays, on stream 1's phase 0 surface.**
   - Write the ray-sampler spec first: it is the interface stream 3 and the viewer wait on.
   - Rewrite `column_traces` as the sampler: roots on `white-surf/1` vertices by edge key; rays of fixed extent (d inward, 8 mm outward) with no stops; label intervals and meetings; classes derived for diagnostics, without the bank split. The inward extension is new.
-  - The **normal** method: straight rays along the smoothed white normal (`streamlines.ray`, `first_fall`, `tissue_wm_distance`).
+  - The **normal** method: straight rays along the smoothed white normal (`streamlines.ray`, and `first_fall` on the shared WM-distance sampler, §7).
   - Port `mesh_graph` in a local form, on the duplicate-edge fix (§7).
   - Work by superblock, with halos in mm (§2, domain edges): 8 mm for the labels each ray samples, 16 mm for the rays it may meet. Read the labels through the chunked reader and its cache. Give the analysis that picks the superblock level. Test that a column is identical whichever superblock computes it.
 - **Phase 1: equivolume depth.** Add **equivolume** (`offset_equivolume`) to the sampler.
@@ -1142,7 +1142,7 @@ Each stream's plan lists its own modules. These are shared, or belong to no stre
 Samplers that belong to no stream (§1, Goals), computed on demand from published files, so every reader gets the same answer from the same code:
 
 - **Curvature of `white-surf/1`** at a scale given in mm, with smoothing that keeps mass (§3c, step 4). Readers: stream 3 (depth estimators), the viewer.
-- **The WM distance through tissue,** capped at 8 mm, with fluid and outside as obstacles, per superblock with its halo (§2). Readers: stream 1's `orient` (the sign of the data normal), stream 2 (`first_fall`). Today it is `tissue_wm_distance` in `streamlines`.
+- **The WM distance through tissue,** capped at 8 mm, with fluid and outside as obstacles, per superblock with its halo (§2). Readers: stream 1's `orient` (the sign of the data normal), stream 2 (`first_fall`). Today it is `tissue_wm_distance` in `streamlines`. It lands first, as its own PR straight after stream 1's phase 0, before stream 2's `first_fall` and `orient` build on it.
 
 Problems in the current code that a restart should not inherit:
 
@@ -1171,7 +1171,8 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | `orient` (sampler) | The structure tensor, the signed data normal and its coherence, for a superblock and its halo (§3c, step 3) | stream 1, phase 1 |
 | The ray sampler | Per column, keyed by edge key and method: samples from −d to 8 mm, label intervals, meetings, normal length (§4c, step 4) | stream 2, phase 0, first: stream 3 and the viewer wait on it |
 | The column volume (sampler) | Each column's echoes sampled along its ray, with 3D positions and partial-volume marks (§5c, step 1) | stream 3, phase 0 |
-| WM distance through tissue; curvature (samplers) | §7 | with their first readers: stream 1, phase 1; stream 3, phase 4 |
+| WM distance through tissue (sampler) | §7 | its own PR after stream 1, phase 0; before 2.0 and `orient` |
+| Curvature (sampler) | §7 | with its first reader: stream 3, phase 4 |
 | z(τ) | Depth maps per column: the pial edge at τ = 1, the GM/WM transition as a level | stream 3, phase 2 |
 | Bands; thickness and contacts | Bands per region and layer identity; the thickness field and contact splits | stream 3, phases 3–4 |
 | Feedback to stream 1 | Sites in `wm-sites/1` (no spec of its own) | stream 3, phase 5 |
@@ -1224,6 +1225,8 @@ flowchart TB
   S1P5 --> S1P7
   S1P6 & S1P7 -.-> S1P8
 
+  SHW["WM-distance sampler (shared)"]
+  S1P0 --> SHW --> S2P0 & S1P1
   S1P0 --> S2P0 --> S2P1 --> S2P2
   S1P1 --> S2P2
   S1P5 -.-> S2P2
@@ -1261,7 +1264,8 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 1.7 | 1.5 | |
 | 1.8 | 1.6, 1.7 | only if their diagnostics ask |
 | Scaling track | 1.0 | alongside 1.1–1.8; done before the first whole brain |
-| 2.0 | 1.0 | writes the ray-sampler spec first |
+| WM-distance sampler | 1.0 | shared (§7); before 2.0 and `orient` |
+| 2.0 | 1.0, the WM-distance sampler | writes the ray-sampler spec first |
 | 2.1 | 2.0 | |
 | 2.2 | 2.1; 1.1 (data normal) | the hippocampus roots wait on 1.5; its diagnostic decides between steering the rays here and stream 1's antialiasing term |
 | 2.3 | 2.2 | only if 2.2 shows something was missed |
