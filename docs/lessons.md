@@ -450,7 +450,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - **The answer log is append-only.** A correction is a new answer that supersedes an earlier one, never a rewrite, so the log is its own history: what each reviewer saw and chose, and when. Together with the kept fix diffs, it shows how later generations agreed with each answer.
 - **Two kinds of answer:**
   - **Site answers:** at a site from the queue, the viewer offers a few concrete choices with previews: `remove-strand`, `thicken`, `fill-gap`, `widen-gap`, `leave`, `manual-paint`. Each choice is a function of the current label that returns the voxels it changes. ITK-SNAP, on an exported crop, is the escape hatch for free painting.
-  - **Scribbles:** a few strokes marking voxels as WM or not WM, wherever the reviewer sees an error, including errors no site finder flags. Everything unmarked stays unlabelled, so nnU-Net trains on the strokes with its ignore label. Scribbles cost little per answer.
+  - **Scribbles:** a few strokes, each marking its voxels with one class from the label set (picked with a key; WM or cortex by default, the common cases), wherever the reviewer sees an error, including errors no site finder flags. Everything unmarked stays unlabelled, so nnU-Net trains on the strokes with its ignore label. Scribbles cost little per answer.
 - Only verified labels train the model. Automatic fixes and the model's own predictions never do.
 - The held-out test regions are labelled from scratch, apart from the queue.
 
@@ -502,7 +502,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
 - **Phase 1: review and fold repair** on phase 0's output (the steps of the #80 plan, with #81 and #82 as its first PRs). Its answers correct the hemisphere now and become the first verified training labels.
   1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
   2. The volume pane in `--white` mode (#82).
-  3. The review pane, with site answers and scribbles.
+  3. The review pane, with site answers and scribbles (one class per stroke).
   4. The ITK-SNAP escape hatch: export a crop, import the painted voxels as an answer.
   5. `wm-edits/1` edited so that answers stand on their own, in an append-only log with supersession.
   6. `dseg` publishes its fixes as a table and a sparse diff (step 2), under `wm-dseg-fixes/1`, with replay and revert tests; every run's diff is kept, keyed by its input SHAs.
@@ -511,7 +511,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
 - **Phase 2: data, label set, test regions.**
   - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 8 is needed.
   - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, and other labels only if a later stage needs them. Write the label-set spec with the majority rule for partial volume (3b), as the rule labellers follow.
-  - Test regions: a few boxes per hemisphere (start with V1V2, PCC_SPL, M1S1, and the V1V2 seam review points). They are labelled from scratch, not by correcting the seed labels, so the seed does not anchor them, and they are never used in training. Format: a BIDS `_dseg` with a versioned sidecar spec that records the box and the labeller.
+  - Test regions: a few boxes per hemisphere (start with V1V2, PCC_SPL, M1S1, and the V1V2 seam review points). They are labelled from scratch, not by correcting the seed labels, so the seed does not anchor them, and they are never used in training. Format: a BIDS `_dseg` with a versioned sidecar spec that records the box and the labeller. They are painted in the viewer's painting mode (stream 4, phase 1).
 - **Phase 3: the surface steps read probabilities.** Independent of the network; exact-answer tests on phantoms first.
   1. `handles.remove_handles` takes a required priority volume, P: the object front claims in order of decreasing P and the background front in order of increasing P, so the walls fall where P is closest to 0.5. Distance ordering goes. Phantom test: a handle whose bridge has a known low-P place away from its thinnest place; the cut must fall there.
   2. `antialias` takes a required data term: near the boundary, φ is pulled towards a smooth function of P − 0.5, weighted by a per-voxel confidence. The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. Phantom test: a plane at a known sub-voxel offset, with P a blurred step across it; the vertices must recover the offset.
@@ -1092,7 +1092,7 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 is the same work as stream 1's 
   - Port as is: `viewer.flatmap`, `viewer.inflation`, `viewer.sections`.
   - Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
   - Bring in the geodesic-patch flat map (#69), on the fixed `mesh_graph` (§7).
-- **Phase 1: the stream 1 review pane,** with site answers and scribbles, writing `wm-edits/1`.
+- **Phase 1: the stream 1 review pane,** with site answers and scribbles (one class per stroke), writing `wm-edits/1`; and a **painting mode** for labelling test regions from scratch (brush and fill by class, slice by slice with 3D checks), writing the test-region `_dseg` with the box and labeller in its sidecar, which stream 1's phase 2 needs.
 - **Phase 2: columns.** Rewrite against the ray sampler, calling it for what is on screen: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
 - **Phase 3: stream 3's outputs,** a pane for each as its spec appears: the columns sampled on request, z(τ) and its levels, bands, thickness and contacts.
 
@@ -1194,6 +1194,8 @@ flowchart TB
   S1P1 --> S2P2
   S1P5 -.-> S2P2
   S2P2 -.-> S2P3
+  S2P2 -. "antialiasing term, if called for" .-> S1P3
+  S4P1 --> S1P2
 
   S2P0 --> S3P0 --> S3P1 --> S3P2
   S3P1 --> S3P3
@@ -1216,8 +1218,8 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 |---|---|---|
 | 1.0 | — | gates every stream |
 | 1.1 | 1.0; 4.0 (the review pane) | 4.1 is the same work (the review pane); also `orient`, the data normal |
-| 1.2 | 1.0 | |
-| 1.3 | 1.0 | stand-in P from purple-mri |
+| 1.2 | 1.0; 4.1 (painting mode) | |
+| 1.3 | 1.0 | stand-in P from purple-mri; may later add the data-normal term, if 2.2's diagnostic calls for it, in whichever phase is then current |
 | 1.4 | 1.2 | gains from 1.1's answers |
 | 1.5 | 1.3, 1.4 | replaces the purple-mri aseg; streams 2–4 rerun; decides the hippocampus |
 | 1.6 | 1.1, 1.5 | queues 3.5's sites when they exist |
