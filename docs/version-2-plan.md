@@ -128,9 +128,12 @@ These bind every stream from its first version. A first version may be rough, bu
 **The kinds of data apart from training**
 
 1. **Training labels.** The seed labels during bootstrapping (phase 7), then only verified answers. Needed now. Every answer trains the next generation; none is withheld.
-2. **Data held apart inside a training run.** nnU-Net's five folds: each fold's model never sees its validation region. Needed from the first generation, for two reasons that are internal to training, not a test of success:
-   - **The fold spread** is the disagreement of the five fold models, the epistemic uncertainty that ranks the queue (phase 10). Without folds there is no spread, and the queue loses its "where more labels help" ranking.
-   - **Calibration of P near 0.5.** A network is overconfident on its own training voxels, so P is calibrated, and if needed corrected (temperature scaling), on each fold's out-of-fold predictions only. The walls of handle removal and the queue's margins depend on it (§3c, step 1).
+2. **Data held apart inside a training run.** Needed from the first generation, for two reasons that are internal to training, not a test of success: a spread that ranks the queue, and the calibration of P. The number of models is not fixed.
+   - **The first generation uses nnU-Net's five folds:** each fold's model never sees its validation region. It has no answers yet, so both the spread and the calibration come from the folds.
+     - **The fold spread** is the disagreement of the five fold models, the epistemic uncertainty that ranks the queue (phase 10).
+     - **Calibration of P near 0.5.** A network is overconfident on its own training voxels, so P is calibrated, and if needed corrected (temperature scaling), on out-of-fold predictions only. The walls of handle removal and the queue's margins depend on it (§3c, step 1).
+   - **A later generation may use one model.** Five folds cost about 5× the training of one model, and that delays the time before the answers come back as a better model. So, on a later generation, compare the fold spread with a cheaper spread from one model: test-time augmentation (nnU-Net's mirroring and flips) or a checkpoint ensemble. The measure is how well each spread predicts where the answers made against that generation change the labels, on the same answers for both. If the cheaper spread ranks as well, change to one model with that spread, and calibrate P on the last out-of-fold set plus the prequential answers, which are out of sample by construction.
+   - **The limits of the prequential answers as calibration data:** they are sparse (hundreds of sites against millions of voxels), they are biased towards hard sites (the queue picks them), and the first generation has none.
 
    Early stopping is not used: nnU-Net keeps its final checkpoint, and the schedule length is set by the retrospective replay. With one hemisphere the folds are contiguous Morton superblocks with an ignored gap one patch wide, because neighbouring voxels share their noise (correlation 0.5–0.67, §2) and a patch's context reaches across random splits; out-of-fold predictions next to a training voxel would look calibrated when they are not. With several hemispheres the folds split by hemisphere. Calibration near 0.5 needs verified labels at the boundary, since the seed labels are ignored there: for the first generation, trained on seed labels alone, it is read from views and from where P crosses 0.5 within purple-mri's ignore band; from the second, on the verified voxels in each fold's validation region. The fold scores (Dice and the like) are not success measures.
 3. **The operational measure.** Needed now, from the first review; it is the definition of success. Per hemisphere and per generation: the queue's length, the answers that change voxels and the voxels they change, and reviewer time where it is recorded. How fast it falls, review session by review session as generations follow each other, is how fast the system learns. Leakage between neighbouring voxels helps here: a model that fixes the neighbours of an answer has learnt from it, and the user benefits. So this measures what the user experiences, not generalisation to a new specimen.
@@ -147,7 +150,7 @@ These bind every stream from its first version. A first version may be rough, bu
 
 **Consequences for the plan**
 
-- Phase 8's folds stay, for the spread and the out-of-fold calibration, not for validation.
+- Phase 8's first generation uses five folds, for the spread and the out-of-fold calibration, not for validation. Whether later generations keep them is decided by the spread comparison (phase 10).
 - Phase 9's diagnostics score each generation on the answers made against it before it trained on them, and report the answers it trained on apart.
 - The retrospective replay scores each schedule prequentially.
 - The painting mode (stream 4, phase 1) stays out of the plan. Free painting has the `manual-paint` site answer and the ITK-SNAP escape hatch. It returns only if the de novo measure, when decided, needs dense labels.
@@ -592,7 +595,7 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
   - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset.
 - **Phase 8: the first generation.** Its labels and P replace the purple-mri aseg as stream 1's input, and the surface steps read P on the hemisphere for the first time; streams 2–4 rerun on the new outputs.
   - Then remove the labels-only path (distance ordering, smoothness-only antialiasing).
-  - Five folds, split by hemisphere when there are several. With one hemisphere, five spatial folds of contiguous Morton superblocks, with a gap one patch wide set to ignore between each fold's training and validation regions, so no patch straddles both. The folds exist for the fold spread and for calibrating P on out-of-fold predictions, not for validation (§1, *Data for training, and for judging success*); their scores are not success measures. Spatial folds make the fold spread include spatial variation as well as what more labels can fix.
+  - Five folds, split by hemisphere when there are several; whether later generations keep them is decided in phase 10. With one hemisphere, five spatial folds of contiguous Morton superblocks, with a gap one patch wide set to ignore between each fold's training and validation regions, so no patch straddles both. The folds exist for the fold spread and for calibrating P on out-of-fold predictions, not for validation (§1, *Data for training, and for judging success*); their scores are not success measures. Spatial folds make the fold spread include spatial variation as well as what more labels can fix.
   - Inference writes the `_dseg`, the WM-filled `_probseg` and the fold spread, with sidecars.
   - Diagnostics against the purple-mri seed labels as a baseline, on the hemisphere: the length of the review queue and the number of manual edits it needs; calibration of P near 0.5; handles and cavities before correction; the phase 6 walls and their margins, with P ordering against the labels-only path's distance ordering (where the walls move, the normal metrics, views of the walls that move most); views of where ours and purple-mri's differ most.
   - With its data, mesh the hemisphere with the hippocampus inside and outside the filled mask, and decide from views of both (Open).
@@ -601,13 +604,13 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
   - Once enough answers have accumulated, run the retrospective replay (step 1 Open) and set the update frequency, schedule length and replay from it.
 - **Phase 10: uncertainty.**
   - Two estimates that need no new network output:
-    - the fold spread, which is epistemic: what more labels can fix;
+    - the spread, which is epistemic: what more labels can fix. From the folds in the first generation; on a later generation, compared with a one-model spread (test-time augmentation, or a checkpoint ensemble) by how well each predicts where the answers made against that generation change the labels, on the same answers. If the one-model spread ranks as well, later generations train one model, and P is calibrated on the last out-of-fold set plus the prequential answers (§1);
     - σ from a calibrated P and a distance, which is aleatoric: what the image leaves open. If the boundary distance d at a voxel is Gaussian, d ~ N(μ, σ²), then P(inside) = Φ(−μ/σ).
   - Uses:
     - Rank the queue. A high-spread site is a good training label; a high-σ site is a judgment and is recorded as one.
     - Weight the antialias data term by 1/σ².
     - Give each white-surface vertex a position uncertainty.
-  - Diagnostic: do σ and the fold spread predict where the manual edits change the labels, on answers made against that generation (§1)?
+  - Diagnostic: do σ and the spread predict where the manual edits change the labels, on answers made against that generation (§1)?
 - **Phase 11: only if the diagnostics ask for it.**
   - A signed-distance output (capped at about 5 voxels, L1, trained only where every voxel within the cap is labelled), or a Laplace head with β-NLL, if the σ derived from P is poorly calibrated or saturated where it matters.
   - N4 bias correction, if the network's errors (where the manual edits change its labels) follow position across the specimen or a smooth fit of WM intensity (§2).
