@@ -67,6 +67,7 @@ from scipy import sparse
 from scipy.spatial import cKDTree
 
 from baillarger._jit import njit
+from baillarger.excisions import TISSUE_LABELS, detect
 from baillarger.mesh import marching_tetrahedra
 
 type Bool = npt.NDArray[np.bool_]
@@ -144,22 +145,11 @@ def missing_tissue(
 ) -> Bool:
     """Tissue the aseg labels (WM or cortex) where the FLASH is black: blocks
     cut out of the specimen before the scan, imputed by the segmentation.
-
-    The FLASH smoothed by sigma voxels is below frac x the cortex median, in
-    connected blocks of at least min_vox voxels, grown by margin_mm.
-    """
-    f = np.asarray(flash, np.float64)
-    tis = (rim == 2) | (rim == 3)
-    gm_med = np.median(f[rim == 3])
-    blk = tis & (ndi.gaussian_filter(f, sigma) < frac * gm_med)
-    lab, n = ndi.label(blk)
-    big = np.zeros(n + 1, bool)
-    big[1:] = np.bincount(lab.ravel(), minlength=n + 1)[1:] >= min_vox
-    miss: Bool = big[lab]
-    it = int(round(margin_mm / min(voxel_mm)))
-    if it:
-        miss = ndi.binary_dilation(miss, iterations=it) & tis
-    return miss
+    baillarger.excisions.detect on the rim labels (2 WM, 3 cortex), kept
+    with its old signature for the old callers."""
+    wm, ctx = TISSUE_LABELS["R"]
+    aseg = np.select([rim == 2, rim == 3], [wm, ctx], 0).astype(np.int16)
+    return detect(aseg, flash, voxel_mm, "R", frac, sigma, min_vox, margin_mm)
 
 
 # ---------------------------------------------------------------- white mesh
