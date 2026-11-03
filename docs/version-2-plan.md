@@ -585,13 +585,14 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 
 The whole stream proceeds in phases. Phase 0 runs the pipeline on the purple-mri aseg as it is, so the other streams get real outputs early; each later phase refines a step (the segmentation, the surface, the review) keeping the published formats (extended in place, never replaced), and downstream streams rerun on the new outputs. Each phase is one or more PRs.
 
-Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each other, and phase 2 follows phase 1. The viewer's review pane (stream 4, phase 2) builds on phase 3, and answers exist only once the review pane does. Phase 7 needs phases 2 and 5 (and gains from phase 3's answers); phase 8 needs phases 6 and 7; phase 9 needs phase 8 and the review pane (stream 4, phase 2); phase 10 needs phase 8; phase 11 only if the diagnostics of phases 9 and 10 ask for it. Whole-brain scaling is a track of its own, alongside phases 1–11, and must be done before the first whole brain.
+Order: phase 0 first. Phases 0.5, 1, 3 and 5 can then start alongside each other, phase 2 follows phase 1, and phase 4 follows phase 2. Phase 6 is written with phase 8. The viewer's review pane (stream 4, phase 2) builds on phase 3, and answers exist only once the review pane does. Phase 7 needs phases 2 and 5 (and gains from phase 3's answers); phase 8 needs phases 6 and 7; phase 9 needs phase 8 and the review pane (stream 4, phase 2); phase 10 needs phase 8; phase 11 only if the diagnostics of phases 9 and 10 ask for it. Whole-brain scaling is a track of its own, alongside phases 1–11, and must be done before the first whole brain.
 
 - **Phase 0: the pipeline on the purple-mri aseg.** **Done** (#91, #98, #106); the hemisphere outputs are rerun whenever the label set changes. Changed in round 1: the excision step (fragments, crumbs, the bubble mask, `wm-excisions/1`) was added. The excision detector stays at bootstrap quality, because the purple-mri aseg only bootstraps; its known limits are in step 2. Labels only, with the current code's labels-only path (handle removal ordered by distance, antialiasing by smoothness alone). The aim is the published outputs streams 2–4 need: `wm-dseg/1`, `white-surf/1`, `white-overview/1`.
   - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
   - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` with its band path, the only one it has (the blocked solve is scaling item 4).
   - Add the normal length \|n̄\| to `white-surf/1` (`_desc-normlen_white.func.gii`) and its spec, since stream 2's phase 0 records it on each column. Exact tests: 1 on a plane; below 1 at the crest of a thin blade.
   - The rule for cut faces (step 2): relabel the purple-mri aseg's excisions to outside with the detector, and keep its excision map as a test set. The excision step drops map fragments, makes crumbs outside and publishes the bubble mask (step 2, `wm-excisions/1`). Phantom tests: an excision through WM that leaves a tunnel (fixed by a plug), and one that cuts a piece off (b0 rises).
+- **Phase 0.5: the white surface's pieces.** State how many closed pieces the white surface has on the hemisphere, which they are (the main piece, WM islands inside cortex, pieces cut off by excisions), and the rule that keeps or removes each kind: the connectivity that `dseg` uses to count pieces (§2 allows only Kuhn adjacency), against FreeSurfer's largest 18-connected component, and whether an enclosed ventricle may be a piece of its own (step 2, Open). Every vertex of a piece is a column root, so streams 2 and 3 and the flat map (§6c, closed pieces) read the result. Mostly measurement and text: correct the counts in step 2 and §6c, and change `wm-dseg/1` only if the rule changes.
 - **Phase 1: the WM-distance sampler** (shared code, §7). Port `tissue_wm_distance` from `streamlines` as a sampler: the distance through tissue, capped at 8 mm, with fluid and outside as obstacles, per superblock with its halo (§2). Exact tests: the straight-line distance where nothing blocks the path, a path forced round a fluid obstacle, and the same value whichever superblock computes it. Phase 2 (`orient`) builds on it, for the sign of the data normal.
 - **Phase 2: `orient`** (step 3). Port the tensor tools from `streamlines` (torch, blocks) as an on-demand sampler of the local cortex level, the structure tensor and the signed data normal with its coherence, with exact tests (phantom planes and spheres), and add agreement of the surface normals with it to the surface diagnostics.
 - **Phase 3: the review's formats and code** on phase 0's output (the steps of the #80 plan, with #81 as its first PR). Everything here is stream 1's and needs no viewer; the viewer's review pane (stream 4, phase 2) is built on it, and the answers made there correct the hemisphere now and become the first verified training labels.
@@ -600,10 +601,10 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
   3. The site-answer choices (`remove-strand`, `thicken`, `fill-gap`, `widen-gap`, `leave`) as published code with a written contract: each a function of the current label and the site that returns the voxels it changes. The review pane calls them for its previews and writes what the reviewer picks; exact tests on phantoms.
   4. The ITK-SNAP escape hatch, as a command-line tool: export a crop, import the painted voxels as an answer.
   5. `dseg` publishes its fixes as a table and a sparse diff (step 2), under `wm-dseg-fixes/1`, with replay and revert tests; every run's diff is kept, keyed by its input SHAs.
-- **Phase 4: fold repair.** Finish the fold repair of #85 on phase 0's output: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold. To compare the fixes, start from #83: its `dseg` options (fill cost, thickening of cuts and fills, thread trimming) vary the handle fixes and are off by default. Run the variants on the hemisphere and compare the tight-fold sites by kind (GM or fluid, near a fix or not), the voxels changed and the surface area. The comparison answers the Open item on fills through cortex against thickening (3c).
+- **Phase 4: fold repair.** After phase 2, so that the variants are judged with the data normal. Finish the fold repair of #85 on phase 0's output: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold. To compare the fixes, start from #83: its `dseg` options (fill cost, thickening of cuts and fills, thread trimming) vary the handle fixes and are off by default. Run the variants on the hemisphere and compare the tight-fold sites by kind (GM or fluid, near a fix or not), the voxels changed and the surface area. The comparison answers the Open item on fills through cortex against thickening (3c).
 - **Phase 5: the label set.** **Done** (#89, #95, #117), except the hippocampus (phase 8). Changed in round 1: the phase was "data, label set, test regions". The list of hemispheres was dropped: there are many, and the models improve as they train on them. The test regions were dropped: no data is held out (§1). The ventricles were moved outside (step 2).
   - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, and other labels only if a later stage needs them. Check `FILLED_LABELS` against FreeSurfer's fill (`mri_edit_wm_with_aseg`) and decide each label it treats differently, with the reason recorded. Write the label-set spec with the majority rule for partial volume (3b), as the rule labellers follow. Done: `label-set/1` and `labels.py` (#89, #95); the decisions are in 3b and step 2. Open: the hippocampus (phase 8). The ventricles are outside (step 2) (`labels.py` and `label-set/1`, #117).
-- **Phase 6: the surface steps read probabilities.** Code and exact-answer tests on phantoms only: there is no P on the real hemisphere until phase 8, which runs it there.
+- **Phase 6: the surface steps read probabilities.** Written with phase 8, not before: the code fixes what P means (a probability, or a tissue fraction for a sub-voxel position), which is settled with the first generation's calibration. Code and exact-answer tests on phantoms, then phase 8 runs it on the hemisphere.
   1. `handles.remove_handles` takes a required priority volume, P: the object front claims in order of decreasing P and the background front in order of increasing P, so the walls fall where P is closest to 0.5. Distance ordering goes. Phantom test: a handle whose bridge has a known low-P place away from its thinnest place; the cut must fall there.
   2. `antialias` takes a required data term: near the boundary, φ is pulled towards a smooth function of P − 0.5, weighted by a per-voxel confidence. The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. Phantom test: a plane at a known sub-voxel offset, with P a blurred step across it; the vertices must recover the offset.
   3. The fix table gains each fix's signed margin in P (step 2). The review queue ranks by it.
@@ -1307,6 +1308,7 @@ Each stream's plan (§3d, §4d, §5d, §6d) gives its own order. This section pu
 flowchart TB
   subgraph S1["Stream 1: WM segmentation and surface"]
     S1P0["1.0 pipeline on the purple-mri aseg"]
+    S1P05["1.0.5 the white surface's pieces"]
     S1P1["1.1 WM-distance sampler (shared)"]
     S1P2["1.2 orient"]
     S1P3["1.3 review formats and code"]
@@ -1348,7 +1350,8 @@ flowchart TB
   end
 
   S1P0 --> S1P1 --> S1P2
-  S1P0 --> S1P3 & S1P4 & S1P5 & S1P6 & S1SC
+  S1P0 --> S1P05 & S1P3 & S1P5 & S1P6 & S1SC
+  S1P2 --> S1P4
   S1P2 & S1P5 --> S1P7
   S4P2 -. "first answers" .-> S1P7
   S1P6 & S1P7 --> S1P8
@@ -1357,6 +1360,7 @@ flowchart TB
   S1P9 & S1P10 -.-> S1P11
 
   S1P0 --> S2P0 --> S2P1 --> S2P2
+  S1P05 -.-> S2P1
   S1P2 --> S2P2
   S1P8 -.-> S2P2
   S2P2 -.-> S2P3
@@ -1389,41 +1393,49 @@ Shading: dark grey, done; light grey, partly done; no shading, not started. The 
 
 A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or feedback that enters as an input.
 
-| Phase | Status | Needs | Notes |
-|---|---|---|---|
-| 1.0 | **Done** (#91, #98, #106) | — | gates every stream |
-| 1.1 |  | 1.0 | shared code (§7); `orient`'s sign builds on it |
-| 1.2 |  | 1.1 | `orient`: the local cortex level, the data normal and its coherence |
-| 1.3 |  | 1.0 | the formats and code the review pane (4.2) is built on; no viewer needed |
-| 1.4 |  | 1.0 | |
-| 1.5 | **Done** (#89, #95, #117) | 1.0 | writes the label-set spec |
-| 1.6 |  | 1.0 | code and phantom tests only; no P on the hemisphere until 1.8, which runs it there |
-| 1.7 |  | 1.2, 1.5 | the `pial_labels` check reads 1.2's local cortex level; gains from the answers made in 4.2 |
-| 1.8 |  | 1.6, 1.7 | replaces the purple-mri aseg; first P on the hemisphere, then the labels-only path goes; streams 2–4 rerun; decides the hippocampus |
-| 1.9 |  | 1.8, 4.2 | queues 3.6's sites when they exist |
-| 1.10 |  | 1.8 | |
-| 1.11 |  | each item when its own diagnostic asks: 1.9, 1.10; 2.2 for the antialiasing term; 3.5 for cut seeds | only if their diagnostics ask |
-| Scaling track |  | 1.0 | alongside 1.1–1.11; done before the first whole brain |
-| 2.0 | **Done** (#94, #100, #101, #102, #108, #113) | 1.0 | writes the ray-sampler spec first; 1.0's hemisphere outputs only for its hemisphere run |
-| 2.1 |  | 2.0 | |
-| 2.2 |  | 2.1; 1.2 (data normal) | the hippocampus roots wait on 1.8; its diagnostic decides between steering the rays here and stream 1's antialiasing term |
-| 2.3 |  | 2.2 | only if 2.2 shows something was missed |
-| 3.0 | **Done** (#103, #104, #109) | 2.0 | starts once 2.0's spec exists; 2.0's code and 1.0's hemisphere outputs only for its hemisphere run |
-| 3.1 |  | 3.0 | |
-| 3.2 | **Done** (#96, #105) | — | the QPBO solver; can start at once, off the critical path |
-| 3.3 |  | 3.1, 3.2 | gains from 3.4 (bands as levels); reads 3.7's answers as anchors once 4.5 writes them |
-| 3.4 |  | 3.1 | alongside 3.3 |
-| 3.5 |  | 3.3 | gains from 2.1 (V(s), for equal-volume depth); tests cut tops against the excision map |
-| 3.6 |  | 3.3 | feeds stream 1 as review sites; gains from 3.7 (reviewed bottoms) |
-| 3.7 |  | 3.3 | writes `laminar-sites/1` and `laminar-edits/1` first |
-| Stream 3 scaling track |  | 3.3, 3.5 | done before the first whole brain |
-| 4.0 | **Done** (#92, #97, #99, #114, #115, #116) | 1.0 | porting and merging need only 1.0's formats and split; the hemisphere outputs only for its hemisphere check |
-| 4.0.5 |  | 4.0 | split from 4.2 in round 1 |
-| 4.1 |  | 4.0.5 | the painting mode; out of the plan unless the de novo measure, when decided, needs dense labels |
-| 4.2 |  | 4.0.5, 1.3 | the review pane, on 1.3's formats and choice code |
-| 4.3 |  | 2.0, 4.0 | |
-| 4.4 |  | 3.3, 3.4, 4.0 | 3.5 adds panes when it publishes |
-| 4.5 |  | 3.7, 4.0.5 | the stream 3 review pane |
+| Phase | Wave | Status | Needs | Notes |
+|---|---|---|---|---|
+| 1.0 | 1 | **Done** (#91, #98, #106) | — | gates every stream |
+| 1.0.5 | 2 |  | 1.0 | how many pieces the white surface has, and the rule that keeps each kind; streams 2 and 3 and the flat map read it |
+| 1.1 | 2 |  | 1.0 | shared code (§7); `orient`'s sign builds on it |
+| 1.2 | 2 |  | 1.1 | `orient`: the local cortex level, the data normal and its coherence |
+| 1.3 | 2 |  | 1.0 | the formats and code the review pane (4.2) is built on; no viewer needed |
+| 1.4 | 3 |  | 1.2 | judged with 1.2's data normal; compares the #83 variants first |
+| 1.5 | 1 | **Done** (#89, #95, #117) | 1.0 | writes the label-set spec |
+| 1.6 | later |  | 1.0 | written with 1.8, once the meaning of P is settled; code and phantom tests, then 1.8 runs it on the hemisphere |
+| 1.7 | 3 |  | 1.2, 1.5 | the `pial_labels` check reads 1.2's local cortex level; gains from the answers made in 4.2 |
+| 1.8 | later |  | 1.6, 1.7 | replaces the purple-mri aseg; first P on the hemisphere, then the labels-only path goes; streams 2–4 rerun; decides the hippocampus |
+| 1.9 | later |  | 1.8, 4.2 | queues 3.6's sites when they exist |
+| 1.10 | later |  | 1.8 | |
+| 1.11 | later |  | each item when its own diagnostic asks: 1.9, 1.10; 2.2 for the antialiasing term; 3.5 for cut seeds | only if their diagnostics ask |
+| Scaling track | later |  | 1.0 | alongside 1.1–1.11; done before the first whole brain |
+| 2.0 | 1 | **Done** (#94, #100, #101, #102, #108, #113) | 1.0 | writes the ray-sampler spec first; 1.0's hemisphere outputs only for its hemisphere run |
+| 2.1 | 2 |  | 2.0 | |
+| 2.2 | 3 |  | 2.1; 1.2 (data normal) | the hippocampus roots wait on 1.8; its diagnostic decides between steering the rays here and stream 1's antialiasing term |
+| 2.3 | later |  | 2.2 | only if 2.2 shows something was missed |
+| 3.0 | 1 | **Done** (#103, #104, #109) | 2.0 | starts once 2.0's spec exists; 2.0's code and 1.0's hemisphere outputs only for its hemisphere run |
+| 3.1 | 2 |  | 3.0 | |
+| 3.2 | 1 | **Done** (#96, #105) | — | the QPBO solver; can start at once, off the critical path |
+| 3.3 | 3 |  | 3.1, 3.2 | gains from 3.4 (bands as levels); reads 3.7's answers as anchors once 4.5 writes them |
+| 3.4 | 3 |  | 3.1 | alongside 3.3 |
+| 3.5 | later |  | 3.3 | gains from 2.1 (V(s), for equal-volume depth); tests cut tops against the excision map |
+| 3.6 | later |  | 3.3 | feeds stream 1 as review sites; gains from 3.7 (reviewed bottoms) |
+| 3.7 | later |  | 3.3 | writes `laminar-sites/1` and `laminar-edits/1` first |
+| Stream 3 scaling track | later |  | 3.3, 3.5 | done before the first whole brain |
+| 4.0 | 1 | **Done** (#92, #97, #99, #114, #115, #116) | 1.0 | porting and merging need only 1.0's formats and split; the hemisphere outputs only for its hemisphere check |
+| 4.0.5 | 2 |  | 4.0 | split from 4.2 in round 1 |
+| 4.1 | later |  | 4.0.5 | the painting mode; out of the plan unless the de novo measure, when decided, needs dense labels |
+| 4.2 | 2 |  | 4.0.5, 1.3 | the review pane, on 1.3's formats and choice code |
+| 4.3 | 2 |  | 2.0, 4.0 | |
+| 4.4 | later |  | 3.3, 3.4, 4.0 | 3.5 adds panes when it publishes |
+| 4.5 | later |  | 3.7, 4.0.5 | the stream 3 review pane |
+
+**Waves.** The phases are done in waves; each wave holds the phases whose needs the earlier waves meet, and the plan's findings are settled for a wave's phases before it starts.
+
+- **Wave 1** (round 1): 1.0, 1.5, 2.0, 3.0, 3.2 and 4.0, all done.
+- **Wave 2:** 1.0.5, 1.1, 1.2, 1.3, 2.1, 3.1, 4.0.5, 4.2 and 4.3. It ends with the first review session on the hemisphere: 1.3's formats and code, the overlays and the review pane, with real answers in the edit log. Review comes before fold repair (1.4), so some of the sites reviewed may be ones fold repair would fix; the answers still stand on their own and train the first generation.
+- **Wave 3:** 1.4, 1.7, 2.2, 3.3 and 3.4.
+- **Later:** the first generation and what follows it (1.6, 1.8–1.11), 2.3, 3.5–3.7, 4.1, 4.4, 4.5 and the scaling tracks; the outcome measures are settled with 1.9 (§1).
 
 **Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.4, 1.8, each review's answers and each generation in 1.9; a new version of a sampler), the stored outputs that read it rerun on it: stream 1's own, and stream 3's z(τ), bands and thickness. Samplers need no rerun: they compute from whatever is published on the next call. Nothing waits for a new version: each phase works on whatever is published.
 
