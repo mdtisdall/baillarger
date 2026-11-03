@@ -531,7 +531,7 @@ The whole stream proceeds in phases. Phase 0 runs the pipeline on the purple-mri
 
 Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each other, and phase 2 follows phase 1. The viewer's review pane (stream 4, phase 2) builds on phase 3, and answers exist only once the review pane does. Phase 7 needs phases 2 and 5 (and gains from phase 3's answers); phase 8 needs phases 6 and 7; phase 9 needs phase 8 and the review pane (stream 4, phase 2); phase 10 needs phase 8; phase 11 only if the diagnostics of phases 9 and 10 ask for it. Whole-brain scaling is a track of its own, alongside phases 1–11, and must be done before the first whole brain.
 
-- **Phase 0: the pipeline on the purple-mri aseg.** Labels only, with the current code's labels-only path (handle removal ordered by distance, antialiasing by smoothness alone). The aim is the published outputs streams 2–4 need: `wm-dseg/1`, `white-surf/1`, `white-overview/1`.
+- **Phase 0: the pipeline on the purple-mri aseg.** **Done** (#91, #98, #106); the hemisphere outputs are rerun whenever the label set changes. Changed in round 1: the excision step (fragments, crumbs, the bubble mask, `wm-excisions/1`) was added. The excision detector stays at bootstrap quality, because the purple-mri aseg only bootstraps; its known limits are in step 2. Labels only, with the current code's labels-only path (handle removal ordered by distance, antialiasing by smoothness alone). The aim is the published outputs streams 2–4 need: `wm-dseg/1`, `white-surf/1`, `white-overview/1`.
   - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
   - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` with its band path, the only one it has (the blocked solve is scaling item 4).
   - Add the normal length \|n̄\| to `white-surf/1` (`_desc-normlen_white.func.gii`) and its spec, since stream 2's phase 0 records it on each column. Exact tests: 1 on a plane; below 1 at the crest of a thin blade.
@@ -545,7 +545,7 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
   4. The ITK-SNAP escape hatch, as a command-line tool: export a crop, import the painted voxels as an answer.
   5. `dseg` publishes its fixes as a table and a sparse diff (step 2), under `wm-dseg-fixes/1`, with replay and revert tests; every run's diff is kept, keyed by its input SHAs.
 - **Phase 4: fold repair.** Finish the fold repair of #85 on phase 0's output: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
-- **Phase 5: the label set.**
+- **Phase 5: the label set.** **Done** (#89, #95, #117), except the hippocampus (phase 8). Changed in round 1: the phase was "data, label set, test regions". The list of hemispheres was dropped: there are many, and the models improve as they train on them. The test regions were dropped: no data is held out (§1). The ventricles were moved outside (step 2).
   - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, and other labels only if a later stage needs them. Check `FILLED_LABELS` against FreeSurfer's fill (`mri_edit_wm_with_aseg`) and decide each label it treats differently, with the reason recorded. Write the label-set spec with the majority rule for partial volume (3b), as the rule labellers follow. Done: `label-set/1` and `labels.py` (#89, #95); the decisions are in 3b and step 2. Open: the hippocampus (phase 8). The ventricles are outside (step 2) (`labels.py` and `label-set/1`, #117).
 - **Phase 6: the surface steps read probabilities.** Code and exact-answer tests on phantoms only: there is no P on the real hemisphere until phase 8, which runs it there.
   1. `handles.remove_handles` takes a required priority volume, P: the object front claims in order of decreasing P and the background front in order of increasing P, so the walls fall where P is closest to 0.5. Distance ordering goes. Phantom test: a handle whose bridge has a known low-P place away from its thinnest place; the cut must fall there.
@@ -783,7 +783,7 @@ The stream proceeds in phases, as stream 1 does. Phase 0 gives stream 3 and the 
 
 Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0. Phase 2 needs phase 1 and stream 1's `orient` (its phase 2). Phase 3 only if phase 2 shows something obvious was missed.
 
-- **Phase 0: the ray sampler, with normal rays, on stream 1's phase 0 surface.**
+- **Phase 0: the ray sampler, with normal rays, on stream 1's phase 0 surface.** **Done** (#94, #100, #101, #102, #108, #113).
   - Write the ray-sampler spec first: it is the interface stream 3 and the viewer wait on.
   - Rewrite `column_traces` as the sampler: roots on `white-surf/1` vertices by edge key; rays with no stops, their inward and outward extents call parameters up to the caps, 2 mm inward and 8 mm outward (label intervals always over the full caps, since they read labels only); label intervals; classes derived for diagnostics, without the bank split. The inward extension is new.
   - The **normal** method: straight rays along the smoothed white normal (`streamlines.ray`).
@@ -1046,9 +1046,9 @@ The stream proceeds in phases, as streams 1 and 2 do: each phase adds one design
 
 Order: phase 0 needs stream 2's phase 0, and phase 1 follows it. Phase 2 needs nothing and can start at once, so the solver is off the critical path. Phase 3 needs phases 1 and 2; phase 4 needs phase 1 and can run alongside phase 3 (its bands become the joint warp's levels); phase 5 needs phase 3 and gains from stream 2's phase 1; phases 6 and 7 need phase 3. Stream 4's phase 5 (the review pane) needs phase 7, and its answers rerun phase 3's warp.
 
-- **Phase 0: the column-volume sampler** on stream 2's ray sampler: the column volume of a superblock and its halo (in mm, §2), computed on demand through the chunked reader and its cache, between extents given per column, with exact tests. No file; a sampler contract (§1), since the viewer calls it too.
+- **Phase 0: the column-volume sampler** **Done** (#103, #104, #109). On stream 2's ray sampler: the column volume of a superblock and its halo (in mm, §2), computed on demand through the chunked reader and its cache, between extents given per column, with exact tests. No file; a sampler contract (§1), since the viewer calls it too.
 - **Phase 1: flattening.** Port `flatten` with a blocked or local solve, and a torch version if it stays heavy.
-- **Phase 2: a QPBO that is not GPL.** It replaces `thinqpbo` (GPL-3) under `surfcut.qpbo`, and needs nothing from any other phase (#96, #105).
+- **Phase 2: a QPBO that is not GPL.** It replaces `thinqpbo` (GPL-3) under `surfcut.qpbo`, and needs nothing from any other phase. **Done** (#96, #105).
   - A survey of permissive libraries and other algorithms, with GPU support and whole-brain scale, came first (`docs/plans/phase-3.2-survey.md`, #105). Its outcome: QPBO and QPBO-I are our own, on an int64 max flow behind one function (`_flow.max_flow`). The engine behind it is OR-Tools' `SimpleMaxFlow` (Apache-2.0, push-relabel), so `ortools` is a runtime dependency. Our own int64 max flow in numba comes later, as the first step of scaling item 2. No exact route runs on the GPU today; the GPU routes are research for scaling item 2.
   - Exact tests: brute force on small problems; on submodular problems it must equal the plain min-cut; the same answer on every run; the same bound and strong labels as dwave-preprocessing's `roof_duality` (Apache-2.0), and the same bound as the local-polytope LP. No GPL code, not even as a test reference.
   - The engineering lessons of 5c, step 3: int64 capacities with costs rounded down, hard costs of 1 + the finite total below 2⁶¹, no term that depends on a window's centre, and determinism without a global random state.
@@ -1180,13 +1180,14 @@ The viewer proceeds in phases that follow the other streams: each phase adds pan
 
 Order: phase 0 needs stream 1's phase 0. Phases 1 and 2 follow phase 0 and can run alongside each other: phase 2 needs stream 1's review formats and code (its phase 3). Phase 3 needs stream 2's phase 0, and phase 4 needs stream 3's published outputs. Phase 5 needs phase 3 and stream 3's review formats (its phase 7).
 
-- **Phase 0: the viewer on stream 1's outputs.**
+- **Phase 0: the viewer on stream 1's outputs.** **Partly done** (#92, #97, #99, #114, #115, #116); the hemisphere check on main is pending. Changed in round 1: two fixes were added, the metric term in the inflation (#115, §6c) and the depth test for the selected point in the large surface pane (#116).
   - Port with changes: `viewer.server`, `viewer.overview`, `viewer.white_view`, `viewer.surface` (the parts that already read published outputs).
   - Port as is: `viewer.flatmap`, `viewer.sections`. `viewer.inflation` gets the metric-preserving term (§6c, Inflation).
   - Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
   - Bring in the geodesic-patch flat map (#69), on the fixed `mesh_graph` (§7).
-- **Phase 1: a painting mode** (brush and fill by class, slice by slice with 3D checks). Whether it is needed is open: scribbles and site answers are made in the review pane (phase 2), and no test regions are labelled.
-- **Phase 2: the stream 1 review pane.** First, overlays on the brick pane: the labels, from a label-brick pyramid built like the echo's (the most common label of each 2×2×2 block in place of the mean), then mesh outlines. The review panes (this phase and phase 5) and the painting mode (phase 1) draw on the brick pane, not on NiiVue: NiiVue loads one box into the browser, which does not scale to 50 µm whole brain. Then the pane: the queue from `wm-sites/1`, the site-answer choices with previews (calling stream 1's published choice code), and scribbles (one class per stroke), writing `wm-edits/1`. Stream 1's phase 3 publishes all three; the pane holds no stream 1 logic of its own.
+- **Phase 0.5: overlays on the brick pane:** the labels, from a label-brick pyramid built like the echo's (the most common label of each 2×2×2 block in place of the mean), then mesh outlines. The review panes (phases 2 and 5) and the painting mode (phase 1) draw on the brick pane, not on NiiVue: NiiVue loads one box into the browser, which does not scale to 50 µm whole brain. Changed in round 1: split from phase 2, because phases 1, 2 and 5 all draw on these overlays.
+- **Phase 1: a painting mode** (brush and fill by class, slice by slice with 3D checks). Whether it is needed is open: scribbles and site answers are made in the review pane (phase 2), and no test regions are labelled. Changed in round 1: the phase existed to paint the test regions, which were dropped.
+- **Phase 2: the stream 1 review pane:** the queue from `wm-sites/1`, the site-answer choices with previews (calling stream 1's published choice code), and scribbles (one class per stroke), writing `wm-edits/1`. Stream 1's phase 3 publishes all three; the pane holds no stream 1 logic of its own. Changed in round 1: the brick-pane overlays moved to phase 0.5.
 - **Phase 3: columns.** Rewrite against the ray sampler, calling it for what is on screen: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
 - **Phase 4: stream 3's outputs,** a pane for each as its spec appears: the columns sampled on request, z(τ) and its levels with their sources, bands, thickness, and the two banks' tops at contacts.
 - **Phase 5: the stream 3 review pane:** the queue from `laminar-sites/1`, each site shown on its columns and on sections through them, with the carried level drawn; the user places points on the pial edge or the GM/WM transition, written to `laminar-edits/1`. The pane holds no stream 3 logic; stream 3's warp reads the answers on its next run.
@@ -1281,6 +1282,7 @@ flowchart TB
   end
   subgraph S4["Stream 4: viewer"]
     S4P0["4.0 viewer on stream 1's outputs"]
+    S4P05["4.0.5 brick-pane overlays"]
     S4P1["4.1 painting mode, if needed"]
     S4P2["4.2 stream 1 review pane"]
     S4P3["4.3 columns"]
@@ -1312,52 +1314,60 @@ flowchart TB
   S3P6 -.-> S1P9
   S3P3 & S3P5 --> S3SC
 
-  S1P0 --> S4P0 --> S4P1 & S4P2
+  S1P0 --> S4P0 --> S4P05 --> S4P1 & S4P2
   S1P3 --> S4P2
   S2P0 & S4P0 --> S4P3
   S3P3 & S3P4 --> S4P4
   S3P5 -.-> S4P4
-  S3P7 & S4P0 --> S4P5
+  S3P7 & S4P05 --> S4P5
   S4P5 -. "answers as anchors" .-> S3P3
   S3P5 -. "cut seeds, if needed" .-> S1P11
+
+  classDef done fill:#9e9e9e,stroke:#424242,color:#000
+  classDef partial fill:#e0e0e0,stroke:#616161,color:#000
+  class S1P0,S1P5,S2P0,S3P0,S3P2 done
+  class S4P0 partial
 ```
+
+Shading: dark grey, done; light grey, partly done; no shading, not started. The table gives each phase's PRs.
 
 A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or feedback that enters as an input.
 
-| Phase | Needs | Notes |
-|---|---|---|
-| 1.0 | — | gates every stream |
-| 1.1 | 1.0 | shared code (§7); `orient`'s sign builds on it |
-| 1.2 | 1.1 | `orient`: the local cortex level, the data normal and its coherence |
-| 1.3 | 1.0 | the formats and code the review pane (4.2) is built on; no viewer needed |
-| 1.4 | 1.0 | |
-| 1.5 | 1.0 | writes the label-set spec |
-| 1.6 | 1.0 | code and phantom tests only; no P on the hemisphere until 1.8, which runs it there |
-| 1.7 | 1.2, 1.5 | the `pial_labels` check reads 1.2's local cortex level; gains from the answers made in 4.2 |
-| 1.8 | 1.6, 1.7 | replaces the purple-mri aseg; first P on the hemisphere, then the labels-only path goes; streams 2–4 rerun; decides the hippocampus |
-| 1.9 | 1.8, 4.2 | queues 3.6's sites when they exist |
-| 1.10 | 1.8 | |
-| 1.11 | each item when its own diagnostic asks: 1.9, 1.10; 2.2 for the antialiasing term; 3.5 for cut seeds | only if their diagnostics ask |
-| Scaling track | 1.0 | alongside 1.1–1.11; done before the first whole brain |
-| 2.0 | 1.0 | writes the ray-sampler spec first; 1.0's hemisphere outputs only for its hemisphere run |
-| 2.1 | 2.0 | |
-| 2.2 | 2.1; 1.2 (data normal) | the hippocampus roots wait on 1.8; its diagnostic decides between steering the rays here and stream 1's antialiasing term |
-| 2.3 | 2.2 | only if 2.2 shows something was missed |
-| 3.0 | 2.0 | starts once 2.0's spec exists; 2.0's code and 1.0's hemisphere outputs only for its hemisphere run |
-| 3.1 | 3.0 | |
-| 3.2 | — | the QPBO solver; can start at once, off the critical path |
-| 3.3 | 3.1, 3.2 | gains from 3.4 (bands as levels); reads 3.7's answers as anchors once 4.5 writes them |
-| 3.4 | 3.1 | alongside 3.3 |
-| 3.5 | 3.3 | gains from 2.1 (V(s), for equal-volume depth); tests cut tops against the excision map |
-| 3.6 | 3.3 | feeds stream 1 as review sites; gains from 3.7 (reviewed bottoms) |
-| 3.7 | 3.3 | writes `laminar-sites/1` and `laminar-edits/1` first |
-| Stream 3 scaling track | 3.3, 3.5 | done before the first whole brain |
-| 4.0 | 1.0 | porting and merging need only 1.0's formats and split; the hemisphere outputs only for its hemisphere check |
-| 4.1 | 4.0 | the painting mode; whether it is needed is open |
-| 4.2 | 4.0, 1.3 | the review pane, on 1.3's formats and choice code |
-| 4.3 | 2.0, 4.0 | |
-| 4.4 | 3.3, 3.4, 4.0 | 3.5 adds panes when it publishes |
-| 4.5 | 3.7, 4.0 | the stream 3 review pane |
+| Phase | Status | Needs | Notes |
+|---|---|---|---|
+| 1.0 | **Done** (#91, #98, #106) | — | gates every stream |
+| 1.1 |  | 1.0 | shared code (§7); `orient`'s sign builds on it |
+| 1.2 |  | 1.1 | `orient`: the local cortex level, the data normal and its coherence |
+| 1.3 |  | 1.0 | the formats and code the review pane (4.2) is built on; no viewer needed |
+| 1.4 |  | 1.0 | |
+| 1.5 | **Done** (#89, #95, #117) | 1.0 | writes the label-set spec |
+| 1.6 |  | 1.0 | code and phantom tests only; no P on the hemisphere until 1.8, which runs it there |
+| 1.7 |  | 1.2, 1.5 | the `pial_labels` check reads 1.2's local cortex level; gains from the answers made in 4.2 |
+| 1.8 |  | 1.6, 1.7 | replaces the purple-mri aseg; first P on the hemisphere, then the labels-only path goes; streams 2–4 rerun; decides the hippocampus |
+| 1.9 |  | 1.8, 4.2 | queues 3.6's sites when they exist |
+| 1.10 |  | 1.8 | |
+| 1.11 |  | each item when its own diagnostic asks: 1.9, 1.10; 2.2 for the antialiasing term; 3.5 for cut seeds | only if their diagnostics ask |
+| Scaling track |  | 1.0 | alongside 1.1–1.11; done before the first whole brain |
+| 2.0 | **Done** (#94, #100, #101, #102, #108, #113) | 1.0 | writes the ray-sampler spec first; 1.0's hemisphere outputs only for its hemisphere run |
+| 2.1 |  | 2.0 | |
+| 2.2 |  | 2.1; 1.2 (data normal) | the hippocampus roots wait on 1.8; its diagnostic decides between steering the rays here and stream 1's antialiasing term |
+| 2.3 |  | 2.2 | only if 2.2 shows something was missed |
+| 3.0 | **Done** (#103, #104, #109) | 2.0 | starts once 2.0's spec exists; 2.0's code and 1.0's hemisphere outputs only for its hemisphere run |
+| 3.1 |  | 3.0 | |
+| 3.2 | **Done** (#96, #105) | — | the QPBO solver; can start at once, off the critical path |
+| 3.3 |  | 3.1, 3.2 | gains from 3.4 (bands as levels); reads 3.7's answers as anchors once 4.5 writes them |
+| 3.4 |  | 3.1 | alongside 3.3 |
+| 3.5 |  | 3.3 | gains from 2.1 (V(s), for equal-volume depth); tests cut tops against the excision map |
+| 3.6 |  | 3.3 | feeds stream 1 as review sites; gains from 3.7 (reviewed bottoms) |
+| 3.7 |  | 3.3 | writes `laminar-sites/1` and `laminar-edits/1` first |
+| Stream 3 scaling track |  | 3.3, 3.5 | done before the first whole brain |
+| 4.0 | **Partly done** (#92, #97, #99, #114, #115, #116): the hemisphere check on main is pending | 1.0 | porting and merging need only 1.0's formats and split; the hemisphere outputs only for its hemisphere check |
+| 4.0.5 |  | 4.0 | split from 4.2 in round 1 |
+| 4.1 |  | 4.0.5 | the painting mode; whether it is needed is open |
+| 4.2 |  | 4.0.5, 1.3 | the review pane, on 1.3's formats and choice code |
+| 4.3 |  | 2.0, 4.0 | |
+| 4.4 |  | 3.3, 3.4, 4.0 | 3.5 adds panes when it publishes |
+| 4.5 |  | 3.7, 4.0.5 | the stream 3 review pane |
 
 **Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.4, 1.8, each review's answers and each generation in 1.9; a new version of a sampler), the stored outputs that read it rerun on it: stream 1's own, and stream 3's z(τ), bands and thickness. Samplers need no rerun: they compute from whatever is published on the next call. Nothing waits for a new version: each phase works on whatever is published.
 
