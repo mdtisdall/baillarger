@@ -1,6 +1,6 @@
 """The ray sampler on a hemisphere: the diagnostics of phase 2.0.
 
-    python prototypes/scripts/ray_hemisphere.py SURF DSEG OUT [--level M]
+    python prototypes/scripts/ray_hemisphere.py SURF DSEG OUT [--pieces] [--level M]
         [--only N] [--overview OVERVIEW] [--cache-gb G]
 
 Samples every superblock that the surface crosses (or the first N, in Morton
@@ -12,6 +12,10 @@ order) at the full caps and the default step, and writes to OUT:
   normal length |n̄| (bins); the fraction of roots whose ray goes from its WM
   straight into outside with no cortex between (cut faces); the time and the
   peak memory of each call and of the pass;
+- `wm_to_outside.npy`: per vertex, whether its ray goes from WM into
+  outside with no cortex between;
+- with `--pieces`, after a pass, in its own process: the counts by
+  connected piece of the surface, added to `summary.json`;
 - with `--overview`, `classes_overview.png`: the derived classes on the
   overview mesh, from four sides.
 """
@@ -52,6 +56,46 @@ def wm_to_outside(r: rays.Rays) -> npt.NDArray[np.bool_]:
     return out
 
 
+def piece_labels(surf: Path, n: int) -> npt.NDArray[np.int64]:
+    """The connected piece of each vertex (before the pass, so that its
+    memory is freed before the sampler's)."""
+    from nibabel.gifti.gifti import GiftiImage
+
+    from baillarger.mesh_smoothing import pieces
+
+    g = GiftiImage.from_filename(str(surf), mmap=True)
+    f = np.asarray(g.darrays[1].data, np.int64)
+    vlab, _ = pieces(f, n)
+    return vlab
+
+
+def pieces_table(
+    vlab: npt.NDArray[np.int64], cls: npt.NDArray[np.uint8], cut: npt.NDArray[np.bool_]
+) -> list[dict[str, int]]:
+    """Per connected piece of the surface, largest first: its roots, their
+    derived classes and the roots whose ray goes from WM into outside."""
+    out = []
+    for p in np.argsort(-np.bincount(vlab[vlab >= 0]), kind="stable"):
+        sel = vlab == p
+        row = {"piece": int(p), "roots": int(sel.sum())}
+        row |= {NAMES[k]: int(np.sum(cls[sel] == k)) for k in NAMES}
+        row["wm_to_outside"] = int(cut[sel].sum())
+        out.append(row)
+    return out
+
+
+def add_pieces(surf: Path, out: Path) -> None:
+    """The counts by piece, from a pass's saved arrays, in their own process
+    (the piece labels of the whole mesh need several GB)."""
+    cls = np.load(out / "classes.npy")
+    cut = np.load(out / "wm_to_outside.npy")
+    vlab = piece_labels(surf, len(cls))
+    summary = json.loads((out / "summary.json").read_text())
+    summary["by_piece"] = pieces_table(vlab, cls, cut)
+    summary["pieces_peak_gb"] = round(peak_gb(), 3)
+    (out / "summary.json").write_text(json.dumps(summary, indent=1))
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("surf", type=Path)
@@ -61,8 +105,16 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--only", type=int, default=0)
     p.add_argument("--overview", type=Path)
     p.add_argument("--cache-gb", type=float, default=0.25)
+    p.add_argument(
+        "--pieces",
+        action="store_true",
+        help="after a pass: add the counts by piece of the surface to summary.json",
+    )
     a = p.parse_args(argv)
     a.out.mkdir(parents=True, exist_ok=True)
+    if a.pieces:
+        add_pieces(a.surf, a.out)
+        return
     t0 = time.perf_counter()
     sampler = rays.RaySampler(a.surf, a.dseg, int(a.cache_gb * (1 << 30)))
     t_open = time.perf_counter() - t0
@@ -123,49 +175,70 @@ def main(argv: list[str] | None = None) -> None:
         calls=calls,
     )
     np.save(a.out / "classes.npy", cls)
+    np.save(a.out / "wm_to_outside.npy", cut)
     (a.out / "summary.json").write_text(json.dumps(summary, indent=1))
     if a.overview:
-        draw(a.overview, cls, a.out / "classes_overview.png")
+        draw(
+            a.overview,
+            [
+                ("derived class", cls, ["#bbbbbb", "#2a7fd4", "#d4552a", "#e8c547"]),
+                ("WM into outside", cut.astype(np.uint8), ["#bbbbbb", "#7a1fa2"]),
+            ],
+            a.out / "classes_overview.png",
+        )
 
 
-def draw(overview: Path, cls: npt.NDArray[np.uint8], png: Path) -> None:
-    """The derived classes on the overview mesh (each overview vertex shows
-    its true vertex), from four sides."""
+def draw(
+    overview: Path,
+    values: list[tuple[str, npt.NDArray[np.uint8], list[str]]],
+    png: Path,
+) -> None:
+    """Per-vertex values on the overview mesh (each overview vertex shows its
+    true vertex): one row per value, orthographic views from both sides of
+    each axis of the scanner, faces drawn far to near."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.collections import PolyCollection
     from matplotlib.colors import ListedColormap
     from nibabel.gifti.gifti import GiftiImage
 
     g = GiftiImage.from_filename(str(overview))
     x, f = g.agg_data(("pointset", "triangle"))
+    x = np.asarray(x, np.float64)
+    f = np.asarray(f, np.int64)
     name = overview.name.replace("desc-overview_", "desc-overviewids_")
-    ids = (
-        GiftiImage.from_filename(
-            str(overview.with_name(name.replace(".surf.", ".func.")))
-        )
-        .darrays[0]
-        .data
+    name = name.replace(".surf.gii", ".func.gii")
+    ids = GiftiImage.from_filename(str(overview.with_name(name))).darrays[0].data
+    ids = np.asarray(ids).reshape(-1)
+    views = [(0, 1), (0, -1), (1, 1), (1, -1), (2, 1), (2, -1)]
+    labels = ["+x", "-x", "+y", "-y", "+z", "-z"]
+    fig, axes = plt.subplots(
+        len(values), len(views), figsize=(4 * len(views), 4.5 * len(values))
     )
-    c = cls[ids].astype(float)
-    face = np.round(np.median(c[f], axis=1))
-    cmap = ListedColormap(["#bbbbbb", "#2a7fd4", "#d4552a", "#e8c547"])
-    fig = plt.figure(figsize=(16, 12))
-    views = [(0, 0), (0, 180), (90, 0), (-90, 0)]
-    for i, (elev, azim) in enumerate(views):
-        ax = fig.add_subplot(2, 2, i + 1, projection="3d")
-        tri = ax.plot_trisurf(
-            x[:, 0], x[:, 1], x[:, 2], triangles=f, linewidth=0, antialiased=False
-        )
-        tri.set_array(face)
-        tri.set_cmap(cmap)
-        tri.set_clim(-0.5, 3.5)
-        ax.view_init(elev, azim)
-        ax.set_axis_off()
-        ax.set_box_aspect(np.ptp(x, axis=0))
-    fig.suptitle("derived class: grey none, blue open, red in WM, yellow neither")
-    fig.savefig(png, dpi=110, bbox_inches="tight")
+    axes = np.atleast_2d(axes)
+    for row, (title, val, colours) in enumerate(values):
+        c = val[ids]
+        face = np.array([np.bincount(t, minlength=len(colours)).argmax() for t in c[f]])
+        cmap = ListedColormap(colours)
+        for col, (axis, sign) in enumerate(views):
+            ax = axes[row, col]
+            plane = [a for a in range(3) if a != axis]
+            depth = sign * x[f, axis].mean(1)
+            o = np.argsort(depth)  # far first
+            pc = PolyCollection(x[f[o]][:, :, plane], cmap=cmap, linewidths=0)
+            pc.set_array(face[o].astype(float))
+            pc.set_clim(-0.5, len(colours) - 0.5)
+            ax.add_collection(pc)
+            ax.set_xlim(x[:, plane[0]].min(), x[:, plane[0]].max())
+            ax.set_ylim(x[:, plane[1]].min(), x[:, plane[1]].max())
+            ax.set_aspect("equal")
+            if sign > 0:
+                ax.invert_xaxis()
+            ax.set_title(f"{title}, seen from {labels[col]}", fontsize=9)
+            ax.set_axis_off()
+    fig.savefig(png, dpi=100, bbox_inches="tight")
 
 
 if __name__ == "__main__":
