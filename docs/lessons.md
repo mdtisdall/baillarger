@@ -63,7 +63,7 @@ Each stream publishes its outputs in a specified format and reads only the other
 These bind every stream from its first version. A first version may be rough, but its algorithms and data structures must be ones that scale.
 
 - **Native resolution.** Work at the acquired resolution: 160 µm now, 50 µm whole brains later. Never decimate or downsample to make a step tractable. The decimated overview is for display only.
-- **Whole brain.** The target is about 2·10¹⁰ voxels and 3.5·10⁸ surface vertices. Stages work on blocks with a halo, with no whole-volume float arrays. Volumes are read through one reader, chunked when large: NIfTI-Zarr, 64³ chunks sharded in Morton order.
+- **Whole brain.** The target is about 2·10¹⁰ voxels and 3.5·10⁸ surface vertices. Stages work on blocks with a halo stated in mm (§2, domain edges), with no whole-volume float arrays. Volumes are read through one reader, chunked when large: NIfTI-Zarr, 64³ chunks sharded in Morton order.
 - **GPU where it pays at the large scale.** PyTorch: CUDA on big machines, MPS on the laptop, with numpy as the reference. Each device is tested against numpy on the laptop. These stay on the CPU, parallel over independent pieces: sequential steps (handle removal), I/O and checks.
 - **Results identical across devices up to float32 rounding.** No discrete jump that rounding can flip.
 - **Always 3D.** Slices only for seeding or display.
@@ -117,6 +117,9 @@ The restart does not work on boxes. Two things from them still matter:
 
 - **Read the box numbers with their edge bias in mind.** Most stream 2 and 3 evidence comes from boxes, and 65–99 % of column failures and a quarter to two thirds of contacts lay at box faces (SF F26, F27). The numbers here are evidence about methods; expect them to change on the hemisphere.
 - **Blocked processing has the same edge effect at every block boundary.** Near any cut in the data, columns run out and fronts from beyond the cut never arrive, so their neighbours meet in their place. On the boxes it took regions at least 6 mm from every face, and leaving out roots within 2 mm of a face, to keep results clean. So a block's halo must reach as far as anything that crosses it: a column (up to the 8 mm length cap), a front, a smoothing kernel. Otherwise the result depends on where the block boundaries fall.
+- **Halos are stated in mm, never in blocks.** A 64-voxel block is 10.3 mm at 160 µm but 3.2 mm at 50 µm, so "the neighbouring blocks" covers the 8 mm cap now and fails later. Reaches add up: two rays can meet only if their roots lie within 16 mm (8 mm each), so finding meetings needs a 16 mm reach, and sampling an 8 mm one. A halo copied round each 64³ block would cost ((B + 2h)/B)³ in reads: 216× for an 8 mm halo at 50 µm. Two things keep it small:
+  - **Superblocks.** Stages with long reaches (streams 2 and 3) work on a coarser level of the same Morton order: a superblock of 8³ blocks is a contiguous run of the block index, 25.6 mm at 50 µm, and an 8 mm halo then costs about 4.3×. The level is chosen by analysis for the target hardware (its working set against GPU memory). The 64³ blocks of storage and of `white-surf/1` stay as they are.
+  - **The halo is a set of reads, not a copy.** Volumes are sampled on demand through the chunked reader, with a chunk cache, and superblocks are visited in Morton order, so each chunk is read about once whatever the halo.
 
 **Identity, topology and precision** (code; #61)
 
@@ -647,8 +650,8 @@ Measured at the marked points (CP; #47, #52, #58):
 *Design and lessons*
 
 - Today the traces are a prototype `.npz` with no spec, built on a box white mesh with no edge keys.
-- **Blocked, because no reader reads them whole.** A 50 µm whole brain has about 3.5·10⁸ columns per method; with per-sample positions (a median column of about 75 samples at 12 bytes each) that is about 300 GB per method. Stream 3 reads the columns of one block and its halo; the viewer reads the columns round what is on screen.
-  - A column belongs to the 64³ Morton block of its root vertex and is keyed by its root's edge key, so the block index of `white-surf/1` finds the roots and their columns together, and a halo is the neighbouring blocks.
+- **Blocked, because no reader reads them whole.** A 50 µm whole brain has about 3.5·10⁸ columns per method; with per-sample positions (a median column of about 75 samples at 12 bytes each) that is about 300 GB per method. Stream 3 reads the columns of one superblock and its halo; the viewer reads the columns round what is on screen.
+  - A column belongs to the 64³ Morton block of its root vertex and is keyed by its root's edge key, so the block index of `white-surf/1` finds the roots and their columns together. A superblock and its halo (in mm, §2) are runs of that index.
   - Per-sample arrays are ragged: one array of samples with a pointer array per block, as `white-overview/1` stores the true vertices each face carries.
   - **Straight rays are stored by their parameters** (root, direction, length), not by samples: their samples are recomputed on demand, which cuts the main method's size by about two orders of magnitude. Only methods whose paths bend (front-equivolume, and the deflected normal ray if adopted) store samples.
   - Per-column fields are stored once per column: the stop reason, the class, the meetings (`crest_at`, `meet_at`), the root met and its distance along the surface.
@@ -712,7 +715,7 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0. Phase 2 needs 
   - Rewrite `column_traces` to root on `white-surf/1` vertices by edge key and trace by mesh blocks, keeping the constants and the classes by ending (4c, step 3), without the bank split, and leaving out roots on the cut-face flag.
   - The **normal** method: straight rays along the smoothed white normal (`streamlines.ray`, `first_fall`, `tissue_wm_distance`), stopped by stream 1's labels.
   - Port `mesh_graph` in a local form, with the duplicate-edge bug fixed (§7).
-  - Size each block's halo to the 8 mm length cap (§2, domain edges).
+  - Trace by superblock, with halos in mm (§2, domain edges): 8 mm for the labels each ray samples, 16 mm for the rays it may meet. Read the labels through the chunked reader and its cache. Give the analysis that picks the superblock level.
 - **Phase 1: equivolume depth.** Add **equivolume** (`offset_equivolume`) and **front-equivolume** (`column_front.grow_equivolume`, per mesh block) to the published traces.
 - **Phase 2: the open questions** (4c, Open), on the hemisphere away from domain edges:
   - the misalignment diagnostic (4c, Open), and from it the steering it calls for: the deflected normal ray here, stream 1's antialiasing term there, or both;
@@ -754,7 +757,7 @@ Where each layer lies along every column, read from the image's own contrast and
 
 | Input | From | Use |
 |---|---|---|
-| Column traces, for one block and its halo | stream 2, step 4 | where to sample |
+| Column traces, for one superblock and its halo (in mm) | stream 2, step 4 | where to sample |
 | The FLASH echoes, for the same region | the scan | the samples |
 
 *Outputs*
@@ -940,7 +943,7 @@ The stream proceeds in phases, as streams 1 and 2 do: each phase adds one design
 
 Order: phase 0 needs stream 2's phase 0. Phases 1 and 2 follow in order; phase 3 can run alongside phase 2 (its bands become the joint warp's levels); phase 4 needs phase 2 and gains from stream 2's phase 1; phase 5 needs phase 2.
 
-- **Phase 0: the column-volume sampler** on stream 2's phase 0 traces: the column volume of a block and its halo, computed on demand, with exact tests. No file and no spec.
+- **Phase 0: the column-volume sampler** on stream 2's phase 0 traces: the column volume of a superblock and its halo (in mm, §2), computed on demand through the chunked reader and its cache, with exact tests. No file and no spec.
 - **Phase 1: flattening.** Port `flatten` with a blocked or local solve, and a torch version if it stays heavy.
 - **Phase 2: the joint warp.**
   - Port `surfcut.model` and `surfcut.cut`; replace `surfcut.qpbo` with a QPBO that is not GPL (our own, or a permissive library).
