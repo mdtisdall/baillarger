@@ -69,10 +69,13 @@ def test_the_surface_and_its_sidecar(surface: tuple[Path, Path]) -> None:
     assert np.all(np.sum(s.normals[ball] * (s.v[ball] - c), 1) > 0)
     assert np.allclose(np.linalg.norm(s.normals, axis=1), 1, atol=1e-5)
     # the normal length: in [0, 1], near 1 on the smooth ball and block, and
-    # the length that mesh_smoothing gives for the vertices as read
+    # the length that mesh_smoothing gives for the vertices as read. On the
+    # ball (radius r about 11 voxels) the unit normals turn by about s / r
+    # over the smoothing support (s about 2 voxels), so the length is about
+    # 1 - (s / r)**2 / 2, near 0.98
     assert s.normlen.dtype == np.float32 and s.normlen.shape == (len(s.v),)
     assert s.normlen.min() >= 0 and s.normlen.max() <= 1
-    assert np.median(s.normlen) > 0.999
+    assert np.median(s.normlen) > 0.98
     _, ref = S.smooth_normals_and_length(s.v, s.f)
     assert np.abs(s.normlen - np.minimum(ref, 1)).max() < 1e-4
 

@@ -149,6 +149,24 @@ def test_normal_length_of_an_octahedron_after_one_step() -> None:
     np.testing.assert_allclose(n, v, atol=1e-15)
 
 
+def test_normal_length_is_not_renormalised_between_steps() -> None:
+    """The octahedron as above. With no division, each step halves the
+    vector at every vertex (its neighbours' vectors still have the mean 0),
+    so after k steps the length is 0.5**k. With a division in each step it
+    would stay 0.5. The unit normals are the vertices at every step."""
+    v = np.array(
+        [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]], float
+    )
+    f = np.array(
+        [[0, 2, 4], [2, 1, 4], [1, 3, 4], [3, 0, 4]]
+        + [[2, 0, 5], [1, 2, 5], [3, 1, 5], [0, 3, 5]]
+    )
+    for k in (2, 10):
+        n, length = S.smooth_normals_and_length(v, f, k)
+        np.testing.assert_allclose(length, 0.5**k, rtol=1e-12)
+        np.testing.assert_allclose(n, v, atol=1e-12)
+
+
 def test_old_and_new_normals_are_the_same() -> None:
     v, f, _ = ball_mesh(8.0)
     for iters in (1, 3, 10):
