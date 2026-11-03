@@ -127,7 +127,7 @@ The restart does not work on boxes. Two things from them still matter:
 - **Vertex identity is the grid-edge key:** lin(p) × 7 + (4 s_i + 2 s_j + s_k − 1), in int64. It survives remeshing, so anything stored per vertex keys on it.
 - **The block layout:** the grid starts at voxel 0, with 64-voxel blocks in Morton order (i at bit 3b+2, j at 3b+1, k at 3b). A vertex is owned by the first block that uses it.
 - **Precision:** mesh steps run in float32, with float64 only for the affine, area sums and intersection tests. Torch kernels use no float64, no CSR and no atomics, so each run gives the same result. An unavailable device is an error.
-- **Manual and feedback inputs** are replayable inputs, applied before the automatic step and never baked into the source (`wm-edits/1`, #78).
+- **Manual inputs** are replayable inputs, applied before the automatic step and never baked into the source (`wm-edits/1`, #78). Feedback from a later stream enters as review sites, so it reaches the labels only through a person's answer.
 
 **Licences**
 
@@ -162,7 +162,7 @@ A closed surface without handles near the grey/white-matter boundary of each hem
 - The flow: input label + edits → `dseg` (automatic correction, with a fixes image) → white surface.
   - No later step writes back into the input label or into `dseg`. The surface stage never changes the label it read.
   - The automatic fixes (cuts, fills, thickening) stay in the derivative and its fixes image. They never become part of the input.
-- The loop closes through inputs. A person's answer, or later stream 3's feedback, becomes an edit: the verified label of each voxel it covers, valid for any input. Stream 1 then reruns from the start.
+- The loop closes through inputs. A person's answer becomes an edit: the verified label of each voxel it covers, valid for any input. Stream 3's feedback enters as sites in the review queue; the answers to them are verified labels like any other. Stream 1 then reruns from the start.
   - Edits are kept apart from the automatic changes, so they apply again when the correction changes.
   - `DecidedAgainst` records the SHA of the `dseg` the person looked at, so a rerun can list the answers whose context changed (`wm-edits/1`, #78).
 - Steps 2–5 must not depend on which generation produced the label.
@@ -409,6 +409,7 @@ The coupling that is real, decided once:
 |---|---|---|
 | Corrected labels and fixes image | step 2 | finding sites |
 | P and fold spread | step 1 | finding and ranking sites |
+| Sites from stream 3: where the GM/WM transition along the columns disagrees with the WM label | stream 3, step 6 (`wm-sites/1`) | more sites |
 | The FLASH, the surface, the overview | the scan; steps 4 and 5 | display in the viewer |
 
 *Outputs*
@@ -426,7 +427,8 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - **The queue.** The pipeline finds the sites that need judgment and gathers them into one queue per hemisphere, after the automatic result:
   - tight folds (`wm-sites/1`) and large handle fixes;
   - the topology walls with the smallest margin in P;
-  - the places with the largest fold spread, where the model is least sure.
+  - the places with the largest fold spread, where the model is least sure;
+  - stream 3's sites, where the profiles disagree with the WM label.
 - **Each answer serves twice:**
   - as an edit that corrects this hemisphere now;
   - as a verified label for training the next generation.
@@ -459,7 +461,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 
   Since labelling happens in our viewer, an interactive model would run on the viewer's server, not inside Slicer or ITK-SNAP. Whichever spreads a scribble, its output is the model's guess, not a verified label. Only the strokes, and what the reviewer explicitly accepts, train the next generation.
 - Whether an automatic fix that a reviewer accepted (`leave`) counts as verified, and so trains the model.
-- How stream 3's feedback (for example, the GM/WM transition found along columns) becomes a stream 1 input. Does it edit the label, or adjust the surface stage?
+- Which of stream 3's disagreements become sites, and how they rank against the other site finders.
 - **The bootstrap's stand-in P.** If purple-mri cannot save its probabilities, the surface steps need another stand-in P before the first generation exists.
 - Open decisions for our own segmentation:
   - **The hippocampus: inside the white surface or outside it.** To be decided once there is data, by looking at both on our own segmentation. If inside, stream 2 must also decide how to treat roots on the part of the surface that wraps it, which is not neocortex: a medial-wall label, or roots kept and judged later.
@@ -925,11 +927,11 @@ Where each layer lies along every column, read from the image's own contrast and
 
 | Output | Spec | Used by |
 |---|---|---|
-| An input to stream 1; content and format open | none yet | stream 1, steps 1–2 |
+| Sites for stream 1's review queue: where the GM/WM transition along the columns disagrees with the WM label | `wm-sites/1` | stream 1, step 6 |
 
 *Design and lessons*
 
-- Nothing is built. The feedback must arrive as a spec'd input to stream 1, as `wm-edits` does, never as a code dependency.
+- Nothing is built. The feedback arrives as sites in stream 1's queue, in `wm-sites/1`, never as a code dependency and never as labels. Stream 3's output is a machine output: it neither edits the labels nor trains the model unless a person answers its site (stream 1's rule against drift).
 
 #### Open
 
@@ -940,7 +942,7 @@ Where each layer lies along every column, read from the image's own contrast and
 - The M1/S1 profile miss. The candidates: template locality, superficial thinning at the contact, or an areal border.
 - An honest likelihood: measure the residual correlation, or use Student-t.
 - Band identity beyond the stria; whether equal τ is the same layer across an areal border; what M1S1's τ 0.33 band is.
-- What the feedback to stream 1 says, and in what format.
+- Which disagreements become sites, and how they are ranked.
 
 ### 5d. Implementation plan
 
@@ -957,7 +959,7 @@ Order: phase 0 needs stream 2's phase 0. Phases 1 and 2 follow in order; phase 3
   - Rewrite `bands` (DP with the cross-validated K) and `gain` only if they are needed.
   - Salvage the layer-maps diagnostics from #56 (isopachs, pinch-outs, facies; `layer_maps_lib.py` and its tests).
 - **Phase 4: thickness and contacts.** Resolve the two conflicts (5c, Open) on one shared set of hemisphere columns, away from domain edges, then publish the thickness field and the contact splits with their specs.
-- **Phase 5: feedback to stream 1.** Decide what it says and write its spec, as an input stream 1 reads like its edits.
+- **Phase 5: feedback to stream 1.** Write the site finder for disagreements between the GM/WM transition and the WM label, publishing sites in `wm-sites/1`.
 
 ## 6. Stream 4: the viewer
 
@@ -1111,7 +1113,7 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | Column traces | Rays keyed by edge key and method, blocked by the white surface's blocks; straight rays by parameters, bent rays by ragged samples; per-column stops, classes and meetings (§4c, step 4) | stream 2, phase 0, first: stream 3 and the viewer wait on it |
 | z(τ) | Depth maps per column: the pial edge at τ = 1, the GM/WM transition as a level | stream 3, phase 2 |
 | Bands; thickness and contacts | Bands per region and layer identity; the thickness field and contact splits | stream 3, phases 3–4 |
-| Feedback to stream 1 | An input stream 1 reads like its edits | stream 3, phase 5 |
+| Feedback to stream 1 | Sites in `wm-sites/1` (no spec of its own) | stream 3, phase 5 |
 
 ## 9. Dependencies between phases
 
@@ -1189,7 +1191,7 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 1.3 | 1.0 | stand-in P from purple-mri |
 | 1.4 | 1.2 | gains from 1.1's answers |
 | 1.5 | 1.3, 1.4 | replaces the purple-mri aseg; streams 2–4 rerun; decides the hippocampus |
-| 1.6 | 1.1, 1.5 | takes 3.5's feedback as an input when it exists |
+| 1.6 | 1.1, 1.5 | queues 3.5's sites when they exist |
 | 1.7 | 1.5 | |
 | 1.8 | 1.6, 1.7 | only if their diagnostics ask |
 | Scaling track | 1.0 | alongside 1.1–1.8; done before the first whole brain |
