@@ -518,6 +518,7 @@ def test_the_normal_length_is_the_roots(
     exact values are phase 1.0's tests)."""
     sampler = phantom["blade"][0]
     r = every_column(sampler)
+    assert r.roots.normal_length.shape == r.roots.vertex.shape
     assert np.array_equal(r.roots.normal_length, sampler.normlen[r.roots.vertex])
     assert np.all((r.roots.normal_length >= 0) & (r.roots.normal_length <= 1.0001))
     assert np.all(r.roots.normal_length[top_face(r, 19.5)] > 0.999)

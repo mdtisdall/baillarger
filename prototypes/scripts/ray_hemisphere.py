@@ -1,7 +1,7 @@
 """The ray sampler on a hemisphere: the diagnostics of phase 2.0.
 
     python prototypes/scripts/ray_hemisphere.py SURF DSEG OUT [--level M]
-        [--only N] [--overview OVERVIEW]
+        [--only N] [--overview OVERVIEW] [--cache-gb G]
 
 Samples every superblock that the surface crosses (or the first N, in Morton
 order) at the full caps and the default step, and writes to OUT:
@@ -60,10 +60,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--level", type=int, default=1)
     p.add_argument("--only", type=int, default=0)
     p.add_argument("--overview", type=Path)
+    p.add_argument("--cache-gb", type=float, default=0.25)
     a = p.parse_args(argv)
     a.out.mkdir(parents=True, exist_ok=True)
     t0 = time.perf_counter()
-    sampler = rays.RaySampler(a.surf, a.dseg)
+    sampler = rays.RaySampler(a.surf, a.dseg, int(a.cache_gb * (1 << 30)))
     t_open = time.perf_counter() - t0
     m = a.level
     sbs = np.unique(sampler.block_ijk >> m, axis=0)
@@ -114,6 +115,8 @@ def main(argv: list[str] | None = None) -> None:
         by_normal_length=table,
         wm_to_outside=int(cut[done].sum()),
         wm_to_outside_fraction=float(cut[done].mean()) if done.any() else 0.0,
+        cache_gb=a.cache_gb,
+        chunk_reads=sampler.labels.reads,
         open_seconds=round(t_open, 3),
         pass_seconds=round(time.perf_counter() - t0, 3),
         peak_gb=round(peak_gb(), 3),
