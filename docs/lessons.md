@@ -228,6 +228,7 @@ The coupling that is real, decided once:
 - Steps 2 and 3 require P as well as labels.
 - Only verified labels train later generations.
 - Test regions are labelled from scratch and never trained on.
+- Training runs on a compute cluster with CUDA GPUs; how to reach it is to be settled when training starts. Inference and data preparation can run on the laptop.
 
 *Literature* (from memory; check before citing)
 
@@ -408,7 +409,6 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - How stream 3's feedback (for example, the GM/WM transition found along columns) becomes a stream 1 input. Does it edit the label, or adjust the surface stage?
 - **The bootstrap's stand-in P.** If purple-mri cannot save its probabilities, the surface steps need another stand-in P before the first generation exists.
 - Open decisions for our own segmentation:
-  - Where to train. nnU-Net needs CUDA for training; inference runs on the laptop.
   - The labelling tool for the test regions and the answers: our viewer, or ITK-SNAP / 3D Slicer with nnInteractive (Apache-2.0 code; check the licence of its weights, which may be non-commercial). Whichever it is must support scribbles as well as site answers.
   - Missing tissue: a class of its own (proposed, with the rule in step 2) or ignored in training.
   - Whether the hippocampus stays outside the filled mask.
