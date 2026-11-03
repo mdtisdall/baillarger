@@ -305,7 +305,7 @@ The coupling that is real, decided once:
 | Output | Spec | Used by |
 |---|---|---|
 | The structure tensor per cortex voxel (6 unique components, float32), at derivative scale 1 voxel and integration scale 2 voxels | none yet | the data normal and coherence below; stream 3 (planned checks of laminar orientation) |
-| The data normal (the tensor's leading eigenvector, signed by WM distance through tissue) and its coherence | none yet | step 4 (judging the surface's normals; a term only if adopted, Open); stream 2, steps 2 and 3 (the field T and the methods that follow the image) |
+| The data normal (the tensor's leading eigenvector, signed by WM distance through tissue) and its coherence | none yet | step 4 (judging the surface's normals; a term only if adopted, Open); stream 2, step 2 (diagnostics: how far each ray departs from it) |
 
 *Design and lessons*
 
@@ -314,7 +314,7 @@ The coupling that is real, decided once:
   - Coherence falls to 0.05–0.38 at contacts and fundi, which is where most column failures happen.
   - The normal has no sign. Sign it by the WM distance through tissue, with fluid as an obstacle. A straight-line distance flips the sign beside open sulci (CP; #46).
 - It needs only the echoes and the corrected labels, not the surface, so it can run beside step 4. It belongs to stream 1 so that both the surface's check and stream 2's tracing read one published output, and no stream waits on another in a cycle.
-- **Doesn't work:** tracing step by step along the raw tensor normal: no field, no stop, so paths stall and run on (SF F3). Stream 2 fits a field to the data normal instead.
+- **Doesn't work:** tracing step by step along the raw tensor normal: no field, no stop, so paths stall and run on (SF F3). Stream 2's rays use no field (§4c).
 
 #### Step 4: the surface (`mesh`)
 
@@ -424,7 +424,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 
 - Fixes chosen by intensity (FreeSurfer's cut or fill by intensity; #85 step 2); the tube case; the size threshold for exceptions; whether fills through cortex are as acceptable as thickening.
 - Missing tissue: how far the cut face bends the normals of vertices near it but not on it, and whether stream 2 should use distance along the mesh from flagged vertices; whether the viewer needs the cut face as a surface label of its own; how much the detector's errors (dark vessels or fluid taken for missing tissue) matter now that the mask follows it.
-- Whether T = 0 should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
+- Whether depth 0 (the column roots) should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Finding hidden fluid gaps from the image before columns are traced: a thin, slowly decaying dark strip inside labelled cortex (SF F21).
 - **How `dseg` applies standalone answers** to a new generation's labels: whether a verified voxel always overrides the input, and how to show the reviewer where a new generation disagrees with an earlier answer.
 - **Whether antialiasing should align the surface with the data normal.** A data term in step 4 would pull the surface normals towards step 3's data normal near the boundary, weighted by its coherence (high in most cortex, low at contacts and fundi). The sign constraints stay, so the topology stays guaranteed. The cost: agreement with the data normal would stop being an independent check of the surface. Keep part of the evidence out of the term (one echo, or held-out regions), or judge the surface by something else, such as how straight the columns run.
@@ -458,7 +458,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
   - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
   - Make missing tissue a published label (from the image-based detector of step 2), and the cut-face flag a published per-vertex output keyed by edge key (neither has a spec yet). Then apply the missing-tissue rule in `dseg`, with phantom tests: an excised block that leaves a tunnel (fixed by a plug, flagged), one that cuts a piece off (b0 rises), and enclosed missing tissue (filled).
-  - Rewrite `pial_labels` as a stream 1 input: keep its noise estimators and detector, and have it emit spec'd edits that relabel fluid channels and vessels that the label marks as cortex, which crest methods in stream 2 need (§4c, step 2).
+  - Rewrite `pial_labels` as a stream 1 input: keep its noise estimators and detector, and have it emit spec'd edits that relabel fluid channels and vessels that the label marks as cortex, which stream 2's crossings depend on (§4c, step 2).
 - **Phase 1: review and fold repair** on phase 0's output (the steps of the #80 plan, with #81 and #82 as its first PRs). Its answers correct the hemisphere now and become the first verified training labels.
   1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
   2. The volume pane in `--white` mode (#82).
@@ -527,16 +527,16 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 ### 4b. High-level design
 
 1. **Roots.** One root per `white-surf/1` vertex, keyed by edge key, with rays both inward and outward.
-2. **The fitted field T.** A field fitted to stream 1's data normal, for the methods that follow the image (phase 1). The normal rays of phase 0 do not use it.
-3. **Trace complete rays.** A small set of simple methods that differ in one respect each and share the rest. Some follow no field: straight rays along the surface normal, or the surface grown along its own normals at a curvature-driven (equivolume) speed. The others follow the field T and share one frozen rule for crossing its crest.
-4. **Record what each ray meets.** Crests, meetings with other fronts, turns, and the class of each column. Nothing is cut here: the cut is read from the profile in stream 3.
-5. **Publish the column traces** in a spec'd format that stream 3 and the viewer read.
+2. **Trace complete rays, with no field.** A small set of simple methods that differ in one respect each: straight rays along the smoothed surface normal, and the same rays or the surface grown along its own normals with an equivolume (curvature-driven) measure of depth. None reads the image.
+3. **Record what each ray meets.** Meetings with other rays and fronts, and the class of each column. Nothing is cut here: the cut is read from the profile in stream 3.
+4. **Publish the column traces** in a spec'd format that stream 3 and the viewer read.
+
+Rays that follow a field fitted to the image (T) are not part of the design. On every measure that matters downstream they did no better than straight rays and often worse (4c, *Fields fitted to the data normal*). Revisiting them is later-phase work, only if something obvious was missed.
 
 **Standing decisions**
 
-- **Columns are complete rays.** They stop only at fluid, far WM, missing tissue, the domain edge or a length cap (8 mm), never where two fronts meet.
-- **The crossing rule is frozen, for the methods that follow ∇T** (user, #52; `column_front.past_crest`): climb ∇T; inside T's crest stencil, keep the heading; on leaving it, if T falls ahead, descend −∇T for good. **traverse** and **front** use it. The methods with no field (**normal**, **equivolume**, **front-equivolume**) never meet T and need no crossing rule: their rays pass through a contact as they pass anything else, and the meeting is recorded (`crest_at`, `meet_at`). **crest** and **one-pass** have rules of their own and are kept for comparison.
-- **Column rules stay simple.** A field artefact is recorded in a test, never patched with a new clause.
+- **Columns are complete rays.** They stop only at fluid, far WM, missing tissue, the domain edge or a length cap (8 mm), never where two fronts meet. A ray passes through a contact as it passes anything else, and the meeting is recorded.
+- **Column rules stay simple.** An artefact is recorded in a test, never patched with a new clause.
 - Normal rays stay straight (user, #47).
 - No step uses the fixes image to decide where to search, or re-finds a boundary as the depth origin.
 - **No step labels banks.** A column belongs to its root, and nothing more. Where a ray ends in WM or meets another column, the distance along the white mesh between the two roots is recorded as a number, never thresholded into "same bank" or "other bank": a fold and a contact differ only along that continuum (step 1, Theory). The distance uses the across-triangle graph, so the two sides of a thin blade stay far apart.
@@ -556,8 +556,8 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 
 | Output | Spec | Used by |
 |---|---|---|
-| Roots keyed by edge key, with position and normal | internal | steps 3–4 |
-| The across-triangle mesh graph | internal | distances along the surface (steps 3–4) |
+| Roots keyed by edge key, with position and normal | internal | steps 2–3 |
+| The across-triangle mesh graph | internal | distances along the surface (step 3) |
 
 *Design and lessons*
 
@@ -565,141 +565,132 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 - **Distances on the mesh** need the edges across neighbouring triangles: 8.2 % bound on a plane, against 41 % along edges alone (#10, #45).
 - **Theory** (SF; shock theory): because the WM is connected, every collision is a front meeting itself. A fold and a contact differ only in how far apart the meeting roots lie along the surface, which is a continuum, so no pointwise quantity separates them.
 
-#### Step 2: the fitted field T
+#### Step 2: tracing methods
 
 *Inputs*
 
 | Input | From | Use |
 |---|---|---|
-| The data normal and its coherence | stream 1, step 3 | the direction T's gradient is fitted to |
-| `_desc-wmtopo_dseg` | stream 1, step 2 | WM for T = 0; fluid and missing tissue for the extension and obstacles |
-| Relabelled fluid channels and vessels (planned, from `pial_labels`) | stream 1 (an edit) | crests off the label's errors |
+| Roots | step 1 | ray starts and directions |
+| `_desc-wmtopo_dseg`, with the relabelled fluid channels and vessels | stream 1, step 2 and its `pial_labels` edits | stops: fluid, far WM, missing tissue; a fluid channel labelled as cortex makes a false crossing |
+| The data normal and its coherence | stream 1, step 3 | diagnostics only: how far each ray departs from the image's own normal |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
-| The field T and its crests | internal, no spec yet | steps 3 and 4 |
-
-*Design and lessons*
-
-- **The fitted field T** (Lomask-style least squares of ∇T against the data normal, T = 0 on WM) has no stalls and bridges fused gaps.
-  - T is not a distance: it under-reads long columns.
-  - It must be extended 1 voxel into fluid and 0.5 mm into WM, or it makes spurious turns at the pia.
-  - pyamg needs local Jacobi weights to be deterministic (#40, #45).
-- **T's crest is the midline between the two WM surfaces, not the contact.** On the kissing phantom it sits 0.3 mm from the contact, even across a fluid gap (CP). The crest test (T rises into a voxel but not beyond, with a slope change above L²κ plus noise) needs no calibration.
-- **Crests on the aseg's errors.** Many crests sit on the aseg's fluid channels and vessels, so crest methods need those relabelled first. That relabelling (`pial_labels`: closed-form darkness at α = 10⁻³, fluid fraction above ½, a noise-bound component size, the stria trap) belongs to stream 1 as a spec'd input (#46, #49).
-- **Doesn't work:**
-  - Laplace streamlines: they make fused cortex look open (49 k open against 348 crossing at V1V2) and need the outer boundary first.
-  - A single all-WM field cannot place an unequal contact: its ridge is the geometric midline (F11).
-
-#### Step 3: tracing methods
-
-*Inputs*
-
-| Input | From | Use |
-|---|---|---|
-| Roots | step 1 | ray starts |
-| The data normal | stream 1, step 3 | directions, for methods that follow the image |
-| T | step 2 | directions and crests, for the field methods |
-| `_desc-wmtopo_dseg` | stream 1, step 2 | stops: fluid, far WM, missing tissue |
-
-*Outputs*
-
-| Output | Spec | Used by |
-|---|---|---|
-| Per root and method, one ray: samples with 3D positions and arc length, and why it stopped | internal | steps 4 and 5 |
+| Per root and method, one ray: samples with 3D positions, arc length and equivolume depth, and why it stopped | internal | steps 3 and 4 |
 
 *Design and lessons*
 
 Measured at the marked points (CP; #47, #52, #58):
 
-- **normal** (straight rays along the smoothed white normal, no field, no image): keeps the right class on every phantom and almost never returns to its own bank. Its profile split is the best at M1/S1 (median 0.17 mm) and 0.075 mm at V1V2. Its costs are more stops at caps and edges, and 0.18–0.41 mm path error against curved true columns at crowns.
-- **front** (the white mesh grown as one surface, directions coupled along the mesh at 2 voxels): the most accurate wherever folds are 0.64 mm or wider (contact p90 0.054 mm), and it reaches all 35 V1V2 points. Its swept volume matches equal volume within 0.2 %. It is worst at 0.32 mm crowns (p90 0.77 mm), because the coupling scale equals the crown radius.
-- **crest and traverse,** with the **fitted_blend start** (mesh normal at the root, blended into the field over 0.3 mm): the most accurate field tracers at tight fundi and contacts. The blended start removes the turn spike at 0.3 mm from the WM (turns fall from 11–16 % to 0.5–2.4 %).
-- **front-equivolume** (speed A₀/A along the smoothed normals): bends 0.25–0.31 mm off the straight ray, ends many columns at the caps, splits poorly at M1/S1 (0.55 mm), and runs 8–9× slower. Which paths are right is untested.
-- **one-pass** (fronts from all WM in one fast-marching pass):
-  - `baillarger.fronts` (Mirebeau's Selling stencils) is causal for anisotropic metrics and never jumps a one-voxel wall. Arrival is first order (4–8 % error from a point source); arc length is good only where paths follow the metric's direction; 141³ takes about 10 s at 2.7 GB.
-  - Per-source start times and speeds give crystal growth: connected regions.
-  - The root's position must be carried through the pass, as arc length is; it then lands within 0.01 mm. One label per root voxel triples the arrival error, and root patches misplace the root by 0.36–0.80 mm (SF F23).
-  - It is a sequential heap on whole arrays: box scale only.
+- **normal** (straight rays along the smoothed white normal, at constant speed): keeps the right class on every phantom and almost never returns to its own bank (386 and 26 columns at V1V2 and M1S1). Its profile split is the best at M1/S1 (median 0.17 mm) and 0.075 mm at V1V2, as good as any method there. Its costs:
+  - more stops at the length cap: past another bank's front at 2.4–2.7 mm, a straight ray grazes a far bank that is not parallel to its own. These are kept as rays that end in cortex;
+  - 0.18–0.41 mm path error against the phantoms' curved true columns at crowns (0.25 mm at kissing pairs).
+- **equivolume** (normal's rays, with the depth measured on the rays: each column's cross-section is its root's dual area with every vertex moved along its own normal). The same paths as normal, with depth that follows the neighbouring rays.
+- **front-equivolume** (the white mesh grown along its own smoothed normals at speed A₀/A, so the fronts are the equivolume layers and the columns bend to stay normal to them): bends 0.25–0.31 mm off the straight ray, ends many columns at the caps, splits poorly at M1/S1 (0.55 mm), and runs 8–9× slower. Which paths are right is untested.
 - **Bok's measure** for a vertex is the exact flux of its dual cell. Equivolume depth is (V(s) − V(s₀)) / (V(s₁) − V(s₀)).
-- **Doesn't work:**
-  - Dijkstra or 6-neighbour fast marching for anisotropic metrics: about 29° lattice bias.
-  - A lattice step across T's crest: about 31 k returns to the own bank per site.
-  - Sorting front sides by connected pieces, and geometric walls between banks: fragile where banks join round a fundus. The one-pass march needs no sides.
+- Where a normal ray passes another bank's front is where the WM distance through tissue stops rising along it (`first_fall`); the front methods record where a column meets another front at a smaller depth (`meet_at`).
+- The crossings depend on a cortex label without fluid channels and vessels, so tracing reads stream 1's `pial_labels` edits.
 
-#### Step 4: recording what each ray meets
+#### Step 3: recording what each ray meets
 
 *Inputs*
 
 | Input | From | Use |
 |---|---|---|
-| The rays | step 3 | what each column meets |
-| T's crests | step 2 | `crest_at` |
+| The rays | step 2 | what each column meets |
+| The across-triangle mesh graph | step 1 | the distance along the surface between meeting roots |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
-| Per column: `crest_at`, `meet_at`, `turn_at`, the root it meets, its class | internal | step 5 |
+| Per column: where it passes another front (`crest_at`, `meet_at`), the root it meets and the distance to it along the surface, its class | internal | step 4 |
 
 *Design and lessons*
 
-- Meetings are recorded on the column (`crest_at`, `meet_at`, `turn_at`) and never acted on.
+- Meetings are recorded on the column (`crest_at`, `meet_at`) and never acted on.
 - Classes by how the ray ends, not by bank: in fluid (open), in WM, at a contact, at the cap or a domain edge, failed. The current code splits the WM ends into crossing and own-bank return at `SAME_MM` (5 mm along the mesh); the restart drops that split and records the distance instead.
 - **Doesn't work:** any threshold on bend angle, turn, or root separation along the surface. Each cuts a continuum: between 10° and 60°, 5–34 % of classes change. A 5 mm "same bank" fallback is wrong at both faces.
 
-#### Step 5: the published traces
+#### Step 4: the published traces
 
 *Inputs*
 
 | Input | From | Use |
 |---|---|---|
-| Rays and what they meet | steps 3 and 4 | the traces |
+| Rays and what they meet | steps 2 and 3 | the traces |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
-| Column traces keyed by edge key and method: each sample's 3D position, the meetings, the class; readable by block | none yet | stream 3; the viewer |
+| Column traces keyed by edge key and method: each sample's 3D position and depth, the meetings, the class; readable by block | none yet | stream 3; the viewer |
 
 *Design and lessons*
 
 - Today the traces are a prototype `.npz` with no spec, built on a box white mesh with no edge keys.
 - They must key on edge keys, carry each sample's 3D position and the recorded meetings, and be readable by block.
 
+#### Fields fitted to the data normal (not in the design; a later phase at most)
+
+Every method below followed the image through a field, and none did better than straight rays where it mattered downstream:
+
+- **The evidence against them** (CP, the methods on one field, labels and roots):
+  - **Own-bank returns:** traverse sent 32,320 (V1V2) and 30,568 (M1S1) columns back into their own WM, crest 2,394 and 2,353, normal 386 and 26.
+  - **Crests from T, not the geometry:** 62 % (V1V2) and 56 % (M1S1) of crest's open columns met another bank, against 12 % and 6 % for normal rays. T's crest test fires inside 5–10 % of the cortex, even after relabelling the fluid channels.
+  - **The profile split** at M1/S1, the measure stream 3 uses: normal 0.17 mm, crest 0.24, front 0.36, traverse 0.41. At V1V2 all were within 0.065–0.075 mm. The open conflict in stream 3 says the same: 0.5–0.8 mm on tensor paths, 0.17 on normal rays.
+  - **Their one advantage** is on phantoms: field paths stay closer to curved true columns (0.11–0.33 mm against 0.18–0.41 at crowns). Whether real columns curve is unknown.
+- **What was learned about T**, for a revisit:
+- **The fitted field T** (Lomask-style least squares of ∇T against the data normal, T = 0 on WM) has no stalls and bridges fused gaps.
+  - T is not a distance: it under-reads long columns.
+  - It must be extended 1 voxel into fluid and 0.5 mm into WM, or it makes spurious turns at the pia.
+  - pyamg needs local Jacobi weights to be deterministic (#40, #45).
+- **T's crest is the midline between the two WM surfaces, not the contact.** On the kissing phantom it sits 0.3 mm from the contact, even across a fluid gap (CP). The crest test (T rises into a voxel but not beyond, with a slope change above L²κ plus noise) needs no calibration.
+- **Crests on the aseg's errors.** Many crests sit on the aseg's fluid channels and vessels, so crest methods need those relabelled first. That relabelling (`pial_labels`: closed-form darkness at α = 10⁻³, fluid fraction above ½, a noise-bound component size, the stria trap) belongs to stream 1 as a spec'd input (#46, #49).
+- **front** (the white mesh grown as one surface, directions coupled along the mesh at 2 voxels): the most accurate wherever folds are 0.64 mm or wider (contact p90 0.054 mm), and it reaches all 35 V1V2 points. Its swept volume matches equal volume within 0.2 %. It is worst at 0.32 mm crowns (p90 0.77 mm), because the coupling scale equals the crown radius.
+- **crest and traverse,** with the **fitted_blend start** (mesh normal at the root, blended into the field over 0.3 mm): the most accurate field tracers at tight fundi and contacts. The blended start removes the turn spike at 0.3 mm from the WM (turns fall from 11–16 % to 0.5–2.4 %).
+  - **The crossing rule** (user, #52; `column_front.past_crest`), shared by traverse and front: climb ∇T; inside T's crest stencil, keep the heading; on leaving it, if T falls ahead, descend −∇T for good. **crest** cut at T's largest value instead, and one-pass had a turn rule and a fallback.
+- **one-pass** (fronts from all WM in one fast-marching pass):
+  - `baillarger.fronts` (Mirebeau's Selling stencils) is causal for anisotropic metrics and never jumps a one-voxel wall. Arrival is first order (4–8 % error from a point source); arc length is good only where paths follow the metric's direction; 141³ takes about 10 s at 2.7 GB.
+  - Per-source start times and speeds give crystal growth: connected regions.
+  - The root's position must be carried through the pass, as arc length is; it then lands within 0.01 mm. One label per root voxel triples the arrival error, and root patches misplace the root by 0.36–0.80 mm (SF F23).
+  - It is a sequential heap on whole arrays: box scale only.
+- **Doesn't work:**
+  - Tracing step by step along the raw tensor normal: no field, no stop, so paths stall and run on (SF F3).
+  - Laplace streamlines: they make fused cortex look open (49 k open against 348 crossing at V1V2) and need the outer boundary first.
+  - A single all-WM field cannot place an unequal contact: its ridge is the geometric midline (F11).
+  - Dijkstra or 6-neighbour fast marching for anisotropic metrics: about 29° lattice bias.
+  - A lattice step across T's crest: about 31 k returns to the own bank per site.
+  - Sorting front sides by connected pieces, and geometric walls between banks: fragile where banks join round a fundus.
+
 #### Open
 
-- Which paths are right in real cortex: straight rays, field traces or the front. The planned check is phantoms with curved, equivolume true columns.
-- What the crests inside thick cortex are: they cover 5–10 % of cortex even after relabelling.
-- The cost ratio across the layer normal for arrival (3, 1, or falling with coherence).
-- `fronts` accuracy when the metric is tilted 5–20° off the true paths, which is the case on real data.
+- Which paths are right in real cortex: straight rays, or rays that bend with the equivolume layers. The planned check is phantoms with curved, equivolume true columns, and on real data how far each ray departs from the data normal where it is coherent.
+- What the capped rays mean for stream 3: a straight ray that grazes a far bank ends in cortex, with no far WM to anchor its top.
 - **Radial fibres.** At 160 µm the texture is planar, so no source shows radial fibres giving column orientation. Their fade-out depth can still be a planar laminar edge.
 
 ### 4d. Implementation plan
 
-The stream proceeds in phases, as stream 1 does. Phase 0 gives stream 3 and the viewer real column traces early; later phases add the methods that follow the image and settle the open questions, keeping the published format (extended in place, never replaced). Whenever stream 1 publishes a new white surface (its phases 1, 3 and 5), the traces are rerun. Each phase is one or more PRs.
+The stream proceeds in phases, as stream 1 does. Phase 0 gives stream 3 and the viewer real column traces early; later phases add the equivolume methods and settle the open questions, keeping the published format (extended in place, never replaced). Whenever stream 1 publishes a new white surface (its phases 1, 3 and 5), the traces are rerun. Each phase is one or more PRs.
 
-Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0 and also needs stream 1's `pial_labels` edits and its data normal (stream 1, phase 1). Phase 2 needs phase 1.
+Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0. Phase 2 needs phase 1 and stream 1's data normal (its phase 1). Phase 3 only if phase 2 shows something obvious was missed.
 
 - **Phase 0: normal rays on stream 1's phase 0 surface.**
   - Write the spec for column traces first: it is the interface stream 3 and the viewer wait on.
-  - Rewrite `column_traces` to root on `white-surf/1` vertices by edge key and trace by mesh blocks, keeping the constants and the classes by ending (4c, step 4), without the bank split, and leaving out roots on the cut-face flag.
-  - The **normal** method only: straight rays along the smoothed white normal, needing no field and no image, stopped by stream 1's labels. It keeps the right class on every phantom, so it is the safe first trace.
+  - Rewrite `column_traces` to root on `white-surf/1` vertices by edge key and trace by mesh blocks, keeping the constants and the classes by ending (4c, step 3), without the bank split, and leaving out roots on the cut-face flag.
+  - The **normal** method: straight rays along the smoothed white normal (`streamlines.ray`, `first_fall`, `tissue_wm_distance`), stopped by stream 1's labels.
   - Port `mesh_graph` in a local form, with the duplicate-edge bug fixed (§7).
   - Size each block's halo to the 8 mm length cap (§2, domain edges).
-- **Phase 1: the methods that follow the image.**
-  - Port with changes: the `streamlines` integrators (torch, blocks). The tensor tools go to stream 1's `orient` (step 3).
-  - Rewrite `fitted_field` as a blocked or multigrid solve, if T stays.
-  - Port `column_front` per mesh block, with `past_crest` byte for byte, and add **front**, **crest** and **traverse** (with the fitted_blend start) to the published traces, keeping the frozen crossing rule.
-  - Leave `fronts` (the one-pass march) at box scale; do not build a whole-brain step on it.
+- **Phase 1: equivolume depth.** Add **equivolume** (`offset_equivolume`) and **front-equivolume** (`column_front.grow_equivolume`, per mesh block) to the published traces.
 - **Phase 2: the open questions** (4c, Open), on the hemisphere away from domain edges:
-  - which paths are right in real cortex, by phantoms with curved, equivolume true columns;
-  - what the crests inside thick cortex are;
-  - the cost ratio across the layer normal, and `fronts` accuracy under a tilted metric;
+  - which paths are right, by phantoms with curved, equivolume true columns and by each ray's departure from the data normal;
+  - the capped rays;
   - radial fibres;
   - with stream 1's hippocampus decision (its phase 5), how roots on the surface round the hippocampus are treated.
+- **Phase 3, only if phase 2 shows something was missed: revisit fields fitted to the data normal** (4c). Nothing of `fitted_field`, `past_crest`, the field methods of `column_front` or `fronts` is ported before then; they stay in git, with the lessons above.
 
 ## 5. Stream 3: laminar profiles, contacts and alignment
 
@@ -1082,7 +1073,7 @@ There is no spec yet for:
 
 Stream 1's ordered scaling steps are in its plan (§3d). Across the streams:
 
-- Streams 2 and 3 exist only at box scale, with whole-box arrays: `column_traces`, `fitted_field` (pyamg), `fronts`, `fit_warp`, `mesh_graph`.
+- Streams 2 and 3 exist only at box scale, with whole-box arrays: `column_traces`, `fit_warp`, `mesh_graph` (and `fitted_field` and `fronts`, which are not ported).
 - Normals are computed on the whole mesh.
 - `NiftiSource` reads a `.nii.gz` whole, and `BlockReader` keeps volumes up to 4 GB resident on the device.
 - Many scales are hard-wired to 0.16 mm voxels: the 0.04 mm sampling, the 1.5-voxel band width, the tapers, the 0.32 mm twicing and the 2-voxel coupling. Restate each as mm or as voxels on purpose.
