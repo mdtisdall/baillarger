@@ -143,7 +143,7 @@ The restart does not work on boxes. Two things from them still matter:
 
 ### 3a. Goal
 
-A closed white surface without handles for each hemisphere, at the acquired resolution, whose normals are the cortical normals.
+A closed surface without handles near the grey/white-matter boundary of each hemisphere (the "white surface"), at the acquired resolution, whose normals are the cortical normals.
 
 ### 3b. High-level design
 
