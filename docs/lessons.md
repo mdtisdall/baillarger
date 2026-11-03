@@ -1078,7 +1078,7 @@ The specs in `docs/formats/` stay at version 1 until a release. Each is enforced
 There is no spec yet for:
 
 - column traces (stream 2's output, which stream 3 and the viewer need);
-- the structure tensor and the data normal with its coherence (stream 1's step 3; stream 1 judges its surface against it, and stream 2 traces with it);
+- the structure tensor and the data normal with its coherence (stream 1's step 3; stream 1 judges its surface against it, and stream 2 its rays);
 - pial-label changes;
 - the missing-tissue mask;
 - any stream 3 output, including feedback to stream 1;
