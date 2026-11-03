@@ -298,6 +298,7 @@ The coupling that is real, decided once:
 |---|---|---|
 | `_desc-wmtopo_dseg` | step 2 | the filled mask; missing tissue for the cut-face flag |
 | P | step 1 | the antialiasing data term |
+| The data normal and its coherence | stream 2, step 2 | diagnostics only: agreement of the surface normals with the image (a term in the surface only if adopted, Open) |
 
 *Outputs*
 
@@ -553,7 +554,8 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 
 | Output | Spec | Used by |
 |---|---|---|
-| The data normal, its coherence and sign | none yet | step 3; stream 1 (judging the white surface's normals; possibly an antialiasing term, §3c Open); stream 3 (planned checks) |
+| The structure tensor per cortex voxel (6 unique components, float32), at derivative scale 1 voxel and integration scale 2 voxels | none yet | the data normal and coherence below; stream 3 (planned checks of laminar orientation) |
+| The data normal (the tensor's leading eigenvector, signed by WM distance through tissue) and its coherence | none yet | step 3; stream 1, step 3 (judging the surface's normals; an antialiasing term only if adopted, §3c Open) |
 | The field T and its crests | internal, no spec yet | steps 3 and 4 |
 
 *Design and lessons*
