@@ -262,7 +262,7 @@ The coupling that is real, decided once:
 
 | Input | From | Use |
 |---|---|---|
-| `_dseg` and P | step 1 | the filled mask; handle removal ordered by P |
+| `_dseg` and P | step 1; until phase 5, the purple-mri aseg, with no P in phase 0 and a stand-in P from phase 3 | the filled mask; handle removal ordered by P |
 | `_desc-wmedits_edits.tsv` and sidecar (`wm-edits/1`) | step 6 | edits applied before the correction |
 | The FLASH | the scan | the fluid relabel (fix kind 5); fixes chosen by intensity, only if adopted (Open) |
 | Cut seeds: points in scanner mm, each "in the bite" or "on a flat face" | step 6 (placed or confirmed by the reviewer; proposed by the detector on the bootstrap hemisphere) | growing the cut faces through cortex |
@@ -422,7 +422,10 @@ The coupling that is real, decided once:
 | Corrected labels and fixes image | step 2 | finding sites |
 | P and fold spread | step 1 | finding and ranking sites |
 | Sites from stream 3: where the GM/WM transition along the columns disagrees with the WM label | stream 3, step 6 (`wm-sites/1`) | more sites |
-| The FLASH, the surface, the overview | the scan; steps 4 and 5 | display in the viewer |
+| The fix table | step 2 | ranking by margin |
+| The surface | step 4 | finding sites (tight folds, misfacing faces); display |
+| The FLASH | the scan | finding sites (where the fluid relabel disagrees with the model); display |
+| The overview | step 5 | display in the viewer |
 
 *Outputs*
 
@@ -611,6 +614,7 @@ Rays that follow a field fitted to the image (T) are not part of the design. On 
 | Input | From | Use |
 |---|---|---|
 | Roots | step 1 | ray starts and directions |
+| `white-surf/1` triangles | stream 1, step 4 | dual areas; the front methods' growth |
 | `_desc-wmtopo_dseg`, with the fluid relabel applied | stream 1, step 2 | stops: fluid, far WM; a fluid channel labelled as cortex makes a false crossing |
 | WM distance through tissue, capped at 8 mm | computed per superblock (shared code, §7) | `first_fall` |
 | The data normal and its coherence | stream 1, step 3 | diagnostics only: how far each ray departs from the image's own normal |
