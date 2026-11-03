@@ -17,6 +17,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "dwave-preprocessing>=0.6.11",
   "matplotlib>=3.11.2",
   "mypy",
   "pytest",
@@ -46,12 +47,13 @@ exclude = ["^\\.worktrees/", "^tests/reference/"]
 # unannotated too.
 untyped_calls_exclude = ["skimage", "nibabel", "numba"]
 
-# numba, llvmlite, ortools, pyamg, scikit-fmm and scikit-learn have no type stubs.
+# numba, llvmlite, ortools, pyamg, scikit-fmm, scikit-learn and dwave-preprocessing
+# have no type stubs.
 # baillarger.surfcut._flow.max_flow gives OR-Tools' maximum flow a typed signature.
 # baillarger._jit gives njit a typed signature.
 [[tool.mypy.overrides]]
 module = ["numba", "numba.*", "llvmlite", "llvmlite.*", "pyamg", "pyamg.*", "skfmm", "skfmm.*",
-  "sklearn", "sklearn.*", "ortools", "ortools.*"]
+  "sklearn", "sklearn.*", "ortools", "ortools.*", "dwave", "dwave.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

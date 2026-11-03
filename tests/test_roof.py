@@ -3,8 +3,12 @@ force on small energies, answers by hand, and the order of components."""
 
 import itertools
 
+import dimod
 import numpy as np
+import numpy.typing as npt
 import pytest
+from dwave.preprocessing import roof_duality
+from scipy.optimize import linprog
 from test_surfcut import folded_model
 
 from baillarger.surfcut import qpbo
@@ -167,3 +171,110 @@ def test_small_terms_do_not_change_the_labels_when_rounded_down() -> None:
     assert [y for y, e in E.items() if e <= best + 1e-15] == [(0, 1, 1, 1)]
     r = roof(P)
     assert r.weak[0] in (-1, 0) and r.strong[0] in (-1, 0)
+
+
+# ------------------------------------------- an independent roof duality: dwave's
+
+
+def bqm_of(P: Binary) -> dimod.BinaryQuadraticModel:
+    """The same energy as a dimod binary quadratic model (finite tables only)."""
+    b = dimod.BinaryQuadraticModel("BINARY")
+    off = float(np.sum(P.U0))
+    for v in range(P.n):
+        b.add_linear(v, float(P.U1[v] - P.U0[v]))
+    for i, j, A, B, C, D in zip(
+        P.i.tolist(), P.j.tolist(), P.A, P.B, P.C, P.D, strict=True
+    ):
+        # A (1 - yi)(1 - yj) + B (1 - yi) yj + C yi (1 - yj) + D yi yj
+        off += float(A)
+        b.add_linear(i, float(C - A))
+        b.add_linear(j, float(B - A))
+        if i == j:
+            b.add_linear(i, float(A - B - C + D))
+        else:
+            b.add_quadratic(i, j, float(A - B - C + D))
+    b.offset = off
+    return b
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_roof_against_dwave(seed: int) -> None:
+    """dwave-preprocessing's roof_duality (Apache-2.0, its own implementation)
+    on random models of up to 60 variables, too many for brute force: the same
+    bound and the same strong labels. The costs are integers, so that no
+    rounding error can break a tie between two minima: with costs such as
+    0.123, the two solvers round differently, and where two minima differ
+    only on a variable, each can label it strongly, to different values."""
+    rng = np.random.default_rng(33000 + seed)
+    n = int(rng.integers(2, 60))
+    m = int(rng.integers(1, 3 * n))
+    i, j = ints(rng.integers(0, n, m)), ints(rng.integers(0, n, m))
+    tab = floats(rng.integers(-1000, 1001, size=(4, m)))
+    U = floats(rng.integers(-1000, 1001, size=(2, n)))
+    P = Binary(U[0], U[1], i, j, tab[0], tab[1], tab[2], tab[3])
+    r = roof(P)
+    lb, fixed = roof_duality(bqm_of(P), strict=True)
+    assert abs(r.lower_bound - lb) < 1e-6  # dwave sums in floating point
+    assert {v: int(r.strong[v]) for v in range(n) if r.strong[v] >= 0} == fixed
+
+
+def local_polytope_bound(P: Binary) -> float:
+    """The minimum of the local-polytope LP relaxation (finite tables only),
+    by scipy's HiGHS. Variables: q_v = P(y_v = 1), and the four entries of each
+    pair's table, which sum to 1 and have the q of the two variables as
+    marginals. The tables of a pair are merged first: separate tables for one
+    pair would each get their own entries, a looser relaxation. For binary
+    energies this LP's minimum is the roof-duality bound (Hammer, Hansen and
+    Simeone 1984)."""
+    n = P.n
+    const = float(np.sum(P.U0))
+    lin = P.U1 - P.U0
+    tables: dict[tuple[int, int], npt.NDArray[np.float64]] = {}
+    for a, b, A, B, C, D in zip(
+        P.i.tolist(), P.j.tolist(), P.A, P.B, P.C, P.D, strict=True
+    ):
+        if a == b:  # a term on one variable: A at y = 0, D at y = 1
+            const += float(A)
+            lin[a] += float(D - A)
+            continue
+        t = np.array([[A, B], [C, D]])  # t[y_a, y_b]
+        key, t = ((a, b), t) if a < b else ((b, a), t.T)
+        tables[key] = tables.get(key, np.zeros((2, 2))) + t
+    m = len(tables)
+    c = np.concatenate([lin, np.zeros(4 * m)])
+    A_eq = np.zeros((3 * m, n + 4 * m))
+    b_eq = np.zeros(3 * m)
+    for k, ((a, b), t) in enumerate(tables.items()):
+        cols = n + 4 * k + np.arange(4)  # entries 00, 01, 10, 11
+        c[cols] = t.ravel()
+        A_eq[3 * k, cols] = 1  # sum 1
+        b_eq[3 * k] = 1
+        A_eq[3 * k + 1, cols[[2, 3]]] = 1  # P(y_a = 1) = q_a
+        A_eq[3 * k + 1, a] = -1
+        A_eq[3 * k + 2, cols[[1, 3]]] = 1  # P(y_b = 1) = q_b
+        A_eq[3 * k + 2, b] = -1
+    res = linprog(
+        c,
+        A_eq=A_eq if m else None,
+        b_eq=b_eq if m else None,
+        bounds=(0, 1),
+        method="highs",
+    )
+    assert res.status == 0 and res.fun is not None
+    return const + float(res.fun)
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_roof_bound_is_the_local_polytope_bound(seed: int) -> None:
+    """The roof bound equals the minimum of the local-polytope LP, up to the
+    rounding (below it by at most the total rounding error, never above)."""
+    rng = np.random.default_rng(34000 + seed)
+    n = int(rng.integers(2, 40))
+    m = int(rng.integers(1, 3 * n))
+    i, j = ints(rng.integers(0, n, m)), ints(rng.integers(0, n, m))
+    tab = np.round(rng.normal(size=(4, m)), 3)
+    U = np.round(rng.normal(size=(2, n)), 3)
+    P = Binary(U[0], U[1], i, j, tab[0], tab[1], tab[2], tab[3])
+    lp = local_polytope_bound(P)
+    lb = roof(P).lower_bound
+    assert lb <= lp + 1e-7 and lp - lb < 1e-6
