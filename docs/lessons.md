@@ -229,6 +229,7 @@ The coupling that is real, decided once:
 - Only verified labels train later generations.
 - Test regions are labelled from scratch and never trained on.
 - **Labelling happens in our own viewer** (stream 4): the test regions, the site answers and the scribbles. It reads the blocked formats we rely on (NIfTI-Zarr volumes, `white-surf/1` with its block index, the overview), so a person can label anywhere in a whole brain at full resolution, against the surface. ITK-SNAP and 3D Slicer load whole volumes into memory and read neither format, so at 50 µm they would only ever see exported crops. The viewer also writes answers directly as spec'd edits (`wm-edits/1`). ITK-SNAP stays only as an escape hatch for free painting on an exported crop.
+- **nnU-Net is an external tool, not a package dependency.** Only the export and import modules know about it: the export writes nnU-Net's raw dataset format, nnU-Net is called on it (on the cluster for training), and the import reads its predictions back into spec'd outputs.
 - Training runs on a compute cluster with CUDA GPUs; how to reach it is to be settled when training starts. Inference and data preparation can run on the laptop.
 
 *Literature* (from memory; check before citing)
@@ -412,7 +413,6 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - Open decisions for our own segmentation:
   - Missing tissue: a class of its own (proposed, with the rule in step 2) or ignored in training.
   - How stream 2 treats roots on the part of the white surface that wraps the hippocampus, which is not neocortex: a medial-wall label, or roots kept and judged later.
-  - nnU-Net as a package dependency, or an external tool that only the export and import modules know about. Proposed: external.
   - **How fast a generation follows a review.** nnU-Net can start from the previous weights (`-pretrained_weights`) with a short custom schedule, sampling patches mostly round the new verified labels and replaying the older labels so the model does not forget them. On a CUDA GPU that is hours, not days, so a generation could follow each review session. To choose: the schedule length, and how much replay is needed (measured on the test regions).
   - **Whether a different network would do better.** Probably not by architecture: in "nnU-Net revisited" (MICCAI 2024) careful benchmarking erased most claimed gains of transformer and Mamba models (Swin UNETR, nnFormer, U-Mamba); MedNeXt was on a par. The bottleneck is labels. Worth testing once there are several hemispheres: self-supervised pretraining of the residual-encoder nnU-Net on all our unlabelled FLASH volumes (DKFZ has tooling for this; check its state and licence).
 
@@ -453,7 +453,7 @@ Three tracks that can run in parallel: the surface steps, our own segmentation, 
   - Bootstrapping: purple-mri's labels as weak seed labels. Its labels in the interiors; the missing blocks from the step 2 detector; ignore in a band of about 2 voxels each side of every purple-mri boundary, and where a simple FLASH check disagrees with purple-mri (the check to be chosen on the test regions).
   - The existing `wm-edits` answers as verified labels, never ignored.
   - Verified labels are kept apart from seed labels, with provenance, so a generation can be retrained with or without the seed.
-  - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset (proposed).
+  - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset.
 - **Phase 3: the first generation.**
   - Five folds, split by hemisphere when there are several, by box otherwise. A split by box makes the folds' accuracy an upper bound.
   - Inference writes the `_dseg`, the WM-filled `_probseg` and the fold spread, with sidecars.
