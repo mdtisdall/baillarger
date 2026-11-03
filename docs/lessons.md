@@ -196,7 +196,7 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 
 | Output | Spec | Used by |
 |---|---|---|
-| `_dseg`: labels in the FreeSurfer convention, missing tissue included | none yet | step 2 (the filled mask) |
+| `_dseg`: labels in the FreeSurfer convention; excisions are outside | none yet | step 2 (the filled mask) |
 | `_label-WMfilled_probseg`: P(filled WM) | none yet | step 2 (where handle walls fall); step 4 (the antialiasing data term); step 6 (wall margins) |
 | `_label-WMfilled_desc-foldsd_probseg`: the spread of P across folds | none yet | step 6 (ranking the queue) |
 | The model generation, in each sidecar | none yet | tracing a label to its model |
@@ -222,7 +222,7 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 The coupling that is real, decided once:
 
 1. **The label set.** The filled mask is `FILLED_LABELS` (WM, lateral ventricle, caudate, putamen, pallidum, thalamus, CC; whether the hippocampus joins them is open). The network must output at least these classes, and the hippocampus as a class of its own, separately from cortex and outside, or the surface changes.
-2. **Missing tissue.** Blocks cut out before the scan are labelled as missing tissue, a class of its own (proposed), or ignored in training. Step 2 gives the rule for the surface.
+2. **Excisions are outside.** Blocks cut out before the scan are labelled outside, like any other Fomblin; the label set has no missing-tissue class. Where the data ends is a separate fact, the cut faces, which step 2 derives from the labels and a few seeds (the rule for cut faces).
 3. **Calibration.** P must be calibrated near 0.5, because step 2 places walls by it. Calibration is a diagnostic of every generation.
 4. **The defect count.** The number of handles and cavities before correction sets the length of the review queue (step 6). It is a diagnostic of every generation, not a target to optimise inside the network.
 5. **Partial volume: the majority rule.** A voxel takes the class that fills most of it. A fluid channel narrower than half a voxel, or two banks pressed pia to pia with no fluid, is therefore cortex in the labels.
@@ -264,6 +264,7 @@ The coupling that is real, decided once:
 | `_dseg` and P | step 1 | the filled mask; handle removal ordered by P |
 | `_desc-wmedits_edits.tsv` and sidecar (`wm-edits/1`) | step 6 | edits applied before the correction |
 | The FLASH | the scan | fixes chosen by intensity, only if adopted (Open) |
+| Cut seeds: points in scanner mm, each "in the bite" or "on a flat face" | step 6 (placed or confirmed by the reviewer; proposed by the detector on the bootstrap hemisphere) | growing the cut faces through cortex |
 
 *Outputs*
 
@@ -271,20 +272,23 @@ The coupling that is real, decided once:
 |---|---|---|
 | `_desc-wmtopo_dseg`: the corrected labels; filled mask with Betti (b0, 0, 0) | `wm-dseg/1` | steps 3, 4 and 6; stream 2 (masks and stops) |
 | `_desc-wmtopofixes_dseg`: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit | `wm-dseg-fixes/1` | step 6; the viewer |
-| Fills inside missing tissue as a value of their own; each fix's margin in P (planned) | none yet | step 6 |
+| Each fix's margin in P (planned) | none yet | step 6 |
+| `_desc-cut_mask`: the outside voxels that lie against a cut face (planned) | none yet | step 4 (the cut-face flag); stream 2 (the domain-edge stop); stream 3 (no anchors on cut faces) |
 
 *Design and lessons*
 
-- **Missing tissue** (PL). Blocks of tissue were cut out of the specimen before the scan, and the FLASH is black there. In V1V2 the missing tissue is 14.6 % of the cortex label.
-  - It can be found from the image: FLASH below 0.25 × the cortex median after smoothing by 2 voxels, in blocks of at least 250 voxels, grown by 0.3 mm. This detector supplies the class for the seed labels, since the purple-mri aseg labels the blocks as if the tissue were there.
-  - It is an obstacle for columns, not a source.
-- **The filled mask** (#61, #66, #67). Aseg 41 plus 43, 49–52 and 192 (right hemisphere; 2, 4, 10–13 and 192 left), with cavities filled. The deep structures (ventricle, thalamus, ...) belong in the mask. Whether the hippocampus (53 right, 17 left) is inside the white surface or outside it is open, to be decided once there is data (Open); the surface results in this section were measured with it outside. Missing tissue counts as outside (rule below). A voxel cut from the mask takes the label of the nearest (mm) voxel outside it.
-- **The rule for missing tissue** (proposed). The cut face is treated as a domain edge: close the surface there, invent nothing, and mark exactly which vertices lie on it.
-  1. Missing tissue is a published stream 1 label.
-  2. For the filled mask, missing tissue counts as outside. The mask stops at the cut face, and the surface runs along it.
-  3. Handle removal and the cavity fill then run as usual, and fixes may fill into missing tissue, by the usual rule (whichever changes fewer voxels). A plug where there is no data alters nothing real, whereas forbidding it would force cuts through real WM. Such fills are recorded in the fixes image as fills inside missing tissue. Missing tissue enclosed by WM cannot be a real excision, since excisions open to the outside, so filling it is right in any case.
-  4. Each vertex lies on one grid edge (its edge key), joining a mask voxel to a non-mask voxel. The vertex is on the cut face exactly when that non-mask voxel is missing tissue. This flag needs no threshold and is published per vertex, keyed by edge key. Plugs are flagged by the same test.
-  5. Stream 2 roots no columns on flagged vertices. Columns from nearby vertices that run into missing tissue stop there, as at any obstacle.
+- **Excisions** (PL). Blocks of tissue were cut out of the specimen before the scan, and the FLASH is black there. The purple-mri aseg labels them as if the tissue were there: 14.6 % of V1V2's cortex label.
+  - The detector (FLASH below 0.25 × the cortex median after smoothing by 2 voxels, in blocks of at least 250 voxels, grown by 0.3 mm) works only against an aseg that imputes tissue, since Fomblin outside the specimen is as dark. It is a bootstrap tool: on the purple-mri hemisphere it relabels excisions to outside in the seed labels and proposes cut seeds. Once our own labels exist, it has nothing to do.
+- **The filled mask** (#61, #66, #67). Aseg 41 plus 43, 49–52 and 192 (right hemisphere; 2, 4, 10–13 and 192 left), with cavities filled. The deep structures (ventricle, thalamus, ...) belong in the mask. Whether the hippocampus (53 right, 17 left) is inside the white surface or outside it is open, to be decided once there is data (Open); the surface results in this section were measured with it outside. Excisions are outside (rule below). A voxel cut from the mask takes the label of the nearest (mm) voxel outside it.
+- **The rule for cut faces.** A cut face is a domain edge: close the surface there, invent nothing, and mark exactly where it lies. This covers excisions and the knife faces where the hemisphere was separated (through the corpus callosum and the diencephalon).
+  1. **Excisions are outside.** The labels have no missing-tissue class. The filled mask, handle removal and the cavity fill run as usual, and a fill into an excision is an ordinary fill into outside (whichever changes fewer voxels): a plug where there is no data alters nothing real, whereas forbidding it would force cuts through real WM.
+  2. **Where the filled mask touches outside, the face is a cut.** In normal anatomy cortex always lies between the filled mask and outside. So the outside voxels next to the filled mask belong to the cut mask, with no threshold and no seeds. This finds the knife faces and every excision through WM, wherever the tissue deformed after cutting.
+  3. **Excisions through cortex only need seeds,** since cortex lies between the mask and the cut there. Each cut seed is a point in scanner mm, replayable like an edit, of one of two kinds:
+     - **In the bite** (the excision's Fomblin): grow the region from the seed through outside voxels, kept inside the specimen's envelope (a closing of tissue with a ball of radius R) and out of sulci (an opening with a ball of radius r). The grown region joins the cut mask. If the grow reaches the envelope's exterior, or is empty near the seed, the excision goes to review.
+     - **On a flat face** (a cut with no bite, such as a pole cut off): grow over the tissue boundary while it stays close to a plane fitted as it grows; the fit bridges the sulcal gaps the cut crosses. The outside voxels against the grown face join the cut mask.
+  4. **The cut-face flag.** Each white-surface vertex lies on one grid edge (its edge key), joining a mask voxel to a non-mask voxel. The vertex is on a cut face exactly when that non-mask voxel is in the cut mask. Published per vertex, keyed by edge key.
+  5. **Use downstream.** Stream 2 roots no columns on flagged vertices, and a ray that leaves tissue into the cut mask stops with the reason "domain edge", not "fluid". Stream 3 never anchors τ = 1 on a cut face and leaves those column tops out of the thickness evidence.
+  6. **Seeds stay valid across generations and resolutions;** the faces are derived from them on each run, so they sit exactly on the current labels' boundary, which is what the rays cross.
 - **The guarantee still holds.** The mesh of any voxel mask is closed, and `dseg` refuses to write unless the Betti numbers are (b0, 0, 0). An excision that cuts a gyrus clean off makes another piece, which `wm-dseg/1` already allows: one or more closed, genus-0 pieces. What changes is that part of the surface is not grey/white, and it is flagged exactly.
 - **Handle removal** (`handles.remove_handles`; #38, #48, #67):
   - Topology uses Kuhn adjacency, so it equals the mesh's (§2).
@@ -309,7 +313,7 @@ The coupling that is real, decided once:
 | Input | From | Use |
 |---|---|---|
 | FLASH echoes 2 and 3 (trend-removed log) | the scan | the structure tensor |
-| `_desc-wmtopo_dseg` | step 2 | cortex mask for the convolution; WM distance through tissue for the sign, with fluid and missing tissue as obstacles |
+| `_desc-wmtopo_dseg` | step 2 | cortex mask for the convolution; WM distance through tissue for the sign, with fluid and outside as obstacles |
 
 *Outputs*
 
@@ -334,7 +338,7 @@ The coupling that is real, decided once:
 
 | Input | From | Use |
 |---|---|---|
-| `_desc-wmtopo_dseg` | step 2 | the filled mask; missing tissue for the cut-face flag |
+| `_desc-wmtopo_dseg`, `_desc-cut_mask` | step 2 | the filled mask; the cut mask for the cut-face flag |
 | P | step 1 | the antialiasing data term |
 | The data normal and its coherence | step 3 | diagnostics only: agreement of the surface normals with the image (a term in the surface only if adopted, Open) |
 
@@ -413,6 +417,7 @@ The coupling that is real, decided once:
 |---|---|---|
 | The sites in the queue | `wm-sites/1` (#81) | the viewer's review pane |
 | The answers: `_desc-wmedits_edits.tsv` and sidecar | `wm-edits/1` | step 2 (edits); step 1 (verified training labels) |
+| Cut seeds, placed or confirmed by the reviewer | none yet | step 2 (cut faces) |
 
 *Design and lessons*
 
@@ -435,7 +440,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 #### Open
 
 - Fixes chosen by intensity (FreeSurfer's cut or fill by intensity; #85 step 2); the tube case; the size threshold for exceptions; whether fills through cortex are as acceptable as thickening.
-- Missing tissue: how far the cut face bends the normals of vertices near it but not on it, and whether stream 2 should use distance along the mesh from flagged vertices; whether the viewer needs the cut face as a surface label of its own; how much the detector's errors (dark vessels or fluid taken for missing tissue) matter now that the mask follows it.
+- Cut faces: R and r for the bite grow, chosen on the bootstrap hemisphere; whether flat-face excisions are cut close enough to planar for the plane fit; how far a cut face bends the normals of vertices near it but not on it, and whether stream 2 should use distance along the mesh from flagged vertices; whether the viewer needs the cut face as a surface label of its own.
 - Whether depth 0 (the column roots) should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Hidden fluid gaps (a thin, slowly decaying dark strip inside labelled cortex; SF F21): under the majority rule they stay cortex, and stream 3 finds them along the columns. Open: whether a detector before tracing is still worth having, as a diagnostic or to rank review sites.
 - Whether `orient`'s window should stop where the WM-distance fronts of two banks meet, so that it never spans a fused sulcus (step 3).
@@ -457,7 +462,6 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - How stream 3's feedback (for example, the GM/WM transition found along columns) becomes a stream 1 input. Does it edit the label, or adjust the surface stage?
 - **The bootstrap's stand-in P.** If purple-mri cannot save its probabilities, the surface steps need another stand-in P before the first generation exists.
 - Open decisions for our own segmentation:
-  - Missing tissue: a class of its own (proposed, with the rule in step 2) or ignored in training.
   - **The hippocampus: inside the white surface or outside it.** To be decided once there is data, by looking at both on our own segmentation. If inside, stream 2 must also decide how to treat roots on the part of the surface that wraps it, which is not neocortex: a medial-wall label, or roots kept and judged later.
   - **How fast a generation follows a review.** nnU-Net can start from the previous weights (`-pretrained_weights`) with a short custom schedule, sampling patches mostly round the new verified labels and replaying the older labels so the model does not forget them. On a CUDA GPU that is hours, not days, so a generation could follow each review session. How often to train, how long, and how much replay are to be found by experiment, not chosen in advance (3d, phase 6):
     - **Retrospective replay.** Every answer carries its time, and each generation's weights are kept, so the answer history can be replayed offline at different update frequencies (each session, every N answers, each hemisphere) and schedule lengths. For each, measure GPU hours against the test-region diagnostics.
@@ -470,10 +474,10 @@ The whole stream proceeds in phases. Phase 0 runs the pipeline on the purple-mri
 
 Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase 4 needs phase 2 (and gains from phase 1's answers); phase 5 needs phases 3 and 4; phase 6 needs phases 1 and 5. Whole-brain scaling is a track of its own, alongside phases 1–8, and must be done before the first whole brain.
 
-- **Phase 0: the pipeline on the purple-mri aseg.** Labels only, with the current code's labels-only path (handle removal ordered by distance, antialiasing by smoothness alone). The aim is the published outputs streams 2–4 need: `wm-dseg/1`, `white-surf/1`, `white-overview/1`, missing tissue and the cut-face flag.
+- **Phase 0: the pipeline on the purple-mri aseg.** Labels only, with the current code's labels-only path (handle removal ordered by distance, antialiasing by smoothness alone). The aim is the published outputs streams 2–4 need: `wm-dseg/1`, `white-surf/1`, `white-overview/1`, the cut mask and the cut-face flag.
   - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
   - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
-  - Make missing tissue a published label (from the image-based detector of step 2), and the cut-face flag a published per-vertex output keyed by edge key (neither has a spec yet). Then apply the missing-tissue rule in `dseg`, with phantom tests: an excised block that leaves a tunnel (fixed by a plug, flagged), one that cuts a piece off (b0 rises), and enclosed missing tissue (filled).
+  - The rule for cut faces (step 2): relabel the purple-mri aseg's excisions to outside with the detector, which also proposes cut seeds; publish the cut mask and the cut-face flag (per vertex, keyed by edge key). Write the cut-seed spec. Phantom tests: an excision through WM that leaves a tunnel (fixed by a plug, flagged with no seed), one that cuts a piece off (b0 rises), an excision through cortex only (found from a seed in the bite), and a flat cut with no bite (found from a seed on the face).
   - Rewrite `pial_labels` as a stream 1 input: keep its noise estimators and detector, and have it emit spec'd edits that relabel fluid channels and vessels that the label marks as cortex, which stream 2's crossings depend on (§4c, step 2). It follows the majority rule (3b): its test is a fluid fraction above ½, so channels narrower than that stay cortex.
 - **Phase 1: review and fold repair** on phase 0's output (the steps of the #80 plan, with #81 and #82 as its first PRs). Its answers correct the hemisphere now and become the first verified training labels.
   1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
@@ -485,7 +489,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   7. Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
 - **Phase 2: data, label set, test regions.**
   - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 8 is needed.
-  - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, missing tissue, and other labels only if a later stage needs them. Write the label-set spec with the majority rule for partial volume (3b), as the rule labellers follow.
+  - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, and other labels only if a later stage needs them. Write the label-set spec with the majority rule for partial volume (3b), as the rule labellers follow.
   - Test regions: a few boxes per hemisphere (start with V1V2, PCC_SPL, M1S1, and the V1V2 seam review points). They are labelled from scratch, not by correcting the seed labels, so the seed does not anchor them, and they are never used in training. Format: a BIDS `_dseg` with a versioned sidecar spec that records the box and the labeller.
 - **Phase 3: the surface steps read probabilities.** Independent of the network; exact-answer tests on phantoms first.
   1. `handles.remove_handles` takes a required priority volume, P: the object front claims in order of decreasing P and the background front in order of increasing P, so the walls fall where P is closest to 0.5. Distance ordering goes. Phantom test: a handle whose bridge has a known low-P place away from its thinnest place; the cut must fall there.
@@ -496,7 +500,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   6. Then remove the labels-only path (distance ordering, smoothness-only antialiasing).
 - **Phase 4: training data.**
   - Export to nnU-Net's raw dataset format: the three echoes as channels `_0000`–`_0002`, with labels that use an ignore label.
-  - Bootstrapping: purple-mri's labels as weak seed labels. Its labels in the interiors; the missing blocks from the step 2 detector; ignore in a band of about 2 voxels each side of every purple-mri boundary (so the network never learns purple-mri's choices at mixed voxels), and where a simple FLASH check disagrees with purple-mri (the check to be chosen on the test regions).
+  - Bootstrapping: purple-mri's labels as weak seed labels. Its labels in the interiors; excisions relabelled to outside, from the detector, confirmed by the reviewer; ignore in a band of about 2 voxels each side of every purple-mri boundary (so the network never learns purple-mri's choices at mixed voxels), and where a simple FLASH check disagrees with purple-mri (the check to be chosen on the test regions).
   - Phase 1's answers (`wm-edits`) as verified labels, never ignored.
   - Verified labels are kept apart from seed labels, with provenance, so a generation can be retrained with or without the seed.
   - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset.
@@ -527,7 +531,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
 
 In this order:
 
-1. The midline cut (the corpus callosum joins the hemispheres).
+1. The virtual midline cut, for whole brains only (the corpus callosum joins the hemispheres): planes through the commissures and the pons, from seed points, applied only inside the structures that join the hemispheres, as FreeSurfer's `mri_fill` does. Hemisphere specimens need none: their knife faces are cut faces (step 2).
 2. `dseg` in blocks: blocked connected components with a merge, Euler sums per block, the cavity fill, and handle removal as "find globally, fix in local boxes". That last part needs a design and a prototype first: one piece is about 43 GB, and whole-array `dseg` at 50 µm is about 1 TB.
 3. NIfTI-Zarr volumes, together with item 2.
 4. A band-only multigrid antialias solver with a fused kernel: FISTA on the whole volume costs about h⁻⁵; the target is about h⁻² per cycle.
@@ -553,7 +557,7 @@ Rays that follow a field fitted to the image (T) are not part of the design. On 
 
 **Standing decisions**
 
-- **Columns are complete rays.** They stop only at fluid, far WM, missing tissue, the domain edge or a length cap (8 mm), never where two fronts meet. A ray passes through a contact as it passes anything else, and the meeting is recorded. Fluid means the fluid label, by stream 1's majority rule (3b): a channel narrower than half a voxel, or pia touching pia, is not a stop but a contact.
+- **Columns are complete rays.** They stop only at fluid, far WM, a cut face or other domain edge, or a length cap (8 mm), never where two fronts meet. A ray passes through a contact as it passes anything else, and the meeting is recorded. Fluid means the fluid label, by stream 1's majority rule (3b): a channel narrower than half a voxel, or pia touching pia, is not a stop but a contact.
 - **Column rules stay simple.** An artefact is recorded in a test, never patched with a new clause.
 - Normal rays stay straight (user, #47).
 - No step uses the fixes image to decide where to search, or re-finds a boundary as the depth origin.
@@ -569,6 +573,7 @@ Rays that follow a field fitted to the image (T) are not part of the design. On 
 |---|---|---|
 | `white-surf/1`: vertices, normals, edge keys, block index | stream 1, step 4 | one root per vertex |
 | The cut-face flag (planned) | stream 1, step 4 | roots left out |
+| `_desc-cut_mask` (planned) | stream 1, step 2 | the domain-edge stop |
 
 *Outputs*
 
@@ -590,7 +595,7 @@ Rays that follow a field fitted to the image (T) are not part of the design. On 
 | Input | From | Use |
 |---|---|---|
 | Roots | step 1 | ray starts and directions |
-| `_desc-wmtopo_dseg`, with the relabelled fluid channels and vessels | stream 1, step 2 and its `pial_labels` edits | stops: fluid, far WM, missing tissue; a fluid channel labelled as cortex makes a false crossing |
+| `_desc-wmtopo_dseg`, with the relabelled fluid channels and vessels | stream 1, step 2 and its `pial_labels` edits | stops: fluid, far WM; a fluid channel labelled as cortex makes a false crossing |
 | The data normal and its coherence | stream 1, step 3 | diagnostics only: how far each ray departs from the image's own normal |
 
 *Outputs*
@@ -803,7 +808,7 @@ Where each layer lies along every column, read from the image's own contrast and
 | Input | From | Use |
 |---|---|---|
 | Flattened traces and shifts | step 2 | conservation of shifts |
-| Contacts and open tops | stream 2 (meetings and stops) | ties and anchors |
+| Contacts and open tops | stream 2 (meetings and stops; a domain-edge stop is not an open top) | ties and anchors |
 | Detected bands | step 4 | levels, when placed at them |
 
 *Outputs*
@@ -1061,7 +1066,7 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 is the same work as stream 1's 
   - Port as is: `viewer.flatmap`, `viewer.inflation`, `viewer.sections`.
   - Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
   - Bring in the geodesic-patch flat map (#69), with its `edge_graph` fix split out.
-- **Phase 1: the stream 1 review pane,** with site answers and scribbles, writing `wm-edits/1`.
+- **Phase 1: the stream 1 review pane,** with site answers and scribbles, writing `wm-edits/1`, and placing or confirming cut seeds.
 - **Phase 2: column traces.** Rewrite against the column-trace spec: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
 - **Phase 3: stream 3's outputs,** a pane for each as its spec appears: the columns sampled on request, z(τ) and its levels, bands, thickness and contacts.
 
@@ -1073,7 +1078,7 @@ Each stream's plan lists its own modules. These are shared, or belong to no stre
 |---|---|
 | Port as is | `backend`, `bids` (strict sidecars, spec docs tested against code), `gifti`, `timing`, `_jit`, `mesh` (Kuhn marching, edge keys, Morton blocks: the most reusable piece), `mesh_intersect`, `phantoms`, `scripts/check`, `scripts/affected-tests`, `scripts/memguard` |
 | Port with changes | `blocks` (add the chunked source; never read large inputs whole: `NiftiSource` now reads a `.nii.gz` whole, and `BlockReader` keeps volumes up to 4 GB resident on the device), `mesh_torch` (block-local tables), `mesh_smoothing` (keep normals, edges, pieces), `mesh_graph` (local form; fix the bug below) |
-| Drop | `topology` and `wellcomposed` ((26,6) codes), `growth` and `joint` (old seam model), `frame` (move `missing_tissue` to stream 1) |
+| Drop | `topology` and `wellcomposed` ((26,6) codes), `growth` and `joint` (old seam model), `frame` (its `missing_tissue` detector moves to stream 1 as the bootstrap's excision detector) |
 
 Problems in the current code that a restart should not inherit:
 
@@ -1095,7 +1100,7 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | `white-surf/1` | GIfTI with external data: float32 vertices in scanner mm, int32 triangles, float32 normals, int64 edge keys, a block index in Morton order | exists |
 | `white-overview/1` | The decimated display mesh, its true-vertex ids and the true vertices each face carries; five guarantees | exists |
 | `wm-edits/1` | Exists as voxel-row diffs against a SHA-pinned aseg, with each answer's site and choice; to be revised so answers stand on their own (verified labels, valid for any input) | revision: stream 1, phase 1 |
-| Missing tissue; the cut-face flag | A label class; a per-vertex flag keyed by edge key | stream 1, phase 0 |
+| Cut seeds; the cut mask; the cut-face flag | Replayable seed points in scanner mm with their kind; the outside voxels against a cut face; a per-vertex flag keyed by edge key | stream 1, phase 0 |
 | Pial-label edits | Relabelled fluid channels and vessels | stream 1, phase 0 (perhaps as `wm-edits/1` with more labels) |
 | `wm-sites/1` | The review queue's sites | stream 1, phase 1 (#81) |
 | Structure tensor; data normal and coherence | `orient`'s outputs (§3c, step 3) | stream 1, phase 1 |
