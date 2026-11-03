@@ -58,6 +58,8 @@ Each stream's section gives its goal, its high-level design, its implementation 
 
 Each stream publishes its outputs in a specified format and reads only the others' published outputs. Each reaches a first version good enough for the others to build on, then improves along its own course; a change in one stream should not force work in another.
 
+**Two kinds of published output.** A *file* in a spec'd format, or a *sampler*: a versioned function in shared code (§7) that computes an output on demand, for a superblock and its halo, from published files only. A sampler has a written contract under `docs/formats/` like any spec (its inputs, parameters, outputs and units) and exact tests (phantoms, brute force, device equality), and it gives the same result for the same column or voxel whichever superblock asks. Streams may call each other's samplers, never each other's internals; a change to a sampler's contract is a spec change. Whatever can be computed locally from published files is a sampler, not a file: storing it would cost more traffic and space than recomputing it. The samplers: `orient` (stream 1), the ray sampler (stream 2), the column volume (stream 3), and the WM distance through tissue and curvature (shared).
+
 ### Constraints
 
 These bind every stream from its first version. A first version may be rough, but its algorithms and data structures must be ones that scale.
@@ -72,7 +74,7 @@ These bind every stream from its first version. A first version may be rough, bu
   - Chunked volumes are to be NIfTI-Zarr, still a draft standard, exported to `.nii.gz` for other tools.
   - Where BIDS has no rule, names are BIDS-like and the spec records the choice.
 
-  Each output has one written spec, enforced by one writer and one reader.
+  Each output, file or sampler (§1, Goals), has one written spec, enforced by one writer and one reader.
 - **No GPL dependencies,** with no exceptions. Where only a GPL library fits, use a permissive one or write the piece ourselves. State the licence when proposing a library.
 - **FreeSurfer is the model.** Its topology correction, pretess and strand thickening are the defaults to follow. Deviate only with cause and data. We do not run FreeSurfer, even as a benchmark.
 - **A person decides only where the data cannot.** Places that need judgment go into one review queue per stage. Each answer is a replayable edit: the automatic result is correct without it, and the review refines it.
@@ -223,7 +225,7 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 The coupling that is real, decided once:
 
 1. **The label set.** The filled mask is `FILLED_LABELS` (WM, lateral ventricle, caudate, putamen, pallidum, thalamus, CC; whether the hippocampus joins them is open). The network must output at least these classes, and the hippocampus as a class of its own, separately from cortex and outside, or the surface changes.
-2. **Excisions are outside.** Blocks cut out before the scan are labelled outside, like any other Fomblin; the label set has no missing-tissue class. Where the data ends is a separate fact, the cut faces, which step 2 derives from the labels and a few seeds (the rule for cut faces).
+2. **Excisions are outside.** Blocks cut out before the scan are labelled outside, like any other Fomblin; the label set has no missing-tissue class. Where the data ends needs no label and no stored output (the rule for cut faces).
 3. **Calibration.** P must be calibrated near 0.5, because step 2 places walls by it. Calibration is a diagnostic of every generation.
 4. **The defect count.** The number of handles and cavities before correction sets the length of the review queue (step 6). It is a diagnostic of every generation, not a target to optimise inside the network.
 5. **Partial volume: the majority rule.** A voxel takes the class that fills most of it. A fluid channel narrower than half a voxel, or two banks pressed pia to pia with no fluid, is therefore cortex in the labels.
@@ -266,7 +268,6 @@ The coupling that is real, decided once:
 | `_dseg` and P | step 1; until phase 5, the purple-mri aseg, with no P in phase 0 and a stand-in P from phase 3 | the filled mask; handle removal ordered by P |
 | `_desc-wmedits_edits.tsv` and sidecar (`wm-edits/1`) | step 6 | edits applied before the correction |
 | The FLASH | the scan | the fluid relabel (fix kind 5); fixes chosen by intensity, only if adopted (Open) |
-| Cut seeds: points in scanner mm, each "in the bite" or "on a flat face" | step 6 (placed or confirmed by the reviewer; proposed by the detector on the bootstrap hemisphere) | growing the cut faces through cortex |
 
 *Outputs*
 
@@ -276,23 +277,17 @@ The coupling that is real, decided once:
 | `_desc-wmtopofixes_dseg`: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit, 5 fluid relabel (derivable from the diff; kept as the viewer's display layer) | `wm-dseg-fixes/1` | the viewer |
 | `_desc-wmtopofixes_fixes.tsv`: one row per fix: id, kind, voxel count, centroid and bounding box in mm, wall size, signed margin in P (planned) | `wm-dseg-fixes/1` | step 6 (ranking); process review |
 | The fix diff: per changed voxel, its linear index, fix id, old label and new label, in Morton order (planned) | `wm-dseg-fixes/1` | replay and revert; process review across runs |
-| `_desc-cut_mask`: the outside voxels that lie against a cut face (planned) | none yet | step 4 (the cut-face flag); stream 2 (the domain-edge stop); stream 3 (no anchors on cut faces) |
 
 *Design and lessons*
 
 - **Excisions** (PL). Blocks of tissue were cut out of the specimen before the scan, and the FLASH is black there. The purple-mri aseg labels them as if the tissue were there: 14.6 % of V1V2's cortex label.
-  - The detector (FLASH below 0.25 × the cortex median after smoothing by 2 voxels, in blocks of at least 250 voxels, grown by 0.3 mm) works only against an aseg that imputes tissue, since Fomblin outside the specimen is as dark. It is a bootstrap tool: on the purple-mri hemisphere it relabels excisions to outside in the seed labels and proposes cut seeds. Once our own labels exist, it has nothing to do.
+  - The detector (FLASH below 0.25 × the cortex median after smoothing by 2 voxels, in blocks of at least 250 voxels, grown by 0.3 mm) works only against an aseg that imputes tissue, since Fomblin outside the specimen is as dark. It is a bootstrap tool: on the purple-mri hemisphere it relabels excisions to outside in the seed labels, and its map of the excisions is kept as a test set for stream 3 (whether profiles alone find cut tops, §5c, Open). Once our own labels exist, it has nothing to do.
 - **The filled mask** (#61, #66, #67). Aseg 41 plus 43, 49–52 and 192 (right hemisphere; 2, 4, 10–13 and 192 left), with cavities filled. The deep structures (ventricle, thalamus, ...) belong in the mask. Whether the hippocampus (53 right, 17 left) is inside the white surface or outside it is open, to be decided once there is data (Open); the surface results in this section were measured with it outside. Excisions are outside (rule below). A voxel cut from the mask takes the label of the nearest (mm) voxel outside it.
-- **The rule for cut faces.** A cut face is a domain edge: close the surface there, invent nothing, and mark exactly where it lies. This covers excisions and the knife faces where the hemisphere was separated (through the corpus callosum and the diencephalon).
+- **The rule for cut faces.** A cut face is a domain edge: close the surface there and invent nothing. This covers excisions and the knife faces where the hemisphere was separated (through the corpus callosum and the diencephalon). Nothing about it is stored.
   1. **Excisions are outside.** The labels have no missing-tissue class. The filled mask, handle removal and the cavity fill run as usual, and a fill into an excision is an ordinary fill into outside (whichever changes fewer voxels): a plug where there is no data alters nothing real, whereas forbidding it would force cuts through real WM.
-  2. **Where the filled mask touches outside, the face is a cut.** In normal anatomy cortex always lies between the filled mask and outside. So the outside voxels next to the filled mask belong to the cut mask, with no threshold and no seeds. This finds the knife faces and every excision through WM, wherever the tissue deformed after cutting.
-  3. **Excisions through cortex only need seeds,** since cortex lies between the mask and the cut there. Each cut seed is a point in scanner mm, replayable like an edit, of one of two kinds:
-     - **In the bite** (the excision's Fomblin): grow the region from the seed through outside voxels, kept inside the specimen's envelope (a closing of tissue with a ball of radius R) and out of sulci (an opening with a ball of radius r). The grown region joins the cut mask. If the grow reaches the envelope's exterior, or is empty near the seed, the excision goes to review.
-     - **On a flat face** (a cut with no bite, such as a pole cut off): grow over the tissue boundary while it stays close to a plane fitted as it grows; the fit bridges the sulcal gaps the cut crosses. The outside voxels against the grown face join the cut mask.
-  4. **The cut-face flag.** Each white-surface vertex lies on one grid edge (its edge key), joining a mask voxel to a non-mask voxel. The vertex is on a cut face exactly when that non-mask voxel is in the cut mask. Published per vertex, keyed by edge key.
-  5. **Use downstream.** Stream 2 roots no columns on flagged vertices, and a ray that leaves tissue into the cut mask stops with the reason "domain edge", not "fluid". Stream 3 never anchors τ = 1 on a cut face and leaves those column tops out of the thickness evidence.
-  6. **Seeds stay valid across generations and resolutions;** the faces are derived from them on each run, so they sit exactly on the current labels' boundary, which is what the rays cross.
-- **The guarantee still holds.** The mesh of any voxel mask is closed, and `dseg` refuses to write unless the Betti numbers are (b0, 0, 0). An excision that cuts a gyrus clean off makes another piece, which `wm-dseg/1` already allows: one or more closed, genus-0 pieces. What changes is that part of the surface is not grey/white, and it is flagged exactly.
+  2. **Where the filled mask touches outside, the face is a cut.** In normal anatomy cortex always lies between the filled mask and outside. So a root whose ray goes from WM straight into outside, with no cortex between, is on a cut face: the knife faces and every excision through WM. Stream 2's label intervals show it directly; no threshold, no seeds, no flag.
+  3. **Excisions through cortex only** look, in the labels, like cortex reaching the pia. Whether stream 3's profiles tell a cut top apart (a truncated layer sequence; the error grows with the depth cut away) is tested against the bootstrap detector's excision map (§5c, Open). If they cannot, the fallback is cut seeds placed by the reviewer and grown into the cut (Open).
+- **The guarantee still holds.** The mesh of any voxel mask is closed, and `dseg` refuses to write unless the Betti numbers are (b0, 0, 0). An excision that cuts a gyrus clean off makes another piece, which `wm-dseg/1` already allows: one or more closed, genus-0 pieces. What changes is that part of the surface is not grey/white; the rays from it show that directly.
 - **Handle removal** (`handles.remove_handles`; #38, #48, #67):
   - Topology uses Kuhn adjacency, so it equals the mesh's (§2).
   - Object and background fronts grow by simple points. Each handle's wall is cut or filled, whichever changes fewer voxels; ties go to the cut, then to the lowest voxel index.
@@ -354,7 +349,7 @@ The coupling that is real, decided once:
 
 | Input | From | Use |
 |---|---|---|
-| `_desc-wmtopo_dseg`, `_desc-cut_mask` | step 2 | the filled mask; the cut mask for the cut-face flag |
+| `_desc-wmtopo_dseg` | step 2 | the filled mask |
 | P | step 1 | the antialiasing data term |
 | The data normal and its coherence | step 3 | diagnostics only: agreement of the surface normals with the image (a term in the surface only if adopted, Open) |
 
@@ -367,7 +362,6 @@ The coupling that is real, decided once:
 | `_desc-normlen_white.func.gii`: the length of the averaged normal before renormalising, \|n̄\| in [0, 1] (planned) | `white-surf/1` | stream 2 (recorded per column); stream 3 (weighing evidence) |
 | `_desc-edgekeys_white.func.gii`: each vertex's grid-edge key | `white-surf/1` | every per-vertex output downstream |
 | `_desc-blocks_white.tsv`: the block index | `white-surf/1` | blocked readers downstream |
-| The cut-face flag per vertex, keyed by edge key (planned) | none yet | stream 2 (no roots there) |
 
 *Design and lessons*
 
@@ -439,7 +433,6 @@ The coupling that is real, decided once:
 |---|---|---|
 | The sites in the queue | `wm-sites/1` (#81) | the viewer's review pane |
 | The answers: `_desc-wmedits_edits.tsv` and sidecar | `wm-edits/1` | step 2 (edits); step 1 (verified training labels) |
-| Cut seeds, placed or confirmed by the reviewer | none yet | step 2 (cut faces) |
 
 *Design and lessons*
 
@@ -464,7 +457,8 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 #### Open
 
 - Fixes chosen by intensity (FreeSurfer's cut or fill by intensity; #85 step 2); the tube case; the size threshold for exceptions; whether fills through cortex are as acceptable as thickening.
-- Cut faces: R and r for the bite grow, chosen on the bootstrap hemisphere; whether flat-face excisions are cut close enough to planar for the plane fit; how far a cut face bends the normals of vertices near it but not on it, and whether stream 2 should use distance along the mesh from flagged vertices; whether the viewer needs the cut face as a surface label of its own.
+- Cut faces: how far a cut face bends the normals of vertices near it but not on it.
+- **The fallback for excisions through cortex, if stream 3's profiles cannot find their tops:** cut seeds, points in scanner mm placed by the reviewer and replayable like edits. A seed in the bite grows through outside voxels, kept inside the specimen's envelope (a closing of tissue, radius R) and out of sulci (an opening, radius r); a seed on a flat face grows over the tissue boundary while it stays close to a plane fitted as it grows. The faces are derived on each run, so they follow the current labels. Whether flat faces are planar enough is unknown.
 - Whether depth 0 (the column roots) should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Hidden fluid gaps (a thin, slowly decaying dark strip inside labelled cortex; SF F21): under the majority rule they stay cortex, and stream 3 finds them along the columns. Open: whether a detector before tracing is still worth having, as a diagnostic or to rank review sites.
 - Whether normal smoothing should stop at blade crests (feature-preserving smoothing, such as bilateral normal filtering, Zheng et al. 2011) instead of letting the two faces cancel.
@@ -500,10 +494,10 @@ The whole stream proceeds in phases. Phase 0 runs the pipeline on the purple-mri
 
 Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase 4 needs phase 2 (and gains from phase 1's answers); phase 5 needs phases 3 and 4; phase 6 needs phases 1 and 5. Whole-brain scaling is a track of its own, alongside phases 1–8, and must be done before the first whole brain.
 
-- **Phase 0: the pipeline on the purple-mri aseg.** Labels only, with the current code's labels-only path (handle removal ordered by distance, antialiasing by smoothness alone). The aim is the published outputs streams 2–4 need: `wm-dseg/1`, `white-surf/1`, `white-overview/1`, the cut mask and the cut-face flag.
+- **Phase 0: the pipeline on the purple-mri aseg.** Labels only, with the current code's labels-only path (handle removal ordered by distance, antialiasing by smoothness alone). The aim is the published outputs streams 2–4 need: `wm-dseg/1`, `white-surf/1`, `white-overview/1`.
   - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
   - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
-  - The rule for cut faces (step 2): relabel the purple-mri aseg's excisions to outside with the detector, which also proposes cut seeds; publish the cut mask and the cut-face flag (per vertex, keyed by edge key). Write the cut-seed spec. Phantom tests: an excision through WM that leaves a tunnel (fixed by a plug, flagged with no seed), one that cuts a piece off (b0 rises), an excision through cortex only (found from a seed in the bite), and a flat cut with no bite (found from a seed on the face).
+  - The rule for cut faces (step 2): relabel the purple-mri aseg's excisions to outside with the detector, and keep its excision map as a test set. Phantom tests: an excision through WM that leaves a tunnel (fixed by a plug), and one that cuts a piece off (b0 rises).
   - Rewrite `pial_labels` as step 2's fluid relabel (fix kind 5): keep its noise estimators and detector, and record its changes in the fixes image as an automatic fix. Stream 2's crossings depend on it (§4c, step 2). It follows the majority rule (3b): its test is a fluid fraction above ½, so channels narrower than that stay cortex.
 - **Phase 1: review and fold repair** on phase 0's output (the steps of the #80 plan, with #81 and #82 as its first PRs). Its answers correct the hemisphere now and become the first verified training labels.
   1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
@@ -571,24 +565,25 @@ GPU, by cost: antialias first, then the normal-smoothing tables, then mesh and v
 
 ### 4a. Goal
 
-A complete ray from every white-surface vertex through the cortex, to fluid or into the far bank's WM, recording what it meets on the way.
+A complete ray from every white-surface vertex, from inside the WM under it to well beyond the cortex, recording every label it crosses and every column it meets, so that stream 3 reads the cortex from the profile.
 
 ### 4b. High-level design
 
-1. **Roots.** One root per `white-surf/1` vertex, keyed by edge key, with rays both inward and outward.
-2. **Trace complete rays, with no field.** A small set of simple methods that differ in one respect each: straight rays along the smoothed surface normal, and the same rays or the surface grown along its own normals with an equivolume (curvature-driven) measure of depth. None reads the image.
-3. **Record what each ray meets.** Meetings with other rays and fronts, and the class of each column. Nothing is cut here: the cut is read from the profile in stream 3.
-4. **Publish the column traces** in a spec'd format that stream 3 and the viewer read.
+1. **Roots.** One root per `white-surf/1` vertex, keyed by edge key.
+2. **Rays of fixed extent, with no field.** Each root's ray runs d inward (into the WM under it) and 8 mm outward, along the smoothed surface normal, with equivolume depth measured on the rays. None reads the image.
+3. **Record what each ray meets.** The label intervals along it and its meetings with other columns. Nothing is cut and nothing stops a ray: the cut is read from the profile in stream 3.
+4. **The ray sampler.** Stream 2's output is a spec'd sampler (§1): stream 3 and the viewer call it for a superblock and its halo. Nothing per column is stored.
 
-Rays that follow a field fitted to the image (T) are not part of the design. On every measure that matters downstream they did no better than straight rays and often worse (4c, *Fields fitted to the data normal*). Revisiting them is later-phase work, only if something obvious was missed.
+Rays that follow a field fitted to the image (T), and fronts grown from the surface, are not part of the design. On every measure that matters downstream they did no better than straight rays and often worse (4c, *Later-phase methods*). Revisiting them is later-phase work, only if something obvious was missed.
 
 **Standing decisions**
 
-- **Columns are complete rays.** They stop only at fluid, far WM, a cut face or other domain edge, or a length cap (8 mm), never where two fronts meet. A ray passes through a contact as it passes anything else, and the meeting is recorded. Fluid means the fluid label, by stream 1's majority rule (3b): a channel narrower than half a voxel, or pia touching pia, is not a stop but a contact.
+- **Columns are complete rays of fixed extent:** d inward and 8 mm outward, ending only at the edge of the image. They never stop at fluid, WM, a cut or a contact: they record where they cross each label and where they meet other columns, and stream 3 decides where the cortex ends. Seismic practice is the model: record the full trace, pick the horizons in interpretation.
 - **Column rules stay simple.** An artefact is recorded in a test, never patched with a new clause.
 - Normal rays stay straight (user, #47).
 - No step uses the fixes image to decide where to search, or re-finds a boundary as the depth origin.
-- **No step labels banks.** A column belongs to its root, and nothing more. Where a ray ends in WM or meets another column, the distance along the white mesh between the two roots is recorded as a number, never thresholded into "same bank" or "other bank": a fold and a contact differ only along that continuum (step 1, Theory). The distance uses the across-triangle graph, so the two sides of a thin blade stay far apart.
+- **No step labels banks.** A column belongs to its root, and nothing more. Where a ray enters WM or meets another column, the distance along the white mesh between the two roots is recorded as a number, never thresholded into "same bank" or "other bank": a fold and a contact differ only along that continuum (step 1, Theory). The distance uses the across-triangle graph, so the two sides of a thin blade stay far apart.
+- **Excisions need no special treatment here.** They are outside in the labels; a ray crosses into them as into any outside. Where an excision exposes WM, the root has no cortex interval at all. Whether stream 3's profiles tell a cut top from the pia is tested there (§5c, Open).
 
 ### 4c. Implementation design
 
@@ -598,53 +593,46 @@ Rays that follow a field fitted to the image (T) are not part of the design. On 
 
 | Input | From | Use |
 |---|---|---|
-| `white-surf/1`: vertices, normals, normal lengths, edge keys, block index | stream 1, step 4 | one root per vertex; each root's normal length recorded on its column |
-| The cut-face flag (planned) | stream 1, step 4 | roots left out |
-| `_desc-cut_mask` (planned) | stream 1, step 2 | the domain-edge stop |
+| `white-surf/1`: vertices, triangles, normals, normal lengths, edge keys, block index | stream 1, step 4 | one root per vertex; each root's normal length recorded on its column; dual areas |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
-| Roots keyed by edge key, with position and normal | internal | steps 2–3 |
+| Roots keyed by edge key, with position, normal and normal length | internal | steps 2–3 |
 | The across-triangle mesh graph | internal | distances along the surface (step 3) |
 
 *Design and lessons*
 
-- One root per white-mesh vertex (about one per voxel), except vertices flagged as cut face (§3c, step 2). Rays go both inward and outward from the surface.
+- One root per white-mesh vertex (about one per voxel).
 - **Distances on the mesh** need the edges across neighbouring triangles: 8.2 % bound on a plane, against 41 % along edges alone (#10, #45).
 - **Theory** (SF; shock theory): because the WM is connected, every collision is a front meeting itself. A fold and a contact differ only in how far apart the meeting roots lie along the surface, which is a continuum, so no pointwise quantity separates them.
 
-#### Step 2: tracing methods
+#### Step 2: rays
 
 *Inputs*
 
 | Input | From | Use |
 |---|---|---|
 | Roots | step 1 | ray starts and directions |
-| `white-surf/1` triangles | stream 1, step 4 | dual areas; the front methods' growth |
-| `_desc-wmtopo_dseg`, with the fluid relabel applied | stream 1, step 2 | stops: fluid, far WM; a fluid channel labelled as cortex makes a false crossing |
-| WM distance through tissue, capped at 8 mm | computed per superblock (shared code, §7) | `first_fall` |
-| The data normal and its coherence | stream 1, step 3 | diagnostics only: how far each ray departs from the image's own normal |
+| `white-surf/1` triangles | stream 1, step 4 | dual areas for equivolume depth |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
-| Per root and method, one ray: samples with 3D positions, arc length and equivolume depth, and why it stopped | internal | steps 3 and 4 |
+| Per root and method, one ray from s = −d to s = 8 mm: positions at any requested step, arc length, equivolume depth | internal | step 3; the sampler (step 4) |
 
 *Design and lessons*
 
 Measured at the marked points (CP; #47, #52, #58):
 
-- **normal** (straight rays along the smoothed white normal, at constant speed): keeps the right class on every phantom and almost never returns to its own bank (386 and 26 columns at V1V2 and M1S1). Its profile split is the best at M1/S1 (median 0.17 mm) and 0.075 mm at V1V2, as good as any method there. Its costs:
-  - more stops at the length cap: past another bank's front at 2.4–2.7 mm, a straight ray grazes a far bank that is not parallel to its own. These are kept as rays that end in cortex;
+- **normal** (straight rays along the smoothed white normal): keeps the right class on every phantom and almost never returns to its own bank (386 and 26 columns at V1V2 and M1S1). Its profile split is the best at M1/S1 (median 0.17 mm) and 0.075 mm at V1V2, as good as any method there. Its costs:
+  - a straight ray can graze a far bank that is not parallel to its own, past another bank's front at 2.4–2.7 mm, and cross neither fluid nor WM within 8 mm;
   - 0.18–0.41 mm path error against the phantoms' curved true columns at crowns (0.25 mm at kissing pairs).
-- **equivolume** (normal's rays, with the depth measured on the rays: each column's cross-section is its root's dual area with every vertex moved along its own normal). The same paths as normal, with depth that follows the neighbouring rays.
-- **front-equivolume** (the white mesh grown along its own smoothed normals at speed A₀/A, so the fronts are the equivolume layers and the columns bend to stay normal to them): bends 0.25–0.31 mm off the straight ray, ends many columns at the caps, splits poorly at M1/S1 (0.55 mm), and runs 8–9× slower. Which paths are right is untested.
+- **equivolume** (normal's rays, with the depth measured on the rays: each column's cross-section is its root's dual area with every vertex of its 1-ring moved along its own normal). The same paths as normal, with depth that follows the neighbouring rays. It needs only the root's 1-ring, so it is local.
 - **Bok's measure** for a vertex is the exact flux of its dual cell. Equivolume depth is (V(s) − V(s₀)) / (V(s₁) − V(s₀)).
-- Where a normal ray passes another bank's front is where the WM distance through tissue stops rising along it (`first_fall`); the front methods record where a column meets another front at a smaller depth (`meet_at`).
-- The crossings depend on a cortex label without fluid channels and vessels, so tracing reads stream 1's labels after the fluid relabel (step 2, fix kind 5). It relabels only channels that fill most of a voxel; narrower ones stay cortex, and the rays record them as meetings for stream 3.
+- **The inward extension** (s from −d to 0) runs back along −n into the WM under the root, so the profile covers the GM/WM transition wherever the surface sits: the surface may lie in GM or in WM, and stream 3 reads the transition as a level of z(τ). d starts at 1 mm and is set in stream 3, phase 1, from where the transition is found.
 
 #### Step 3: recording what each ray meets
 
@@ -653,47 +641,53 @@ Measured at the marked points (CP; #47, #52, #58):
 | Input | From | Use |
 |---|---|---|
 | The rays | step 2 | what each column meets |
+| `_desc-wmtopo_dseg`, with the fluid relabel applied | stream 1, step 2 | the label intervals |
+| WM distance through tissue, capped at 8 mm | computed per superblock (shared code, §7) | `first_fall` |
 | The across-triangle mesh graph | step 1 | the distance along the surface between meeting roots |
+| The data normal and its coherence | stream 1, step 3 (sampler) | diagnostics only: how far each ray departs from the image's own normal |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
-| Per column: where it passes another front (`first_fall`, `meet_at`), the root it meets and the distance to it along the surface, its class | internal | step 4 |
+| Per column: the label intervals (where it enters and leaves cortex, WM, fluid or outside); its meetings (`first_fall`, `meet_at`), each with the root met and its distance along the surface; a class derived from the intervals, for diagnostics | internal | the sampler (step 4) |
 
 *Design and lessons*
 
-- Meetings are recorded on the column (`first_fall` for normal rays, `meet_at` for the front methods, with the root met and its distance along the mesh) and never acted on. A contact is a meeting, recorded on any column whatever its class.
-- Classes by how the ray ends, not by bank: in fluid (open), in WM, at a cut face or other domain edge, at the cap, failed. A ray never ends at a contact: it passes through. The current code splits the WM ends into crossing and own-bank return at `SAME_MM` (5 mm along the mesh); the restart drops that split and records the distance instead.
+- **Label intervals, not stops.** Every crossing is recorded, including short WM runs from the staircase, a surface that sits off the label, a ray that grazes its own WM, and WM strands or islands inside the cortex. None of them cuts a column short; stream 3 reads which crossing is the pia, which WM is the far bank's, and where the transition lies.
+- Meetings are recorded on the column (`first_fall` where the WM distance through tissue stops rising along a normal ray; `meet_at` where an equivolume column meets another bank's columns at a smaller depth), with the root met and its distance along the mesh, and never acted on. A contact is a meeting.
+- **Classes are summaries,** derived from the intervals for diagnostics only: open (fluid before any WM), in WM (WM entered after cortex), neither within 8 mm. They decide nothing. The current code's split of WM ends into crossing and own-bank return at `SAME_MM` (5 mm along the mesh) goes; the distance is recorded instead.
+- The labels' fluid comes after stream 1's fluid relabel (step 2, fix kind 5), which relabels only channels that fill most of a voxel; narrower ones stay cortex, and the rays record them as meetings for stream 3.
 - **Doesn't work:** any threshold on bend angle, turn, or root separation along the surface. Each cuts a continuum: between 10° and 60°, 5–34 % of classes change. A 5 mm "same bank" fallback is wrong at both faces.
 
-#### Step 4: the published traces
+#### Step 4: the ray sampler
 
 *Inputs*
 
 | Input | From | Use |
 |---|---|---|
-| Rays and what they meet | steps 2 and 3 | the traces |
+| Steps 1–3, as code | this stream | the sampler |
+| `white-surf/1`, `_desc-wmtopo_dseg` | stream 1 | its only data inputs |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
-| Column traces keyed by edge key and method, blocked by the white surface's blocks: straight rays by root, direction and length; bent rays by their samples' 3D positions and depth; per column, the stop reason, class, meetings, the root met and its distance along the surface | none yet | stream 3; the viewer |
+| The ray sampler: for a superblock and its halo and a method, every column's samples (positions, arc length, equivolume depth, from −d to 8 mm, at a requested step), label intervals, meetings and normal length, keyed by edge key | the ray-sampler spec (a sampler, §1; none yet) | stream 3; the viewer |
+| Diagnostics: the misalignment views, outcomes by normal length, the derived classes | none (views) | the user |
 
 *Design and lessons*
 
-- Today the traces are a prototype `.npz` with no spec, built on a box white mesh with no edge keys.
-- **Blocked, because no reader reads them whole.** A 50 µm whole brain has about 3.5·10⁸ columns per method; with per-sample positions (a median column of about 75 samples at 12 bytes each) that is about 300 GB per method. Stream 3 reads the columns of one superblock and its halo; the viewer reads the columns round what is on screen.
-  - A column belongs to the 64³ Morton block of its root vertex and is keyed by its root's edge key, so the block index of `white-surf/1` finds the roots and their columns together. A superblock and its halo (in mm, §2) are runs of that index.
-  - Per-sample arrays are ragged: one array of samples with a pointer array per block, as `white-overview/1` stores the true vertices each face carries.
-  - **Straight rays are stored by their parameters** (root, direction, length), not by samples: their samples are recomputed on demand, which cuts the main method's size by about two orders of magnitude. Only methods whose paths bend (front-equivolume, and the deflected normal ray if adopted) store samples.
-  - Per-column fields are stored once per column: the stop reason, the class, the meetings (`first_fall`, `meet_at`), the root met and its distance along the surface.
-- **A standard to start from:** TRX, a newer community tractography format (memory-mapped arrays, data per streamline and per point, groups), with groups as blocks plus our block index and edge keys, as `white-surf/1` extends GIfTI. Its reference library is believed to be BSD-licensed; check before adopting. TCK cannot be read by block and carries no per-column data, so it stays only as the viewer's export.
+- **Nothing per column is stored.** Every method in the design is per column and local: a straight ray, a 1-ring for equivolume depth, labels within 8 mm, meetings within 16 mm. So the sampler recomputes columns for a superblock and its halo (§2) on each call, deterministically, and the same column gives the same result whichever superblock asks.
+- At 50 µm a whole brain has about 3.5·10⁸ columns per method; stored with per-sample positions they would take hundreds of GB per method. Computing them reads only the labels along each ray, which stream 3 reads anyway to sample the echoes.
+- Today the traces are a prototype `.npz` with no spec, built on a box white mesh with no edge keys. TCK stays only as the viewer's export.
+- If a later method bends rays in a way that is not local (a grown front, a fitted field), it is stored or proven local before it joins the sampler.
 
-#### Fields fitted to the data normal (not in the design; a later phase at most)
+#### Later-phase methods: fields and fronts (not in the design)
 
-Every method below followed the image through a field, and none did better than straight rays where it mattered downstream:
+Every method below followed the image through a field or grew a front from the surface, and none did better than straight rays where it mattered downstream. A front couples columns over the mesh, so its reach grows with every step and it is not local (4c, step 4):
+
+- **front-equivolume** (the white mesh grown along its own smoothed normals at speed A₀/A, so the fronts are the equivolume layers and the columns bend to stay normal to them): bends 0.25–0.31 mm off the straight ray, ends many columns at the caps, splits poorly at M1/S1 (0.55 mm), and runs 8–9× slower. It was never shown to be right.
 
 - **The evidence against them** (CP, the methods on one field, labels and roots):
   - **Own-bank returns:** traverse sent 32,320 (V1V2) and 30,568 (M1S1) columns back into their own WM, crest 2,394 and 2,353, normal 386 and 26.
@@ -735,30 +729,30 @@ Every method below followed the image through a field, and none did better than 
     - the total angle from the root normal is capped (θ_max, for example 20–30°), so the ray keeps moving away from its root and cannot return to its own WM.
 
     An alternative form: trace the straight ray, then relax the whole path towards the data normal with a bending stiffness, as a short 1D problem per column. Judge it against normal on one footing: path error on curved phantoms, classes and own-bank returns at the sites, the profile split at the marked points (normal's 0.17 mm at M1/S1 is the bar), and its sensitivity to κ_max and θ_max, which is a finding to report, never a setting to tune away.
-- What the capped rays mean for stream 3: a straight ray that grazes a far bank ends in cortex, with no far WM to anchor its top.
+- Rays that cross neither fluid nor WM within 8 mm (a straight ray grazing a far bank): what stream 3 anchors their tops to.
 - **Radial fibres.** At 160 µm the texture is planar, so no source shows radial fibres giving column orientation. Their fade-out depth can still be a planar laminar edge.
 
 ### 4d. Implementation plan
 
-The stream proceeds in phases, as stream 1 does. Phase 0 gives stream 3 and the viewer real column traces early; later phases add the equivolume methods and settle the open questions, keeping the published format (extended in place, never replaced). Whenever stream 1 publishes a new white surface (its phases 1, 3 and 5), the traces are rerun. Each phase is one or more PRs.
+The stream proceeds in phases, as stream 1 does. Phase 0 gives stream 3 and the viewer a real ray sampler early; later phases add equivolume depth and settle the open questions, keeping the sampler's contract (extended in place, never replaced). Whenever stream 1 publishes a new white surface or labels (its phases 1, 3 and 5), the sampler gives new columns on the next call: nothing has to be rerun. Each phase is one or more PRs.
 
 Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0. Phase 2 needs phase 1 and stream 1's data normal (its phase 1). Phase 3 only if phase 2 shows something obvious was missed.
 
-- **Phase 0: normal rays on stream 1's phase 0 surface.**
-  - Write the spec for column traces first: it is the interface stream 3 and the viewer wait on.
-  - Rewrite `column_traces` to root on `white-surf/1` vertices by edge key and trace by mesh blocks, keeping the constants and the classes by ending (4c, step 3), without the bank split, and leaving out roots on the cut-face flag.
-  - The **normal** method: straight rays along the smoothed white normal (`streamlines.ray`, `first_fall`, `tissue_wm_distance`), stopped by stream 1's labels.
+- **Phase 0: the ray sampler, with normal rays, on stream 1's phase 0 surface.**
+  - Write the ray-sampler spec first: it is the interface stream 3 and the viewer wait on.
+  - Rewrite `column_traces` as the sampler: roots on `white-surf/1` vertices by edge key; rays of fixed extent (d inward, 8 mm outward) with no stops; label intervals and meetings; classes derived for diagnostics, without the bank split. The inward extension is new.
+  - The **normal** method: straight rays along the smoothed white normal (`streamlines.ray`, `first_fall`, `tissue_wm_distance`).
   - Port `mesh_graph` in a local form, with the duplicate-edge bug fixed (§7).
-  - Trace by superblock, with halos in mm (§2, domain edges): 8 mm for the labels each ray samples, 16 mm for the rays it may meet. Read the labels through the chunked reader and its cache. Give the analysis that picks the superblock level.
-- **Phase 1: equivolume depth.** Add **equivolume** (`offset_equivolume`) and **front-equivolume** (`column_front.grow_equivolume`, per mesh block) to the published traces.
+  - Work by superblock, with halos in mm (§2, domain edges): 8 mm for the labels each ray samples, 16 mm for the rays it may meet. Read the labels through the chunked reader and its cache. Give the analysis that picks the superblock level. Test that a column is identical whichever superblock computes it.
+- **Phase 1: equivolume depth.** Add **equivolume** (`offset_equivolume`) to the sampler.
 - **Phase 2: the open questions** (4c, Open), on the hemisphere away from domain edges:
   - the misalignment diagnostic (4c, Open), and from it the steering it calls for: the deflected normal ray here, stream 1's antialiasing term there, or both;
   - which paths are right, by phantoms with curved, equivolume true columns;
-  - the capped rays;
+  - rays that cross neither fluid nor WM within 8 mm;
   - column outcomes and the misalignment diagnostic against the root's normal length \|n̄\| (thin blades);
   - radial fibres;
   - with stream 1's hippocampus decision (its phase 5), how roots on the surface round the hippocampus are treated.
-- **Phase 3, only if phase 2 shows something was missed, and the deflected normal ray does not cover it: revisit fields fitted to the data normal** (4c). Nothing of `fitted_field`, `past_crest`, the field methods of `column_front` or `fronts` is ported before then; they stay in git, with the lessons above.
+- **Phase 3, only if phase 2 shows something was missed, and the deflected normal ray does not cover it: revisit fields and fronts** (4c, *Later-phase methods*). Nothing of `fitted_field`, `past_crest`, `column_front` or `fronts` is ported before then; they stay in git, with the lessons above.
 
 ## 5. Stream 3: laminar profiles, contacts and alignment
 
@@ -792,7 +786,7 @@ Where each layer lies along every column, read from the image's own contrast and
 
 | Input | From | Use |
 |---|---|---|
-| Column traces, for one superblock and its halo (in mm) | stream 2, step 4 | where to sample |
+| The ray sampler, for one superblock and its halo (in mm): samples, label intervals, meetings | stream 2, step 4 | where to sample; what each column crosses |
 | The FLASH echoes, for the same region | the scan | the samples |
 
 *Outputs*
@@ -803,7 +797,7 @@ Where each layer lies along every column, read from the image's own contrast and
 
 *Design and lessons*
 
-- **A sampler, not a file.** The column volume is a fixed function of the traces and the echoes, both already stored, so it is computed per block when a step needs it, kept in memory while that step works on the block, and never published. Storing it would cost more than it saves: at 0.04 mm steps each column samples the 0.16 mm image about four times per voxel it crosses, and neighbouring columns overlap, so a stored column volume is larger than the echoes it came from (hundreds of GB per method at whole-brain scale), and reading it moves more bytes than reading the echo block and interpolating. Trilinear sampling on a given trace is exact, so recomputing gives the same samples every time. A per-run cache is allowed only if a measured cost shows it pays. Exact tests: samples on a linear image are exact; a straight trace through a slab gives the slab's profile.
+- **A sampler, not a file.** The column volume is a fixed function of stream 2's rays (themselves a sampler) and the echoes, so it is computed per superblock when a step needs it, kept in memory while that step works on it, and never stored. It is published as a sampler (§1), because the viewer calls it too. Storing it would cost more than it saves: at 0.04 mm steps each column samples the 0.16 mm image about four times per voxel it crosses, and neighbouring columns overlap, so a stored column volume is larger than the echoes it came from (hundreds of GB per method at whole-brain scale), and reading it moves more bytes than reading the echo block and interpolating. Trilinear sampling on a given trace is exact, so recomputing gives the same samples every time. A per-run cache is allowed only if a measured cost shows it pays. Exact tests: samples on a linear image are exact; a straight trace through a slab gives the slab's profile.
 - One trace per white-mesh vertex, sampled every 0.04 mm, each sample keeping its 3D position. It reads like a seismic section: the stria runs as a continuous band from open into fused cortex, and the far bank's stria appears mirrored past a contact (CP).
 - The voxels within 1 voxel of the WM or the pia are partial volume. They made half the data term and drew 30 % of band boundaries; leave them out (PL; #24).
 
@@ -838,7 +832,7 @@ Where each layer lies along every column, read from the image's own contrast and
 | Input | From | Use |
 |---|---|---|
 | Flattened traces and shifts | step 2 | conservation of shifts |
-| Contacts and open tops | stream 2 (meetings and stops; a domain-edge stop is not an open top) | ties and anchors |
+| Meetings and label intervals | stream 2's sampler | ties; the readings below |
 | Detected bands | step 4 | levels, when placed at them |
 
 *Outputs*
@@ -851,6 +845,7 @@ Where each layer lies along every column, read from the image's own contrast and
 
 - One monotone z(τ) per column, z(1) = the pia, solved by QPBO at a few levels and then filled between them.
 - Its terms: conservation of shifts between columns whose roots are neighbours on the white mesh, the two-sided tie c_A + c_B = L at contacts (the user's choice), robust open-top anchors, weak lateral smoothness, a vertical prior and hard ordering.
+- **Readings that were once stream 2's stops.** Stream 2's rays never stop, so this step reads from the profile and the label intervals: the pial edge (a fluid interval is evidence, not a decision); an open top, where the profile and a fluid interval agree with no WM beyond within reach; and the far bank's WM entry for the tie's L, chosen among the WM intervals together with the profile.
 - It certifies 96.6–100 % of variables, so the remaining errors belong to the model.
 - The vertical prior must be the chain form, |z_ℓ − (τ_ℓ/τ_ℓ₊₁) z_ℓ₊₁|.
 - Levels placed at detected bands tighten the stria's spread by about 40 %. It reaches 0.08 mm at both M1/S1 and V1V2.
@@ -963,6 +958,7 @@ Where each layer lies along every column, read from the image's own contrast and
 
 #### Open
 
+- **Cut tops from profiles alone.** An excision through cortex is outside in the labels, so its column looks like one reaching the pia. Do the profiles flag it (a truncated layer sequence; a top at lower τ than its neighbours), and how large are the errors where they do not? Tested against the bootstrap detector's excision map (§3c, step 2). If not, stream 1 adds cut seeds (§3c, Open).
 - **Conflict: the equal-volume closed form from white-surface curvature.** PL (#23) adopted it with curvature smoothed at 1 mm (no stria trend); SF F10 lists it as failed with curvature at 0.32–0.80 mm (over-corrects on open V1, ρ −0.69, because the pia is flatter than a parallel shell). The tests differ in curvature scale, columns and measure, so the dependence on scale is unresolved. Normal rays (#47) use it at 0.5 mm, unvalidated.
 - **Conflict: the best M1/S1 estimator depends on the paths and the score.** The field prior alone on crossing paths gives 0.07–0.12 mm, against 0.26–0.33 mm in other scores. The profile split misses by 0.5–0.8 mm on tensor paths but gets 0.17 mm on normal rays. The crossing path's L and the column arc lengths were never reconciled. Compare estimators only on one shared set of paths with one score.
 - The joint fit of the thickness field to visible tops and to the contact sums L, and whether it converges.
@@ -974,11 +970,11 @@ Where each layer lies along every column, read from the image's own contrast and
 
 ### 5d. Implementation plan
 
-The stream proceeds in phases, as streams 1 and 2 do: each phase adds one design step on the column volume, keeping earlier outputs' formats (extended in place, never replaced). Whenever stream 2 publishes new traces, the stream reruns. Each phase is one or more PRs. The old patch pipeline (`columns`, `regions`, `surfaces`, `bottom`, `tv`, `refine`, `output`) is not ported: it needs a pial exit and writes no BIDS output.
+The stream proceeds in phases, as streams 1 and 2 do: each phase adds one design step on the column volume, keeping earlier outputs' formats (extended in place, never replaced). Whenever stream 1 or 2 publishes a new surface, labels or sampler version, the stream reruns on it. Each phase is one or more PRs. The old patch pipeline (`columns`, `regions`, `surfaces`, `bottom`, `tv`, `refine`, `output`) is not ported: it needs a pial exit and writes no BIDS output.
 
 Order: phase 0 needs stream 2's phase 0. Phases 1 and 2 follow in order; phase 3 can run alongside phase 2 (its bands become the joint warp's levels); phase 4 needs phase 2 and gains from stream 2's phase 1; phase 5 needs phase 2.
 
-- **Phase 0: the column-volume sampler** on stream 2's phase 0 traces: the column volume of a superblock and its halo (in mm, §2), computed on demand through the chunked reader and its cache, with exact tests. No file and no spec.
+- **Phase 0: the column-volume sampler** on stream 2's ray sampler: the column volume of a superblock and its halo (in mm, §2), computed on demand through the chunked reader and its cache, with exact tests. No file; a sampler contract (§1), since the viewer calls it too.
 - **Phase 1: flattening.** Port `flatten` with a blocked or local solve, and a torch version if it stays heavy.
 - **Phase 2: the joint warp.**
   - Port `surfcut.model` and `surfcut.cut`; replace `surfcut.qpbo` with a QPBO that is not GPL (our own, or a permissive library).
@@ -1040,7 +1036,7 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
 |---|---|---|
 | Volumes: the FLASH, labels, P | the scan; stream 1 | the volume pane |
 | `white-surf/1`, `white-overview/1` | stream 1 | surface, sections, inflation, flat map |
-| Column traces; stream 3's outputs | streams 2 and 3, as their specs appear | their panes |
+| The ray sampler; stream 3's outputs and samplers | streams 2 and 3, as their specs appear | their panes |
 
 *Outputs*
 
@@ -1096,8 +1092,8 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 is the same work as stream 1's 
   - Port as is: `viewer.flatmap`, `viewer.inflation`, `viewer.sections`.
   - Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
   - Bring in the geodesic-patch flat map (#69), with its `edge_graph` fix split out.
-- **Phase 1: the stream 1 review pane,** with site answers and scribbles, writing `wm-edits/1`, and placing or confirming cut seeds.
-- **Phase 2: column traces.** Rewrite against the column-trace spec: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
+- **Phase 1: the stream 1 review pane,** with site answers and scribbles, writing `wm-edits/1`.
+- **Phase 2: columns.** Rewrite against the ray sampler, calling it for what is on screen: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
 - **Phase 3: stream 3's outputs,** a pane for each as its spec appears: the columns sampled on request, z(τ) and its levels, bands, thickness and contacts.
 
 ## 7. Shared code
@@ -1110,9 +1106,9 @@ Each stream's plan lists its own modules. These are shared, or belong to no stre
 | Port with changes | `blocks` (add the chunked source; never read large inputs whole: `NiftiSource` now reads a `.nii.gz` whole, and `BlockReader` keeps volumes up to 4 GB resident on the device), `mesh_torch` (block-local tables), `mesh_smoothing` (keep normals, edges, pieces), `mesh_graph` (local form; fix the bug below) |
 | Drop | `topology` and `wellcomposed` ((26,6) codes), `growth` and `joint` (old seam model), `frame` (its `missing_tissue` detector moves to stream 1 as the bootstrap's excision detector) |
 
-Computed on demand from published outputs, never published, so every reader gets the same answer from the same code:
+Samplers that belong to no stream (§1, Goals), computed on demand from published files, so every reader gets the same answer from the same code:
 
-- **Curvature of `white-surf/1`** at a scale given in mm, with smoothing that keeps mass (§3c, step 4). Readers: stream 2 (equivolume depth), stream 3 (depth estimators), the viewer.
+- **Curvature of `white-surf/1`** at a scale given in mm, with smoothing that keeps mass (§3c, step 4). Readers: stream 3 (depth estimators), the viewer.
 - **The WM distance through tissue,** capped at 8 mm, with fluid and outside as obstacles, per superblock with its halo (§2). Readers: stream 1's `orient` (the sign of the data normal), stream 2 (`first_fall`). Today it is `tissue_wm_distance` in `streamlines`.
 
 Problems in the current code that a restart should not inherit:
@@ -1127,7 +1123,7 @@ Problems in the current code that a restart should not inherit:
 
 ## 8. Interfaces between streams
 
-The specs in `docs/formats/` stay at version 1 until a release, edited in place. Each is enforced by a `bids.SidecarSpec`, and its document is tested against the code. A spec not yet written is written at the start of the phase that first publishes its output, before that output's code.
+The specs in `docs/formats/` stay at version 1 until a release, edited in place. A file's spec is enforced by a `bids.SidecarSpec`; a sampler's contract (§1) by its exact tests. Each document is tested against the code. A spec not yet written is written at the start of the phase that first publishes its output, before that output's code.
 
 | Spec | Defines | Written in |
 |---|---|---|
@@ -1135,12 +1131,14 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | `white-surf/1` | GIfTI with external data: float32 vertices in scanner mm, int32 triangles, float32 normals, float32 normal lengths (to be added), int64 edge keys, a block index in Morton order | exists |
 | `white-overview/1` | The decimated display mesh, its true-vertex ids and the true vertices each face carries; five guarantees | exists |
 | `wm-edits/1` | Exists as voxel-row diffs against a SHA-pinned aseg, with each answer's site and choice; to be revised so answers stand on their own (verified labels, valid for any input), in an append-only log where a correction supersedes and never rewrites | revision: stream 1, phase 1 |
-| Cut seeds; the cut mask; the cut-face flag | Replayable seed points in scanner mm with their kind; the outside voxels against a cut face; a per-vertex flag keyed by edge key | stream 1, phase 0 |
 | `wm-sites/1` | The review queue's sites | stream 1, phase 1 (#81) |
 | Test regions | Labelled boxes, with the box and the labeller | stream 1, phase 2 |
 | Training export | The nnU-Net dataset, with seed and verified labels kept apart, with provenance | stream 1, phase 4 |
 | Our `_dseg`, P, fold spread | The network's outputs, with the model generation in each sidecar | stream 1, phase 5 |
-| Column traces | Rays keyed by edge key and method, blocked by the white surface's blocks; straight rays by parameters, bent rays by ragged samples; per-column stops, classes and meetings (§4c, step 4) | stream 2, phase 0, first: stream 3 and the viewer wait on it |
+| `orient` (sampler) | The structure tensor, the signed data normal and its coherence, for a superblock and its halo (§3c, step 3) | stream 1, phase 1 |
+| The ray sampler | Per column, keyed by edge key and method: samples from −d to 8 mm, label intervals, meetings, normal length (§4c, step 4) | stream 2, phase 0, first: stream 3 and the viewer wait on it |
+| The column volume (sampler) | Each column's echoes sampled along its ray, with 3D positions and partial-volume marks (§5c, step 1) | stream 3, phase 0 |
+| WM distance through tissue; curvature (samplers) | §7 | with their first readers: stream 1, phase 1; stream 3, phase 4 |
 | z(τ) | Depth maps per column: the pial edge at τ = 1, the GM/WM transition as a level | stream 3, phase 2 |
 | Bands; thickness and contacts | Bands per region and layer identity; the thickness field and contact splits | stream 3, phases 3–4 |
 | Feedback to stream 1 | Sites in `wm-sites/1` (no spec of its own) | stream 3, phase 5 |
@@ -1164,7 +1162,7 @@ flowchart TB
     S1SC["whole-brain scaling track"]
   end
   subgraph S2["Stream 2: columns"]
-    S2P0["2.0 normal rays"]
+    S2P0["2.0 ray sampler, normal rays"]
     S2P1["2.1 equivolume depth"]
     S2P2["2.2 open questions; misalignment diagnostic"]
     S2P3["2.3 revisit fields, only if needed"]
@@ -1180,7 +1178,7 @@ flowchart TB
   subgraph S4["Stream 4: viewer"]
     S4P0["4.0 viewer on stream 1's outputs"]
     S4P1["4.1 stream 1 review pane"]
-    S4P2["4.2 column traces"]
+    S4P2["4.2 columns"]
     S4P3["4.3 stream 3's outputs"]
   end
 
@@ -1226,7 +1224,7 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 1.7 | 1.5 | |
 | 1.8 | 1.6, 1.7 | only if their diagnostics ask |
 | Scaling track | 1.0 | alongside 1.1–1.8; done before the first whole brain |
-| 2.0 | 1.0 | writes the column-trace spec first |
+| 2.0 | 1.0 | writes the ray-sampler spec first |
 | 2.1 | 2.0 | |
 | 2.2 | 2.1; 1.1 (data normal) | the hippocampus roots wait on 1.5; its diagnostic decides between steering the rays here and stream 1's antialiasing term |
 | 2.3 | 2.2 | only if 2.2 shows something was missed |
