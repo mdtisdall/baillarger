@@ -94,6 +94,7 @@ dependencies = [
     { name = "nibabel" },
     { name = "numba" },
     { name = "numpy" },
+    { name = "ortools" },
     { name = "pyamg" },
     { name = "scikit-fmm" },
     { name = "scipy" },
@@ -105,7 +106,6 @@ dependencies = [
 dev = [
     { name = "matplotlib" },
     { name = "mypy" },
-    { name = "ortools" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "scikit-image" },
@@ -118,6 +118,7 @@ requires-dist = [
     { name = "nibabel", specifier = ">=5.4.2" },
     { name = "numba", specifier = ">=0.68.0" },
     { name = "numpy", specifier = ">=2.5.4" },
+    { name = "ortools", specifier = ">=9.15.6755" },
     { name = "pyamg", specifier = ">=5.3.0" },
     { name = "scikit-fmm", specifier = ">=2025.6.23" },
     { name = "scipy", specifier = ">=1.18.1" },
@@ -129,7 +130,6 @@ requires-dist = [
 dev = [
     { name = "matplotlib", specifier = ">=3.11.2" },
     { name = "mypy" },
-    { name = "ortools", specifier = ">=9.15.6755" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "scikit-image", specifier = ">=0.26.0" },
