@@ -228,6 +228,7 @@ The coupling that is real, decided once:
 - Steps 2 and 3 require P as well as labels.
 - Only verified labels train later generations.
 - Test regions are labelled from scratch and never trained on.
+- **Labelling happens in our own viewer** (stream 4): the test regions, the site answers and the scribbles. It reads the blocked formats we rely on (NIfTI-Zarr volumes, `white-surf/1` with its block index, the overview), so a person can label anywhere in a whole brain at full resolution, against the surface. ITK-SNAP and 3D Slicer load whole volumes into memory and read neither format, so at 50 µm they would only ever see exported crops. The viewer also writes answers directly as spec'd edits (`wm-edits/1`). ITK-SNAP stays only as an escape hatch for free painting on an exported crop.
 - Training runs on a compute cluster with CUDA GPUs; how to reach it is to be settled when training starts. Inference and data preparation can run on the laptop.
 
 *Literature* (from memory; check before citing)
@@ -386,7 +387,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
   - as a verified label for training the next generation.
 - **Answers stand on their own.** Each is the verified label of each voxel it covers, valid for any input, not a diff against one segmentation. That way answers survive from one generation to the next. Each records its site (if any), choice, time and the SHA of the `dseg` the person looked at. An answer with no voxels (`leave`) is recorded too, so the site counts as answered.
 - **Two kinds of answer:**
-  - **Site answers:** at a site from the queue, the viewer offers a few concrete choices with previews: `remove-strand`, `thicken`, `fill-gap`, `widen-gap`, `leave`, `manual-paint`. Each choice is a function of the current label that returns the voxels it changes. ITK-SNAP is the escape hatch for free painting.
+  - **Site answers:** at a site from the queue, the viewer offers a few concrete choices with previews: `remove-strand`, `thicken`, `fill-gap`, `widen-gap`, `leave`, `manual-paint`. Each choice is a function of the current label that returns the voxels it changes. ITK-SNAP, on an exported crop, is the escape hatch for free painting.
   - **Scribbles:** a few strokes marking voxels as WM or not WM, wherever the reviewer sees an error, including errors no site finder flags. Everything unmarked stays unlabelled, so nnU-Net trains on the strokes with its ignore label. Scribbles cost little per answer.
 - Only verified labels train the model. Automatic fixes and the model's own predictions never do.
 - The held-out test regions are labelled from scratch, apart from the queue.
@@ -404,12 +405,11 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
   - **VISTA3D** (NVIDIA, via MONAI): automatic and interactive segmentation in one model; weights believed non-commercial.
   - 3D SAM variants (SAM-Med3D, SegVol): general-purpose and weak on fine structure; not a first choice.
 
-  Whichever spreads a scribble, its output is the model's guess, not a verified label. Only the strokes, and what the reviewer explicitly accepts, train the next generation.
+  Since labelling happens in our viewer, an interactive model would run on the viewer's server, not inside Slicer or ITK-SNAP. Whichever spreads a scribble, its output is the model's guess, not a verified label. Only the strokes, and what the reviewer explicitly accepts, train the next generation.
 - Whether an automatic fix that a reviewer accepted (`leave`) counts as verified, and so trains the model.
 - How stream 3's feedback (for example, the GM/WM transition found along columns) becomes a stream 1 input. Does it edit the label, or adjust the surface stage?
 - **The bootstrap's stand-in P.** If purple-mri cannot save its probabilities, the surface steps need another stand-in P before the first generation exists.
 - Open decisions for our own segmentation:
-  - The labelling tool for the test regions and the answers: our viewer, or ITK-SNAP / 3D Slicer with nnInteractive (Apache-2.0 code; check the licence of its weights, which may be non-commercial). Whichever it is must support scribbles as well as site answers.
   - Missing tissue: a class of its own (proposed, with the rule in step 2) or ignored in training.
   - Whether the hippocampus stays outside the filled mask.
   - nnU-Net as a package dependency, or an external tool that only the export and import modules know about. Proposed: external.
@@ -477,7 +477,7 @@ Three tracks that can run in parallel: the surface steps, our own segmentation, 
 1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
 2. The volume pane in `--white` mode (#82).
 3. The review pane, with site answers and scribbles.
-4. The ITK-SNAP escape hatch.
+4. The ITK-SNAP escape hatch: export a crop, import the painted voxels as an answer.
 5. `wm-edits/1` edited so that answers stand on their own.
 
 ## 4. Stream 2: columns
@@ -891,6 +891,7 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
 
 - The server binds 127.0.0.1. Keep a server on a big machine with a tunnelled browser possible: no response may scale with the whole mesh or volume.
 - Looking comes first; which correction tools to build waits until the data can be seen well.
+- **The viewer is the labelling tool** for every stream, because it reads the blocked formats that whole-brain data needs and general tools do not (§3c, step 1).
 - Review queues offer a few concrete options per site with previews, not a free-form editor, plus scribbles for stream 1.
 
 ### 6c. Implementation design
