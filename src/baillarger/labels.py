@@ -23,15 +23,11 @@ FOLLOWS_VENTRICLE = {"R": (63,), "L": (31,)}
 #: the labels filled into the WM mask, by hemisphere: WM, lateral ventricle
 #: and the choroid plexus with it, thalamus, caudate, putamen, pallidum,
 #: corpus callosum, accumbens, ventral DC and vessel. The hippocampus is open
-#: (phase 1.8). The inferior lateral ventricle and the amygdala are outside
-#: (Proposed).
+#: (phase 1.8). The inferior lateral ventricle and the amygdala are outside.
 FILLED_LABELS = {
     "R": (41, 43, 49, 50, 51, 52, 58, 60, 62, 63, 192),
     "L": (2, 4, 10, 11, 12, 13, 26, 28, 30, 31, 192),
 }
-
-#: the filled labels that are Proposed, not decided
-PROPOSED_FILLED = {"R": (58, 62), "L": (26, 30)}
 
 #: FreeSurferColorLUT names of the labels of the set
 LUT_NAMES = {

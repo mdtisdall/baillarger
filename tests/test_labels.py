@@ -50,7 +50,6 @@ def test_every_label_has_a_name_and_the_right_hemisphere() -> None:
         assert labels.WM_LABEL[hemi] in labels.FILLED_LABELS[hemi]
         assert labels.CORTEX_LABEL[hemi] not in labels.FILLED_LABELS[hemi]
         assert labels.HIPPOCAMPUS_LABEL[hemi] not in labels.FILLED_LABELS[hemi]
-        assert set(labels.PROPOSED_FILLED[hemi]) <= set(labels.FILLED_LABELS[hemi])
 
 
 def test_followers_are_filled_with_the_ventricle() -> None:
