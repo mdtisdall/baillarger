@@ -14,7 +14,7 @@ import nibabel as nib
 import numpy as np
 import pytest
 
-from baillarger import white
+from baillarger import white_dseg, white_overview, white_surf
 from baillarger.viewer import overview as OV
 from baillarger.viewer import server as VS
 from baillarger.viewer.white_view import WhiteView
@@ -38,12 +38,13 @@ def surf(tmp_path_factory: pytest.TempPathFactory) -> Path:
     src = d / "in" / "sub-T01_ses-S1_aseg.nii.gz"
     src.parent.mkdir(parents=True)
     nib.save(nib.nifti1.Nifti1Image(a, AFF), src)
-    white.main(["dseg", str(src), "--out", str(d / "deriv")])
+    white_dseg.main([str(src), "--out", str(d / "deriv")])
     anat = d / "deriv/sub-T01/ses-S1/anat"
     dseg = anat / "sub-T01_ses-S1_desc-wmtopo_dseg.nii.gz"
-    args = ["--block-cells", "8", "--overview-eps", str(EPS), "--workers", "1"]
-    white.main(["mesh", str(dseg), "--out", str(d / "deriv"), *args])
-    return anat / "sub-T01_ses-S1_hemi-R_white.surf.gii"
+    white_surf.main([str(dseg), "--out", str(d / "deriv"), "--block-cells", "8"])
+    surf = anat / "sub-T01_ses-S1_hemi-R_white.surf.gii"
+    white_overview.main([str(surf), "--eps", str(EPS), "--workers", "1"])
+    return surf
 
 
 def test_a_surface_on_the_overview(surf: Path, tmp_path: Path) -> None:
@@ -79,8 +80,8 @@ def test_no_overview_or_another_surface_is_refused(surf: Path, tmp_path: Path) -
     side["DataSHA256"] = good
     sc.write_text(json.dumps(side))
     # no overview written
-    white.overview_paths(s2)["overview"].unlink()
-    with pytest.raises(FileNotFoundError, match="baillarger.white overview"):
+    white_overview.overview_paths(s2)["overview"].unlink()
+    with pytest.raises(FileNotFoundError, match="baillarger.white_overview"):
         OV.overview_surface(s2, tmp_path, log=lambda m: None)
 
 
