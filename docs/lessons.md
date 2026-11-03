@@ -54,7 +54,7 @@ The work is split into four streams, each a tool:
 3. Laminar profiles (§5)
 4. The viewer (§6)
 
-Each stream's section gives its goal, its high-level design, its implementation design (the details and lessons for each design step) and its implementation plan.
+Each stream's section gives its goal, its high-level design, its implementation design (for each design step, its inputs and outputs, then its details and lessons) and its implementation plan.
 
 Each stream publishes its outputs in a specified format and reads only the others' published outputs. Each reaches a first version good enough for the others to build on, then improves along its own course; a change in one stream should not force work in another.
 
@@ -176,8 +176,6 @@ A closed surface without handles near the grey/white-matter boundary of each hem
 ### 3c. Implementation design
 
 Measured numbers in this section come from the one hemisphere we have, segmented by purple-mri, whose aseg bootstraps our model. Read them as evidence about methods: our own labels may show other defects. That aseg's own errors are in §2.
-
-Each step lists its inputs and outputs first, then its design and lessons.
 
 #### Step 1: our own WM segmentation
 
@@ -482,11 +480,36 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 
 #### Step 1: roots
 
+*Inputs*
+
+- Stream 1's `white-surf/1`: vertices, normals, edge keys and block index.
+- Stream 1's cut-face flag per vertex (planned).
+
+*Outputs* (internal)
+
+- One root per unflagged vertex, keyed by edge key, with its position and normal.
+- The across-triangle mesh graph, for distances along the surface.
+
+*Design and lessons*
+
 - One root per white-mesh vertex (about one per voxel), except vertices flagged as cut face (§3c, step 2). Rays go both inward and outward from the surface.
 - **Distances on the mesh** need the edges across neighbouring triangles: 8.2 % bound on a plane, against 41 % along edges alone (#10, #45).
 - **Theory** (SF; shock theory): because the WM is connected, every collision is a front meeting itself. A fold and a contact differ only in how far apart the meeting roots lie along the surface, which is a continuum, so no pointwise quantity separates them.
 
 #### Step 2: orientation evidence
+
+*Inputs*
+
+- The FLASH echoes (2 and 3, trend-removed log).
+- Stream 1's corrected labels (`_desc-wmtopo_dseg`): cortex for the convolution mask, WM for T = 0 and for signing the normal, fluid and missing tissue as obstacles.
+- Stream 1's edits that relabel fluid channels and vessels (planned, from `pial_labels`).
+
+*Outputs* (internal, no spec yet)
+
+- The data normal, its coherence and its sign, per cortex voxel.
+- The fitted field T and its crests.
+
+*Design and lessons*
 
 - **The data normal** (SF F1): structure tensor of trend-removed log echoes 2 and 3, at derivative scale 1 voxel and integration scale 2 voxels, by masked normalized convolution over cortex.
   - For about 91 % of interior cortex the echoes agree within 10°.
@@ -504,6 +527,18 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
   - A single all-WM field cannot place an unequal contact: its ridge is the geometric midline (F11).
 
 #### Step 3: tracing methods
+
+*Inputs*
+
+- The roots (step 1).
+- The data normal and T (step 2), for the methods that follow the image.
+- Stream 1's corrected labels, for the stops: fluid, far WM, missing tissue.
+
+*Outputs* (internal)
+
+- Per root and method, one ray: its samples with 3D positions and arc length, and why it stopped.
+
+*Design and lessons*
 
 Measured at the marked points (CP; #47, #52, #58):
 
@@ -524,11 +559,31 @@ Measured at the marked points (CP; #47, #52, #58):
 
 #### Step 4: recording what each ray meets
 
+*Inputs*
+
+- The rays (step 3), T's crests (step 2) and the other roots' rays.
+
+*Outputs* (internal)
+
+- Per column: `crest_at`, `meet_at`, `turn_at`, the root it meets, and its class.
+
+*Design and lessons*
+
 - Meetings are recorded on the column (`crest_at`, `meet_at`, `turn_at`) and never acted on.
 - Classes: open, crossing, own-bank return, to-contact, failed.
 - **Doesn't work:** any threshold on bend angle, turn, or root separation along the surface. Each cuts a continuum: between 10° and 60°, 5–34 % of classes change. A 5 mm "same bank" fallback is wrong at both faces.
 
 #### Step 5: the published traces
+
+*Inputs*
+
+- Steps 3 and 4.
+
+*Outputs* (no spec yet)
+
+- The column traces, read by stream 3 and the viewer: keyed by edge key and method, with each sample's 3D position, the recorded meetings and the class, readable by block.
+
+*Design and lessons*
 
 - Today the traces are a prototype `.npz` with no spec, built on a box white mesh with no edge keys.
 - They must key on edge keys, carry each sample's 3D position and the recorded meetings, and be readable by block.
@@ -579,10 +634,32 @@ Where each layer lies along every column, read from the image's own contrast and
 
 #### Step 1: the column volume
 
+*Inputs*
+
+- Stream 2's column traces.
+- The FLASH echoes.
+
+*Outputs* (internal)
+
+- One trace per column: the echoes sampled every 0.04 mm, each sample with its 3D position, partial-volume samples marked.
+
+*Design and lessons*
+
 - One trace per white-mesh vertex, sampled every 0.04 mm, each sample keeping its 3D position. It reads like a seismic section: the stria runs as a continuous band from open into fused cortex, and the far bank's stria appears mirrored past a contact (CP).
 - The voxels within 1 voxel of the WM or the pia are partial volume. They made half the data term and drew 30 % of band boundaries; leave them out (PL; #24).
 
 #### Step 2: flattening
+
+*Inputs*
+
+- The column volume (step 1).
+- Neighbouring columns, from the mesh graph on `white-surf/1`.
+
+*Outputs* (internal)
+
+- Shifts between neighbouring traces, and the warp fitted to them.
+
+*Design and lessons*
 
 - **Shifts between neighbours** (`flatten`; Lucas–Kanade shifts, the Lomask / Wu–Hale form, CG):
   - Exact on synthetic warps.
@@ -592,6 +669,18 @@ Where each layer lies along every column, read from the image's own contrast and
 - **Doesn't work:** phase-unwrapping relative geologic time (it slips cycles at facies changes).
 
 #### Step 3: the joint warp
+
+*Inputs*
+
+- The flattened traces and shifts (step 2).
+- Contacts and open tops, from stream 2's recorded meetings and stops.
+- Detected bands (step 4), when levels are placed at them.
+
+*Outputs* (no spec yet)
+
+- Per column, a monotone depth map z(τ): the pial edge at τ = 1, and the GM/WM transition as one of its levels.
+
+*Design and lessons*
 
 - One monotone z(τ) per column, z(1) = the pia, solved by QPBO at a few levels and then filled between them.
 - Its terms: conservation of shifts inside each bank, the two-sided tie c_A + c_B = L at contacts (the user's choice), robust open-top anchors, weak lateral smoothness, a vertical prior and hard ordering.
@@ -609,6 +698,18 @@ Where each layer lies along every column, read from the image's own contrast and
 
 #### Step 4: bands and layer identity
 
+*Inputs*
+
+- The traces in the flattened frame (steps 2 and 3).
+- The column graph.
+
+*Outputs* (no spec yet)
+
+- The bands per region: position in τ, bright or dark, width.
+- Which layer each band is, and where an area's pattern changes.
+
+*Design and lessons*
+
 - **Bands in τ:** stack each trace with neighbours weighted by profile correlation, and keep extrema at least 1.5 voxels wide. A 2.5-voxel threshold drops the stria (1.67 voxels).
   - V1V2: bright at τ 0.18, the stria at 0.37, bright at 0.81.
   - M1S1 has a dark band at τ 0.33 that is not a stria.
@@ -618,6 +719,20 @@ Where each layer lies along every column, read from the image's own contrast and
 - **Doesn't work:** multi-object level sets (they cannot let a band vanish); k-means with no spatial prior; per-column classifiers glued together afterwards.
 
 #### Step 5: thickness and contacts
+
+*Inputs*
+
+- The joint warp (step 3) and the columns' tops.
+- The contacts and their lengths L, from stream 2.
+- The white surface's curvature, for the depth estimators.
+
+*Outputs* (no spec yet)
+
+- A thickness field on the white-surface vertices.
+- Each contact's split between its two banks, reported three ways.
+- Depth within each column, by the estimator chosen for that role.
+
+*Design and lessons*
 
 **Depth within a column (role 1)**
 
@@ -653,6 +768,16 @@ Where each layer lies along every column, read from the image's own contrast and
 - Report a split three ways (profile alone, profile with field, field alone), and with both stretches.
 
 #### Step 6: feedback to stream 1
+
+*Inputs*
+
+- The GM/WM transition and other levels (steps 3–5).
+
+*Outputs* (no spec yet)
+
+- A spec'd input to stream 1. Its content and format are open.
+
+*Design and lessons*
 
 - Nothing is built. The feedback must arrive as a spec'd input to stream 1, as `wm-edits` does, never as a code dependency.
 
@@ -700,11 +825,34 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
 
 #### Step 1: the server and shared state
 
+*Inputs*
+
+- The paths of the published outputs to show.
+
+*Outputs*
+
+- Shared state (crosshair in world mm, selected true vertex) over POST /state and Server-Sent Events.
+- Binary arrays for the panes.
+
+*Design and lessons*
+
 - One server; shared state over POST /state and Server-Sent Events, so any number of windows and panes stay in step (#43, #44).
 - Two linked points: a crosshair in world mm, and a selected true vertex.
 - Send binary arrays, not VTK. Caches are keyed by the source SHA.
 
 #### Step 2: panes
+
+*Inputs*
+
+- Volumes (the FLASH, labels, P) through the one reader.
+- Stream 1's `white-surf/1` and `white-overview/1`.
+- Stream 2's column traces and stream 3's outputs, as their specs appear.
+
+*Outputs*
+
+- Views, and picks written to the shared state.
+
+*Design and lessons*
 
 - **Volume:** the brick pyramid (32³ bricks, 2×2×2 means, a WebGL2 page-table atlas). The hemisphere echo builds in 6.8 s at 1.4 GB, and every sampled pixel matches the data. Its `BrickSource` is the interface for a NIfTI-Zarr store (#84).
 - **Surface:** through the overview. Every pick maps to a true vertex and nothing is measured on the overview. Hemisphere start takes 24 s the first time and 0.8 s cached (#70–#72). Our own WebGL view, because a click on a NiiVue mesh does not move the crosshair.
@@ -714,6 +862,16 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
 - **NiiVue 0.69 pitfalls:** load it from the pinned `+esm` URL; `readTCK` drops the first line (start the data with a NaN row); `loadMeshes`/`removeMesh` race (use `addMeshFromUrl`); catch keys in the capture phase.
 
 #### Step 3: review panes
+
+*Inputs*
+
+- Each stage's queue and the data around each site: for stream 1, `wm-sites/1` with the labels, P and the surface.
+
+*Outputs*
+
+- Answers as spec'd edits: for stream 1, `wm-edits/1`.
+
+*Design and lessons*
 
 - **Lessons from the pial editor** (PE; CP):
   - Edits are stored as data (world mm, roots) that replay exactly in any order. A vertex drag must be saved as that vertex.
