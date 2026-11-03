@@ -252,6 +252,7 @@ The coupling that is real, decided once:
 - Distance outputs: Xue et al., AAAI 2020; Navarro et al., MLMI 2019; Ma et al., MIDL 2020; for cortex, SegRecon (Gopinath et al. 2021), DeepCSR (Cruz et al., CVPR 2021), recon-all-clinical (Gopinath et al. 2024).
 - Uncertainty: Kendall and Gal, NeurIPS 2017; β-NLL, Seitzer et al., ICLR 2022.
 - Partial volume: mixel models (Santago and Gage, 1993); Shattuck et al. 2001 (BrainSuite); Van Leemput et al., IEEE TMI 2003; FSL FAST (Zhang et al. 2001); Tohka et al. 2004; PV-SynthSeg (Billot et al., MICCAI 2020).
+- Multichannel structure tensors: Di Zenzo, *CVGIP* 1986; Weickert, *Coherence-enhancing diffusion of colour images*, 1999; Brox et al., nonlinear structure tensors, 2006.
 - Thin sulci: CRUISE and its ACE (Han et al., *NeuroImage* 2004); CLASP in CIVET (Kim et al., *NeuroImage* 2005); FreeSurfer's pial surface and its self-intersection constraint (Dale, Fischl and Sereno 1999; Fischl and Dale 2000).
 - Topology losses: Hu et al., NeurIPS 2019; clDice (Shit et al., CVPR 2021); Betti matching (Stucki et al., ICML 2023).
 - purple-mri, the bootstrap labels: Khandelwal et al., *Imaging Neuroscience* 2024; the purple-mri repository (topology notes and surface scripts).
@@ -322,7 +323,7 @@ The coupling that is real, decided once:
 
 | Input | From | Use |
 |---|---|---|
-| FLASH echoes 2 and 3 (trend-removed log) | the scan | the structure tensor |
+| All FLASH echoes (trend-removed log) and their gradient-noise covariance C (§2's noise model, across echoes) | the scan | the structure tensor |
 | `_desc-wmtopo_dseg` | step 2 | cortex mask for the convolution |
 | WM distance through tissue, capped at 8 mm, with fluid and outside as obstacles | computed per superblock from `_desc-wmtopo_dseg` (shared code, §7) | the sign of the data normal |
 
@@ -335,12 +336,15 @@ The coupling that is real, decided once:
 
 *Design and lessons*
 
-- **The data normal** (SF F1): structure tensor of trend-removed log echoes 2 and 3, at derivative scale 1 voxel and integration scale 2 voxels, by masked normalized convolution over cortex.
-  - For about 91 % of interior cortex the echoes agree within 10°.
+- **The data normal:** the whitened multichannel structure tensor of all the trend-removed log echoes, J = Σ Gᵀ C⁻¹ G over the window (G the echoes' gradients, one row per echo; C their gradient-noise covariance), at derivative scale 1 voxel and integration scale 2 voxels, by masked normalized convolution over cortex.
+  - **Why all echoes.** In the log, ∇log I_e = ∇log ρ − TE_e ∇R2\*: every echo carries the same proton-density and T1 term, plus the R2\* term scaled by its TE. Both are laminar evidence and, since laminae are planar (§2), both point along the cortical normal, so echoes add aligned signal; the only question is their weight against noise. Whitening by C is the maximum-likelihood answer under the Gaussian noise model, so the data set the weights per specimen and protocol, and no subset of echoes is hard-wired. (Earlier work used echoes 2 and 3 only, without a stated reason.)
+  - **C** extends §2's calibration-free noise estimate from one echo to the cross-echo covariance; if the echoes' noise is independent, C is diagonal and each echo is weighted by 1/σ_e².
+  - **Diagnostics:** each echo's own tensor and its share of J's trace, by depth and region; views of where one echo's normal departs from the combined one. The echoes agree within 10° in about 91 % of interior cortex (SF F1, echoes 2 and 3).
+  - **A risk near edges.** Echo 1 has the best tissue/Fomblin contrast, so the pial edge, vessels and fused-sulcus partial volume give it the largest gradients, which can pull the normal towards a tissue edge rather than the laminae. All echoes share this; the remedy, if the diagnostics call for one, is in the window (robust down-weighting near edges), not in dropping an echo (Open).
   - Coherence falls to 0.05–0.38 at contacts and fundi, which is where most column failures happen.
   - The normal has no sign. Sign it by the WM distance through tissue, with fluid as an obstacle. A straight-line distance flips the sign beside open sulci (CP; #46).
   - Under the majority rule (3b), a fused sulcus is cortex in the mask, so a window there can take in both banks. Coherence already falls at contacts, which marks those voxels; whether the window should also stop where the two banks' WM-distance fronts meet is open.
-- **A sampler, not a file.** Every quantity here is local: derivative scale 1 voxel, integration scale 2 voxels, and the sign from the capped WM distance (§2). Recomputing reads echoes 2 and 3 (8 B per voxel) and runs a few separable convolutions, so it is bandwidth-bound with little compute; reading a stored result would cost 24 B per voxel for the tensor or 16 B for the normal and coherence, and about 10¹¹ bytes of storage for a 50 µm whole brain. So `orient` is code with a written contract (the echoes, the scales, the sign rule), called for a superblock and its halo, like stream 3's column volume. A cache is an optimisation to add later if the viewer needs one, not an interface.
+- **A sampler, not a file.** Every quantity here is local: derivative scale 1 voxel, integration scale 2 voxels, and the sign from the capped WM distance (§2). Recomputing reads the three echoes (12 B per voxel) and runs a few separable convolutions, so it is bandwidth-bound with little compute; reading a stored result would cost 24 B per voxel for the tensor or 16 B for the normal and coherence, and about 10¹¹ bytes of storage for a 50 µm whole brain. So `orient` is code with a written contract (the echoes, the scales, the sign rule), called for a superblock and its halo, like stream 3's column volume. A cache is an optimisation to add later if the viewer needs one, not an interface.
 - It needs only the echoes and the corrected labels, not the surface, so it can run beside step 4. It belongs to stream 1 so that the surface's check and stream 2's misalignment diagnostic call one piece of code, and no stream waits on another in a cycle.
 - **Doesn't work:** tracing step by step along the raw tensor normal: no field, no stop, so paths stall and run on (SF F3). Stream 2's rays use no field (§4c).
 
@@ -381,7 +385,7 @@ The coupling that is real, decided once:
 - **Curvature** (SF F28): the 0.32 mm mesh with curvature at 0.48 mm agrees with quadrics fitted to the voxel faces (rank correlation 0.85–0.98), with about half their jitter.
   - Never take curvature from the Hessian of a smoothed signed distance: it mixes the two sides of thin blades.
   - Valence-weighted smoothing biases Gaussian curvature. Use smoothing that keeps mass.
-- **Doesn't work** (both from SF F28, which tested the surface as the start of a front or level set for stream 2; the smooth surface there was a mesh smoothed by twicing at 0.32 mm, which the antialiased surface now replaces):
+- **Doesn't work** (both from SF F28, which tested the surface as the start of anything that grows from it, such as a front or a level set; the smooth surface there was a mesh smoothed by twicing at 0.32 mm, which the antialiased surface now replaces):
   - **Refining the grid instead of smoothing the boundary.** The idea was to get sub-voxel accuracy by running a level set on a grid twice as fine (80 µm), started from the signed distance to the label's own voxel faces (or to the binary contour). It fails because the label's half-voxel steps are in the boundary data, and a finer grid reproduces them faithfully:
     - 6–11 % of the points within 2 voxels of the surface got the wrong inside/outside sign: they lie between the true surface and the label's steps.
     - The closest-point (foot) map jumped by more than 2 grid steps between neighbouring points at 7–11 % of pairs, so neighbouring points were assigned roots far apart.
@@ -463,6 +467,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - Whether depth 0 (the column roots) should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Hidden fluid gaps (a thin, slowly decaying dark strip inside labelled cortex; SF F21): under the majority rule they stay cortex, and stream 3 finds them along the columns. Open: whether a detector before tracing is still worth having, as a diagnostic or to rank review sites.
 - Whether `orient`'s window should stop where the WM-distance fronts of two banks meet, so that it never spans a fused sulcus (step 3).
+- Whether `orient` needs a robust window near the pia, vessels and fused sulci, where tissue-edge gradients (largest in echo 1) can outweigh the laminae (step 3).
 - **How `dseg` applies standalone answers** to a new generation's labels: whether a verified voxel always overrides the input, and how to show the reviewer where a new generation disagrees with an earlier answer.
 - **Whether antialiasing should align the surface with the data normal.** A data term in step 4 would pull the surface normals towards step 3's data normal near the boundary, weighted by its coherence (high in most cortex, low at contacts and fundi). The sign constraints stay, so the topology stays guaranteed. The cost: agreement with the data normal would stop being an independent check of the surface. Keep part of the evidence out of the term (one echo, or held-out regions), or judge the surface by something else, such as how straight the columns run.
   - Its reach is limited: the sign constraints keep the surface within about half a voxel of the mask, so the term can smooth the staircase and short-wavelength tilt, but cannot turn a region whose mask faces the wrong way; that needs a different label.
@@ -652,12 +657,12 @@ Measured at the marked points (CP; #47, #52, #58):
 
 | Output | Spec | Used by |
 |---|---|---|
-| Per column: where it passes another front (`crest_at`, `meet_at`), the root it meets and the distance to it along the surface, its class | internal | step 4 |
+| Per column: where it passes another front (`first_fall`, `meet_at`), the root it meets and the distance to it along the surface, its class | internal | step 4 |
 
 *Design and lessons*
 
-- Meetings are recorded on the column (`crest_at`, `meet_at`) and never acted on.
-- Classes by how the ray ends, not by bank: in fluid (open), in WM, at a contact, at the cap or a domain edge, failed. The current code splits the WM ends into crossing and own-bank return at `SAME_MM` (5 mm along the mesh); the restart drops that split and records the distance instead.
+- Meetings are recorded on the column (`first_fall` for normal rays, `meet_at` for the front methods, with the root met and its distance along the mesh) and never acted on. A contact is a meeting, recorded on any column whatever its class.
+- Classes by how the ray ends, not by bank: in fluid (open), in WM, at a cut face or other domain edge, at the cap, failed. A ray never ends at a contact: it passes through. The current code splits the WM ends into crossing and own-bank return at `SAME_MM` (5 mm along the mesh); the restart drops that split and records the distance instead.
 - **Doesn't work:** any threshold on bend angle, turn, or root separation along the surface. Each cuts a continuum: between 10° and 60°, 5–34 % of classes change. A 5 mm "same bank" fallback is wrong at both faces.
 
 #### Step 4: the published traces
@@ -681,7 +686,7 @@ Measured at the marked points (CP; #47, #52, #58):
   - A column belongs to the 64³ Morton block of its root vertex and is keyed by its root's edge key, so the block index of `white-surf/1` finds the roots and their columns together. A superblock and its halo (in mm, §2) are runs of that index.
   - Per-sample arrays are ragged: one array of samples with a pointer array per block, as `white-overview/1` stores the true vertices each face carries.
   - **Straight rays are stored by their parameters** (root, direction, length), not by samples: their samples are recomputed on demand, which cuts the main method's size by about two orders of magnitude. Only methods whose paths bend (front-equivolume, and the deflected normal ray if adopted) store samples.
-  - Per-column fields are stored once per column: the stop reason, the class, the meetings (`crest_at`, `meet_at`), the root met and its distance along the surface.
+  - Per-column fields are stored once per column: the stop reason, the class, the meetings (`first_fall`, `meet_at`), the root met and its distance along the surface.
 - **A standard to start from:** TRX, a newer community tractography format (memory-mapped arrays, data per streamline and per point, groups), with groups as blocks plus our block index and edge keys, as `white-surf/1` extends GIfTI. Its reference library is believed to be BSD-licensed; check before adopting. TCK cannot be read by block and carries no per-column data, so it stays only as the viewer's export.
 
 #### Fields fitted to the data normal (not in the design; a later phase at most)
@@ -842,7 +847,7 @@ Where each layer lies along every column, read from the image's own contrast and
 *Design and lessons*
 
 - One monotone z(τ) per column, z(1) = the pia, solved by QPBO at a few levels and then filled between them.
-- Its terms: conservation of shifts inside each bank, the two-sided tie c_A + c_B = L at contacts (the user's choice), robust open-top anchors, weak lateral smoothness, a vertical prior and hard ordering.
+- Its terms: conservation of shifts between columns whose roots are neighbours on the white mesh, the two-sided tie c_A + c_B = L at contacts (the user's choice), robust open-top anchors, weak lateral smoothness, a vertical prior and hard ordering.
 - It certifies 96.6–100 % of variables, so the remaining errors belong to the model.
 - The vertical prior must be the chain form, |z_ℓ − (τ_ℓ/τ_ℓ₊₁) z_ℓ₊₁|.
 - Levels placed at detected bands tighten the stria's spread by about 40 %. It reaches 0.08 mm at both M1/S1 and V1V2.
