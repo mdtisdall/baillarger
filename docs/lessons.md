@@ -201,24 +201,22 @@ A closed surface without handles near the grey/white-matter boundary of each hem
   - the model generation recorded in each output's sidecar, so a label can be traced to the model that made it;
   - a choice, at each generation, of whether to rerun earlier hemispheres with it. A rerun changes everything downstream of the label.
 
-*The interface to steps 2–4*
+*What it gives the later steps*
 
-| Output | Required | BIDS name | Use in steps 2–4 |
+| Output | Required | BIDS name | Read by |
 |---|---|---|---|
-| Labels, FreeSurferColorLUT | yes | `_dseg` | the filled mask, as now |
-| P(filled WM), float | no | `_label-WMfilled_probseg` | the order of handle removal; the data term of the antialiasing |
-| Fold spread of P | no | `_label-WMfilled_desc-foldsd_probseg` | uncertainty for the review queue |
+| Labels, FreeSurferColorLUT | yes | `_dseg` | step 2 |
+| P(filled WM), float | no | `_label-WMfilled_probseg` | steps 2 and 3 |
+| Fold spread of P | no | `_label-WMfilled_desc-foldsd_probseg` | step 5 |
 
-- With labels only, steps 2–4 work as now: handle removal ordered by distance to the other phase, antialiasing by thin-plate smoothness alone. So any segmentation still fits.
-- With P, the same algorithms make better decisions. The surface work does not wait for the network, and the network does not wait for the surface work.
-- P matters to the surface mainly where P moves a wall (which side of a fused bank a cut falls) and where it smooths the staircase. Both change the normals; position finer than a voxel is a by-product.
+- With labels only, the later steps work as they do now, so any segmentation still fits. The surface work does not wait for the network, and the network does not wait for the surface work.
 
 The coupling that is real, decided once:
 
 1. **The label set.** The filled mask is `FILLED_LABELS` (WM, lateral ventricle, caudate, putamen, pallidum, thalamus, CC; not the hippocampus). The network must output at least these classes, separately from cortex, hippocampus and outside, or the surface changes.
-2. **Missing tissue.** purple-mri invents labels in the blocks cut out before the scan. Our network labels them as missing, or they are ignored in training. Step 2 then needs a rule for a filled mask that ends at missing tissue (open, below).
-3. **Calibration.** Handle removal by P puts each wall where P is lowest along the bridge or tunnel. That is right only if P is calibrated near 0.5, so calibration is a diagnostic of every generation.
-4. **The defect count.** The number of handles and cavities before correction sets the length of the review queue. It is a diagnostic of every generation, not a target to optimise inside the network.
+2. **Missing tissue.** purple-mri invents labels in the blocks cut out before the scan. Our network labels them as missing, or they are ignored in training.
+3. **Calibration.** P must be calibrated near 0.5, because step 2 places walls by it. Calibration is a diagnostic of every generation.
+4. **The defect count.** The number of handles and cavities before correction sets the length of the review queue (step 5). It is a diagnostic of every generation, not a target to optimise inside the network.
 
 *Decisions taken*
 
@@ -249,6 +247,8 @@ The coupling that is real, decided once:
   - On the purple-mri aseg: Betti (1, 111, 182) → (1, 0, 0) in 3.4 min at about 22 GB. Most moves are 1–2 voxels.
   - The meeting wall need not be the smallest cut: one cut of 2,047 voxels ran along a thin strand.
   - Batching walls per pass changes the result, so don't.
+- **Handle removal with probabilities** (planned; plan phase 1). Without P, the fronts claim voxels in order of distance to the other phase. With P, the object front claims in order of decreasing P and the background front in order of increasing P, so each wall falls where P is closest to 0.5. That is right only if P is calibrated near 0.5. Each fix records its margin, the P along its wall, and the review queue ranks by it. P matters to the surface mainly here: it decides which side of a fused bank a cut falls.
+- **Missing tissue in the filled mask.** When the label marks excised blocks as missing, step 2 needs a rule for a filled mask that ends there (open).
 - **Tight folds (misfacing faces)** (#81, #85). On the purple-mri aseg the surface has 152 at 91 sites. Diagonal-only contacts in the label cause most of them: 74 of 90 sites have a checkerboard or corner-only contact within 4 voxels. A different segmentation may show a different pattern.
   - Thicken to 2s, widen gaps between surfaces, then make the mask well-composed, at s = 0.30 mm. This takes 90 sites to 5 and edges over 60° from 297 to 4, at a cost of +3.9 % area and a 90th-percentile neighbour angle of 5.4° against 3.9°.
   - s must not be a whole number of voxels along any axis: at 0.32 mm (exactly 2 voxels on one axis) the checkerboards rise from about 390 to 7,000. 0.26 mm is worse on every count; above 0.30 mm the bulk and area grow.
@@ -264,6 +264,7 @@ The coupling that is real, decided once:
   - Each vertex stays on its own grid edge, so the surface has no self-intersections by construction and keeps the edge keys.
   - A tilted plane's normals come out within 0.5° (the raw staircase is 31° off).
   - On the hemisphere: one closed genus-0 piece, 12.7 M vertices, 25.3 M faces, no self-intersecting faces; CPU and MPS identical bit for bit; 1,651 iterations, 16 min on MPS, peak 20–24 GB.
+- **Antialiasing with probabilities** (planned; plan phase 1). Without P, φ is shaped by thin-plate smoothness alone. With P, an optional data term pulls φ near the boundary towards a smooth function of P − 0.5, weighted by a per-voxel confidence (1/σ², once σ exists). The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. This smooths the staircase where P carries sub-voxel information; position finer than a voxel is a by-product, not a goal.
 - **Smoothing is the wrong tool here:**
   - Smoothing the label and then contouring loses 2-voxel WM blades: at σ = 1 voxel it loses 16 % of V1V2's thin WM, shrinks convex surfaces by about σ²κ, and makes slivers.
   - Taubin λ|μ smoothing is unstable at short cutoffs. Tukey twicing never amplifies.
