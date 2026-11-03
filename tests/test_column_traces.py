@@ -11,7 +11,7 @@ from test_white import SHAPE, read_labels, write_data
 from baillarger import column_front as CF
 from baillarger import column_traces as CT
 from baillarger import streamlines as S
-from baillarger import white
+from baillarger import white_dseg, white_surf
 from baillarger.data import ASEG_CORTEX, ASEG_WM, Patch
 
 VOX = 0.16
@@ -390,7 +390,7 @@ def test_load_tissue_reads_its_labels_from_a_dseg(tmp_path: Path) -> None:
     Without, the aseg's WM label, with its handles."""
     a, p = write_data(tmp_path)
     dseg = read_labels(p)
-    mask = np.isin(dseg, white.filled_labels(p))
+    mask = np.isin(dseg, white_dseg.filled_labels(p))
     t = CT.load_tissue((0, 0, 0), SHAPE, directory=tmp_path, dseg=p)
     assert np.array_equal(t.patch.aseg, dseg)
     assert np.array_equal(t.wm, mask) and np.array_equal(t.labels == 2, mask)
@@ -399,7 +399,10 @@ def test_load_tissue_reads_its_labels_from_a_dseg(tmp_path: Path) -> None:
     cut = np.argwhere((a == ASEG_WM) & ~mask)
     assert len(cut) == 1 and t.labels[tuple(cut[0])] == 1
     v, f, _ = CT.white_mesh(t.wm)
-    assert [q["genus"] for q in white.mesh_pieces(v, f, t.patch.voxel_mm)] == [0, 0]
+    assert [q["genus"] for q in white_surf.mesh_pieces(v, f, t.patch.voxel_mm)] == [
+        0,
+        0,
+    ]
     t0 = CT.load_tissue((0, 0, 0), SHAPE, directory=tmp_path)
     assert np.array_equal(t0.patch.aseg, a) and np.array_equal(t0.wm, a == ASEG_WM)
     # a box: the crop of the same labels
