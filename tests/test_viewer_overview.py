@@ -1,5 +1,6 @@
 """Tests of baillarger.viewer.overview and baillarger.viewer.white_view on a
-surface and overview written by the mesh command from a synthetic segmentation:
+surface and overview written by white_surf and white_overview from a synthetic
+segmentation:
 the Surface on the overview, its cache, and the refusals; the server viewing the
 surface alone (--white)."""
 
@@ -26,7 +27,7 @@ EPS = 0.05
 @pytest.fixture(scope="module")
 def surf(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A right hemisphere: a WM ball round a ventricle, in cortex, and a separate
-    WM block, through the dseg and mesh commands (with its overview)."""
+    WM block, through white_dseg, white_surf and white_overview."""
     d = tmp_path_factory.mktemp("ov")
     x = np.indices((44, 40, 36)).astype(float)
     r = np.sqrt(((x - np.array([20.3, 19.6, 17.8])[:, None, None, None]) ** 2).sum(0))
@@ -148,9 +149,7 @@ def test_the_volume_pane_box(surf: Path, tmp_path: Path) -> None:
     it (all of them), and the box moved to a selection's voxel."""
     import gzip
 
-    from baillarger import white
-
-    W = white.WhiteSurface.load(surf)
+    W = white_surf.WhiteSurface.load(surf)
     shape = tuple(W.sidecar["GridShape"])
     w = WhiteView(
         surf,
