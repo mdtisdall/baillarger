@@ -92,7 +92,7 @@ def test_smoothing_on_a_device_matches_numpy(name: str, offset: float) -> None:
 @pytest.mark.parametrize("name", DEVICES)
 def test_normal_length_on_a_device_matches_numpy(name: str) -> None:
     """The length of the smoothed normal (a blade, whose length runs from
-    about 0.9 to 1) is the numpy one to float32 rounding, and the normals
+    about 0.36 to 1) is the numpy one to float32 rounding, and the normals
     are the ones that MeshOps.normals gives."""
     g = np.zeros((24, 24, 24))
     g[10:11, 4:20, 4:20] = 1.0

@@ -50,6 +50,9 @@ from baillarger.bids import (
     write_sidecar,
 )
 from baillarger.handles import kuhn_betti, kuhn_structure, remove_handles
+from baillarger.labels import FILLED_LABELS as FILLED_LABELS
+from baillarger.labels import LUT_NAMES as LUT_NAMES
+from baillarger.labels import WM_LABEL as WM_LABEL
 from baillarger.timing import Laps, log_to_stderr
 from baillarger.wm_edits import Edits, apply_edits, read_edits, sources_match
 
@@ -57,37 +60,6 @@ type Bool = npt.NDArray[np.bool_]
 type Betti = tuple[int, int, int]
 
 # ------------------------------------------------- the corrected segmentation
-
-#: the labels filled into the WM mask, by hemisphere (FreeSurfer LUT): WM,
-#: lateral ventricle, thalamus, caudate, putamen, pallidum, corpus callosum.
-#: The hippocampus is not filled: its laminar axis does not run out from the
-#: WM below it.
-FILLED_LABELS = {"R": (41, 43, 49, 50, 51, 52, 192), "L": (2, 4, 10, 11, 12, 13, 192)}
-WM_LABEL = {"R": 41, "L": 2}
-
-#: FreeSurfer LUT names of the labels the corrected segmentation's .tsv lists
-LUT_NAMES = {
-    0: "Unknown",
-    2: "Left-Cerebral-White-Matter",
-    3: "Left-Cerebral-Cortex",
-    4: "Left-Lateral-Ventricle",
-    10: "Left-Thalamus",
-    11: "Left-Caudate",
-    12: "Left-Putamen",
-    13: "Left-Pallidum",
-    17: "Left-Hippocampus",
-    18: "Left-Amygdala",
-    41: "Right-Cerebral-White-Matter",
-    42: "Right-Cerebral-Cortex",
-    43: "Right-Lateral-Ventricle",
-    49: "Right-Thalamus",
-    50: "Right-Caudate",
-    51: "Right-Putamen",
-    52: "Right-Pallidum",
-    53: "Right-Hippocampus",
-    54: "Right-Amygdala",
-    192: "Corpus_Callosum",
-}
 
 #: values of the fixes image: a handle cut, a handle fill, a cavity fill, a
 #: manual edit (baillarger.wm_edits)

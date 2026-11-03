@@ -2,6 +2,7 @@
 vertex a path crossed, on meshes with known geodesics."""
 
 import numpy as np
+import pytest
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
@@ -273,3 +274,62 @@ def test_only_the_faces_of_blocks_meeting_the_halo_box_are_read() -> None:
     for a, b in spy.read:
         got[a:b] = True
     np.testing.assert_array_equal(got, want)
+
+
+def _graph_by_rows(v: np.ndarray, f: np.ndarray, vox: tuple[float, ...]) -> csr_matrix:
+    """The edge graph with the duplicate pairs removed by np.unique(axis=0):
+    the reference for the one-key-per-pair version."""
+    from scipy.sparse import coo_matrix
+
+    E = np.sort(np.concatenate([edges(f), G._across(f)]), 1)
+    E = np.unique(E, axis=0)
+    w = np.linalg.norm((v[E[:, 0]] - v[E[:, 1]]) * np.asarray(vox), axis=1)
+    n = (len(v),) * 2
+    out: csr_matrix = (
+        coo_matrix((w, (E[:, 0], E[:, 1])), shape=n)
+        + coo_matrix((w, (E[:, 1], E[:, 0])), shape=n)
+    ).tocsr()
+    return out
+
+
+def _same_bytes(a: csr_matrix, b: csr_matrix) -> bool:
+    return (
+        a.shape == b.shape
+        and a.indptr.dtype == b.indptr.dtype
+        and a.indices.dtype == b.indices.dtype
+        and a.data.dtype == b.data.dtype
+        and a.indptr.tobytes() == b.indptr.tobytes()
+        and a.indices.tobytes() == b.indices.tobytes()
+        and a.data.tobytes() == b.data.tobytes()
+    )
+
+
+def test_edge_graph_equals_the_row_unique_version_byte_for_byte() -> None:
+    meshes = [plane(8), ball()]
+    rng = np.random.default_rng(0)
+    for n in (5, 30, 200):
+        # random triangles: repeated edges, repeated pairs, shared edges
+        f = rng.integers(0, n, (4 * n, 3))
+        f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
+        meshes.append((rng.random((n, 3)) * 10, f))
+    for v, f in meshes:
+        assert _same_bytes(G.edge_graph(v, f, VOX), _graph_by_rows(v, f, VOX))
+
+
+def test_pair_keys_of_nothing_and_the_vertex_limit() -> None:
+    assert G._pair_keys(np.empty((0, 2), np.int64), 5).shape == (0,)
+    n = G._MAX_VERTICES
+    assert n * n + n < np.iinfo(np.int64).max  # the largest key fits
+    E = np.array([[n - 1, n - 2], [n - 2, n - 1], [0, n - 1]], np.int64)
+    assert G._pair_keys(E, n).tolist() == [n - 1, (n - 2) * n + n - 1]
+    with np.testing.assert_raises(AssertionError):
+        G._pair_keys(E, n + 1)
+
+
+def test_edge_graph_in_small_chunks_is_the_same(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    v, f = ball()
+    whole = _graph_by_rows(v, f, VOX)
+    monkeypatch.setattr(G, "_CHUNK", 7)
+    assert _same_bytes(G.edge_graph(v, f, VOX), whole)
