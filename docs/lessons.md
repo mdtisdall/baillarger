@@ -558,6 +558,13 @@ In this order:
 4. A band-only multigrid antialias solver with a fused kernel: FISTA on the whole volume costs about h⁻⁵; the target is about h⁻² per cycle.
 5. Decimation with int32 ids and a block-wise first pass.
 6. Normals and their smoothing by mesh block, with a halo: they are now computed on the whole mesh.
+7. The fluid relabel's component-size test, blocked with the same connected-component merge as `dseg`.
+8. The site finders per block, with a global merge of the queue.
+9. Inference at 50 µm: sliding-window nnU-Net on the cluster, writing NIfTI-Zarr chunks directly, and an import that never holds a whole volume.
+10. The fix diff written per block, in Morton order.
+11. The viewer's brick pyramid built from NIfTI-Zarr (with item 3).
+
+`orient`, the WM distance and curvature are local samplers and need no item; the excision detector runs only on the bootstrap hemisphere.
 
 GPU, by cost: antialias first, then the normal-smoothing tables, then mesh and volume connected components. Handle removal, cut relabelling, decimation and I/O stay on the CPU.
 
@@ -985,6 +992,14 @@ Order: phase 0 needs stream 2's phase 0. Phases 1 and 2 follow in order; phase 3
 - **Phase 4: thickness and contacts.** Resolve the two conflicts (5c, Open) on one shared set of hemisphere columns, away from domain edges, then publish the thickness field and the contact splits with their specs.
 - **Phase 5: feedback to stream 1.** Write the site finder for disagreements between the GM/WM transition and the WM label, publishing sites in `wm-sites/1`.
 
+**Whole-brain scaling** (alongside phases 2–4; done before the first whole brain)
+
+The column volume and the shift estimates are local, but three solves are global, and each needs a blocked design, with the efficiency analysis, in the phase that builds it:
+
+1. The flattening warp fit: a blocked or multigrid least-squares solve.
+2. The joint warp: QPBO is a graph cut over every column, tied across contacts, and a graph cut cannot be split into blocks exactly. Solve on overlapping superblocks and check that neighbouring solutions agree in the overlap, or use a dual decomposition; design and prototype it before the first whole brain. It is the largest scaling risk in the plan.
+3. The thickness field (Matérn/SPDE on the white mesh): a multigrid or blocked sparse solver.
+
 ## 6. Stream 4: the viewer
 
 ### 6a. Goal
@@ -1174,6 +1189,7 @@ flowchart TB
     S3P3["3.3 bands and layer identity"]
     S3P4["3.4 thickness and contacts"]
     S3P5["3.5 feedback to stream 1"]
+    S3SC["stream 3 scaling track"]
   end
   subgraph S4["Stream 4: viewer"]
     S4P0["4.0 viewer on stream 1's outputs"]
@@ -1203,6 +1219,7 @@ flowchart TB
   S3P2 --> S3P4 & S3P5
   S2P1 -.-> S3P4
   S3P5 -.-> S1P6
+  S3P2 & S3P4 --> S3SC
 
   S1P0 --> S4P0 --> S4P1
   S4P1 --- S1P1
@@ -1235,7 +1252,8 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 3.2 | 3.1 | gains from 3.3 (bands as levels) |
 | 3.3 | 3.1 | alongside 3.2 |
 | 3.4 | 3.2 | gains from 2.1 (equivolume depth) |
-| 3.5 | 3.2 | feeds stream 1 as an input |
+| 3.5 | 3.2 | feeds stream 1 as review sites |
+| Stream 3 scaling track | 3.2, 3.4 | done before the first whole brain |
 | 4.0 | 1.0 | |
 | 4.1 | 4.0 | the same work as 1.1's review pane |
 | 4.2 | 2.0, 4.0 | |
