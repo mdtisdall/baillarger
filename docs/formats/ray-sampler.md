@@ -213,6 +213,10 @@ There is no bank split, no meeting point and no stop.
 All arrays are numpy arrays on the host. n is the number of columns, N the
 number of samples, and Q the number of intervals, in the call.
 
+The halo columns hold the same fields as the owned columns, with the same
+values that the superblock that owns them gives. So a caller can use them
+as neighbours of the owned columns.
+
 ### `Roots`
 
 | Field | Type | Shape | Meaning |
