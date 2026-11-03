@@ -428,8 +428,11 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - Finding hidden fluid gaps from the image before columns are traced: a thin, slowly decaying dark strip inside labelled cortex (SF F21).
 - **How `dseg` applies standalone answers** to a new generation's labels: whether a verified voxel always overrides the input, and how to show the reviewer where a new generation disagrees with an earlier answer.
 - **Whether antialiasing should align the surface with the data normal.** A data term in step 4 would pull the surface normals towards step 3's data normal near the boundary, weighted by its coherence (high in most cortex, low at contacts and fundi). The sign constraints stay, so the topology stays guaranteed. The cost: agreement with the data normal would stop being an independent check of the surface. Keep part of the evidence out of the term (one echo, or held-out regions), or judge the surface by something else, such as how straight the columns run.
+  - Its reach is limited: the sign constraints keep the surface within about half a voxel of the mask, so the term can smooth the staircase and short-wavelength tilt, but cannot turn a region whose mask faces the wrong way; that needs a different label.
+  - The data normal at the boundary comes from the deepest layers (WM has no laminar texture), where coherence may be lower.
+  - Whether to use it is decided by stream 2's misalignment diagnostic (§4c, Open): misalignment set at the root and constant along the rays points here; misalignment that grows with depth points to steering the rays instead.
 
-  To be tested after phase 3. The data normal is not a network input: it is a fixed function of the echoes the network already sees, and nnU-Net's mirroring and rotation would treat its components as scalars and contradict the image.
+  To be tested after phase 3, once stream 2's diagnostic has run. The data normal is not a network input: it is a fixed function of the echoes the network already sees, and nnU-Net's mirroring and rotation would treat its components as scalars and contradict the image.
 - **Whether a scribble also corrects the current hemisphere,** or only trains the next generation. A few strokes give no full-voxel edit, so the current correction needs something to spread them: a rerun after fine-tuning, or an interactive model. Candidates (from memory; check before choosing):
   - **nnInteractive** (DKFZ, 2025): a promptable 3D model from the nnU-Net team, taking points, scribbles, boxes and lassos, with no retraining. Code Apache-2.0; the weights are believed to be non-commercial and share-alike (CC BY-NC-SA), which must be read before use.
   - **MONAI Label with DeepEdit** (Apache-2.0): a U-Net with click inputs, whose server can train in the background as labels are saved. Fully permissive, but a looser fit with nnU-Net.
@@ -668,7 +671,16 @@ Every method below followed the image through a field, and none did better than 
 
 #### Open
 
-- Which paths are right in real cortex: straight rays, or rays that bend with the equivolume layers. The planned check is phantoms with curved, equivolume true columns, and on real data how far each ray departs from the data normal where it is coherent.
+- Which paths are right in real cortex: straight rays, or rays that bend with the equivolume layers or the laminae. The planned check is phantoms with curved, equivolume true columns.
+- **Where the rays and the image disagree, and so what to steer.** The diagnostic: the angle between each normal ray and the data normal at every sample, from the root outward, where coherence is high, shown by depth and by site as views, not a pass/fail number. It decides between two ways of steering by the image, and may call for both at different scales:
+  - **Misalignment set at the root and roughly constant along the ray:** the surface faces the wrong way and the cortex runs straight beyond it. Steer the surface: stream 1's antialiasing term towards the data normal (§3c, Open).
+  - **Misalignment small at the root and growing with depth:** the columns curve. Steer the rays: a **deflected normal ray**, which starts along the surface normal and leans towards the data normal, with no field T:
+    - the unsigned data normal is taken along the axis closest to the current heading, so no field is fitted and there are no crests, no crossing rule and no stalls;
+    - the pull is weighted by coherence, so the ray runs straight at contacts and fundi, where fields went wrong;
+    - the bending rate is capped (κ_max per mm), so the heading cannot kink;
+    - the total angle from the root normal is capped (θ_max, for example 20–30°), so the ray keeps moving away from its root and cannot return to its own WM.
+
+    An alternative form: trace the straight ray, then relax the whole path towards the data normal with a bending stiffness, as a short 1D problem per column. Judge it against normal on one footing: path error on curved phantoms, classes and own-bank returns at the sites, the profile split at the marked points (normal's 0.17 mm at M1/S1 is the bar), and its sensitivity to κ_max and θ_max, which is a finding to report, never a setting to tune away.
 - What the capped rays mean for stream 3: a straight ray that grazes a far bank ends in cortex, with no far WM to anchor its top.
 - **Radial fibres.** At 160 µm the texture is planar, so no source shows radial fibres giving column orientation. Their fade-out depth can still be a planar laminar edge.
 
@@ -686,11 +698,12 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 follows phase 0. Phase 2 needs 
   - Size each block's halo to the 8 mm length cap (§2, domain edges).
 - **Phase 1: equivolume depth.** Add **equivolume** (`offset_equivolume`) and **front-equivolume** (`column_front.grow_equivolume`, per mesh block) to the published traces.
 - **Phase 2: the open questions** (4c, Open), on the hemisphere away from domain edges:
-  - which paths are right, by phantoms with curved, equivolume true columns and by each ray's departure from the data normal;
+  - the misalignment diagnostic (4c, Open), and from it the steering it calls for: the deflected normal ray here, stream 1's antialiasing term there, or both;
+  - which paths are right, by phantoms with curved, equivolume true columns;
   - the capped rays;
   - radial fibres;
   - with stream 1's hippocampus decision (its phase 5), how roots on the surface round the hippocampus are treated.
-- **Phase 3, only if phase 2 shows something was missed: revisit fields fitted to the data normal** (4c). Nothing of `fitted_field`, `past_crest`, the field methods of `column_front` or `fronts` is ported before then; they stay in git, with the lessons above.
+- **Phase 3, only if phase 2 shows something was missed, and the deflected normal ray does not cover it: revisit fields fitted to the data normal** (4c). Nothing of `fitted_field`, `past_crest`, the field methods of `column_front` or `fronts` is ported before then; they stay in git, with the lessons above.
 
 ## 5. Stream 3: laminar profiles, contacts and alignment
 
