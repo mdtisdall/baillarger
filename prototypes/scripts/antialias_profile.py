@@ -172,7 +172,7 @@ def solve_crops(a):
     import antialias as AA
     from baillarger.bids import read_sidecar, sidecar_path
     from baillarger.blocks import open_volume
-    from baillarger.white import DSEG_SPEC
+    from baillarger.white_dseg import DSEG_SPEC
 
     side = read_sidecar(sidecar_path(a.solve), DSEG_SPEC)
     vol = open_volume(a.solve)
