@@ -232,7 +232,7 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 
 *Probabilities*
 
-- Steps 2 and 4 require labels and P; there is no labels-only path. The one exception is the bootstrap: the current code's labels-only path runs on the purple-mri aseg from phase 0 until our first generation's P replaces it (phase 8). Step 6 uses the fold spread when it exists; during bootstrapping it ranks without it.
+- Steps 2 and 4 require labels and P; there is no labels-only path. The one exception is the bootstrap: the current code's labels-only path runs on the purple-mri aseg from phase 0 until our first generation's P replaces it (phase 8). During bootstrapping there is no P, so the queue has neither margins nor fold spread: it ranks by site kind and wall size (step 6).
 - During bootstrapping there is no P: purple-mri gives labels only, and no probabilities are expected from it. The surface steps' P-reading code is still written and tested on phantoms first (3d, phase 6), so the surface work does not wait for the network; it runs on the hemisphere once the first generation exists.
 
 The coupling that is real, decided once:
@@ -441,9 +441,9 @@ The coupling that is real, decided once:
 | Input | From | Use |
 |---|---|---|
 | Corrected labels and fixes image | step 2 | finding sites |
-| P and fold spread | step 1 | finding and ranking sites |
+| P and fold spread | step 1 (from phase 8) | finding and ranking sites |
 | Sites from stream 3: where the GM/WM transition along the columns disagrees with the WM label | stream 3, step 6 (`wm-sites/1`) | more sites |
-| The fix table | step 2 | ranking by margin |
+| The fix table | step 2 | ranking by wall size; by margin from phase 8 |
 | The surface | step 4 | finding sites (tight folds, misfacing faces); display |
 | The FLASH | the scan | display |
 | The overview | step 5 | display in the viewer |
@@ -460,10 +460,13 @@ The coupling that is real, decided once:
 The design follows `wm-edits/1` (#78), the review plan in #80 and the site finder in #81.
 
 - **The queue.** The pipeline finds the sites that need judgment and gathers them into one queue per hemisphere, after the automatic result:
-  - tight folds (`wm-sites/1`) and large handle fixes;
-  - the fixes with the smallest margin in P (from the fix table);
-  - the places with the largest fold spread, where the model is least sure;
-  - stream 3's sites, where the profiles disagree with the WM label.
+  - tight folds (`wm-sites/1`) and large handle fixes, by wall size (from phase 3);
+  - fixes that override an answer (from phase 3);
+  - the fixes with the smallest margin in P (from the fix table; from phase 8, when P exists);
+  - the places with the largest fold spread, where the model is least sure (from phase 8);
+  - stream 3's sites, where the profiles disagree with the WM label (from stream 3's phase 5).
+
+  During bootstrapping the queue ranks by site kind and wall size; margins and fold spread join it from phase 8.
 - **Each answer serves twice:**
   - as an edit that corrects this hemisphere now;
   - as a verified label for training the next generation.
