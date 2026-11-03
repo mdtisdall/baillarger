@@ -2,9 +2,9 @@
 
 SpecVersion `wm-dseg/1` (the corrected segmentation) and `wm-dseg-fixes/1`
 (the diagnostic image of the changes). Written by
-`python -m baillarger.white dseg ASEG [--edits EDITS] --out DERIV`
-(`baillarger.white.write_wm_topo`); the keys are enforced by
-`baillarger.white.DSEG_SPEC` and `FIXES_SPEC`, and `tests/test_bids.py` checks
+`python -m baillarger.white_dseg ASEG [--edits EDITS] --out DERIV`
+(`baillarger.white_dseg.write_wm_topo`); the keys are enforced by
+`baillarger.white_dseg.DSEG_SPEC` and `FIXES_SPEC`, and `tests/test_bids.py` checks
 that the tables below list the same keys, types and requirements.
 
 ## Files

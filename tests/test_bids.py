@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from baillarger import bids, white, wm_edits
+from baillarger import bids, white_dseg, white_overview, white_surf, wm_edits
 from baillarger.bids import Key, SidecarSpec
 
 DOCS = Path(__file__).resolve().parents[1] / "docs" / "formats"
@@ -92,10 +92,10 @@ def doc_keys(doc: Path, version: str) -> set[tuple[str, str, bool]]:
 @pytest.mark.parametrize(
     ("doc", "spec"),
     [
-        ("wm-dseg.md", white.DSEG_SPEC),
-        ("wm-dseg.md", white.FIXES_SPEC),
-        ("white-surf.md", white.SURF_SPEC),
-        ("white-overview.md", white.OVERVIEW_SPEC),
+        ("wm-dseg.md", white_dseg.DSEG_SPEC),
+        ("wm-dseg.md", white_dseg.FIXES_SPEC),
+        ("white-surf.md", white_surf.SURF_SPEC),
+        ("white-overview.md", white_overview.OVERVIEW_SPEC),
         ("wm-edits.md", wm_edits.EDITS_SPEC),
     ],
 )
