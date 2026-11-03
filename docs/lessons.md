@@ -175,9 +175,23 @@ A closed surface without handles near the grey/white-matter boundary of each hem
 
 ### 3c. Implementation design
 
+Measured numbers in this section come from the one hemisphere we have, segmented by purple-mri, whose aseg bootstraps our model. Read them as evidence about methods: our own labels may show other defects. That aseg's own errors are in §2.
+
+Each step lists its inputs and outputs first, then its design and lessons.
+
 #### Step 1: our own WM segmentation
 
-Measured numbers in this section come from the one hemisphere we have, segmented by purple-mri, whose aseg bootstraps our model. Read them as evidence about methods: our own labels may show other defects. That aseg's own errors are in §2.
+*Inputs*
+
+- The three FLASH echoes, as channels.
+- For training: the seed labels (bootstrapping only), the verified answers from step 5 (`wm-edits/1`) and the test regions (for evaluation only).
+
+*Outputs* (no spec yet)
+
+- `_dseg`: labels in the FreeSurfer convention, missing tissue included.
+- `_label-WMfilled_probseg`: P(filled WM).
+- `_label-WMfilled_desc-foldsd_probseg`: the spread of P across folds.
+- Each sidecar records the model generation.
 
 *Aim.* The white surface needs per-voxel evidence from the FLASH itself: a probability of filled WM, improved wherever a person has answered. The network is the means to that, not a goal of its own.
 
@@ -228,6 +242,20 @@ The coupling that is real, decided once:
 
 #### Step 2: topology correction (`dseg`)
 
+*Inputs*
+
+- Step 1's `_dseg` and P.
+- The edits from step 5: `_desc-wmedits_edits.tsv` and its sidecar (`wm-edits/1`).
+- The FLASH, only if fixes chosen by intensity are adopted (Open).
+
+*Outputs* (`docs/formats/wm-dseg.md`)
+
+- `_desc-wmtopo_dseg`: the corrected labels (`wm-dseg/1`), on the input's grid. Its filled mask has Betti numbers (b0, 0, 0).
+- `_desc-wmtopofixes_dseg`: what changed and why (`wm-dseg-fixes/1`): 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit.
+- Planned, no spec yet: fills inside missing tissue as a value of their own, and each fix's margin in P.
+
+*Design and lessons*
+
 - **Missing tissue** (PL). Blocks of tissue were cut out of the specimen before the scan, and the FLASH is black there. In V1V2 the missing tissue is 14.6 % of the cortex label.
   - It can be found from the image: FLASH below 0.25 × the cortex median after smoothing by 2 voxels, in blocks of at least 250 voxels, grown by 0.3 mm. This detector supplies the class for the seed labels, since the purple-mri aseg labels the blocks as if the tissue were there.
   - It is an obstacle for columns, not a source.
@@ -257,6 +285,21 @@ The coupling that is real, decided once:
 
 #### Step 3: the surface (`mesh`)
 
+*Inputs*
+
+- Step 2's `_desc-wmtopo_dseg`, from which the filled mask is taken.
+- Step 1's P, for the antialiasing data term.
+
+*Outputs* (`white-surf/1`, `docs/formats/white-surf.md`)
+
+- `_hemi-<h>_white.surf.gii`: the vertices and triangles, with external binary data (`.dat`).
+- `_desc-normals_white.func.gii`: the unit normals.
+- `_desc-edgekeys_white.func.gii`: each vertex's grid-edge key.
+- `_desc-blocks_white.tsv`: the block index.
+- Planned, no spec yet: the cut-face flag per vertex, keyed by edge key.
+
+*Design and lessons*
+
 - **Antialiasing beats smoothing** (#61; SF F28).
   - A thin-plate field φ with φ ≥ ε on the mask and φ ≤ −ε off it, in a band of the signed distance, solved by FISTA with restarts in PyTorch.
   - Each vertex stays on its own grid edge, so the surface has no self-intersections by construction and keeps the edge keys.
@@ -282,6 +325,18 @@ The coupling that is real, decided once:
 
 #### Step 4: the overview (`overview`)
 
+*Inputs*
+
+- Step 3's `white-surf/1`.
+
+*Outputs* (`white-overview/1`, `docs/formats/white-overview.md`)
+
+- `_desc-overview_white.surf.gii`: the decimated mesh.
+- `_desc-overviewids_white.func.gii`: the true vertex of each overview vertex.
+- `_desc-overviewcarry_white.func.gii`: the true vertices each face carries.
+
+*Design and lessons*
+
 - `decimate` (#70–#77): 25.3 M → 210 k faces at ε = 0.1 mm in 186 s, keeping topology, the ε bound, unmoved true vertices, orientation and no self-intersections. The Numba block worker is bit for bit the Python reference.
 - The fold test must compare against the input normals each face stands for, not the face's last state; otherwise 1,027 faces turned over.
 - Pairs of sheets closer than 2ε at necks cross. Pinning the crossing faces' input vertices and re-decimating clears them.
@@ -289,6 +344,18 @@ The coupling that is real, decided once:
 - For display only: nothing is measured on it.
 
 #### Step 5: review
+
+*Inputs*
+
+- Step 2's corrected labels and fixes image, and step 1's P and fold spread, to find and rank the sites.
+- For display: the FLASH, step 3's surface and step 4's overview.
+
+*Outputs*
+
+- `wm-sites/1` (#81): the sites in the queue.
+- The answers: `_desc-wmedits_edits.tsv` and its sidecar (`wm-edits/1`, `docs/formats/wm-edits.md`), read by step 2 as edits and by step 1 as verified training labels.
+
+*Design and lessons*
 
 The design follows `wm-edits/1` (#78), the review plan in #80 and the site finder in #81.
 
