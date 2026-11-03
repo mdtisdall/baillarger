@@ -482,7 +482,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 
 - Fixes chosen by intensity (FreeSurfer's cut or fill by intensity; #85 step 2); the tube case; the size threshold for exceptions; whether fills through cortex are as acceptable as thickening.
 - Cut faces: how far a cut face bends the normals of vertices near it but not on it.
-- **The fallback for excisions through cortex, if stream 3's profiles cannot find their tops:** cut seeds, points in scanner mm placed by the reviewer and replayable like edits. A seed in the bite grows through outside voxels, kept inside the specimen's envelope (a closing of tissue, radius R) and out of sulci (an opening, radius r); a seed on a flat face grows over the tissue boundary while it stays close to a plane fitted as it grows. The faces are derived on each run, so they follow the current labels. Whether flat faces are planar enough is unknown.
+- **The fallback for excisions through cortex, if stream 3's profiles cannot find their tops:** cut seeds, points in scanner mm placed by the reviewer and replayable like edits. A seed in the bite grows through outside voxels, kept inside the specimen's envelope (a closing of tissue, radius R) and out of sulci (an opening, radius r); a seed on a flat face grows over the tissue boundary while it stays close to a plane fitted as it grows. The faces are derived on each run, so they follow the current labels. Whether flat faces are planar enough is unknown. Decided by stream 3's cut-top test (its phase 4); the work is phase 11's.
 - Whether depth 0 (the column roots) should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Hidden fluid gaps (a thin, slowly decaying dark strip inside labelled cortex; SF F21): under the majority rule they stay cortex, and stream 3 finds them along the columns. Open: whether a detector before tracing is still worth having, as a diagnostic or to rank review sites.
 - Whether normal smoothing should stop at blade crests (feature-preserving smoothing, such as bilateral normal filtering, Zheng et al. 2011) instead of letting the two faces cancel.
@@ -570,6 +570,7 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
   - Outputs that hold more than one interface per voxel, if stream 3's contacts need more than the profiles give: an unsigned distance to the pial interface (a channel narrower than a voxel is a valley that never reaches zero, which a signed distance cannot hold), or tissue fractions trained on 50 µm data averaged down to 160 µm, where the fractions are known.
   - A topology loss (clDice, Betti matching), if the queue is too long. It can only reduce defects; the guarantee stays in step 2's correction.
   - A data-normal term in `antialias` (§3c Open), if stream 2's misalignment diagnostic (its phase 2) finds misalignment set at the root and constant along the rays.
+  - Cut seeds for excisions through cortex (§3c Open), if stream 3's cut-top test (its phase 4) finds that profiles cannot find them.
 
 **Whole-brain scaling** (alongside phases 1–11; `docs/scaling.md`)
 
@@ -997,7 +998,7 @@ Where each layer lies along every column, read from the image's own contrast and
 
 #### Open
 
-- **Cut tops from profiles alone.** An excision through cortex is outside in the labels, so its column looks like one reaching the pia. Do the profiles flag it (a truncated layer sequence; a top at lower τ than its neighbours), and how large are the errors where they do not? Tested against the bootstrap detector's excision map (§3c, step 2). If not, stream 1 adds cut seeds (§3c, Open).
+- **Cut tops from profiles alone.** An excision through cortex is outside in the labels, so its column looks like one reaching the pia. Do the profiles flag it (a thickness that drops against its neighbours, or a layer sequence that ends early), and how large are the errors where they do not? Tested in phase 4 (§5d), against the bootstrap detector's excision map (§3c, step 2). If not, stream 1 adds cut seeds (its phase 11; §3c, Open).
 - **Conflict: the equal-volume closed form from white-surface curvature.** PL (#23) adopted it with curvature smoothed at 1 mm (no stria trend); SF F10 lists it as failed with curvature at 0.32–0.80 mm (over-corrects on open V1, ρ −0.69, because the pia is flatter than a parallel shell). The tests differ in curvature scale, columns and measure, so the dependence on scale is unresolved. Normal rays (#47) use it at 0.5 mm, unvalidated.
 - **Conflict: the best M1/S1 estimator depends on the paths and the score.** The field prior alone on crossing paths gives 0.07–0.12 mm, against 0.26–0.33 mm in other scores. The profile split misses by 0.5–0.8 mm on tensor paths but gets 0.17 mm on normal rays. The crossing path's L and the column arc lengths were never reconciled. Compare estimators only on one shared set of paths with one score.
 - The joint fit of the thickness field to visible tops and to the contact sums L, and whether it converges.
@@ -1023,6 +1024,7 @@ Order: phase 0 needs stream 2's phase 0. Phases 1 and 2 follow in order; phase 3
   - Rewrite `bands` (DP with the cross-validated K) and `gain` only if they are needed.
   - Salvage the layer-maps diagnostics from #56 (isopachs, pinch-outs, facies; `layer_maps_lib.py` and its tests).
 - **Phase 4: thickness and contacts.** Resolve the two conflicts (5c, Open) on one shared set of hemisphere columns, away from domain edges, then publish the thickness field and the contact splits with their specs.
+  - The cut-top test (5c, Open): views of tops and thickness against the bootstrap excision map. If the profiles cannot find the cut tops, stream 1 adds cut seeds (its phase 11).
 - **Phase 5: feedback to stream 1.** Write the site finder for disagreements between the GM/WM transition and the WM label, publishing sites in `wm-sites/1`.
 
 **Whole-brain scaling** (alongside phases 2–4; done before the first whole brain)
@@ -1267,6 +1269,7 @@ flowchart TB
   S2P0 & S4P0 --> S4P3
   S3P2 & S3P3 --> S4P4
   S3P4 -.-> S4P4
+  S3P4 -. "cut seeds, if needed" .-> S1P11
 ```
 
 A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or feedback that enters as an input. Phase 1.5 and the painting mode meet in two steps: 1.5 writes the test-region spec, which 4.1 needs, and the regions are painted once 4.1 exists.
@@ -1284,7 +1287,7 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 1.8 | 1.6, 1.7 | replaces the purple-mri aseg; first P on the hemisphere, then the labels-only path goes; streams 2–4 rerun; decides the hippocampus |
 | 1.9 | 1.8, 4.2 | queues 3.5's sites when they exist |
 | 1.10 | 1.8 | |
-| 1.11 | each item when its own diagnostic asks: 1.9, 1.10; 2.2 for the antialiasing term | only if their diagnostics ask |
+| 1.11 | each item when its own diagnostic asks: 1.9, 1.10; 2.2 for the antialiasing term; 3.4 for cut seeds | only if their diagnostics ask |
 | Scaling track | 1.0 | alongside 1.1–1.11; done before the first whole brain |
 | 2.0 | 1.0, 1.1 | writes the ray-sampler spec first |
 | 2.1 | 2.0 | |
@@ -1294,7 +1297,7 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 3.1 | 3.0 | |
 | 3.2 | 3.1 | gains from 3.3 (bands as levels) |
 | 3.3 | 3.1 | alongside 3.2 |
-| 3.4 | 3.2 | gains from 2.1 (V(s), for equal-volume depth) |
+| 3.4 | 3.2 | gains from 2.1 (V(s), for equal-volume depth); tests cut tops against the excision map |
 | 3.5 | 3.2 | feeds stream 1 as review sites |
 | Stream 3 scaling track | 3.2, 3.4 | done before the first whole brain |
 | 4.0 | 1.0 | |
