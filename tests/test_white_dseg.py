@@ -1,4 +1,4 @@
-"""Tests for the dseg command (baillarger.white.wm_topo, write_wm_topo): the
+"""Tests for the dseg command (baillarger.white_dseg.wm_topo, write_wm_topo): the
 segmentation with its WM mask made cavity- and handle-free, on a synthetic
 aseg."""
 
@@ -10,12 +10,12 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from baillarger import bids, white
+from baillarger import bids, white_dseg
 from baillarger.handles import kuhn_betti
 
 SHAPE = (40, 36, 30)
 VOX = (0.2, 0.16, 0.2)
-FILLED = white.FILLED_LABELS["R"]
+FILLED = white_dseg.FILLED_LABELS["R"]
 
 
 def synthetic_aseg() -> npt.NDArray[np.int16]:
@@ -39,7 +39,7 @@ def synthetic_aseg() -> npt.NDArray[np.int16]:
 
 def test_wm_topo_of_a_synthetic_aseg() -> None:
     a = synthetic_aseg()
-    t = white.wm_topo(a, VOX)
+    t = white_dseg.wm_topo(a, VOX)
     assert t.hemi == "R"
     assert t.betti_before == (2, 2, 1) and t.betti_after == (2, 0, 0)
     assert kuhn_betti(np.isin(t.dseg, FILLED)) == (2, 0, 0)
@@ -64,9 +64,9 @@ def test_one_hemisphere_only() -> None:
     a = synthetic_aseg()
     a[0, 0, 0] = 2  # the left WM too
     with pytest.raises(ValueError, match="exactly one"):
-        white.wm_topo(a, VOX)
+        white_dseg.wm_topo(a, VOX)
     with pytest.raises(ValueError, match="exactly one"):
-        white.hemisphere(np.full((3, 3, 3), 42))
+        white_dseg.hemisphere(np.full((3, 3, 3), 42))
 
 
 def test_a_fill_that_joins_two_pieces_into_a_handle_is_refused() -> None:
@@ -83,7 +83,7 @@ def test_a_fill_that_joins_two_pieces_into_a_handle_is_refused() -> None:
     a[18:21, 19, 25] = 41  # joined 3 voxels above the plate
     assert kuhn_betti(np.isin(a, FILLED)) == (2, 1, 0)
     with pytest.raises(RuntimeError, match=r"Betti numbers \(1, 1, 0\)"):
-        white.wm_topo(a, VOX)
+        white_dseg.wm_topo(a, VOX)
 
 
 def test_cuts_take_the_nearest_donor_in_mm() -> None:
@@ -94,13 +94,13 @@ def test_cuts_take_the_nearest_donor_in_mm() -> None:
     # 3 voxels along x (0.3 mm) against 2 along y (0.4 mm)
     labels[18, 15, 15], donor[18, 15, 15] = 7, True
     labels[15, 13, 15], donor[15, 13, 15] = 8, True
-    white.relabel_cuts(labels, cut, donor, (0.1, 0.2, 0.2), margin=1)
+    white_dseg.relabel_cuts(labels, cut, donor, (0.1, 0.2, 0.2), margin=1)
     assert labels[15, 15, 15] == 7
     # a donor far beyond the first box: the box is widened
     labels = np.full((30, 30, 30), 41, np.int16)
     donor = np.zeros(labels.shape, bool)
     labels[0, 0, 0], donor[0, 0, 0] = 9, True
-    white.relabel_cuts(labels, cut, donor, (1.0, 1.0, 1.0), margin=1)
+    white_dseg.relabel_cuts(labels, cut, donor, (1.0, 1.0, 1.0), margin=1)
     assert labels[15, 15, 15] == 9
 
 
@@ -109,7 +109,7 @@ def test_the_dseg_command_writes_the_bids_files(tmp_path: Path) -> None:
     src.parent.mkdir()
     nib.save(nib.nifti1.Nifti1Image(synthetic_aseg(), np.diag([*VOX, 1.0])), src)
     out = tmp_path / "deriv"
-    white.main(["dseg", str(src), "--out", str(out)])
+    white_dseg.main([str(src), "--out", str(out)])
     anat = out / "sub-T01" / "ses-S1" / "anat"
     stem = "sub-T01_ses-S1_desc-wmtopo_dseg"
     fx = "sub-T01_ses-S1_desc-wmtopofixes_dseg"
@@ -119,7 +119,7 @@ def test_the_dseg_command_writes_the_bids_files(tmp_path: Path) -> None:
     d = np.asarray(img.dataobj)
     assert d.dtype == np.int16 and np.allclose(img.affine, np.diag([*VOX, 1.0]))
     assert kuhn_betti(np.isin(d, FILLED)) == (2, 0, 0)
-    side = bids.read_sidecar(anat / f"{stem}.json", white.DSEG_SPEC)
+    side = bids.read_sidecar(anat / f"{stem}.json", white_dseg.DSEG_SPEC)
     assert side["BettiBefore"] == [2, 2, 1] and side["BettiAfter"] == [2, 0, 0]
     assert side["CavityVoxels"] == 8 and side["HandleFillVoxels"] == 4
     assert side["HandleCutVoxels"] == 1 and side["CutLabels"] == {"0": 1}
@@ -132,7 +132,7 @@ def test_the_dseg_command_writes_the_bids_files(tmp_path: Path) -> None:
     assert isinstance(fimg, nib.nifti1.Nifti1Image)
     f = np.asarray(fimg.dataobj)
     assert [(f == k).sum() for k in (1, 2, 3)] == [1, 4, 8]
-    bids.read_sidecar(anat / f"{fx}.json", white.FIXES_SPEC)
+    bids.read_sidecar(anat / f"{fx}.json", white_dseg.FIXES_SPEC)
     assert json.loads((anat / f"{fx}.json").read_text())["SpecVersion"] == (
         "wm-dseg-fixes/1"
     )

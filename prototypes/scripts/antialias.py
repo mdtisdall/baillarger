@@ -39,7 +39,8 @@ from baillarger import mesh_smoothing as S
 from baillarger.bids import read_sidecar, sidecar_path
 from baillarger.blocks import open_volume
 from baillarger.mesh import edge_key, edge_points, marching_tetrahedra_blocks
-from baillarger.white import DSEG_SPEC, WhiteSurface
+from baillarger.white_dseg import DSEG_SPEC
+from baillarger.white_surf import WhiteSurface
 
 T0 = time.perf_counter()
 

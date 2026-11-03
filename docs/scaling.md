@@ -3,7 +3,7 @@
 The pipeline moves from boxes to whole hemispheres one stage at a time; each
 stage is scaled when we get to it, and only the computational problems met
 are fixed. Scaled so far: the WM topology correction, the white surface and
-its overview for viewing (`python -m baillarger.white dseg` and `mesh`;
+its overview for viewing (`python -m baillarger.white_dseg`, `white_surf` and `white_overview`;
 `docs/formats/wm-dseg.md`, `docs/formats/white-surf.md`,
 `docs/formats/white-overview.md`).
 
