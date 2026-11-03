@@ -156,13 +156,10 @@ class RaySampler:
             str(self.surf.with_name(side["EdgeKeysFile"])), mmap=True
         )
         self.keys: npt.NDArray[np.int32] = kg.darrays[0].data  # (n, 2) words
-        # |n̄| comes with white-surf/1's NormLenFile (phase 1.0); NaN until then
-        self.normlen: npt.NDArray[np.float32] | None = None
-        if "NormLenFile" in side:
-            lg = GiftiImage.from_filename(
-                str(self.surf.with_name(side["NormLenFile"])), mmap=True
-            )
-            self.normlen = lg.darrays[0].data
+        lg = GiftiImage.from_filename(
+            str(self.surf.with_name(side["NormLenFile"])), mmap=True
+        )
+        self.normlen: npt.NDArray[np.float32] = lg.darrays[0].data
         idx = np.loadtxt(
             self.surf.with_name(side["BlocksFile"]), skiprows=1, ndmin=2
         ).reshape(-1, len(BLOCK_COLUMNS))
@@ -201,11 +198,7 @@ class RaySampler:
                 halo = cand[np.all((v >= lo) & (v <= hi), axis=1)]
         vertex = np.concatenate([owned, halo])
         words = np.ascontiguousarray(self.keys[vertex], "<i4")
-        nl = (
-            np.full(len(vertex), np.nan, np.float32)
-            if self.normlen is None
-            else np.asarray(self.normlen[vertex], np.float32)
-        )
+        nl = np.asarray(self.normlen[vertex], np.float32)
         return Roots(
             edge_key=words.view("<i8").ravel().astype(np.int64),
             vertex=vertex,
