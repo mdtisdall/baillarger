@@ -1,6 +1,6 @@
 """Tests of warp_cut.qpbo with exact answers: brute force on small models, OR-Tools CP-SAT on larger
-ones. Needs thinqpbo and ortools:
-    nix develop --command uv run --with thinqpbo --with ortools pytest -q prototypes/scripts/test_warp_qpbo.py
+ones. Needs ortools:
+    nix develop --command uv run --with ortools pytest -q prototypes/scripts/test_warp_qpbo.py
 """
 
 import itertools
