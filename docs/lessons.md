@@ -1066,20 +1066,24 @@ Problems in the current code that a restart should not inherit:
 
 ## 8. Interfaces between streams
 
-The specs in `docs/formats/` stay at version 1 until a release. Each is enforced by a `bids.SidecarSpec`, and its document is tested against the code.
+The specs in `docs/formats/` stay at version 1 until a release, edited in place. Each is enforced by a `bids.SidecarSpec`, and its document is tested against the code. A spec not yet written is written at the start of the phase that first publishes its output, before that output's code.
 
-| Spec | Defines |
-|---|---|
-| `wm-dseg/1`, `wm-dseg-fixes/1` | The corrected segmentation and the fixes image (1 cut, 2 fill, 3 cavity, 4 manual); Betti before and after; each move |
-| `wm-edits/1` | Voxel-row diffs against a SHA-pinned aseg, with each answer's site and choice |
-| `white-surf/1` | GIfTI with external data: float32 vertices in scanner mm, int32 triangles, float32 normals, int64 edge keys, a block index in Morton order |
-| `white-overview/1` | The decimated display mesh, its true-vertex ids and the true vertices each face carries; five guarantees |
-
-There is no spec yet for:
-
-- column traces (stream 2's output, which stream 3 and the viewer need);
-- the structure tensor and the data normal with its coherence (stream 1's step 3; stream 1 judges its surface against it, and stream 2 its rays);
-- pial-label changes;
-- the missing-tissue mask;
-- any stream 3 output, including feedback to stream 1;
-- the review-queue sites (`wm-sites/1` is on #81).
+| Spec | Defines | Written in |
+|---|---|---|
+| `wm-dseg/1`, `wm-dseg-fixes/1` | The corrected segmentation and the fixes image (1 cut, 2 fill, 3 cavity, 4 manual); Betti before and after; each move | exists |
+| `white-surf/1` | GIfTI with external data: float32 vertices in scanner mm, int32 triangles, float32 normals, int64 edge keys, a block index in Morton order | exists |
+| `white-overview/1` | The decimated display mesh, its true-vertex ids and the true vertices each face carries; five guarantees | exists |
+| `wm-edits/1` | Exists as voxel-row diffs against a SHA-pinned aseg, with each answer's site and choice; to be revised so answers stand on their own (verified labels, valid for any input) | revision: stream 1, phase 1 |
+| Missing tissue; the cut-face flag | A label class; a per-vertex flag keyed by edge key | stream 1, phase 0 |
+| Pial-label edits | Relabelled fluid channels and vessels | stream 1, phase 0 (perhaps as `wm-edits/1` with more labels) |
+| `wm-sites/1` | The review queue's sites | stream 1, phase 1 (#81) |
+| Structure tensor; data normal and coherence | `orient`'s outputs (§3c, step 3) | stream 1, phase 1 |
+| Fix margins in P | The P along each fix's wall | stream 1, phase 3 |
+| Test regions | Labelled boxes, with the box and the labeller | stream 1, phase 2 |
+| Training export | The nnU-Net dataset, with seed and verified labels kept apart, with provenance | stream 1, phase 4 |
+| Our `_dseg`, P, fold spread | The network's outputs, with the model generation in each sidecar | stream 1, phase 5 |
+| Column traces | Rays keyed by edge key and method: samples, depth, meetings, classes; readable by block | stream 2, phase 0, first: stream 3 and the viewer wait on it |
+| Column volume | The echoes sampled along each column, with 3D positions | stream 3, phase 0 |
+| z(τ) | Depth maps per column: the pial edge at τ = 1, the GM/WM transition as a level | stream 3, phase 2 |
+| Bands; thickness and contacts | Bands per region and layer identity; the thickness field and contact splits | stream 3, phases 3–4 |
+| Feedback to stream 1 | An input stream 1 reads like its edits | stream 3, phase 5 |
