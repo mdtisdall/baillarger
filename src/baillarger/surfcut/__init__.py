@@ -9,7 +9,7 @@ their sum, and pairwise tables (baillarger.surfcut.model).
 
 - cut: the exact minimum of the submodular terms by one minimum s-t cut
   (Ishikawa 2003), scipy's maximum flow.
-- qpbo: every term, ties included, by QPBO (our own, on scipy): a partial labelling
+- qpbo: every term, ties included, by QPBO (our own): a partial labelling
   that agrees with some global minimum, each variable's interval of labels
   it could not rule out, a lower bound, and QPBO-I's completion. Exact on
   submodular models.

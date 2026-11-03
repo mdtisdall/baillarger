@@ -155,9 +155,9 @@ class Roof:
 
 def roof(P: Binary, scale: float = SCALE) -> Roof:
     """QPBO: the roof-duality lower bound and the persistent labels of E. The
-    costs are rounded to 1 / scale (baillarger.surfcut._flow); the bound is
-    that of the rounded energy. Raises ValueError if every labelling is
-    forbidden or the capacities reach the int32 limit."""
+    costs are rounded down to 1 / scale (baillarger.surfcut._flow), so the
+    bound is valid for the true costs. Raises ValueError if every labelling is
+    forbidden or the hard cost reaches 2^61."""
     n = P.n
     if n == 0:
         e = ints([])
@@ -226,7 +226,7 @@ def roof(P: Binary, scale: float = SCALE) -> Roof:
     log = (
         f"roof: {n:,} variables, {Q.i.size:,} pairs; scale {scale:g}, hard cost "
         f"{mc.capacities.hard:,}, largest rounding error "
-        f"{mc.capacities.max_error:.3g}; "
+        f"{mc.capacities.max_error:.3g}, total {mc.capacities.total_error:.3g}; "
         f"{int(np.sum(weak < 0)):,} unlabelled"
     )
     return Roof(ints(weak), ints(strong), lb, log)

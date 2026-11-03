@@ -194,20 +194,68 @@ def test_other_seed_still_valid() -> None:
 
 def test_capacities_at_the_limit() -> None:
     """The hard cost is 1 + the sum of the finite capacities; it must be below
-    2^30."""
-    c = capacities(floats([2**30 - 2, np.inf]), scale=1.0)
-    assert c.hard == 2**30 - 1 and list(c.caps) == [2**30 - 2, 2**30 - 1]
-    with pytest.raises(ValueError, match="2\\^30"):
-        capacities(floats([2**30 - 1, np.inf]), scale=1.0)
+    2^61. Arcs 2^1 .. 2^60 sum to 2^61 - 2 (hard cost 2^61 - 1); with 2^0 too,
+    the hard cost is 2^61."""
+    p = [2.0**k for k in range(1, 61)]
+    c = capacities(floats(p + [np.inf]), scale=1.0)
+    assert c.hard == 2**61 - 1 and int(c.caps[-1]) == 2**61 - 1
+    with pytest.raises(ValueError, match="2\\^61"):
+        capacities(floats([1.0] + p + [np.inf]), scale=1.0)
+
+
+def test_capacities_round_down() -> None:
     c = capacities(floats([0.0014, 0.0026]), scale=1000.0)
-    assert list(c.caps) == [1, 3] and c.max_error == pytest.approx(4e-4)
+    assert list(c.caps) == [1, 2]
+    assert c.max_error == pytest.approx(6e-4)
+    assert c.total_error == pytest.approx(1e-3)
 
 
 def test_cut_at_the_capacity_limit() -> None:
-    """One variable, K = 2, unary [0, c]: one finite arc of c * 1000. At
-    2^30 - 2 units (hard cost 2^30 - 1) it solves; one unit more raises."""
-    M = Model(ints([2]), ints([0]), [floats([0.0, 1073741.822])])
+    """One variable, K = 2, unary [0, c]: one finite arc of c * 10^9 units
+    (2^61 is 2.306e18)."""
+    M = Model(ints([2]), ints([0]), [floats([0.0, 2.30e9])])
     assert list(cut(M)) == [0]
-    M = Model(ints([2]), ints([0]), [floats([0.0, 1073741.823])])
-    with pytest.raises(ValueError, match="2\\^30"):
+    M = Model(ints([2]), ints([0]), [floats([0.0, 2.31e9])])
+    with pytest.raises(ValueError, match="2\\^61"):
         cut(M)
+
+
+def three_neighbours(a: float, b: float) -> Model:
+    """x1 = x2 = 0 and x3 = 1 are forced (a cost of 1 otherwise); hinges a |x1 -
+    x0|, a |x2 - x0| and b |x3 - x0|: x0 = 1 costs 2a, x0 = 0 costs b."""
+    one = [floats([0.0, 1.0]), floats([0.0, 1.0]), floats([1.0, 0.0])]
+    hinge = [
+        (ints(0), ints(k), ints(0), floats([w])) for k, w in ((1, a), (2, a), (3, b))
+    ]
+    return Model(
+        ints([2, 2, 2, 2]), ints([0, 0, 0, 0]), [floats([0.0, 0.0])] + one, hinge=hinge
+    )
+
+
+@pytest.mark.parametrize("a, b", [(0.0004, 0.0006), (0.0009, 0.0011)])
+def test_cut_with_small_costs(a: float, b: float) -> None:
+    """2a > b, so the only minimum has x0 = 0. Costs rounded to 1/1000 change
+    it: to the nearest unit, 0.0004 is 0 and 0.0006 is 0.001; rounded down,
+    0.0009 is 0 and 0.0011 is 0.001. Both give x0 = 1."""
+    M = three_neighbours(a, b)
+    best, arg = brute(M)
+    assert arg is not None and list(arg) == [0, 0, 0, 1]
+    assert list(cut(M)) == [0, 0, 0, 1]
+
+
+def test_qpbo_bound_with_a_cost_that_rounds_up() -> None:
+    """x1 = 1 is forced; x0 = 0 pays a table entry of 0.0006, x0 = 1 a unary cost
+    of 0.0007. The minimum is 0.0006; to the nearest 1/1000 its active cost is
+    0.001, and a bound of the rounded energy would be above the minimum."""
+    T = np.array([[[0.0, 0.0006], [0.0, 0.0]]])
+    M = Model(
+        ints([2, 2]),
+        ints([0, 0]),
+        [floats([0.0, 0.0007]), floats([1.0, 0.0])],
+        table=[(ints([0]), ints([1]), T)],
+    )
+    best, _ = brute(M)
+    assert best == pytest.approx(0.0006, abs=1e-15)
+    r = qpbo(M)
+    assert r.lower_bound <= best + 1e-12
+    assert list(r.labels) == [0, 1]

@@ -22,10 +22,10 @@ x_i < k, and some global minimum lies in every variable's interval at once
 submodular model every variable is certified and the labelling is the global
 minimum.
 
-The maximum flow runs on int32 capacities: costs are rounded to 1 / SCALE
-(baillarger.surfcut._flow), and the lower bound is that of the rounded
-energy. Hard terms cost 1 + the sum of the finite capacities, which must stay
-below 2^30 (ValueError otherwise).
+The maximum flow runs on int64 capacities: costs are rounded down to
+1 / SCALE (baillarger.surfcut._flow), so the lower bound is valid for the
+true energy. Hard terms cost 1 + the sum of the finite capacities, which must
+stay below 2^61 (ValueError otherwise).
 """
 
 from collections.abc import Callable
