@@ -9,7 +9,8 @@ version.
 
 A decision marked **Proposed** is a proposal. The user decides it in the
 review of the PR that adds this document. Until then the code uses the
-proposal.
+proposal. The user decided the choroid plexus, the ventral DC and the WM
+hypointensities (77); the other Proposed rows are not decided yet.
 
 ## The classes
 
@@ -28,9 +29,9 @@ Right values, the left hemisphere the Left values.
 | Pallidum | 52 | 13 | yes | decided |
 | Corpus callosum | 192 | 192 | yes | decided |
 | Accumbens | 58 | 26 | yes | Proposed |
-| Ventral DC | 60 | 28 | yes | Proposed |
+| Ventral DC | 60 | 28 | yes | decided |
 | Vessel | 62 | 30 | yes | Proposed |
-| Choroid plexus | 63 | 31 | yes | Proposed |
+| Choroid plexus | 63 | 31 | follows the lateral ventricle | decided |
 | Inferior lateral ventricle | 44 | 5 | no | Proposed |
 | Amygdala | 54 | 18 | no | Proposed |
 | Hippocampus | 53 | 17 | open | open |
@@ -78,7 +79,7 @@ becomes WM) in these cases:
 | Choroid plexus | Fills the voxel only if no inferior lateral ventricle is within one voxel | E L576-593 |
 | Inferior lateral ventricle | Does not fill the voxel. It fills the cortex voxels beside it and some neighbours | E L627-771 |
 | Hippocampus | Does not fill the voxel in this pass. It fills neighbours under distance rules | E L773 onward |
-| WM hypointensities (77) | Fills the voxel unless cortex is within one voxel | E L564-574 |
+| WM hypointensities (77) | Not in the label set. Decided | The network labels them as WM, which is filled. Add 77 only if a later analysis needs it as its own class. |
 | Third ventricle | No case in the first pass | E L485-912 |
 | Amygdala | No case in the first pass. Later passes of `edit_segmentation` (E L1102 onward) name it with the inferior lateral ventricle and the hippocampus, and set voxels near it. I did not trace them | E L1102-1130 |
 | Unknown (0), and the lateral ventricle again | A later pass fills outside voxels that touch both ventricle and WM, and ventricle within two voxels of WM | E L939-990 |
@@ -104,24 +105,18 @@ later labels, from the network or from a person.
 | Label | Decision | Reason |
 |---|---|---|
 | Accumbens (58, 26) | In. Proposed | FreeSurfer fills it. It is deep grey matter inside the basal forebrain. |
-| Ventral DC (60, 28) | In. Proposed. **Question 2** | FreeSurfer fills it. It touches the brainstem. |
+| Ventral DC (60, 28) | In. Decided | FreeSurfer fills it. It touches the brainstem. At the whole-brain stage, the cut that separates the hemispheres and the brainstem must separate the ventral DC from the midbrain. |
 | Vessel (62, 30) | In. Proposed | FreeSurfer fills it. A vessel that is left out makes a cavity in the mask. |
-| Choroid plexus (63, 31) | In. Proposed. **Question 1** | It lies in the lateral ventricle, which is in. |
+| Choroid plexus (63, 31) | Follows the lateral ventricle. Decided | It has the same class as the lateral ventricle. While the lateral ventricle is filled, the choroid plexus is filled. If the user makes the ventricles outside (after a measurement in phase 1.0), the choroid plexus is outside with them. FreeSurfer uses a neighbourhood rule, which a class set cannot hold. |
 | Inferior lateral ventricle (44, 5) | Out. Proposed | FreeSurfer does not fill the voxel. It is the temporal horn beside the hippocampus, and the hippocampus is not in the mask. |
 | Amygdala (54, 18) | Out. Proposed | FreeSurfer has no case for it. |
-| WM hypointensities (77) | Not in the label set. Proposed. **Question 3** | The aseg has none. |
+| WM hypointensities (77) | Not in the label set. Decided | The network labels them as WM, which is filled. Add 77 only if a later analysis needs it as its own class. |
 
-### Questions for the user
+### Decided by the user
 
-1. **Choroid plexus in.** This deviates from FreeSurfer. FreeSurfer uses a
-   neighbourhood rule (fill unless an inferior lateral ventricle is near). A
-   class set cannot hold that rule. The alternative is out.
-2. **Ventral DC in.** The ventral DC touches the brainstem. For a whole
-   brain, the midline cut and the pons cut must remove it there. Decide
-   this when the whole-brain fill is made.
-3. **WM hypointensities (77) not in the label set.** FreeSurfer fills them
-   unless they are within one voxel of cortex. A class set cannot hold that
-   rule either. If a later aseg has the label, the question comes back.
+1. The choroid plexus follows the lateral ventricle (above).
+2. The ventral DC is in the filled mask (above).
+3. The WM hypointensities (77) are not in the label set (above).
 
 ## Excisions are outside
 

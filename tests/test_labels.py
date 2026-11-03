@@ -30,7 +30,11 @@ def test_doc_lists_the_filled_labels() -> None:
 
 def test_doc_filled_column_matches_the_filled_labels() -> None:
     for hemi, col in (("R", 0), ("L", 1)):
-        yes = {v[col] for v in doc_classes().values() if v[2] == "yes"}
+        yes = {
+            v[col]
+            for v in doc_classes().values()
+            if v[2] == "yes" or v[2].startswith("follows")
+        }
         assert yes == set(labels.FILLED_LABELS[hemi])
 
 
@@ -47,3 +51,9 @@ def test_every_label_has_a_name_and_the_right_hemisphere() -> None:
         assert labels.CORTEX_LABEL[hemi] not in labels.FILLED_LABELS[hemi]
         assert labels.HIPPOCAMPUS_LABEL[hemi] not in labels.FILLED_LABELS[hemi]
         assert set(labels.PROPOSED_FILLED[hemi]) <= set(labels.FILLED_LABELS[hemi])
+
+
+def test_followers_are_filled_with_the_ventricle() -> None:
+    for hemi in ("R", "L"):
+        assert labels.VENTRICLE_LABEL[hemi] in labels.FILLED_LABELS[hemi]
+        assert set(labels.FOLLOWS_VENTRICLE[hemi]) <= set(labels.FILLED_LABELS[hemi])
