@@ -631,12 +631,17 @@ Measured at the marked points (CP; #47, #52, #58):
 
 | Output | Spec | Used by |
 |---|---|---|
-| Column traces keyed by edge key and method: each sample's 3D position and depth, the meetings, the class; readable by block | none yet | stream 3; the viewer |
+| Column traces keyed by edge key and method, blocked by the white surface's blocks: straight rays by root, direction and length; bent rays by their samples' 3D positions and depth; per column, the stop reason, class, meetings, the root met and its distance along the surface | none yet | stream 3; the viewer |
 
 *Design and lessons*
 
 - Today the traces are a prototype `.npz` with no spec, built on a box white mesh with no edge keys.
-- They must key on edge keys, carry each sample's 3D position and the recorded meetings, and be readable by block.
+- **Blocked, because no reader reads them whole.** A 50 µm whole brain has about 3.5·10⁸ columns per method; with per-sample positions (a median column of about 75 samples at 12 bytes each) that is about 300 GB per method. Stream 3 reads the columns of one block and its halo; the viewer reads the columns round what is on screen.
+  - A column belongs to the 64³ Morton block of its root vertex and is keyed by its root's edge key, so the block index of `white-surf/1` finds the roots and their columns together, and a halo is the neighbouring blocks.
+  - Per-sample arrays are ragged: one array of samples with a pointer array per block, as `white-overview/1` stores the true vertices each face carries.
+  - **Straight rays are stored by their parameters** (root, direction, length), not by samples: their samples are recomputed on demand, which cuts the main method's size by about two orders of magnitude. Only methods whose paths bend (front-equivolume, and the deflected normal ray if adopted) store samples.
+  - Per-column fields are stored once per column: the stop reason, the class, the meetings (`crest_at`, `meet_at`), the root met and its distance along the surface.
+- **A standard to start from:** TRX, a newer community tractography format (memory-mapped arrays, data per streamline and per point, groups), with groups as blocks plus our block index and edge keys, as `white-surf/1` extends GIfTI. Its reference library is believed to be BSD-licensed; check before adopting. TCK cannot be read by block and carries no per-column data, so it stays only as the viewer's export.
 
 #### Fields fitted to the data normal (not in the design; a later phase at most)
 
@@ -714,7 +719,7 @@ Where each layer lies along every column, read from the image's own contrast and
 
 ### 5b. High-level design
 
-1. **The column volume.** Sample the echoes along every column into traces, each sample keeping its 3D position.
+1. **The column volume.** Sample the echoes along the columns of a block, each sample keeping its 3D position: computed on demand, never stored.
 2. **Flatten.** Estimate shifts between neighbouring traces and fit a warp, so that layers become level.
 3. **The joint warp.** One monotone depth map per column, tied across contacts and anchored at open tops. The pial edge is its top level (τ = 1), and the GM/WM transition one of its levels.
 4. **Bands and layer identity.** Find the bands in the flattened frame, and tell which layer each is, including where an area's pattern changes.
@@ -738,17 +743,18 @@ Where each layer lies along every column, read from the image's own contrast and
 
 | Input | From | Use |
 |---|---|---|
-| Column traces | stream 2, step 5 | where to sample |
-| The FLASH echoes | the scan | the samples |
+| Column traces, for one block and its halo | stream 2, step 4 | where to sample |
+| The FLASH echoes, for the same region | the scan | the samples |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
-| One trace per column, sampled every 0.04 mm, each sample with its 3D position; partial-volume samples marked | internal | steps 2–4 |
+| The column volume of a block: each column's echoes sampled every 0.04 mm, each sample with its 3D position; partial-volume samples marked | not stored: computed on demand | steps 2–5; the viewer, for the columns on screen |
 
 *Design and lessons*
 
+- **A sampler, not a file.** The column volume is a fixed function of the traces and the echoes, both already stored, so it is computed per block when a step needs it, kept in memory while that step works on the block, and never published. Storing it would cost more than it saves: at 0.04 mm steps each column samples the 0.16 mm image about four times per voxel it crosses, and neighbouring columns overlap, so a stored column volume is larger than the echoes it came from (hundreds of GB per method at whole-brain scale), and reading it moves more bytes than reading the echo block and interpolating. Trilinear sampling on a given trace is exact, so recomputing gives the same samples every time. A per-run cache is allowed only if a measured cost shows it pays. Exact tests: samples on a linear image are exact; a straight trace through a slab gives the slab's profile.
 - One trace per white-mesh vertex, sampled every 0.04 mm, each sample keeping its 3D position. It reads like a seismic section: the stria runs as a continuous band from open into fused cortex, and the far bank's stria appears mirrored past a contact (CP).
 - The voxels within 1 voxel of the WM or the pia are partial volume. They made half the data term and drew 30 % of band boundaries; leave them out (PL; #24).
 
@@ -922,7 +928,7 @@ The stream proceeds in phases, as streams 1 and 2 do: each phase adds one design
 
 Order: phase 0 needs stream 2's phase 0. Phases 1 and 2 follow in order; phase 3 can run alongside phase 2 (its bands become the joint warp's levels); phase 4 needs phase 2 and gains from stream 2's phase 1; phase 5 needs phase 2.
 
-- **Phase 0: the column volume** on stream 2's phase 0 traces, by blocks: the echoes sampled every 0.04 mm along each column, each sample with its 3D position. Write its spec.
+- **Phase 0: the column-volume sampler** on stream 2's phase 0 traces: the column volume of a block and its halo, computed on demand, with exact tests. No file and no spec.
 - **Phase 1: flattening.** Port `flatten` with a blocked or local solve, and a torch version if it stays heavy.
 - **Phase 2: the joint warp.**
   - Port `surfcut.model` and `surfcut.cut`; replace `surfcut.qpbo` with a QPBO that is not GPL (our own, or a permissive library).
@@ -1042,7 +1048,7 @@ Order: phase 0 needs stream 1's phase 0. Phase 1 is the same work as stream 1's 
   - Bring in the geodesic-patch flat map (#69), with its `edge_graph` fix split out.
 - **Phase 1: the stream 1 review pane,** with site answers and scribbles, writing `wm-edits/1`.
 - **Phase 2: column traces.** Rewrite against the column-trace spec: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
-- **Phase 3: stream 3's outputs,** a pane for each as its spec appears: the column volume, z(τ) and its levels, bands, thickness and contacts.
+- **Phase 3: stream 3's outputs,** a pane for each as its spec appears: the columns sampled on request, z(τ) and its levels, bands, thickness and contacts.
 
 ## 7. Shared code
 
@@ -1082,8 +1088,7 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | Test regions | Labelled boxes, with the box and the labeller | stream 1, phase 2 |
 | Training export | The nnU-Net dataset, with seed and verified labels kept apart, with provenance | stream 1, phase 4 |
 | Our `_dseg`, P, fold spread | The network's outputs, with the model generation in each sidecar | stream 1, phase 5 |
-| Column traces | Rays keyed by edge key and method: samples, depth, meetings, classes; readable by block | stream 2, phase 0, first: stream 3 and the viewer wait on it |
-| Column volume | The echoes sampled along each column, with 3D positions | stream 3, phase 0 |
+| Column traces | Rays keyed by edge key and method, blocked by the white surface's blocks; straight rays by parameters, bent rays by ragged samples; per-column stops, classes and meetings (§4c, step 4) | stream 2, phase 0, first: stream 3 and the viewer wait on it |
 | z(τ) | Depth maps per column: the pial edge at τ = 1, the GM/WM transition as a level | stream 3, phase 2 |
 | Bands; thickness and contacts | Bands per region and layer identity; the thickness field and contact splits | stream 3, phases 3–4 |
 | Feedback to stream 1 | An input stream 1 reads like its edits | stream 3, phase 5 |
