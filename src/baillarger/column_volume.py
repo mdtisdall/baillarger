@@ -3,9 +3,8 @@
 
 A sampler computes its output on demand from the rays of the ray sampler
 (ray-sampler/1) and the echoes; nothing is stored. Each sample of a column
-keeps the value of every echo (trilinear, as acquired), a validity flag and
-the partial-volume mark. A column is the same, bit for bit, whichever
-superblock computes it.
+keeps the value of every echo (trilinear, as acquired) and a validity flag.
+A column is the same, bit for bit, whichever superblock computes it.
 
 This version gives the types and the call; the sampler itself comes with
 Part B of phase 3.0.
@@ -40,10 +39,6 @@ class ColumnVolume:
     echo: F32
     #: (N,) true where the interpolation rule gives a value
     valid: Bool
-    #: (N,) true for a partial-volume sample
-    partial: Bool
-    #: (n,) w of each column, mm
-    reach: F32
 
 
 class ColumnVolumeSampler:
@@ -64,6 +59,6 @@ class ColumnVolumeSampler:
         self.grid_shape = grid_shape
 
     def sample(self, rays: Rays, device: str | None = None) -> ColumnVolume:
-        """The echoes at the samples of rays, with the validity and the
-        partial-volume mark of each sample."""
+        """The echoes at the samples of rays, with the validity of
+        each sample."""
         raise NotImplementedError(PENDING)
