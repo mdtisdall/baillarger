@@ -142,8 +142,9 @@ def smooth_normals_and_length[T: np.floating[Any]](
     """Area-weighted vertex normals, then iters steps (at least 1) of
     Laplacian smoothing along the edges (as baillarger.frame.white_mesh).
     Returns the unit normals and the normal length: the norm of the smoothed
-    normal before the last division. It is 1 on a plane. It falls towards 0
-    where opposite normals cancel, as on the crest of a thin blade."""
+    normal before the last division. It measures the disagreement in the
+    last step only: 1 on a plane, less than 1 where the neighbours' normals
+    point in different directions, as near the crest of a thin blade."""
     if iters < 1:
         raise ValueError("iters must be at least 1")
     n = vertex_normals(v, f)

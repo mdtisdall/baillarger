@@ -66,13 +66,20 @@ Each step of the smoothing sets n to 0.5 n + 0.5 × (the mean of n over the
 vertex's neighbours) and then divides n by its norm. The normal length
 \|n̄\| is that norm in the last step, before the division
 (`baillarger.mesh_smoothing.smooth_normals_and_length`). It is in [0, 1]
-(values above 1 from rounding are set to 1). It is 1 where the neighbours'
-normals agree, as on a plane. It is less than 1 where they point in
-different directions. It falls towards 0 where they cancel, as near the
-crest of a thin blade, where the blade's two faces point in opposite
-directions. A low \|n̄\| shows a normal that is not well defined: a small
-change of the surface can turn it far. Readers use it to give less weight
-to such vertices.
+(values above 1 from rounding are set to 1).
+
+\|n̄\| measures only the disagreement in the last smoothing step: the
+disagreement between the vertex's normal and the mean normal of its
+neighbours, after 9 steps have already made the normals smooth. It is 1
+where they agree, as on a plane, and less than 1 where they point in
+different directions. It is not the cancellation of the normals over the
+whole smoothing support (the 10 steps without division). That measure is
+lower: on a thin blade, its two faces point in opposite directions and
+cancel over the support, but the last step sees only the remaining
+disagreement. On a blade phantom one voxel thick, the lowest \|n̄\| is
+0.93. A low \|n̄\| shows a normal that is not well defined: a small change
+of the surface can turn it far. Readers use it to give less weight to such
+vertices.
 
 The surface has no per-vertex cortex label: every vertex is a column root.
 Columns run out from the WM until they reach background (label 0) or a

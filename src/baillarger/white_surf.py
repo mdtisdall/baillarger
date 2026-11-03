@@ -358,7 +358,7 @@ class WhiteSurface:
     one block: vertices (float32) in voxel coordinates of the
     segmentation's grid, faces into them, normals (float32, out of the WM),
     normlen, the normals' length |n| before the last normalisation (float32,
-    in [0, 1]: low where opposite normals cancel, as on a thin blade),
+    in [0, 1]: the disagreement in the last smoothing step),
     vertex_ids, the vertices' indices in the whole mesh (for one block: the
     vertices its faces use), and vertex_key, their grid-edge keys
     (baillarger.mesh.MeshBlocks.vertex_key), which survive a remesh where
