@@ -1180,7 +1180,7 @@ The viewer proceeds in phases that follow the other streams: each phase adds pan
 
 Order: phase 0 needs stream 1's phase 0. Phases 1 and 2 follow phase 0 and can run alongside each other: phase 2 needs stream 1's review formats and code (its phase 3). Phase 3 needs stream 2's phase 0, and phase 4 needs stream 3's published outputs. Phase 5 needs phase 3 and stream 3's review formats (its phase 7).
 
-- **Phase 0: the viewer on stream 1's outputs.** **Partly done** (#92, #97, #99, #114, #115, #116); the hemisphere check on main is pending. Changed in round 1: two fixes were added, the metric term in the inflation (#115, §6c) and the depth test for the selected point in the large surface pane (#116).
+- **Phase 0: the viewer on stream 1's outputs.** **Done** (#92, #97, #99, #114, #115, #116). The hemisphere check on main passed in every pane. Changed in round 1: two fixes were added, the metric term in the inflation (#115, §6c) and the depth test for the selected point in the large surface pane (#116).
   - Port with changes: `viewer.server`, `viewer.overview`, `viewer.white_view`, `viewer.surface` (the parts that already read published outputs).
   - Port as is: `viewer.flatmap`, `viewer.sections`. `viewer.inflation` gets the metric-preserving term (§6c, Inflation).
   - Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
@@ -1325,8 +1325,7 @@ flowchart TB
 
   classDef done fill:#9e9e9e,stroke:#424242,color:#000
   classDef partial fill:#e0e0e0,stroke:#616161,color:#000
-  class S1P0,S1P5,S2P0,S3P0,S3P2 done
-  class S4P0 partial
+  class S1P0,S1P5,S2P0,S3P0,S3P2,S4P0 done
 ```
 
 Shading: dark grey, done; light grey, partly done; no shading, not started. The table gives each phase's PRs.
@@ -1361,7 +1360,7 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 3.6 |  | 3.3 | feeds stream 1 as review sites; gains from 3.7 (reviewed bottoms) |
 | 3.7 |  | 3.3 | writes `laminar-sites/1` and `laminar-edits/1` first |
 | Stream 3 scaling track |  | 3.3, 3.5 | done before the first whole brain |
-| 4.0 | **Partly done** (#92, #97, #99, #114, #115, #116): the hemisphere check on main is pending | 1.0 | porting and merging need only 1.0's formats and split; the hemisphere outputs only for its hemisphere check |
+| 4.0 | **Done** (#92, #97, #99, #114, #115, #116) | 1.0 | porting and merging need only 1.0's formats and split; the hemisphere outputs only for its hemisphere check |
 | 4.0.5 |  | 4.0 | split from 4.2 in round 1 |
 | 4.1 |  | 4.0.5 | the painting mode; whether it is needed is open |
 | 4.2 |  | 4.0.5, 1.3 | the review pane, on 1.3's formats and choice code |
