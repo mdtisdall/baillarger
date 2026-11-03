@@ -1,5 +1,5 @@
 """Tests for baillarger.excisions: the detector of excised tissue, the
-relabel to outside, and the command's files."""
+fragments and crumbs, the relabel to outside, and the command's files."""
 
 import json
 from pathlib import Path
@@ -97,6 +97,107 @@ def test_relabel_sets_the_mask_to_outside_in_a_copy() -> None:
     assert np.array_equal(out[~block], aseg[~block])
 
 
+# ---------------------------------------------------------------- fragments, crumbs
+
+#: the volume of a voxel of VOX, mm3
+V1 = 0.16**3
+
+
+def test_fragments_below_the_limit_are_dropped() -> None:
+    """At 0.004096 mm3 a voxel, 24 voxels (0.098 mm3) are below 0.1 mm3 and
+    25 voxels (0.102 mm3) are not."""
+    assert 24 * V1 < excisions.FRAGMENT_MM3 <= 25 * V1
+    miss = np.zeros((30, 30, 30), bool)
+    miss[2:8, 2:6, 2:3] = True  # 24 voxels
+    miss[2:7, 10:15, 2:3] = True  # 25 voxels
+    miss[15:25, 15:25, 15:25] = True  # 1000 voxels
+    miss[2, 20, 20] = True  # 1 voxel
+    out, pieces, voxels = excisions.drop_fragments(miss, VOX)
+    want = miss.copy()
+    want[2:8, 2:6, 2:3] = False
+    want[2, 20, 20] = False
+    assert np.array_equal(out, want)
+    assert (pieces, voxels) == (2, 25)
+
+
+def test_fragments_are_counted_with_face_adjacency() -> None:
+    """A voxel that touches a large piece only at an edge is a piece of its
+    own, and is dropped."""
+    miss = np.zeros((30, 30, 30), bool)
+    miss[5:15, 5:15, 5:15] = True
+    miss[15, 15, 10] = True  # shares an edge with the block
+    out, pieces, voxels = excisions.drop_fragments(miss, VOX)
+    assert not out[15, 15, 10] and out[5:15, 5:15, 5:15].all()
+    assert (pieces, voxels) == (1, 1)
+
+
+def test_small_pieces_that_touch_the_excision_are_crumbs() -> None:
+    tis = np.zeros((40, 40, 30), bool)
+    tis[2:38, 2:38, 2:12] = True  # large, below the slab
+    tis[2:6, 2:6, 14:18] = True  # 64 voxels, touches the slab
+    tis[10:28, 10:28, 14:20] = True  # 1944 voxels, touches the slab
+    tis[32:36, 2:33, 14:15] = True  # 4 x 31 = 124 voxels, touches the slab
+    island = np.zeros_like(tis)
+    island[2:5, 30:33, 24:27] = True  # 27 voxels, away from the slab
+    tis |= island
+    miss = np.zeros_like(tis)
+    miss[2:38, 2:38, 12:14] = True
+    tis &= ~miss
+    crumb, n = excisions.cut_off(tis, miss, VOX)
+    want = np.zeros_like(tis)
+    want[2:6, 2:6, 14:18] = True
+    want[32:36, 2:33, 14:15] = True
+    assert np.array_equal(crumb, want)
+    assert n == 2
+    assert not crumb[island].any()
+
+
+def test_the_crumb_limit_is_exact() -> None:
+    """244 voxels (0.9994 mm3) are a crumb, 245 voxels (1.0035 mm3) are not."""
+    assert 244 * V1 < excisions.CRUMB_MM3 <= 245 * V1
+    tis = np.zeros((70, 30, 10), bool)
+    tis[2:63, 2:6, 4:5] = True  # 61 x 4 = 244 voxels
+    tis[2:51, 10:15, 4:5] = True  # 49 x 5 = 245 voxels
+    miss = np.zeros_like(tis)
+    miss[:, :, 3] = True
+    crumb, n = excisions.cut_off(tis, miss, VOX)
+    want = np.zeros_like(tis)
+    want[2:63, 2:6, 4:5] = True
+    assert np.array_equal(crumb, want) and n == 1
+
+
+def test_excise_drops_fragments_then_sets_crumbs_to_outside(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """excise with a known detector result: the fragment keeps its label,
+    the excision and the crumb it cuts off become outside, the rest is not
+    changed, and the map is the voxels set to 0."""
+    aseg = np.zeros((40, 40, 30), np.int16)
+    aseg[2:38, 2:38, 2:20] = 42
+    aseg[6:34, 6:34, 6:16] = 41
+    found = np.zeros(aseg.shape, bool)
+    found[2:38, 2:38, 10:13] = True  # the excision: cuts the block in two
+    found[20, 20, 14] = True  # a fragment of 1 voxel
+    # a small piece of cortex on the excision (x, y 2-5, z 13-15), cut off
+    # from the upper half by a moat of outside
+    aseg[2:6, 2:6, 16:20] = 0
+    aseg[6, 2:7, 13:16] = 0
+    aseg[2:7, 6, 13:16] = 0
+    monkeypatch.setattr(excisions, "detect", lambda *a, **k: found)
+    ex = excisions.excise(aseg, np.ones(aseg.shape, np.float32), VOX, "R")
+    crumb = np.zeros(aseg.shape, bool)
+    crumb[2:6, 2:6, 13:16] = True  # 48 voxels
+    exc = found.copy()
+    exc[20, 20, 14] = False
+    assert np.array_equal(ex.mask, exc | crumb)
+    want = aseg.copy()
+    want[exc | crumb] = 0
+    assert np.array_equal(ex.dseg, want)
+    assert ex.dseg[20, 20, 14] == aseg[20, 20, 14] == 41
+    assert ex.fragments == dict(Pieces=1, Voxels=1)
+    assert ex.crumbs == dict(Pieces=1, Voxels=48)
+
+
 def old_missing_tissue(
     rim: npt.NDArray[np.int16],
     flash: npt.ArrayLike,
@@ -156,7 +257,7 @@ def write_inputs(d: Path) -> tuple[Path, Path, Labels, Bool]:
     f = d / "sub-T01_ses-S1_echo-2_FLASH.nii.gz"
     nib.save(nib.nifti1.Nifti1Image(aseg, aff), a)
     nib.save(nib.nifti1.Nifti1Image(flash.astype(np.float32), aff), f)
-    return a, f, aseg, excisions.detect(aseg, flash, VOX, "R")
+    return a, f, aseg, excisions.excise(aseg, flash, VOX, "R").mask
 
 
 def test_the_command_writes_the_bids_files(tmp_path: Path) -> None:
@@ -170,6 +271,8 @@ def test_the_command_writes_the_bids_files(tmp_path: Path) -> None:
     assert x.dtype == aseg.dtype and m.dtype == np.uint8
     assert np.array_equal(m.astype(bool), miss)
     assert np.array_equal(x, excisions.relabel(aseg, miss))
+    # the slab's excision has no fragment and cuts off no crumb
+    assert np.array_equal(miss, excisions.detect(read(a), read(f), VOX, "R"))
     tsv = (anat / "sub-T01_ses-S1_desc-excised_dseg.tsv").read_text().split("\n")
     assert tsv[0] == "index\tname" and "41\tRight-Cerebral-White-Matter" in tsv
     spec = excisions.EXCISIONS_SPEC
@@ -182,8 +285,16 @@ def test_the_command_writes_the_bids_files(tmp_path: Path) -> None:
         assert side["CortexVoxels"] == (aseg == 42).sum()
         assert side["Components"] == 1
         assert side["Detector"] == dict(
-            Frac=0.25, Sigma=2.0, MinVoxels=250, MarginMM=0.3, DilationSteps=2
+            Frac=0.25,
+            Sigma=2.0,
+            MinVoxels=250,
+            MarginMM=0.3,
+            DilationSteps=2,
+            FragmentMM3=0.1,
+            CrumbMM3=1.0,
         )
+        assert side["Fragments"] == dict(Pieces=0, Voxels=0)
+        assert side["Crumbs"] == dict(Pieces=0, Voxels=0)
         assert side["CortexMedian"] == pytest.approx(
             float(np.median(read(f)[aseg == 42]))
         )

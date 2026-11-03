@@ -56,9 +56,24 @@ hemisphere `H`:
 5. Grow the kept voxels by round(`MarginMM` / smallest voxel side) steps of
    binary dilation (face adjacency). Keep only the tissue voxels.
 
-The excision map is the result of step 5. The command sets each voxel of it
-to 0. It changes no other voxel. Labels other than the WM and cortex labels
-(for example the deep structures) are never set to 0.
+6. Drop each connected component (face adjacency) of the result of step 5
+   that is smaller than `FragmentMM3` mm³. These are slivers that the
+   dilation leaves on the rim of an excision. Their voxels keep their labels.
+7. Set each voxel of the result of step 6 to 0.
+8. Find the connected components (face adjacency) of the tissue that step 7
+   leaves. Set to 0 each component that is smaller than `CrumbMM3` mm³ and
+   touches the result of step 6: a voxel of the component is in it, or is
+   next to it (26-adjacency). These are crumbs that an excision cut off. A
+   small piece that no excision touches is not changed.
+
+The excision map is the voxels that steps 7 and 8 set to 0. The command
+changes no other voxel. Labels other than the WM and cortex labels (for
+example the deep structures) are never set to 0.
+
+The defaults: `FragmentMM3` 0.1, `CrumbMM3` 1.0. On the first hemisphere
+(INDD121850, R, 0.16 mm), the fragments were 1–6 voxels (at most 0.025 mm³)
+and the smallest excision was 785 voxels (3.2 mm³). The largest crumb of
+the WM mask was 0.53 mm³.
 
 ## Sidecar keys: wm-excisions/1
 
@@ -71,9 +86,11 @@ to 0. It changes no other voxel. Labels other than the WM and cortex labels
 | `Provenance` | object | yes | `Created` (ISO 8601), `Function`, `Version` (baillarger), `Commit`, `Dirty` |
 | `Hemisphere` | string | yes | `R` or `L` |
 | `TissueLabels` | array of integers | yes | The WM label and the cortex label that the detector can set to 0 |
-| `Detector` | object | yes | The parameters: `Frac` (number), `Sigma` (number, voxels), `MinVoxels` (integer), `MarginMM` (number), `DilationSteps` (integer) |
+| `Detector` | object | yes | The parameters: `Frac` (number), `Sigma` (number, voxels), `MinVoxels` (integer), `MarginMM` (number), `DilationSteps` (integer), `FragmentMM3` (number), `CrumbMM3` (number) |
 | `CortexMedian` | number | yes | The median of the FLASH over the cortex label (step 1) |
-| `ExcisedVoxels` | integer | yes | Voxels set to 0 |
+| `ExcisedVoxels` | integer | yes | Voxels set to 0 (steps 7 and 8) |
 | `ExcisedByLabel` | object | yes | Voxels set to 0, by old label (as a string): number of voxels |
 | `CortexVoxels` | integer | yes | Voxels with the cortex label in the aseg |
 | `Components` | integer | yes | Connected components of the excision map (face adjacency) |
+| `Fragments` | object | yes | The pieces that step 6 dropped: `Pieces` (integer), `Voxels` (integer) |
+| `Crumbs` | object | yes | The tissue pieces that step 8 set to 0: `Pieces` (integer), `Voxels` (integer) |

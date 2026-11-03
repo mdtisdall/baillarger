@@ -2,9 +2,10 @@
 
 An excision is a block of tissue that was cut out of the specimen before the
 scan. The FLASH is black there, but an aseg that imputes tissue (such as
-purple-mri's) labels it WM or cortex. detect finds these voxels and relabel
-sets them to 0 (outside), so that the white surface closes there (the rule
-for cut faces, docs/formats/wm-dseg.md). Use it only on such an aseg: the
+purple-mri's) labels it WM or cortex. detect finds these voxels, and excise
+sets them to 0 (outside), with the small tissue pieces they cut off, so
+that the white surface closes there (the rule for cut faces,
+docs/formats/wm-dseg.md). Use it only on such an aseg: the
 Fomblin outside the specimen is as dark as an excision. Once our own labels
 exist, this module has nothing to do.
 
@@ -19,6 +20,7 @@ excision map (desc-excisions_mask), with their sidecars
 """
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +53,10 @@ TISSUE_LABELS = {"R": (41, 42), "L": (2, 3)}
 #: the detector's defaults
 FRAC, SIGMA, MIN_VOX, MARGIN_MM = 0.25, 2.0, 250, 0.3
 
+#: excision-map pieces below FRAGMENT_MM3 are dropped; tissue pieces below
+#: CRUMB_MM3 that touch the excision map are set to 0
+FRAGMENT_MM3, CRUMB_MM3 = 0.1, 1.0
+
 #: docs/formats/wm-excisions.md
 EXCISIONS_SPEC = SidecarSpec(
     "wm-excisions/1",
@@ -64,6 +70,8 @@ EXCISIONS_SPEC = SidecarSpec(
         Key("ExcisedByLabel", "object", True, "voxels set to 0, by old label"),
         Key("CortexVoxels", "integer", True, "voxels with the cortex label"),
         Key("Components", "integer", True, "components of the excision map"),
+        Key("Fragments", "object", True, "excision-map pieces dropped"),
+        Key("Crumbs", "object", True, "cut-off tissue pieces set to 0"),
     ),
 )
 
@@ -146,6 +154,88 @@ def dark_tissue(
     return miss
 
 
+def drop_fragments(
+    miss: Bool, voxel_mm: tuple[float, float, float], min_mm3: float = FRAGMENT_MM3
+) -> tuple[Bool, int, int]:
+    """miss without its connected components (face adjacency) of less than
+    min_mm3, and the number of pieces and voxels dropped."""
+    lab, n = ndi.label(miss)
+    sz = np.bincount(lab.ravel(), minlength=n + 1)
+    keep = sz * float(np.prod(voxel_mm)) >= min_mm3
+    keep[0] = False
+    drop = ~keep[1:]
+    out: Bool = keep[lab]
+    return out, int(drop.sum()), int(sz[1:][drop].sum())
+
+
+def cut_off(
+    tis: Bool,
+    miss: Bool,
+    voxel_mm: tuple[float, float, float],
+    max_mm3: float = CRUMB_MM3,
+    structure: Bool | None = None,
+) -> tuple[Bool, int]:
+    """The connected components of tis (adjacency structure, default face
+    adjacency) of less than max_mm3 that touch miss (a voxel of the piece is
+    miss or one of its 26 neighbours is), and their number. A small piece
+    that does not touch miss is not in the result."""
+    lab, n = ndi.label(tis, structure)
+    sz = np.bincount(lab.ravel(), minlength=n + 1)
+    near = ndi.binary_dilation(miss, np.ones((3, 3, 3), bool))
+    sel = np.zeros(n + 1, bool)
+    sel[np.unique(lab[near & tis])] = True
+    sel &= sz * float(np.prod(voxel_mm)) < max_mm3
+    sel[0] = False
+    out: Bool = sel[lab]
+    return out, int(sel.sum())
+
+
+@dataclass(frozen=True)
+class Excised:
+    """What excise gives: the excised aseg, the excision map (each voxel
+    that excise set to 0), and the counts for the sidecar."""
+
+    dseg: Labels
+    mask: Bool
+    fragments: dict[str, int]
+    crumbs: dict[str, int]
+
+
+def excise(
+    aseg: npt.ArrayLike,
+    flash: npt.ArrayLike,
+    voxel_mm: tuple[float, float, float],
+    hemi: str,
+    frac: float = FRAC,
+    sigma: float = SIGMA,
+    min_vox: int = MIN_VOX,
+    margin_mm: float = MARGIN_MM,
+    fragment_mm3: float = FRAGMENT_MM3,
+    crumb_mm3: float = CRUMB_MM3,
+) -> Excised:
+    """The excisions set to outside (docs/formats/wm-excisions.md):
+    1. detect;
+    2. drop the pieces of the result of less than fragment_mm3;
+    3. relabel (set the rest to 0);
+    4. set to 0 each tissue piece (WM or cortex label of hemi, face
+       adjacency) of less than crumb_mm3 that touches the map of step 3.
+    The excision map is the voxels of steps 3 and 4. Raises ValueError if
+    the aseg has no voxel with the WM label or the cortex label of hemi."""
+    a = np.asarray(aseg)
+    miss = detect(a, flash, voxel_mm, hemi, frac, sigma, min_vox, margin_mm)
+    miss, nfrag, vfrag = drop_fragments(miss, voxel_mm, fragment_mm3)
+    x = relabel(a, miss)
+    wm, ctx = TISSUE_LABELS[hemi]
+    crumb, ncrumb = cut_off((x == wm) | (x == ctx), miss, voxel_mm, crumb_mm3)
+    x[crumb] = 0
+    return Excised(
+        x,
+        miss | crumb,
+        dict(Pieces=nfrag, Voxels=vfrag),
+        dict(Pieces=ncrumb, Voxels=int(crumb.sum())),
+    )
+
+
 def relabel(aseg: Labels, mask: npt.ArrayLike) -> Labels:
     """A copy of aseg with each voxel of mask set to 0 (outside)."""
     out = np.array(aseg, copy=True)
@@ -167,9 +257,11 @@ def write_excisions(
     sigma: float = SIGMA,
     min_vox: int = MIN_VOX,
     margin_mm: float = MARGIN_MM,
+    fragment_mm3: float = FRAGMENT_MM3,
+    crumb_mm3: float = CRUMB_MM3,
 ) -> dict[str, Path]:
-    """The command: detect on the aseg at aseg and the FLASH at flash (echo
-    2), then relabel, written to the BIDS derivatives root out
+    """The command: excise the aseg at aseg with the FLASH at flash (echo
+    2), written to the BIDS derivatives root out
     (docs/formats/wm-excisions.md). Raises ValueError if the two grids have
     different shapes. Returns the paths written, by role."""
     lap = Laps()
@@ -189,13 +281,23 @@ def write_excisions(
     lap("read")
     wm, ctx = TISSUE_LABELS[hemi]
     gm_med = cortex_median(a, f, hemi)
-    miss = detect(a, f, (vox[0], vox[1], vox[2]), hemi, frac, sigma, min_vox, margin_mm)
+    ex = excise(
+        a,
+        f,
+        (vox[0], vox[1], vox[2]),
+        hemi,
+        frac,
+        sigma,
+        min_vox,
+        margin_mm,
+        fragment_mm3,
+        crumb_mm3,
+    )
     del f
-    lap("detect")
+    x, miss = ex.dseg, ex.mask
+    lap("excise")
     old, cnt = np.unique(a[miss], return_counts=True)
     _, ncomp = ndi.label(miss)
-    x = relabel(a, miss)
-    lap("relabel")
     ents = entities(aseg)
     dataset_description(out)
     p = dict(
@@ -224,19 +326,24 @@ def write_excisions(
             MinVoxels=min_vox,
             MarginMM=margin_mm,
             DilationSteps=dilation_steps(margin_mm, (vox[0], vox[1], vox[2])),
+            FragmentMM3=fragment_mm3,
+            CrumbMM3=crumb_mm3,
         ),
         CortexMedian=gm_med,
         ExcisedVoxels=int(miss.sum()),
         ExcisedByLabel={str(int(k)): int(c) for k, c in zip(old, cnt, strict=True)},
         CortexVoxels=int((a == ctx).sum()),
         Components=int(ncomp),
+        Fragments=ex.fragments,
+        Crumbs=ex.crumbs,
     )
     write_sidecar(
         sidecar_path(p["dseg"]),
         EXCISIONS_SPEC,
         dict(
             Description="The aseg with its excisions (tissue where the FLASH "
-            "is black) set to 0 (outside).",
+            "is black) and the small tissue pieces they cut off set to 0 "
+            "(outside).",
             **common,
         ),
     )
