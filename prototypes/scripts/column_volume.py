@@ -33,7 +33,7 @@ Usage: column_volume.py <figures dir> <work dir> --name NAME (--patch P | --box 
                         [--points FILE] [--tracer {current,fitted,fitted_blend}]
                         [--columns {crest,traverse,normal,equivolume,one-pass,front,front-equivolume}] [--dseg FILE]
                         [--label-changes FILE [--reviewed-only]] [--figs-only]
---dseg: the corrected segmentation (python -m baillarger.white dseg): its labels, and its cavity- and
+--dseg: the corrected segmentation (python -m baillarger.white_dseg): its labels, and its cavity- and
 handle-free WM mask as the WM, everywhere (mesh, field, stops, classes); without it, the aseg's.
 --label-changes: the pial-side label changes (baillarger.pial_labels, LabelChanges.save): the
 detector's best guess (every cell not rejected) and the brush edits; with --reviewed-only, only the
@@ -85,7 +85,7 @@ ap.add_argument("--size", type=int, nargs="+", default=[141])
 ap.add_argument("--points")
 ap.add_argument("--tracer", choices=CT.TRACERS, default="fitted_blend")
 ap.add_argument("--columns", choices=CT.METHODS, default="crest")
-ap.add_argument("--dseg", help="the corrected segmentation (python -m baillarger.white dseg); "
+ap.add_argument("--dseg", help="the corrected segmentation (python -m baillarger.white_dseg); "
                 "default: the aseg")
 ap.add_argument("--label-changes", help="pial-side label changes (baillarger.pial_labels)")
 ap.add_argument("--reviewed-only", action="store_true",

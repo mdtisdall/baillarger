@@ -3,7 +3,7 @@
 The pipeline moves from boxes to whole hemispheres one stage at a time; each
 stage is scaled when we get to it, and only the computational problems met
 are fixed. Scaled so far: the WM topology correction, the white surface and
-its overview for viewing (`python -m baillarger.white dseg` and `mesh`;
+its overview for viewing (`python -m baillarger.white_dseg`, `white_surf` and `white_overview`;
 `docs/formats/wm-dseg.md`, `docs/formats/white-surf.md`,
 `docs/formats/white-overview.md`).
 
@@ -166,7 +166,9 @@ whole brain would be on the order of a terabyte.
    is in "Rules for a scaled stage" (chunks of `BlockCells` a side, Morton
    order, read through `blocks.open_volume`). The `dseg` writes its store
    directly, with no conversion; the aseg and the FLASH echoes get a
-   conversion step.
+   conversion step. The viewer's own volume pane already asks for bricks at
+   levels of detail (`baillarger.viewer.bricks.BrickSource`); the store's
+   multi-resolution chunks take the place of its in-memory pyramid.
 4. The faster antialiasing solver (GPU roadmap, item 1).
 
 The overview's decimation (under Open) is not on this list: it is not the
