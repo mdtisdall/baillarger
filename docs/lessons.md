@@ -243,8 +243,14 @@ The coupling that is real, decided once:
   - It is found from the image: FLASH below 0.25 × the cortex median after smoothing by 2 voxels, in blocks of at least 250 voxels, grown by 0.3 mm.
   - It is an obstacle for columns, not a source.
   - Today it is computed in the old box frame. It should become a published stream 1 output.
-- **The filled mask** (#61, #66, #67). Aseg 41 plus 43, 49–52 and 192 (right hemisphere), with cavities filled; the hippocampus is not filled. The deep structures (ventricle, thalamus, ...) belong in the mask. The imputed WM is kept in it, so that the cut face of an excised block does not become a false white surface. A cut voxel takes the label of the nearest (mm) voxel outside the mask.
-- **Missing tissue with our own segmentation.** Our network labels excised blocks as missing, so there is no imputed WM, and the filled mask ends at the cut face. Step 2 needs a rule for that face (open).
+- **The filled mask** (#61, #66, #67). Aseg 41 plus 43, 49–52 and 192 (right hemisphere), with cavities filled; the hippocampus is not filled. The deep structures (ventricle, thalamus, ...) belong in the mask. Today the imputed WM is kept in it, so that the cut face of an excised block does not become a false white surface. The proposed rule below replaces this: the cut face stays, flagged. A cut voxel takes the label of the nearest (mm) voxel outside the mask.
+- **The rule for missing tissue** (proposed). The cut face is treated as a domain edge: close the surface there, invent nothing, and mark exactly which vertices lie on it. The same rule applies to every source: with our own segmentation missing tissue is a class, and with the purple-mri aseg the detector above supplies it and overrides the imputed labels.
+  1. Missing tissue is a published stream 1 label.
+  2. For the filled mask, missing tissue counts as outside. The mask stops at the cut face, and the surface runs along it.
+  3. Handle removal and the cavity fill then run as usual, and fixes may fill into missing tissue, by the usual rule (whichever changes fewer voxels). A plug where there is no data alters nothing real, whereas forbidding it would force cuts through real WM. Such fills are recorded in the fixes image as fills inside missing tissue. Missing tissue enclosed by WM cannot be a real excision, since excisions open to the outside, so filling it is right in any case.
+  4. Each vertex lies on one grid edge (its edge key), joining a mask voxel to a non-mask voxel. The vertex is on the cut face exactly when that non-mask voxel is missing tissue. This flag needs no threshold and is published per vertex, keyed by edge key. Plugs are flagged by the same test.
+  5. Stream 2 roots no columns on flagged vertices. Columns from nearby vertices that run into missing tissue stop there, as at any obstacle.
+- **The guarantee still holds.** The mesh of any voxel mask is closed, and `dseg` refuses to write unless the Betti numbers are (b0, 0, 0). An excision that cuts a gyrus clean off makes another piece, which `wm-dseg/1` already allows: one or more closed, genus-0 pieces. What changes is that part of the surface is not grey/white, and it is flagged exactly.
 - **Handle removal** (`handles.remove_handles`; #38, #48, #67):
   - Topology uses Kuhn adjacency, so it equals the mesh's (§2).
   - Object and background fronts grow by simple points. Each handle's wall is cut or filled, whichever changes fewer voxels; ties go to the cut, then to the lowest voxel index.
@@ -313,6 +319,7 @@ The coupling that is real, decided once:
 #### Open
 
 - Fixes chosen by intensity (FreeSurfer's cut or fill by intensity; #85 step 2); the tube case; the size threshold for exceptions; whether fills through cortex are as acceptable as thickening.
+- Missing tissue: how far the cut face bends the normals of vertices near it but not on it, and whether stream 2 should use distance along the mesh from flagged vertices; whether the viewer needs the cut face as a surface label of its own; how much the detector's errors (dark vessels or fluid taken for missing tissue) matter now that the mask follows it.
 - Whether T = 0 should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Finding hidden fluid gaps from the image before columns are traced: a thin, slowly decaying dark strip inside labelled cortex (SF F21).
 - **How `dseg` applies standalone answers** to a new generation's labels: whether a verified voxel always overrides the input, and how to show the reviewer where a new generation disagrees with an earlier answer.
@@ -322,7 +329,7 @@ The coupling that is real, decided once:
 - Open decisions for our own segmentation:
   - Where to train. nnU-Net needs CUDA for training; inference runs on the laptop.
   - The labelling tool for the test regions and the answers: our viewer, or ITK-SNAP / 3D Slicer with nnInteractive (Apache-2.0 code; check the licence of its weights, which may be non-commercial). Whichever it is must support scribbles as well as site answers.
-  - Missing tissue: a class of its own or ignored, and what the filled mask does where it meets missing tissue.
+  - Missing tissue: a class of its own (proposed, with the rule in step 2) or ignored in training.
   - Whether the hippocampus stays outside the filled mask when our labels replace purple-mri's.
   - nnU-Net as a package dependency, or an external tool that only the export and import modules know about. Proposed: external.
 
@@ -335,7 +342,7 @@ Three tracks that can run in parallel: the surface steps, our own segmentation, 
 - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
 - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
 - Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
-- Make missing tissue a published output (it has no spec yet).
+- Make missing tissue a published label, and the cut-face flag a published per-vertex output keyed by edge key (neither has a spec yet). Then apply the missing-tissue rule in `dseg`, with phantom tests: an excised block that leaves a tunnel (fixed by a plug, flagged), one that cuts a piece off (b0 rises), and enclosed missing tissue (filled).
 - Rewrite `pial_labels` as a stream 1 input: keep its noise estimators and detector, and have it emit spec'd edits that relabel the aseg's fluid channels and vessels, which crest methods in stream 2 need (§4c, step 2).
 - Scale to whole brains, in this order (`docs/scaling.md`):
   1. The midline cut (the corpus callosum joins the hemispheres).
