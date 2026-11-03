@@ -152,7 +152,7 @@ A closed surface without handles near the grey/white-matter boundary of each hem
 
 1. **Segment the WM.** Our own nnU-Net segmentation of the FLASH gives labels in the FreeSurfer convention, a probability of filled WM and its spread across folds. It is trained in generations through human review, starting from the purple-mri aseg as seed labels.
 2. **Correct the topology (`dseg`).** Apply the edits, fill the WM mask, then remove handles and cavities and repair tight folds, automatically.
-3. **Orientation from the image (`orient`).** The structure tensor of the echoes over cortex, and from it the data normal and its coherence: the image's own cortical normal, against which the surface is judged and along which stream 2 traces.
+3. **Orientation from the image (`orient`).** The structure tensor of the echoes over cortex, and from it the data normal and its coherence: the image's own cortical normal, against which the surface is judged and stream 2's rays are checked (the misalignment diagnostic).
 4. **Make the surface (`mesh`).** Antialias the corrected mask and contour it by blocked marching tetrahedra into `white-surf/1`.
 5. **Make an overview for display (`overview`).** A decimated mesh that maps every pick back to true vertices.
 6. **Review.** Gather the places that need judgment into one queue per hemisphere. Each answer becomes an edit for step 2 and a training label for step 1.
@@ -325,7 +325,7 @@ The coupling that is real, decided once:
   - Coherence falls to 0.05–0.38 at contacts and fundi, which is where most column failures happen.
   - The normal has no sign. Sign it by the WM distance through tissue, with fluid as an obstacle. A straight-line distance flips the sign beside open sulci (CP; #46).
   - Under the majority rule (3b), a fused sulcus is cortex in the mask, so a window there can take in both banks. Coherence already falls at contacts, which marks those voxels; whether the window should also stop where the two banks' WM-distance fronts meet is open.
-- It needs only the echoes and the corrected labels, not the surface, so it can run beside step 4. It belongs to stream 1 so that both the surface's check and stream 2's tracing read one published output, and no stream waits on another in a cycle.
+- It needs only the echoes and the corrected labels, not the surface, so it can run beside step 4. It belongs to stream 1 so that the surface's check and stream 2's misalignment diagnostic read one published output, and no stream waits on another in a cycle.
 - **Doesn't work:** tracing step by step along the raw tensor normal: no field, no stop, so paths stall and run on (SF F3). Stream 2's rays use no field (§4c).
 
 #### Step 4: the surface (`mesh`)
