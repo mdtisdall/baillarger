@@ -179,30 +179,6 @@ def test_samples_off_the_voxel_centres_are_not_valid() -> None:
     assert (cv.echo[cv.valid] == 1.0).all()
 
 
-def test_the_partial_volume_marks_follow_the_rule() -> None:
-    aff = np.eye(4)
-    vol = np.zeros((6, 6, 40), np.float32)
-    smp = column_volume.ColumnVolumeSampler([ArraySource(vol)], aff, [aff], (6, 6, 40))
-    # axis-aligned: w = 1 mm. Label changes at s = 2.0 (41 to 49: same class), 5.0.
-    iv = [[(-2.0, 2.0, 41), (2.0, 5.0, 49), (5.0, 8.0, 0)]]
-    rays = make_rays([[3, 3, 3]], [[0, 0, 1]], iv, e_in=0.0, e_out=8.0, step=0.5)
-    cv = smp.sample(rays)
-    assert cv.reach[0] == 1.0
-    s = rays.s.astype(np.float64)
-    want = (np.abs(s - 2.0) <= 1.0) | (np.abs(s - 5.0) <= 1.0)
-    assert (cv.partial == want).all()
-    assert cv.partial.sum() == 10
-
-
-def test_the_reach_is_the_chord_of_a_voxel() -> None:
-    aff = np.diag([0.16, 0.2, 0.25, 1.0])
-    # along a unit diagonal-ish direction: min over axes of vs_a / |n_a|
-    n = np.array([1.0, 1.0, 1.0]) / np.sqrt(3)
-    want = min(vs / x for vs, x in zip((0.16, 0.2, 0.25), n, strict=True))
-    got = column_volume.reach_of(np.asarray([n], np.float32), aff)
-    np.testing.assert_allclose(got, [want], rtol=1e-6)
-
-
 def test_a_longer_extent_gives_the_same_samples_and_more() -> None:
     rng = np.random.default_rng(0)
     vol = rng.random(SHAPE).astype(np.float32)
@@ -213,7 +189,6 @@ def test_a_longer_extent_gives_the_same_samples_and_more() -> None:
     for k, s in enumerate(short.rays.s):
         m = sl[float(s)]
         assert short.echo[k, 0] == long.echo[m, 0]
-        assert short.partial[k] == long.partial[m]
     assert len(long.echo) > len(short.echo)
 
 
@@ -227,7 +202,6 @@ def test_a_column_is_the_same_in_any_batch() -> None:
         alone = sampler(vol).sample(make_rays(roots[c : c + 1], nrms[c : c + 1]))
         a, b = both.rays.sample_start[c], both.rays.sample_start[c + 1]
         assert np.array_equal(both.echo[a:b], alone.echo, equal_nan=True)
-        assert np.array_equal(both.partial[a:b], alone.partial)
         assert np.array_equal(both.valid[a:b], alone.valid)
 
 
@@ -272,8 +246,6 @@ def test_a_device_matches_numpy_to_float32_rounding(name: str) -> None:
     assert ref.valid.any()
     assert not ref.valid.all()
     assert np.array_equal(got.valid, ref.valid)
-    assert np.array_equal(got.partial, ref.partial)
-    assert np.array_equal(got.reach, ref.reach)
     assert np.array_equal(np.isnan(got.echo), np.isnan(ref.echo))
     np.testing.assert_allclose(got.echo, ref.echo, rtol=0, atol=4 * 2.0**-24)
 
