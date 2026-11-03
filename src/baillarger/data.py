@@ -142,7 +142,7 @@ def load_box(
 ) -> Patch:
     """Read the box [lo, hi) of the three echoes and the aseg, and make the
     rim labels. labels: a segmentation to read in place of the aseg (the
-    corrected segmentation, baillarger.white.write_wm_topo). Raises
+    corrected segmentation, baillarger.white_dseg.write_wm_topo). Raises
     ValueError if the box is not inside the grid or the images do not share
     one grid."""
     seg = aseg_path(directory) if labels is None else labels

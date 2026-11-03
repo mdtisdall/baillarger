@@ -103,7 +103,7 @@ Command line:
 writes, in DIR: pial_labels_<NAME>.npz (the change file, every review cell
 accepted, proposed or rejected by step 7); .json (summary and the ranked
 cells); _labels.nii.gz (the box's rim labels, from the corrected
-segmentation with --dseg (baillarger.white), with the best guess applied:
+segmentation with --dseg (baillarger.white_dseg), with the best guess applied:
 0 other, 1 outside, 2 WM, 3 cortex); _overlay.nii.gz (box grid; overlay's
 codes).
 """
@@ -812,7 +812,7 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--lo", required=True, type=int, nargs=3)
     c.add_argument("--hi", required=True, type=int, nargs=3)
     c.add_argument(
-        "--dseg", type=Path, help="desc-wmtopo_dseg (python -m baillarger.white dseg)"
+        "--dseg", type=Path, help="desc-wmtopo_dseg (python -m baillarger.white_dseg)"
     )
     c.add_argument("--columns", type=Path, help="column_volume_<name>.npz")
     c.add_argument("--alpha", type=float, default=ALPHA)

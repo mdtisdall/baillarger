@@ -9,7 +9,7 @@ features and the depth horizons along these traces
 index coordinates of the box; vox the voxel size (mm); lengths in mm.
 
 1. Tissue (load_tissue, tissue): the rim labels of the box, from the aseg
-   or from the corrected segmentation (baillarger.white, whose cavity- and
+   or from the corrected segmentation (baillarger.white_dseg, whose cavity- and
    handle-free WM mask is then the WM label), optionally the pial-side
    label changes (baillarger.pial_labels: cortex relabelled as fluid), the
    missing tissue (baillarger.frame.missing_tissue), and echoes 2 and 3 with their trend
@@ -123,7 +123,8 @@ from baillarger import streamlines as S
 from baillarger.data import Patch, load_box
 from baillarger.frame import mesh_curvatures, missing_tissue
 from baillarger.fronts import Fronts, march, riemann_from_direction
-from baillarger.white import filled_labels, white_mesh_normals
+from baillarger.white import white_mesh_normals
+from baillarger.white_dseg import filled_labels
 
 if TYPE_CHECKING:
     from baillarger.pial_labels import LabelChanges
@@ -248,7 +249,7 @@ def load_tissue(
     reviewed_only: bool = False,
 ) -> Tissue:
     """The box [lo, hi) of the full grid (0-based voxels): step 1. dseg: the
-    corrected segmentation (baillarger.white.write_wm_topo, on the aseg's
+    corrected segmentation (baillarger.white_dseg.write_wm_topo, on the aseg's
     grid), read in place of the aseg, with its WM mask (filled_labels) as the
     WM label; None keeps the aseg and its WM label. pial_changes,
     reviewed_only: the pial-side label changes
