@@ -278,7 +278,7 @@ def stand_in_normal_length(surf: Path) -> npt.NDArray[np.float32]:
     that phase (mesh_smoothing.smooth_normals, 10 steps), on the surface as
     read."""
     s = white_surf.WhiteSurface.load(surf)
-    v = s.v.astype(np.float32)
+    v = s.v.astype(np.float64)
     n = vertex_normals(v, s.f)
     A, deg = umbrella(v, s.f)
     for _ in range(10):
