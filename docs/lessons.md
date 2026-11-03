@@ -203,13 +203,14 @@ A closed surface without handles near the grey/white-matter boundary of each hem
 
 *What it gives the later steps*
 
-| Output | Required | BIDS name | Read by |
+| Output | BIDS name | Read by | Without it |
 |---|---|---|---|
-| Labels, FreeSurferColorLUT | yes | `_dseg` | step 2 |
-| P(filled WM), float | no | `_label-WMfilled_probseg` | steps 2 and 3 |
-| Fold spread of P | no | `_label-WMfilled_desc-foldsd_probseg` | step 5 |
+| Labels, FreeSurferColorLUT | `_dseg` | step 2 | nothing works: every segmentation must give labels |
+| P(filled WM), float | `_label-WMfilled_probseg` | steps 2 and 3 | handle removal orders by distance; antialiasing uses smoothness alone |
+| Fold spread of P | `_label-WMfilled_desc-foldsd_probseg` | step 5 | the queue ranks without it |
 
-- With labels only, the later steps work as they do now, so any segmentation still fits. The surface work does not wait for the network, and the network does not wait for the surface work.
+- Our own segmentation gives all three. The later steps use P and the fold spread when they are present and fall back when they are not, so a segmentation that gives only labels (purple-mri today, or any other tool) still fits.
+- So the surface work does not wait for the network, and the network does not wait for the surface work.
 
 The coupling that is real, decided once:
 
