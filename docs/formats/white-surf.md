@@ -18,6 +18,8 @@ and `ses`, hemisphere `<h>` (`R` or `L`):
 | `sub-<sub>_ses-<ses>_hemi-<h>_white.dat` | Their data: the vertices, then the triangles |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-normals_white.func.gii` | GIfTI XML: the normals, as external binary data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-normals_white.dat` | Their data |
+| `sub-<sub>_ses-<ses>_hemi-<h>_desc-normlen_white.func.gii` | GIfTI XML: the length of each smoothed normal before the last normalisation, \|n̄\|, as external binary data |
+| `sub-<sub>_ses-<ses>_hemi-<h>_desc-normlen_white.dat` | Their data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-edgekeys_white.func.gii` | GIfTI XML: each vertex's grid-edge key, as external binary data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-edgekeys_white.dat` | Their data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-blocks_white.tsv` | The block index |
@@ -60,6 +62,18 @@ Triangles are oriented so their normals point out of the WM. The normals are
 the area-weighted vertex normals smoothed along the mesh (10 steps,
 `baillarger.mesh_smoothing.smooth_normals`), out of the WM.
 
+Each step of the smoothing sets n to 0.5 n + 0.5 × (the mean of n over the
+vertex's neighbours) and then divides n by its norm. The normal length
+\|n̄\| is that norm in the last step, before the division
+(`baillarger.mesh_smoothing.smooth_normals_and_length`). It is in [0, 1]
+(values above 1 from rounding are set to 1). It is 1 where the neighbours'
+normals agree, as on a plane. It is less than 1 where they point in
+different directions. It falls towards 0 where they cancel, as near the
+crest of a thin blade, where the blade's two faces point in opposite
+directions. A low \|n̄\| shows a normal that is not well defined: a small
+change of the surface can turn it far. Readers use it to give less weight
+to such vertices.
+
 The surface has no per-vertex cortex label: every vertex is a column root.
 Columns run out from the WM until they reach background (label 0) or a
 maximum length; what they pass through (cortex, hippocampus, fluid
@@ -76,6 +90,7 @@ name alone (relative to the `.gii`), with its `ExternalFileOffset` in bytes.
 | `_white.surf.gii` | 1: vertices, scanner RAS mm | float32 | n × 3 | `NIFTI_INTENT_POINTSET` |
 | `_white.surf.gii` | 2: triangles, indices into the vertices | int32 | m × 3 | `NIFTI_INTENT_TRIANGLE` |
 | `_desc-normals_white.func.gii` | 1: unit normals, scanner RAS | float32 | n × 3 | `NIFTI_INTENT_VECTOR` |
+| `_desc-normlen_white.func.gii` | 1: the normal length \|n̄\|, in [0, 1] | float32 | n × 1 | `NIFTI_INTENT_NONE` |
 | `_desc-edgekeys_white.func.gii` | 1: edge keys, each an int64 stored as its (low, high) int32 words (GIfTI has no 64-bit integers): read the array as little-endian int64 | int32 | n × 2 | `NIFTI_INTENT_NONE` |
 
 The point set's `CoordinateSystemTransformMatrix` is the identity from
@@ -133,8 +148,8 @@ crosses (other blocks have no faces):
 
 To read one block: its faces are rows `face_start` to `face_stop` of the
 triangle array; the vertices they name are rows of the vertex array, and
-the same rows of the normals and edge keys. The ranges of all blocks are
-contiguous and cover the arrays. Readers, the viewer among them, read
+the same rows of the normals, normal lengths and edge keys. The ranges of
+all blocks are contiguous and cover the arrays. Readers, the viewer among them, read
 blocks through `WhiteSurface.load` (`block=(i, j, k)`), which re-indexes
 the faces and gathers the boundary vertices that neighbouring blocks own,
 so that the file layout stays inside it.
@@ -159,6 +174,7 @@ so that the file layout stays inside it.
 | `NormalsFile` | string | yes | Name of the normals' `.func.gii` |
 | `BlocksFile` | string | yes | Name of the block index |
 | `EdgeKeysFile` | string | yes | Name of the edge keys' `.func.gii` |
+| `NormLenFile` | string | yes | Name of the normal length's `.func.gii` |
 | `GridShape` | array of integers | yes | The segmentation's grid (voxels), which defines the edge keys |
 | `DataSHA256` | object | yes | SHA-256 of each `.dat`, by name |
 | `Antialias` | object | yes | How the field was solved: `Method` (`thin-plate`), `Band`, `Eps`, `Tolerance`, `Iterations`, `Restarts`, `LastChange`, `Converged` |
