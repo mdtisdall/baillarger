@@ -146,7 +146,7 @@ The restart does not work on boxes. Two things from them still matter:
 
 ### 3a. Goal
 
-A closed surface without handles near the grey/white-matter boundary of each hemisphere (the "white surface"), at the acquired resolution, whose normals are the cortical normals.
+One or more closed surfaces without handles (genus 0 each; an excision can cut a piece off) near the grey/white-matter boundary of each hemisphere (the "white surface"), at the acquired resolution, whose normals are the cortical normals.
 
 ### 3b. High-level design
 
@@ -534,7 +534,7 @@ Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase
   - A signed-distance output (capped at about 5 voxels, L1, trained only where every voxel within the cap is labelled), or a Laplace head with β-NLL, if the σ derived from P is poorly calibrated or saturated where it matters.
   - Synthetic training images from label maps (SynthSeg, PostSynth), as augmentation, if the problem is generalising to other hemispheres or protocols.
   - Outputs that hold more than one interface per voxel, if stream 3's contacts need more than the profiles give: an unsigned distance to the pial interface (a channel narrower than a voxel is a valley that never reaches zero, which a signed distance cannot hold), or tissue fractions trained on 50 µm data averaged down to 160 µm, where the fractions are known.
-  - A topology loss (clDice, Betti matching), if the queue is too long. It can only reduce defects; the guarantee stays in phase 3's decoding.
+  - A topology loss (clDice, Betti matching), if the queue is too long. It can only reduce defects; the guarantee stays in step 2's correction.
 
 **Whole-brain scaling** (alongside phases 1–8; `docs/scaling.md`)
 
@@ -1182,6 +1182,7 @@ flowchart TB
 
   S1P0 --> S4P0 --> S4P1
   S4P1 --- S1P1
+  S4P0 --> S1P1
   S2P0 & S4P0 --> S4P2
   S3P2 & S3P3 --> S4P3
   S3P4 -.-> S4P3
@@ -1192,7 +1193,7 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | Phase | Needs | Notes |
 |---|---|---|
 | 1.0 | — | gates every stream |
-| 1.1 | 1.0; 4.0 | 4.1 is the same work (the review pane); also `orient`, the data normal |
+| 1.1 | 1.0; 4.0 (the review pane) | 4.1 is the same work (the review pane); also `orient`, the data normal |
 | 1.2 | 1.0 | |
 | 1.3 | 1.0 | stand-in P from purple-mri |
 | 1.4 | 1.2 | gains from 1.1's answers |
