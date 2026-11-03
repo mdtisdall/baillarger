@@ -166,7 +166,7 @@ A closed surface without handles near the grey/white-matter boundary of each hem
 **Standing decisions**
 
 - **The white surface exists for its normals, not its position.** Columns start on it and run along its normals. There is no pial surface and no "true GM/WM boundary": the GM/WM transition is aligned afterwards like any other layer.
-  - Judge methods by normal quality: neighbour-angle spread, misfacing faces, cancellation in thin blades, and agreement with orientation from the image.
+  - Judge methods by normal quality: neighbour-angle spread, misfacing faces, cancellation in thin blades, and agreement with the data normal from the image (published by stream 2, §4c step 2).
   - The surface may move into GM or WM to make normals well defined, as long as it keeps the topology and does not self-intersect.
 - The input label is never rewritten. Corrections are derivatives, and manual edits are replayable inputs applied before the automatic correction.
 - The generator fixes topology automatically, with no question per handle. Review refines a result that is already correct.
@@ -400,6 +400,11 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - Whether T = 0 should come from the image's own WM contrast rather than the label. BigBrain puts the L6/WM boundary superficial to the tissue-class white surface (CL).
 - Finding hidden fluid gaps from the image before columns are traced: a thin, slowly decaying dark strip inside labelled cortex (SF F21).
 - **How `dseg` applies standalone answers** to a new generation's labels: whether a verified voxel always overrides the input, and how to show the reviewer where a new generation disagrees with an earlier answer.
+- **Whether antialiasing should align the surface with the data normal.** A data term in step 3 would pull the surface normals towards the data normal near the boundary, weighted by its coherence (high in most cortex, low at contacts and fundi). The sign constraints stay, so the topology stays guaranteed. Two costs:
+  - Agreement with the data normal would stop being an independent check of the surface. Keep part of the evidence out of the term (one echo, or held-out regions), or judge the surface by something else, such as how straight the columns run.
+  - The data normal would have to be computed in stream 1, between steps 2 and 3, since it needs only the echoes and the corrected labels; stream 2 would then read it rather than make it, so the streams do not depend on each other in a cycle.
+
+  To be tested after phase 3. The data normal is not a network input: it is a fixed function of the echoes the network already sees, and nnU-Net's mirroring and rotation would treat its components as scalars and contradict the image.
 - **Whether a scribble also corrects the current hemisphere,** or only trains the next generation. A few strokes give no full-voxel edit, so the current correction needs something to spread them: a rerun after fine-tuning, or an interactive model. Candidates (from memory; check before choosing):
   - **nnInteractive** (DKFZ, 2025): a promptable 3D model from the nnU-Net team, taking points, scribbles, boxes and lassos, with no retraining. Code Apache-2.0; the weights are believed to be non-commercial and share-alike (CC BY-NC-SA), which must be read before use.
   - **MONAI Label with DeepEdit** (Apache-2.0): a U-Net with click inputs, whose server can train in the background as labels are saved. Fully permissive, but a looser fit with nnU-Net.
@@ -496,7 +501,7 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 ### 4b. High-level design
 
 1. **Roots.** One root per `white-surf/1` vertex, keyed by edge key, with rays both inward and outward.
-2. **Orientation evidence.** The data normal from the echoes' structure tensor, and a field T fitted to it, for the methods that follow the image.
+2. **Orientation evidence.** The data normal from the echoes' structure tensor, and a field T fitted to it, for the methods that follow the image (phase 1). The normal rays of phase 0 do not use it. The data normal is also published, so that stream 1 can judge its surface normals against it.
 3. **Trace complete rays.** A small set of simple methods that differ in one respect each and share the rest, including one frozen crossing rule.
 4. **Record what each ray meets.** Crests, meetings with other fronts, turns, and the class of each column. Nothing is cut here: the cut is read from the profile in stream 3.
 5. **Publish the column traces** in a spec'd format that stream 3 and the viewer read.
@@ -548,7 +553,7 @@ A complete ray from every white-surface vertex through the cortex, to fluid or i
 
 | Output | Spec | Used by |
 |---|---|---|
-| The data normal, its coherence and sign | internal, no spec yet | step 3; stream 3 (planned checks) |
+| The data normal, its coherence and sign | none yet | step 3; stream 1 (judging the white surface's normals; possibly an antialiasing term, §3c Open); stream 3 (planned checks) |
 | The field T and its crests | internal, no spec yet | steps 3 and 4 |
 
 *Design and lessons*
@@ -1046,6 +1051,7 @@ The specs in `docs/formats/` stay at version 1 until a release. Each is enforced
 There is no spec yet for:
 
 - column traces (stream 2's output, which stream 3 and the viewer need);
+- the data normal, its coherence and sign (stream 2's step 2; stream 1 judges its surface against it);
 - pial-label changes;
 - the missing-tissue mask;
 - any stream 3 output, including feedback to stream 1;
