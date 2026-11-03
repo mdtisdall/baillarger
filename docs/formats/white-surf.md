@@ -97,7 +97,7 @@ name alone (relative to the `.gii`), with its `ExternalFileOffset` in bytes.
 | `_white.surf.gii` | 1: vertices, scanner RAS mm | float32 | n × 3 | `NIFTI_INTENT_POINTSET` |
 | `_white.surf.gii` | 2: triangles, indices into the vertices | int32 | m × 3 | `NIFTI_INTENT_TRIANGLE` |
 | `_desc-normals_white.func.gii` | 1: unit normals, scanner RAS | float32 | n × 3 | `NIFTI_INTENT_VECTOR` |
-| `_desc-normlen_white.func.gii` | 1: the normal length \|n̄\|, in [0, 1] | float32 | n × 1 | `NIFTI_INTENT_NONE` |
+| `_desc-normlen_white.func.gii` | 1: the normal length \|n̄\|, in [0, 1] | float32 | n (1-D, `Dimensionality="1"`) | `NIFTI_INTENT_NONE` |
 | `_desc-edgekeys_white.func.gii` | 1: edge keys, each an int64 stored as its (low, high) int32 words (GIfTI has no 64-bit integers): read the array as little-endian int64 | int32 | n × 2 | `NIFTI_INTENT_NONE` |
 
 The point set's `CoordinateSystemTransformMatrix` is the identity from

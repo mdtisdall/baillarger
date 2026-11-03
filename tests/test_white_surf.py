@@ -99,8 +99,10 @@ def test_nibabel_reads_the_external_data(surface: tuple[Path, Path]) -> None:
     nl = GiftiImage.from_filename(
         str(surf.with_name(s.sidecar["NormLenFile"])), mmap=True
     ).darrays[0]
-    assert nl.data.dtype == np.float32 and nl.data.shape == (len(s.v), 1)
-    assert np.array_equal(nl.data[:, 0], s.normlen)
+    # one value per vertex: a 1-D array, shape (n,)
+    assert nl.dims == [len(s.v)]
+    assert nl.data.dtype == np.float32 and nl.data.shape == (len(s.v),)
+    assert np.array_equal(nl.data, s.normlen)
     assert nl.ext_fname == surf.name.replace(
         "_white.surf.gii", "_desc-normlen_white.dat"
     )
