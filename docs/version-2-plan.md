@@ -595,7 +595,7 @@ A complete ray from every white-surface vertex, from inside the WM under it to w
 ### 4b. High-level design
 
 1. **Roots.** One root per `white-surf/1` vertex, keyed by edge key.
-2. **Rays of fixed extent, with no field.** Each root's ray runs d inward (into the WM under it) and 8 mm outward, along the smoothed surface normal, with each column's cross-sectional area A(s) and volume V(s) measured on the rays. None reads the image.
+2. **Rays of bounded extent, with no field.** Each root's ray runs inward (into the WM under it) and outward, each up to 8 mm, as far as the caller asks, along the smoothed surface normal, with each column's cross-sectional area A(s) and volume V(s) measured on the rays. None reads the image.
 3. **Record what each ray meets.** The label intervals along it and its meetings with other columns. Nothing is cut and nothing stops a ray: the cut is read from the profile in stream 3.
 4. **The ray sampler.** Stream 2's output is a spec'd sampler (§1): stream 3 and the viewer call it for a superblock and its halo. Nothing per column is stored.
 
@@ -603,7 +603,7 @@ Rays that follow a field fitted to the image (T), and fronts grown from the surf
 
 **Standing decisions**
 
-- **Columns are complete rays of fixed extent:** d inward and 8 mm outward, ending only at the edge of the image. They never stop at fluid, WM, a cut or a contact: they record where they cross each label and where they meet other columns, and stream 3 decides where the cortex ends. Seismic practice is the model: record the full trace, pick the horizons in interpretation.
+- **Columns are complete rays:** up to 8 mm inward and 8 mm outward, ending only at those caps or the edge of the image. The caller sets each extent within the caps; a sample at a given s does not depend on the extent, so a longer ray only adds samples. They never stop at fluid, WM, a cut or a contact: they record where they cross each label and where they meet other columns, and stream 3 decides where the cortex ends. Seismic practice is the model: record the full trace, pick the horizons in interpretation.
 - **Column rules stay simple.** An artefact is recorded in a test, never patched with a new clause.
 - Normal rays stay straight (user, #47).
 - No step uses the fixes image to decide where to search, or re-finds a boundary as the depth origin.
@@ -646,7 +646,7 @@ Rays that follow a field fitted to the image (T), and fronts grown from the surf
 
 | Output | Spec | Used by |
 |---|---|---|
-| Per root and method, one ray from s = −d to s = 8 mm: positions at any requested step, arc length, A(s) and V(s) | internal | step 3; the sampler (step 4) |
+| Per root and method, one ray from s = −e_in to s = e_out (the extents the caller asks for, each at most 8 mm): positions at any requested step, arc length, A(s) and V(s) | internal | step 3; the sampler (step 4) |
 
 *Design and lessons*
 
@@ -658,9 +658,11 @@ Measured at the marked points (CP; #47, #52, #58):
 - **equivolume** (normal's rays, with the column's cross-section A(s) and volume V(s) measured on the rays: the cross-section is its root's dual area with every vertex of its 1-ring moved along its own normal). The same paths as normal, with a volume that follows the neighbouring rays. It needs only the root's 1-ring, so it is local.
 - **Bok's measure** for a vertex is the exact flux of its dual cell. Equivolume depth is (V(s) − V(s₀)) / (V(s₁) − V(s₀)), with s₀ the GM/WM transition and s₁ the pial edge.
   - Neither end is known here: both are read in stream 3 (its phase 2). So the sampler publishes A(s) and V(s), and stream 3 normalises.
-  - V(s) is measured from the ray's inward end, V(−d) = 0, and never falls along the ray. The root is not the GM/WM boundary, so it is not an origin of anything; only differences of V enter the depth, so the origin cancels.
+  - V(s) is measured from the ray's inward end, V(−e_in) = 0, and never falls along the ray. The root is not the GM/WM boundary, so it is not an origin of anything; only differences of V enter the depth, so the origin cancels.
   - Where A(s) reaches zero (the 1-ring's rays meet at a focal point, about one radius of curvature from a tight fundus outward, or inside a thin blade inward), V(s) stops rising. The sampler marks those samples, and stream 3 decides what they mean.
-- **The inward extension** (s from −d to 0) runs back along −n into the WM under the root, so the profile covers the GM/WM transition wherever the surface sits: the surface may lie in GM or in WM, and stream 3 reads the transition as a level of z(τ). d starts at 1 mm and is set in stream 3, phase 1, from where the transition is found.
+- **The inward extension** (s from −e_in to 0) runs back along −n into the WM under the root, so the profile covers the GM/WM transition wherever the surface sits: the surface may lie in GM or in WM, and stream 3 reads the transition as a level of z(τ).
+  - The extents are bounds, not estimates. The pial edge and the transition are estimated in stream 3, jointly across columns (§5c, step 3); the extents only have to contain them. Stream 3 sets them per column, from the label intervals first and longer where a level is cut off (§5c, step 3).
+  - In a thin WM blade, the inward ray crosses the blade and enters the opposite bank's cortex within a fraction of a mm. The label intervals record it like any crossing, and the root's normal length \|n̄\| flags such roots.
 
 #### Step 3: recording what each ray meets
 
@@ -701,7 +703,7 @@ Measured at the marked points (CP; #47, #52, #58):
 
 | Output | Spec | Used by |
 |---|---|---|
-| The ray sampler: for a superblock and its halo and a method, every column's samples (positions, arc length, A(s) and V(s) with a mark where A(s) ≤ 0, from −d to 8 mm, at a requested step), label intervals, meetings and normal length, keyed by edge key | the ray-sampler spec (a sampler, §1; none yet) | stream 3; the viewer |
+| The ray sampler: for a superblock and its halo and a method, every column's samples (positions, arc length, A(s) and V(s) with a mark where A(s) ≤ 0, between the requested extents, at a requested step), label intervals and meetings over the full 8 mm each way, and normal length, keyed by edge key | the ray-sampler spec (a sampler, §1; none yet) | stream 3; the viewer |
 | Diagnostics: the misalignment views, outcomes by normal length, the derived classes | none (views) | the user |
 
 *Design and lessons*
@@ -768,11 +770,11 @@ Order: phase 0 needs stream 1's phases 0 and 1 (the surface and the WM-distance 
 
 - **Phase 0: the ray sampler, with normal rays, on stream 1's phase 0 surface.**
   - Write the ray-sampler spec first: it is the interface stream 3 and the viewer wait on.
-  - Rewrite `column_traces` as the sampler: roots on `white-surf/1` vertices by edge key; rays of fixed extent (d inward, 8 mm outward) with no stops; label intervals and meetings; classes derived for diagnostics, without the bank split. The inward extension is new.
+  - Rewrite `column_traces` as the sampler: roots on `white-surf/1` vertices by edge key; rays with no stops, their inward and outward extents call parameters up to 8 mm each (label intervals and meetings always over the full 8 mm, since they read labels only); label intervals and meetings; classes derived for diagnostics, without the bank split. The inward extension is new.
   - The **normal** method: straight rays along the smoothed white normal (`streamlines.ray`, and `first_fall` on the shared WM-distance sampler, §7).
   - Port `mesh_graph` in a local form, on the duplicate-edge fix (§7).
   - Work by superblock, with halos in mm (§2, domain edges): 8 mm for the labels each ray samples, 16 mm for the rays it may meet. Read the labels through the chunked reader and its cache. Give the analysis that picks the superblock level. Test that a column is identical whichever superblock computes it.
-- **Phase 1: the equivolume cross-section.** Add **equivolume** to the sampler: each column's A(s) and V(s) (`offset_equivolume`), with V(−d) = 0 and the A(s) ≤ 0 marks; stream 3 normalises them. Exact tests: on a plane A is constant; on a sphere of radius R, A(s) = A₀(1 + s/R)².
+- **Phase 1: the equivolume cross-section.** Add **equivolume** to the sampler: each column's A(s) and V(s) (`offset_equivolume`), with V zero at the inward end and the A(s) ≤ 0 marks; stream 3 normalises them. Exact tests: on a plane A is constant; on a sphere of radius R, A(s) = A₀(1 + s/R)².
 - **Phase 2: the open questions** (4c, Open), on the hemisphere away from domain edges:
   - the misalignment diagnostic (4c, Open), and from it the steering it calls for: the deflected normal ray here, stream 1's antialiasing term there, or both;
   - which paths are right, by phantoms with curved, equivolume true columns;
@@ -826,6 +828,7 @@ Where each layer lies along every column, read from the image's own contrast and
 *Design and lessons*
 
 - **A sampler, not a file.** The column volume is a fixed function of stream 2's rays (themselves a sampler) and the echoes, so it is computed per superblock when a step needs it, kept in memory while that step works on it, and never stored. It is published as a sampler (§1), because the viewer calls it too. Storing it would cost more than it saves: at 0.04 mm steps each column samples the 0.16 mm image about four times per voxel it crosses, and neighbouring columns overlap, so a stored column volume is larger than the echoes it came from (hundreds of GB per method at whole-brain scale), and reading it moves more bytes than reading the echo block and interpolating. Trilinear sampling on a given trace is exact, so recomputing gives the same samples every time. A per-run cache is allowed only if a measured cost shows it pays. Exact tests: samples on a linear image are exact; a straight trace through a slab gives the slab's profile.
+- **Extents per column.** The column volume samples each column between the extents stream 3 asks for (step 3), not the full 8 mm each way: the echo samples, and the joint warp's search range over them, are the costly part, and cortex is 2–4.5 mm thick.
 - One trace per white-mesh vertex, sampled every 0.04 mm, each sample keeping its 3D position. It reads like a seismic section: the stria runs as a continuous band from open into fused cortex, and the far bank's stria appears mirrored past a contact (CP).
 - The voxels within 1 voxel of the WM or the pia are partial volume. They made half the data term and drew 30 % of band boundaries; leave them out (PL; #24).
 
@@ -874,6 +877,7 @@ Where each layer lies along every column, read from the image's own contrast and
 - One monotone z(τ) per column, z(1) = the pia, solved by QPBO at a few levels and then filled between them.
 - Its terms: conservation of shifts between columns whose roots are neighbours on the white mesh, the two-sided tie c_A + c_B = L at contacts (the user's choice), robust open-top anchors, weak lateral smoothness, a vertical prior and hard ordering.
 - **Readings that were once stream 2's stops.** Stream 2's rays never stop, so this step reads from the profile and the label intervals: the pial edge (a fluid interval is evidence, not a decision); an open top, where the profile and a fluid interval agree with no WM beyond within reach; and the far bank's WM entry for the tie's L, chosen among the WM intervals together with the profile.
+- **Extents by censoring.** Each column's trace starts from extents read off its label intervals: outward to the end of the cortex interval and inward to the start of the label's WM, each with a margin. A level that the warp places at the end of its trace is censored: the data stop there, and the true level may lie beyond. Wherever a top or a bottom is censored, the region's extents grow and its warp is solved again; a level found inside the trace, by more than the warp's resolution, is left alone. Since a sample does not depend on the extent, growing it changes no level that was already inside. Levels censored at the 8 mm caps are recorded as censored and never extended. The extents are deterministic, from the labels and this rule, so the ray sampler stays a function of published files and call parameters.
 - It certifies 96.6–100 % of variables, so the remaining errors belong to the model.
 - The vertical prior must be the chain form, |z_ℓ − (τ_ℓ/τ_ℓ₊₁) z_ℓ₊₁|.
 - Levels placed at detected bands tighten the stria's spread by about 40 %. It reaches 0.08 mm at both M1/S1 and V1V2.
@@ -1002,11 +1006,12 @@ The stream proceeds in phases, as streams 1 and 2 do: each phase adds one design
 
 Order: phase 0 needs stream 2's phase 0. Phases 1 and 2 follow in order; phase 3 can run alongside phase 2 (its bands become the joint warp's levels); phase 4 needs phase 2 and gains from stream 2's phase 1; phase 5 needs phase 2.
 
-- **Phase 0: the column-volume sampler** on stream 2's ray sampler: the column volume of a superblock and its halo (in mm, §2), computed on demand through the chunked reader and its cache, with exact tests. No file; a sampler contract (§1), since the viewer calls it too.
+- **Phase 0: the column-volume sampler** on stream 2's ray sampler: the column volume of a superblock and its halo (in mm, §2), computed on demand through the chunked reader and its cache, between extents given per column, with exact tests. No file; a sampler contract (§1), since the viewer calls it too.
 - **Phase 1: flattening.** Port `flatten` with a blocked or local solve, and a torch version if it stays heavy.
 - **Phase 2: the joint warp.**
   - Port `surfcut.model` and `surfcut.cut`; replace `surfcut.qpbo` with a QPBO that is not GPL (our own, or a permissive library).
-  - Publish z(τ) per column, with the pial edge at τ = 1 and the GM/WM transition as one of its levels. Write its spec.
+  - Extents by censoring (5c, step 3): first extents from the label intervals, regions re-solved where a top or bottom is censored; each level's censoring is reported. Views of where the levels lie against the trace ends, by region.
+  - Publish z(τ) per column, with the pial edge at τ = 1 and the GM/WM transition as one of its levels, and each level's censoring. Write its spec.
 - **Phase 3: bands and layer identity.**
   - Rewrite `bands` (DP with the cross-validated K) and `gain` only if they are needed.
   - Salvage the layer-maps diagnostics from #56 (isopachs, pinch-outs, facies; `layer_maps_lib.py` and its tests).
@@ -1173,7 +1178,7 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | Training export | The nnU-Net dataset, with seed and verified labels kept apart, with provenance | stream 1, phase 7 |
 | Our `_dseg`, P, fold spread | The network's outputs, with the model generation in each sidecar | stream 1, phase 8 |
 | `orient` (sampler) | The structure tensor, the signed data normal and its coherence, for a superblock and its halo (§3c, step 3) | stream 1, phase 2 |
-| The ray sampler | Per column, keyed by edge key and method: samples from −d to 8 mm (positions, arc length, A(s) and V(s)), label intervals, meetings, normal length (§4c, step 4) | stream 2, phase 0, first: stream 3 and the viewer wait on it |
+| The ray sampler | Per column, keyed by edge key and method: samples between the requested extents, up to 8 mm each way (positions, arc length, A(s) and V(s)); label intervals and meetings over the full 8 mm each way; normal length (§4c, step 4) | stream 2, phase 0, first: stream 3 and the viewer wait on it |
 | The column volume (sampler) | Each column's echoes sampled along its ray, with 3D positions and partial-volume marks (§5c, step 1) | stream 3, phase 0 |
 | WM distance through tissue (sampler) | §7 | stream 1, phase 1 |
 | Curvature (sampler) | §7 | with its first reader: stream 3, phase 4 |
