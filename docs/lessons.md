@@ -76,7 +76,7 @@ These bind every stream from its first version. A first version may be rough, bu
 - **No GPL dependencies,** with no exceptions. Where only a GPL library fits, use a permissive one or write the piece ourselves. State the licence when proposing a library.
 - **FreeSurfer is the model.** Its topology correction, pretess and strand thickening are the defaults to follow. Deviate only with cause and data. We do not run FreeSurfer, even as a benchmark.
 - **A person decides only where the data cannot.** Places that need judgment go into one review queue per stage. Each answer is a replayable edit: the automatic result is correct without it, and the review refines it.
-- **The WM label comes from our own segmentation,** which gives labels in the FreeSurfer convention and P(filled WM) (§3). The surface steps require both; there is no labels-only path. The label is still an input with its own errors: take evidence from the echoes, not from the quirks of the labels.
+- **The WM label comes from our own segmentation,** which gives labels in the FreeSurfer convention and P(filled WM) (§3). The surface steps require both; there is no labels-only path once stream 1's phase 3 is done (§3d). The label is still an input with its own errors: take evidence from the echoes, not from the quirks of the labels.
 
 ### Working rules
 
@@ -184,9 +184,9 @@ Measured numbers in this section come from the one hemisphere we have, segmented
 | Input | From | Use |
 |---|---|---|
 | The three FLASH echoes | the scan | the network's channels |
-| Seed labels | the purple-mri aseg (bootstrapping only; 3d, phase 2) | weak training labels |
+| Seed labels | the purple-mri aseg (bootstrapping only; 3d, phase 4) | weak training labels |
 | Verified answers (`wm-edits/1`) | step 5 | training labels |
-| Test regions | labelled from scratch (3d, phase 0) | evaluation only, never training |
+| Test regions | labelled from scratch (3d, phase 2) | evaluation only, never training |
 
 *Outputs*
 
@@ -208,12 +208,12 @@ Measured numbers in this section come from the one hemisphere we have, segmented
   - held-out test regions that never enter training, so each generation can be compared with the last;
   - the model generation recorded in each output's sidecar, so a label can be traced to the model that made it;
   - a choice, at each generation, of whether to rerun earlier hemispheres with it. A rerun changes everything downstream of the label.
-- **Bootstrapping.** The first generation trains on the purple-mri aseg as weak seed labels, and verified labels gradually take their place (3d, phase 2). Until the first generation exists, the surface steps are built and tested on that aseg.
+- **Bootstrapping.** The first generation trains on the purple-mri aseg as weak seed labels, and verified labels gradually take their place (3d, phase 4). Until the first generation exists, the whole pipeline runs on that aseg (3d, phase 0).
 
 *Probabilities*
 
-- Steps 2 and 3 require labels and P; there is no labels-only path. Step 5 uses the fold spread when it exists; during bootstrapping it ranks without it.
-- During bootstrapping, P is a stand-in from purple-mri (3d, phase 1). That lets the surface steps run before the first generation exists, so the surface work does not wait for the network, and the network does not wait for the surface work.
+- Steps 2 and 3 require labels and P; there is no labels-only path. The one exception is phase 0, which runs the current code's labels-only path on the purple-mri aseg until phase 3 replaces it. Step 5 uses the fold spread when it exists; during bootstrapping it ranks without it.
+- During bootstrapping, P is a stand-in from purple-mri (3d, phase 3). That lets the surface steps run before the first generation exists, so the surface work does not wait for the network, and the network does not wait for the surface work.
 
 The coupling that is real, decided once:
 
@@ -282,7 +282,7 @@ The coupling that is real, decided once:
   - On the hemisphere: Betti (1, 111, 182) → (1, 0, 0) in 3.4 min at about 22 GB. Most moves are 1–2 voxels.
   - The meeting wall need not be the smallest cut: one cut of 2,047 voxels ran along a thin strand.
   - Batching walls per pass changes the result, so don't.
-- **Handle removal by probability** (planned; plan phase 1). The fronts claim voxels by P, not by distance to the other phase as the current code does: the object front claims in order of decreasing P and the background front in order of increasing P, so each wall falls where P is closest to 0.5. That is right only if P is calibrated near 0.5. Each fix records its margin, the P along its wall, and the review queue ranks by it. P matters to the surface mainly here: it decides which side of a fused bank a cut falls.
+- **Handle removal by probability** (planned; 3d, phase 3). The fronts claim voxels by P, not by distance to the other phase as the current code does: the object front claims in order of decreasing P and the background front in order of increasing P, so each wall falls where P is closest to 0.5. That is right only if P is calibrated near 0.5. Each fix records its margin, the P along its wall, and the review queue ranks by it. P matters to the surface mainly here: it decides which side of a fused bank a cut falls.
 - **Tight folds (misfacing faces)** (#81, #85). On the hemisphere the surface has 152 at 91 sites. Diagonal-only contacts in the label cause most of them: 74 of 90 sites have a checkerboard or corner-only contact within 4 voxels.
   - Thicken to 2s, widen gaps between surfaces, then make the mask well-composed, at s = 0.30 mm. This takes 90 sites to 5 and edges over 60° from 297 to 4, at a cost of +3.9 % area and a 90th-percentile neighbour angle of 5.4° against 3.9°.
   - s must not be a whole number of voxels along any axis: at 0.32 mm (exactly 2 voxels on one axis) the checkerboards rise from about 390 to 7,000. 0.26 mm is worse on every count; above 0.30 mm the bulk and area grow.
@@ -316,7 +316,7 @@ The coupling that is real, decided once:
   - Each vertex stays on its own grid edge, so the surface has no self-intersections by construction and keeps the edge keys.
   - A tilted plane's normals come out within 0.5° (the raw staircase is 31° off).
   - On the hemisphere: one closed genus-0 piece, 12.7 M vertices, 25.3 M faces, no self-intersecting faces; CPU and MPS identical bit for bit; 1,651 iterations, 16 min on MPS, peak 20–24 GB.
-- **Antialiasing with probability** (planned; plan phase 1). Besides thin-plate smoothness, a data term pulls φ near the boundary towards a smooth function of P − 0.5, weighted by a per-voxel confidence (1/σ², once σ exists). The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. This smooths the staircase where P carries sub-voxel information; position finer than a voxel is a by-product, not a goal.
+- **Antialiasing with probability** (planned; 3d, phase 3). Besides thin-plate smoothness, a data term pulls φ near the boundary towards a smooth function of P − 0.5, weighted by a per-voxel confidence (1/σ², once σ exists). The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. This smooths the staircase where P carries sub-voxel information; position finer than a voxel is a by-product, not a goal.
 - **Smoothing is the wrong tool here:**
   - Smoothing the label and then contouring loses 2-voxel WM blades: at σ = 1 voxel it loses 16 % of V1V2's thin WM, shrinks convex surfaces by about σ²κ, and makes slivers.
   - Taubin λ|μ smoothing is unstable at short cutoffs. Tukey twicing never amplifies.
@@ -413,57 +413,55 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - Open decisions for our own segmentation:
   - Missing tissue: a class of its own (proposed, with the rule in step 2) or ignored in training.
   - **The hippocampus: inside the white surface or outside it.** To be decided once there is data, by looking at both on our own segmentation. If inside, stream 2 must also decide how to treat roots on the part of the surface that wraps it, which is not neocortex: a medial-wall label, or roots kept and judged later.
-  - **How fast a generation follows a review.** nnU-Net can start from the previous weights (`-pretrained_weights`) with a short custom schedule, sampling patches mostly round the new verified labels and replaying the older labels so the model does not forget them. On a CUDA GPU that is hours, not days, so a generation could follow each review session. How often to train, how long, and how much replay are to be found by experiment, not chosen in advance (3d, phase 4):
+  - **How fast a generation follows a review.** nnU-Net can start from the previous weights (`-pretrained_weights`) with a short custom schedule, sampling patches mostly round the new verified labels and replaying the older labels so the model does not forget them. On a CUDA GPU that is hours, not days, so a generation could follow each review session. How often to train, how long, and how much replay are to be found by experiment, not chosen in advance (3d, phase 6):
     - **Retrospective replay.** Every answer carries its time, and each generation's weights are kept, so the answer history can be replayed offline at different update frequencies (each session, every N answers, each hemisphere) and schedule lengths. For each, measure GPU hours against the test-region diagnostics.
     - **What replay cannot show.** A model updated more often changes which sites reach the queue, and so what reviewers would have answered. Replay holds the answers fixed, so it measures model quality per GPU hour, not reviewer effort saved. A partial estimate of the latter: how many later answers the more frequently updated model already gets right, and so would not have queued.
   - **Whether a different network would do better.** Probably not by architecture: in "nnU-Net revisited" (MICCAI 2024) careful benchmarking erased most claimed gains of transformer and Mamba models (Swin UNETR, nnFormer, U-Mamba); MedNeXt was on a par. The bottleneck is labels. Worth testing once there are several hemispheres: self-supervised pretraining of the residual-encoder nnU-Net on all our unlabelled FLASH volumes (DKFZ has tooling for this; check its state and licence).
 
 ### 3d. Implementation plan
 
-Three tracks that can run in parallel: the surface steps, our own segmentation, and the review loop. Until the first generation exists, the surface steps run on the purple-mri aseg, the bootstrap labels.
+The whole stream proceeds in phases. Phase 0 runs the pipeline on the purple-mri aseg as it is, so the other streams get real outputs early; each later phase refines a step (the segmentation, the surface, the review) keeping the published formats (extended in place, never replaced), and downstream streams rerun on the new outputs. Each phase is one or more PRs.
 
-**Surface steps (2–4)**
+Order: phase 0 first. Phases 1, 2 and 3 can then run alongside each other. Phase 4 needs phase 2 (and gains from phase 1's answers); phase 5 needs phases 3 and 4; phase 6 needs phases 1 and 5. Whole-brain scaling is a track of its own, alongside phases 1–8, and must be done before the first whole brain.
 
-- Once there is data from our own segmentation, mesh the hemisphere with the hippocampus inside and outside the filled mask, and decide from views of both (Open).
-- Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
-- Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
-- Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
-- Make missing tissue a published label, and the cut-face flag a published per-vertex output keyed by edge key (neither has a spec yet). Then apply the missing-tissue rule in `dseg`, with phantom tests: an excised block that leaves a tunnel (fixed by a plug, flagged), one that cuts a piece off (b0 rises), and enclosed missing tissue (filled).
-- Rewrite `pial_labels` as a stream 1 input: keep its noise estimators and detector, and have it emit spec'd edits that relabel fluid channels and vessels that the label marks as cortex, which crest methods in stream 2 need (§4c, step 2).
-- Scale to whole brains, in this order (`docs/scaling.md`):
-  1. The midline cut (the corpus callosum joins the hemispheres).
-  2. `dseg` in blocks: blocked connected components with a merge, Euler sums per block, the cavity fill, and handle removal as "find globally, fix in local boxes". That last part needs a design and a prototype first: one piece is about 43 GB, and whole-array `dseg` at 50 µm is about 1 TB.
-  3. NIfTI-Zarr volumes, together with item 2.
-  4. A band-only multigrid antialias solver with a fused kernel: FISTA on the whole volume costs about h⁻⁵; the target is about h⁻² per cycle.
-  5. Decimation with int32 ids and a block-wise first pass.
-- GPU, by cost: antialias first, then the normal-smoothing tables, then mesh and volume connected components. Handle removal, cut relabelling, decimation and I/O stay on the CPU.
-
-**Our own segmentation (step 1).** Each phase is one or more PRs. Phase 1 does not depend on phases 2–4.
-
-- **Phase 0: data, label set, test regions.**
-  - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 6 is needed.
+- **Phase 0: the pipeline on the purple-mri aseg.** Labels only, with the current code's labels-only path (handle removal ordered by distance, antialiasing by smoothness alone). The aim is the published outputs streams 2–4 need: `wm-dseg/1`, `white-surf/1`, `white-overview/1`, missing tissue and the cut-face flag.
+  - Port as is: `handles` (hemisphere scale), `wm_edits`, `decimate`, and the core it needs (§7).
+  - Port with changes: `white`, split into `dseg`, surface and overview modules plus readers, without the box `white_mesh`; `antialias` band only.
+  - Make missing tissue a published label (from the image-based detector of step 2), and the cut-face flag a published per-vertex output keyed by edge key (neither has a spec yet). Then apply the missing-tissue rule in `dseg`, with phantom tests: an excised block that leaves a tunnel (fixed by a plug, flagged), one that cuts a piece off (b0 rises), and enclosed missing tissue (filled).
+  - Rewrite `pial_labels` as a stream 1 input: keep its noise estimators and detector, and have it emit spec'd edits that relabel fluid channels and vessels that the label marks as cortex, which crest methods in stream 2 need (§4c, step 2).
+- **Phase 1: review and fold repair** on phase 0's output (the steps of the #80 plan, with #81 and #82 as its first PRs). Its answers correct the hemisphere now and become the first verified training labels.
+  1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
+  2. The volume pane in `--white` mode (#82).
+  3. The review pane, with site answers and scribbles.
+  4. The ITK-SNAP escape hatch: export a crop, import the painted voxels as an answer.
+  5. `wm-edits/1` edited so that answers stand on their own.
+  6. Finish the fold repair of #85: intensity-chosen fixes (step 2 there), the relaxation on the hemisphere with the blade/gap test, the tube case, the exception size threshold.
+- **Phase 2: data, label set, test regions.**
+  - List the FLASH hemispheres that exist and are expected, with protocol, resolution and missing blocks. The answer decides how much phase 8 is needed.
   - Fix the label set (FreeSurferColorLUT): outside, WM, cortex, the `FILLED_LABELS` deep structures, hippocampus, missing tissue, and other labels only if a later stage needs them.
   - Test regions: a few boxes per hemisphere (start with V1V2, PCC_SPL, M1S1, and the V1V2 seam review points). They are labelled from scratch, not by correcting the seed labels, so the seed does not anchor them, and they are never used in training. Format: a BIDS `_dseg` with a versioned sidecar spec that records the box and the labeller.
-- **Phase 1: the surface steps read probabilities.** Independent of the network; exact-answer tests on phantoms first.
+- **Phase 3: the surface steps read probabilities.** Independent of the network; exact-answer tests on phantoms first.
   1. `handles.remove_handles` takes a required priority volume, P: the object front claims in order of decreasing P and the background front in order of increasing P, so the walls fall where P is closest to 0.5. Distance ordering goes. Phantom test: a handle whose bridge has a known low-P place away from its thinnest place; the cut must fall there.
   2. `antialias` takes a required data term: near the boundary, φ is pulled towards a smooth function of P − 0.5, weighted by a per-voxel confidence. The sign constraints stay, so the topology and the freedom from self-intersection stay guaranteed. Phantom test: a plane at a known sub-voxel offset, with P a blurred step across it; the vertices must recover the offset.
   3. Each fix in `desc-wmtopofixes` records its margin, the P along its wall. The review queue ranks by it.
   4. Bootstrapping: a stand-in P on the real hemisphere until our own exists: purple-mri rerun with its probabilities saved (nnU-Net `--save_probabilities`), summed over `FILLED_LABELS`. Ask the purple-mri authors whether their container can do this.
-  5. Diagnostics, P ordering against distance ordering on the hemisphere: where the walls move, the normal metrics, and views of the walls that move most.
-- **Phase 2: training data.**
+  5. Diagnostics, P ordering against phase 0's distance ordering on the hemisphere: where the walls move, the normal metrics, and views of the walls that move most.
+  6. Then remove the labels-only path (distance ordering, smoothness-only antialiasing).
+- **Phase 4: training data.**
   - Export to nnU-Net's raw dataset format: the three echoes as channels `_0000`–`_0002`, with labels that use an ignore label.
   - Bootstrapping: purple-mri's labels as weak seed labels. Its labels in the interiors; the missing blocks from the step 2 detector; ignore in a band of about 2 voxels each side of every purple-mri boundary, and where a simple FLASH check disagrees with purple-mri (the check to be chosen on the test regions).
-  - The existing `wm-edits` answers as verified labels, never ignored.
+  - Phase 1's answers (`wm-edits`) as verified labels, never ignored.
   - Verified labels are kept apart from seed labels, with provenance, so a generation can be retrained with or without the seed.
   - The export is a package module (`baillarger.wmseg`) with its own format spec. nnU-Net stays an external tool, called on the exported dataset.
-- **Phase 3: the first generation.**
+- **Phase 5: the first generation.** Its labels and P replace the purple-mri aseg and the stand-in P as stream 1's input; streams 2–4 rerun on the new outputs.
   - Five folds, split by hemisphere when there are several, by box otherwise. A split by box makes the folds' accuracy an upper bound.
   - Inference writes the `_dseg`, the WM-filled `_probseg` and the fold spread, with sidecars.
-  - Diagnostics against the purple-mri seed labels as a baseline, on the test regions and the hemisphere: boundary distance and Dice on the test regions; calibration of P near 0.5; handles and cavities before correction; the phase 1 walls and their margins; views of where ours and purple-mri's differ most.
-- **Phase 4: the review loop.** As in step 5. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics are on the test regions only: those of phase 3, plus the length of the queue.
+  - Diagnostics against the purple-mri seed labels as a baseline, on the test regions and the hemisphere: boundary distance and Dice on the test regions; calibration of P near 0.5; handles and cavities before correction; the phase 3 walls and their margins; views of where ours and purple-mri's differ most.
+  - With its data, mesh the hemisphere with the hippocampus inside and outside the filled mask, and decide from views of both (Open).
+- **Phase 6: generations through review.** As in step 5. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics are on the test regions only: those of phase 5, plus the length of the queue.
   - Keep every generation's weights and the time of every answer, from the first generation on: the update-frequency experiment needs both.
   - Once enough answers have accumulated, run the retrospective replay (step 1 Open) and set the update frequency, schedule length and replay from it.
-- **Phase 5: uncertainty.**
+- **Phase 7: uncertainty.**
   - Two estimates that need no new network output:
     - the fold spread, which is epistemic: what more labels can fix;
     - σ from a calibrated P and a distance, which is aleatoric: what the image leaves open. If the boundary distance d at a voxel is Gaussian, d ~ N(μ, σ²), then P(inside) = Φ(−μ/σ).
@@ -472,18 +470,22 @@ Three tracks that can run in parallel: the surface steps, our own segmentation, 
     - Weight the antialias data term by 1/σ².
     - Give each white-surface vertex a position uncertainty.
   - Diagnostic: does σ predict the boundary errors on the test regions?
-- **Phase 6: only if the diagnostics ask for it.**
+- **Phase 8: only if the diagnostics ask for it.**
   - A signed-distance output (capped at about 5 voxels, L1, trained only where every voxel within the cap is labelled), or a Laplace head with β-NLL, if the σ derived from P is poorly calibrated or saturated where it matters.
   - Synthetic training images from label maps (SynthSeg, PostSynth), as augmentation, if the problem is generalising to other hemispheres or protocols.
-  - A topology loss (clDice, Betti matching), if the queue is too long. It can only reduce defects; the guarantee stays in phase 1's decoding.
+  - A topology loss (clDice, Betti matching), if the queue is too long. It can only reduce defects; the guarantee stays in phase 3's decoding.
 
-**Review loop (step 5)** (the steps of the #80 plan, with #81 and #82 as its first PRs)
+**Whole-brain scaling** (alongside phases 1–8; `docs/scaling.md`)
 
-1. The site finder, written as a derivative with its own spec (`wm-sites/1`, #81).
-2. The volume pane in `--white` mode (#82).
-3. The review pane, with site answers and scribbles.
-4. The ITK-SNAP escape hatch: export a crop, import the painted voxels as an answer.
-5. `wm-edits/1` edited so that answers stand on their own.
+In this order:
+
+1. The midline cut (the corpus callosum joins the hemispheres).
+2. `dseg` in blocks: blocked connected components with a merge, Euler sums per block, the cavity fill, and handle removal as "find globally, fix in local boxes". That last part needs a design and a prototype first: one piece is about 43 GB, and whole-array `dseg` at 50 µm is about 1 TB.
+3. NIfTI-Zarr volumes, together with item 2.
+4. A band-only multigrid antialias solver with a fused kernel: FISTA on the whole volume costs about h⁻⁵; the target is about h⁻² per cycle.
+5. Decimation with int32 ids and a block-wise first pass.
+
+GPU, by cost: antialias first, then the normal-smoothing tables, then mesh and volume connected components. Handle removal, cut relabelling, decimation and I/O stay on the CPU.
 
 ## 4. Stream 2: columns
 
