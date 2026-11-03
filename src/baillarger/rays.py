@@ -159,6 +159,7 @@ class RaySampler:
         lg = GiftiImage.from_filename(
             str(self.surf.with_name(side["NormLenFile"])), mmap=True
         )
+        # 1-D; files from before the 1-D writer hold n x 1, which reads the same
         self.normlen: npt.NDArray[np.float32] = lg.darrays[0].data.reshape(-1)
         idx = np.loadtxt(
             self.surf.with_name(side["BlocksFile"]), skiprows=1, ndmin=2
