@@ -1086,7 +1086,12 @@ There is no spec yet for:
 
 Stream 1's ordered scaling steps are in its plan (§3d). Across the streams:
 
-- Streams 2 and 3 exist only at box scale, with whole-box arrays: `column_traces`, `fit_warp`, `mesh_graph` (and `fitted_field` and `fronts`, which are not ported).
+- **The code of streams 2 and 3 has only run on boxes** (141³-voxel crops, about 22.6 mm on a side): `column_traces`, `fit_warp`, `mesh_graph` (and `fitted_field` and `fronts`, which are not ported). This describes the code, not a limit of the methods:
+  - each step holds the whole box as numpy arrays and processes it at once, with no blocks, halos or chunked reading;
+  - so its costs grow with the volume: the box costs below, scaled to a 50 µm whole brain (about 7,000 boxes' worth), would need terabytes of memory;
+  - `fronts` is sequential by nature (one heap over the whole array), so it cannot be blocked without a redesign.
+
+  Their phase 0s (§4d, §5d) build blocked versions: tracing by mesh block with halos sized to the 8 mm cap, and the column volume by blocks.
 - Normals are computed on the whole mesh.
 - `NiftiSource` reads a `.nii.gz` whole, and `BlockReader` keeps volumes up to 4 GB resident on the device.
 - Many scales are hard-wired to 0.16 mm voxels: the 0.04 mm sampling, the 1.5-voxel band width, the tapers, the 0.32 mm twicing and the 2-voxel coupling. Restate each as mm or as voxels on purpose.
