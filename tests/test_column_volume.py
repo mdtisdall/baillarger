@@ -205,6 +205,17 @@ def test_a_column_is_the_same_in_any_batch() -> None:
         assert np.array_equal(both.valid[a:b], alone.valid)
 
 
+def test_a_batch_of_columns_gives_the_same_samples() -> None:
+    vol, rays = random_case()
+    smp = sampler(vol)
+    whole = smp.sample(rays, "numpy")
+    for lo, hi in ((0, 7), (7, 40)):
+        part = smp.sample(column_volume.take_columns(rays, lo, hi), "numpy")
+        a, b = rays.sample_start[lo], rays.sample_start[hi]
+        assert np.array_equal(part.echo, whole.echo[a:b], equal_nan=True)
+        assert np.array_equal(part.valid, whole.valid[a:b])
+
+
 def test_the_sampler_refuses_a_bad_grid() -> None:
     vol = ArraySource(np.zeros(SHAPE, np.float32))
     cls = column_volume.ColumnVolumeSampler
@@ -288,3 +299,42 @@ def test_reading_through_the_chunked_reader_changes_nothing() -> None:
     got = smp.sample(rays, "numpy")
     assert np.array_equal(got.echo, plain.echo, equal_nan=True)
     assert chunked.reads > 0
+
+
+# --- with the real ray sampler ---
+
+
+def test_the_column_volume_on_the_real_rays(tmp_path: Path) -> None:
+    """A cortex slab with a WM layer, through the dseg and mesh commands and
+    the real ray sampler: a linear image is exact at every valid sample,
+    and the marks on the columns of the top face follow the label changes."""
+    from test_rays import PHANTOM_AFF, PHANTOMS, write_phantom
+
+    surf, dseg = write_phantom(tmp_path, PHANTOMS["slab"])
+    rs = R.RaySampler(surf, dseg)
+    rays = rs.sample((0, 0, 0), 3, e_in=0.4, e_out=1.2)
+    shape = rs.shape
+    aff = rs.affine
+    i, j, k = np.meshgrid(*(np.arange(n) for n in shape), indexing="ij")
+    vol = (0.5 * i - 0.25 * j + 2.0 * k + 3.0).astype(np.float32)
+    smp = column_volume.ColumnVolumeSampler(
+        [ChunkedSource(ArraySource(vol), chunk=8, max_bytes=1 << 20)],
+        aff,
+        [aff],
+        (shape[0], shape[1], shape[2]),
+    )
+    cv = smp.sample(rays, "numpy")
+    v = np.linalg.inv(aff[:3, :3]) @ (rays.position.astype(np.float64) - aff[:3, 3]).T
+    want = 0.5 * v[0] - 0.25 * v[1] + 2.0 * v[2] + 3.0
+    assert cv.valid.sum() > 10000
+    np.testing.assert_allclose(cv.echo[cv.valid, 0], want[cv.valid], rtol=0, atol=2e-4)
+    # the columns of the top face of the WM layer: normal along +k, and a
+    # label change at the face, which the ray sampler gives
+    vs = float(np.linalg.norm(PHANTOM_AFF[:3, 2]))
+    top = np.flatnonzero(
+        (rays.roots.normal[:, 2] > 0.999)
+        & (np.abs(rays.roots.root[:, 2] - (PHANTOM_AFF[2, 3] + 16 * vs)) < vs)
+    )
+    assert len(top) > 50
+    for c in top[:50]:
+        assert rays.interval_start[c + 1] - rays.interval_start[c] > 1
