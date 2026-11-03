@@ -118,6 +118,7 @@ def test_the_server_views_a_white_surface_alone(surf: Path, tmp_path: Path) -> N
         mm = ",".join(str(x) for x in sel["world_mm"])
         assert json.loads(get(base + f"/snap?mm={mm}"))["true_vertex"] == t
         assert len(get(base + "/white.gii")) > 0
+        assert meta["box"]["half"] == w.half and len(meta["box"]["centre"]) == 3
         assert b"<html" in get(base + "/")[:200].lower()
         for path in ("/section?i=0", "/layer?name=x", "/filters", "/echo2.nii.gz"):
             with pytest.raises(urllib.error.HTTPError) as e:
@@ -126,3 +127,74 @@ def test_the_server_views_a_white_surface_alone(surf: Path, tmp_path: Path) -> N
     finally:
         srv.shutdown()
         VS.Handler.white = None
+
+
+def echoes(d: Path, shape: tuple[int, ...]) -> Path:
+    """Echo 1-3 on the surface's grid in d: echo k's value is k times its linear
+    index (int32)."""
+    from baillarger.data import echo_path
+
+    d.mkdir(parents=True, exist_ok=True)
+    for k in (1, 2, 3):
+        a = (k * np.arange(int(np.prod(shape)))).reshape(shape).astype(np.int32)
+        nib.save(nib.nifti1.Nifti1Image(a, AFF), echo_path(k, d))
+    return d
+
+
+def test_the_volume_pane_box(surf: Path, tmp_path: Path) -> None:
+    """The box round a voxel: the echoes cut from their grid with the box's
+    affine, the overlay of the mask, the true surface's faces with a corner in
+    it (all of them), and the box moved to a selection's voxel."""
+    import gzip
+
+    from baillarger import white
+
+    W = white.WhiteSurface.load(surf)
+    shape = tuple(W.sidecar["GridShape"])
+    w = WhiteView(
+        surf,
+        tmp_path / "cache",
+        log=lambda m: None,
+        echo_dir=echoes(tmp_path / "echo", shape),
+        box=6,
+    )
+    c = [int(x) for x in np.round(np.asarray(W.v[len(W.v) // 2], float))]
+    lo, hi = w.box(c)
+    np.testing.assert_array_equal(lo, np.clip(np.array(c) - 6, 0, shape))
+    np.testing.assert_array_equal(hi, np.clip(np.array(c) + 7, 0, shape))
+    assert w.box([0, 39, 35])[0].tolist() == [0, 33, 29]  # clipped to the grid
+    sl = tuple(slice(int(x), int(y)) for x, y in zip(lo, hi, strict=True))
+    img = nib.Nifti1Image.from_bytes(gzip.decompress(w.echo_bytes(2, c)))
+    full = (2 * np.arange(int(np.prod(shape)))).reshape(shape)
+    np.testing.assert_array_equal(np.asarray(img.dataobj), full[sl])
+    np.testing.assert_allclose(
+        img.affine[:3, 3], (AFF @ [*lo.tolist(), 1])[:3], atol=1e-6
+    )
+    dseg = surf.with_name("sub-T01_ses-S1_desc-wmtopo_dseg.nii.gz")
+    seg = np.asarray(nib.nifti1.Nifti1Image.from_filename(dseg).dataobj)
+    mask = np.isin(seg, W.sidecar["FilledLabels"])[sl]
+    ov = w.overlay(c)
+    np.testing.assert_array_equal(ov > 0, mask | (ov > 1))
+    # every face of the true surface with a corner in the box, and no other
+    f = w.surface_faces(c)
+    v = np.asarray(W.v, float)
+    corner_in = np.all((v >= lo - 0.5) & (v <= hi - 0.5), axis=1)
+    want = W.f[corner_in[W.f].any(1)]
+    assert len(f) == len(want) > 0
+    assert {tuple(x) for x in f.tolist()} == {tuple(x) for x in want.tolist()}
+    # a selection reports its voxel
+    sel = w.vertex(0)
+    assert sel["voxel"] == [int(x) for x in np.round(v[sel["true_vertex"]])]
+
+
+def test_an_echo_on_another_grid_is_refused(surf: Path, tmp_path: Path) -> None:
+    from baillarger.data import echo_path
+
+    d = tmp_path / "echo"
+    d.mkdir()
+    nib.save(
+        nib.nifti1.Nifti1Image(np.zeros((10, 10, 10), np.int16), AFF), echo_path(2, d)
+    )
+    w = WhiteView(surf, tmp_path / "cache", log=lambda m: None, echo_dir=d)
+    with pytest.raises(ValueError, match="grid"):
+        w.echo_bytes(2, [5, 5, 5])
