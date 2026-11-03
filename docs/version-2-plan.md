@@ -595,7 +595,7 @@ A complete ray from every white-surface vertex, from inside the WM under it to w
 ### 4b. High-level design
 
 1. **Roots.** One root per `white-surf/1` vertex, keyed by edge key.
-2. **Rays of fixed extent, with no field.** Each root's ray runs d inward (into the WM under it) and 8 mm outward, along the smoothed surface normal, with equivolume depth measured on the rays. None reads the image.
+2. **Rays of fixed extent, with no field.** Each root's ray runs d inward (into the WM under it) and 8 mm outward, along the smoothed surface normal, with each column's cross-sectional area A(s) and volume V(s) measured on the rays. None reads the image.
 3. **Record what each ray meets.** The label intervals along it and its meetings with other columns. Nothing is cut and nothing stops a ray: the cut is read from the profile in stream 3.
 4. **The ray sampler.** Stream 2's output is a spec'd sampler (§1): stream 3 and the viewer call it for a superblock and its halo. Nothing per column is stored.
 
@@ -640,13 +640,13 @@ Rays that follow a field fitted to the image (T), and fronts grown from the surf
 | Input | From | Use |
 |---|---|---|
 | Roots | step 1 | ray starts and directions |
-| `white-surf/1` triangles | stream 1, step 4 | dual areas for equivolume depth |
+| `white-surf/1` triangles | stream 1, step 4 | dual areas for the column's cross-section |
 
 *Outputs*
 
 | Output | Spec | Used by |
 |---|---|---|
-| Per root and method, one ray from s = −d to s = 8 mm: positions at any requested step, arc length, equivolume depth | internal | step 3; the sampler (step 4) |
+| Per root and method, one ray from s = −d to s = 8 mm: positions at any requested step, arc length, A(s) and V(s) | internal | step 3; the sampler (step 4) |
 
 *Design and lessons*
 
@@ -655,8 +655,11 @@ Measured at the marked points (CP; #47, #52, #58):
 - **normal** (straight rays along the smoothed white normal): keeps the right class on every phantom and almost never returns to its own bank (386 and 26 columns at V1V2 and M1S1). Its profile split is the best at M1/S1 (median 0.17 mm) and 0.075 mm at V1V2, as good as any method there. Its costs:
   - a straight ray can graze a far bank that is not parallel to its own, past another bank's front at 2.4–2.7 mm, and cross neither fluid nor WM within 8 mm;
   - 0.18–0.41 mm path error against the phantoms' curved true columns at crowns (0.25 mm at kissing pairs).
-- **equivolume** (normal's rays, with the depth measured on the rays: each column's cross-section is its root's dual area with every vertex of its 1-ring moved along its own normal). The same paths as normal, with depth that follows the neighbouring rays. It needs only the root's 1-ring, so it is local.
-- **Bok's measure** for a vertex is the exact flux of its dual cell. Equivolume depth is (V(s) − V(s₀)) / (V(s₁) − V(s₀)).
+- **equivolume** (normal's rays, with the column's cross-section A(s) and volume V(s) measured on the rays: the cross-section is its root's dual area with every vertex of its 1-ring moved along its own normal). The same paths as normal, with a volume that follows the neighbouring rays. It needs only the root's 1-ring, so it is local.
+- **Bok's measure** for a vertex is the exact flux of its dual cell. Equivolume depth is (V(s) − V(s₀)) / (V(s₁) − V(s₀)), with s₀ the GM/WM transition and s₁ the pial edge.
+  - Neither end is known here: both are read in stream 3 (its phase 2). So the sampler publishes A(s) and V(s), and stream 3 normalises.
+  - V(s) is measured from the ray's inward end, V(−d) = 0, and never falls along the ray. The root is not the GM/WM boundary, so it is not an origin of anything; only differences of V enter the depth, so the origin cancels.
+  - Where A(s) reaches zero (the 1-ring's rays meet at a focal point, about one radius of curvature from a tight fundus outward, or inside a thin blade inward), V(s) stops rising. The sampler marks those samples, and stream 3 decides what they mean.
 - **The inward extension** (s from −d to 0) runs back along −n into the WM under the root, so the profile covers the GM/WM transition wherever the surface sits: the surface may lie in GM or in WM, and stream 3 reads the transition as a level of z(τ). d starts at 1 mm and is set in stream 3, phase 1, from where the transition is found.
 
 #### Step 3: recording what each ray meets
@@ -698,12 +701,12 @@ Measured at the marked points (CP; #47, #52, #58):
 
 | Output | Spec | Used by |
 |---|---|---|
-| The ray sampler: for a superblock and its halo and a method, every column's samples (positions, arc length, equivolume depth, from −d to 8 mm, at a requested step), label intervals, meetings and normal length, keyed by edge key | the ray-sampler spec (a sampler, §1; none yet) | stream 3; the viewer |
+| The ray sampler: for a superblock and its halo and a method, every column's samples (positions, arc length, A(s) and V(s) with a mark where A(s) ≤ 0, from −d to 8 mm, at a requested step), label intervals, meetings and normal length, keyed by edge key | the ray-sampler spec (a sampler, §1; none yet) | stream 3; the viewer |
 | Diagnostics: the misalignment views, outcomes by normal length, the derived classes | none (views) | the user |
 
 *Design and lessons*
 
-- **Nothing per column is stored.** Every method in the design is per column and local: a straight ray, a 1-ring for equivolume depth, labels within 8 mm, meetings within 16 mm. So the sampler recomputes columns for a superblock and its halo (§2) on each call, deterministically, and the same column gives the same result whichever superblock asks.
+- **Nothing per column is stored.** Every method in the design is per column and local: a straight ray, a 1-ring for the equivolume cross-section, labels within 8 mm, meetings within 16 mm. So the sampler recomputes columns for a superblock and its halo (§2) on each call, deterministically, and the same column gives the same result whichever superblock asks.
 - At 50 µm a whole brain has about 3.5·10⁸ columns per method; stored with per-sample positions they would take hundreds of GB per method. Computing them reads only the labels along each ray, which stream 3 reads anyway to sample the echoes.
 - Today the traces are a prototype `.npz` with no spec, built on a box white mesh with no edge keys. TCK stays only as the viewer's export.
 - If a later method bends rays in a way that is not local (a grown front, a fitted field), it is stored or proven local before it joins the sampler.
@@ -759,7 +762,7 @@ Every method below followed the image through a field or grew a front from the s
 
 ### 4d. Implementation plan
 
-The stream proceeds in phases, as stream 1 does. Phase 0 gives stream 3 and the viewer a real ray sampler early; later phases add equivolume depth and settle the open questions, keeping the sampler's contract (extended in place, never replaced). Whenever stream 1 publishes a new white surface or labels (its phases 3, 4, 6 and 8, and each generation after), the sampler gives new columns on the next call: nothing has to be rerun. Each phase is one or more PRs.
+The stream proceeds in phases, as stream 1 does. Phase 0 gives stream 3 and the viewer a real ray sampler early; later phases add the equivolume cross-section and settle the open questions, keeping the sampler's contract (extended in place, never replaced). Whenever stream 1 publishes a new white surface or labels (its phases 3, 4, 6 and 8, and each generation after), the sampler gives new columns on the next call: nothing has to be rerun. Each phase is one or more PRs.
 
 Order: phase 0 needs stream 1's phases 0 and 1 (the surface and the WM-distance sampler). Phase 1 follows phase 0. Phase 2 needs phase 1 and stream 1's `orient` (its phase 2). Phase 3 only if phase 2 shows something obvious was missed.
 
@@ -769,7 +772,7 @@ Order: phase 0 needs stream 1's phases 0 and 1 (the surface and the WM-distance 
   - The **normal** method: straight rays along the smoothed white normal (`streamlines.ray`, and `first_fall` on the shared WM-distance sampler, §7).
   - Port `mesh_graph` in a local form, on the duplicate-edge fix (§7).
   - Work by superblock, with halos in mm (§2, domain edges): 8 mm for the labels each ray samples, 16 mm for the rays it may meet. Read the labels through the chunked reader and its cache. Give the analysis that picks the superblock level. Test that a column is identical whichever superblock computes it.
-- **Phase 1: equivolume depth.** Add **equivolume** (`offset_equivolume`) to the sampler.
+- **Phase 1: the equivolume cross-section.** Add **equivolume** to the sampler: each column's A(s) and V(s) (`offset_equivolume`), with V(−d) = 0 and the A(s) ≤ 0 marks; stream 3 normalises them. Exact tests: on a plane A is constant; on a sphere of radius R, A(s) = A₀(1 + s/R)².
 - **Phase 2: the open questions** (4c, Open), on the hemisphere away from domain edges:
   - the misalignment diagnostic (4c, Open), and from it the steering it calls for: the deflected normal ray here, stream 1's antialiasing term there, or both;
   - which paths are right, by phantoms with curved, equivolume true columns;
@@ -874,7 +877,7 @@ Where each layer lies along every column, read from the image's own contrast and
 - It certifies 96.6–100 % of variables, so the remaining errors belong to the model.
 - The vertical prior must be the chain form, |z_ℓ − (τ_ℓ/τ_ℓ₊₁) z_ℓ₊₁|.
 - Levels placed at detected bands tighten the stria's spread by about 40 %. It reaches 0.08 mm at both M1/S1 and V1V2.
-- The first pial surface is a level of the joint warp (τ = 1), not a separate cut. The fill between levels uses distance until an equal-volume estimator is validated.
+- The first pial surface is a level of the joint warp (τ = 1), not a separate cut. The fill between levels uses distance until an equal-volume estimator is validated; the equal-volume candidate normalises stream 2's V(s) between the GM/WM transition and the pial edge.
 - **QPBO engineering** (#30–#33):
   - Hard costs must be 1 + the finite total, not 1000×.
   - QPBO-I must reseed rand() for determinism.
@@ -1170,7 +1173,7 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | Training export | The nnU-Net dataset, with seed and verified labels kept apart, with provenance | stream 1, phase 7 |
 | Our `_dseg`, P, fold spread | The network's outputs, with the model generation in each sidecar | stream 1, phase 8 |
 | `orient` (sampler) | The structure tensor, the signed data normal and its coherence, for a superblock and its halo (§3c, step 3) | stream 1, phase 2 |
-| The ray sampler | Per column, keyed by edge key and method: samples from −d to 8 mm, label intervals, meetings, normal length (§4c, step 4) | stream 2, phase 0, first: stream 3 and the viewer wait on it |
+| The ray sampler | Per column, keyed by edge key and method: samples from −d to 8 mm (positions, arc length, A(s) and V(s)), label intervals, meetings, normal length (§4c, step 4) | stream 2, phase 0, first: stream 3 and the viewer wait on it |
 | The column volume (sampler) | Each column's echoes sampled along its ray, with 3D positions and partial-volume marks (§5c, step 1) | stream 3, phase 0 |
 | WM distance through tissue (sampler) | §7 | stream 1, phase 1 |
 | Curvature (sampler) | §7 | with its first reader: stream 3, phase 4 |
@@ -1201,7 +1204,7 @@ flowchart TB
   end
   subgraph S2["Stream 2: columns"]
     S2P0["2.0 ray sampler, normal rays"]
-    S2P1["2.1 equivolume depth"]
+    S2P1["2.1 equivolume cross-section"]
     S2P2["2.2 open questions; misalignment diagnostic"]
     S2P3["2.3 revisit fields, only if needed"]
   end
@@ -1279,7 +1282,7 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 3.1 | 3.0 | |
 | 3.2 | 3.1 | gains from 3.3 (bands as levels) |
 | 3.3 | 3.1 | alongside 3.2 |
-| 3.4 | 3.2 | gains from 2.1 (equivolume depth) |
+| 3.4 | 3.2 | gains from 2.1 (V(s), for equal-volume depth) |
 | 3.5 | 3.2 | feeds stream 1 as review sites |
 | Stream 3 scaling track | 3.2, 3.4 | done before the first whole brain |
 | 4.0 | 1.0 | |
