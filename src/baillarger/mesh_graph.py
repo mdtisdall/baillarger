@@ -23,7 +23,7 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 from scipy.spatial import cKDTree
 
@@ -34,6 +34,10 @@ type Bool = npt.NDArray[np.bool_]
 type F32 = npt.NDArray[np.float32]
 type F64 = npt.NDArray[np.float64]
 type I64 = npt.NDArray[np.int64]
+
+
+#: the most vertices for which a pair key (i * n + j < n * n) fits in int64
+_MAX_VERTICES = int(np.sqrt(np.iinfo(np.int64).max))
 
 
 def _across(f: npt.NDArray[np.integer[Any]]) -> I64:
@@ -52,19 +56,46 @@ def _across(f: npt.NDArray[np.integer[Any]]) -> I64:
     return keep
 
 
+def _pair_keys(E: I64, n: int) -> I64:
+    """The distinct vertex pairs of E (k, 2) as sorted int64 keys
+    (smaller index * n + larger index): one key per pair, about 8 bytes, no
+    row copies. A pair that occurs twice in E is kept once."""
+    # key < n * n must fit in int64: n up to 3.03e9 vertices
+    assert n <= _MAX_VERTICES, f"{n} vertices: pair keys overflow int64"
+    key: I64 = E.min(1) if len(E) else E[:, 0].copy()
+    key *= n
+    key += E.max(1) if len(E) else 0
+    out: I64 = np.unique(key)
+    return out
+
+
+_CHUNK = 1 << 22  # entries at a time in _graph: temporaries of a few 10 MB
+
+
 def _graph(
     v: F64, f: npt.NDArray[np.integer[Any]], voxel_mm: npt.ArrayLike
 ) -> csr_matrix:
-    """The graph of edge_graph over len(v) nodes."""
-    E = np.sort(np.concatenate([edges(f), _across(f)]), 1)
-    E = np.unique(E, axis=0)  # a pair that occurs twice gets its length once
+    """The graph of edge_graph over len(v) nodes, built directly in CSR form
+    from the sorted keys of both directions of each edge."""
+    n = len(v)
+    K = _pair_keys(np.concatenate([edges(f), _across(f)]), n)
+    # both directions of each pair: one sorted array, row i = key // n
+    both = np.concatenate([K, (K % n) * n + K // n])
+    del K
+    both.sort()
+    nnz = len(both)
+    idx = np.int32 if max(nnz, n) < 2**31 else np.int64
+    indptr = np.searchsorted(both, np.arange(n + 1, dtype=np.int64) * n).astype(idx)
+    indices = np.empty(nnz, idx)
+    data = np.empty(nnz, np.float64)
     vox = np.asarray(voxel_mm, np.float64)
-    w = np.linalg.norm((v[E[:, 0]] - v[E[:, 1]]) * vox, axis=1)
-    n = (len(v),) * 2
-    out: csr_matrix = (
-        coo_matrix((w, (E[:, 0], E[:, 1])), shape=n)
-        + coo_matrix((w, (E[:, 1], E[:, 0])), shape=n)
-    ).tocsr()
+    for a in range(0, nnz, _CHUNK):
+        c = both[a : a + _CHUNK]
+        i, j = c // n, c % n
+        indices[a : a + _CHUNK] = j
+        data[a : a + _CHUNK] = np.linalg.norm((v[i] - v[j]) * vox, axis=1)
+    parts: Any = (data, indices, indptr)  # scipy's stubs have no CSR triple
+    out: csr_matrix = csr_matrix(parts, shape=(n, n))
     return out
 
 

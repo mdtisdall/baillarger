@@ -858,6 +858,7 @@ function bvEvents() {
   o.addEventListener("gesturestart", e => { e.preventDefault(); const h = at(e); BV.gesture = h && { ...h, scale: 1 }; });
   o.addEventListener("gesturechange", e => { e.preventDefault(); const G = BV.gesture; if (!G) return; bvZoom(G.t, G.x, G.y, e.scale / G.scale); G.scale = e.scale; });
   o.addEventListener("gestureend", e => { e.preventDefault(); BV.gesture = null; });
+  o.addEventListener("contextmenu", e => e.preventDefault());   // a secondary click (two fingers on a trackpad) opens no browser menu here
   document.addEventListener("keydown", e => {
     if (!BV.hover || e.target.tagName === "SELECT" || e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey || e.altKey) return;
     const d = { ArrowUp: 1, ArrowDown: -1, PageUp: 10, PageDown: -10 }[e.key]; if (d === undefined) return;
