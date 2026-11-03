@@ -21,14 +21,14 @@ FILLED = white_dseg.FILLED_LABELS["R"]
 
 def synthetic_aseg() -> npt.NDArray[np.int16]:
     """Right hemisphere: a WM block drilled by a 2 x 2 tunnel of cortex (a
-    fill of 4), holding a ventricle and an enclosed pocket of cortex (a
+    fill of 4), holding a thalamus and an enclosed pocket of cortex (a
     cavity of 8); a WM ring 5 wide closed by a one-voxel rod across a slit of
     background (a cut of 1); a patch of hippocampus."""
     a = np.zeros(SHAPE, np.int16)
     a[8:24, 6:22, 4:20] = 42
     a[10:22, 8:20, 6:18] = 41
     a[15:17, 13:15, 6:18] = 42  # the tunnel
-    a[11:13, 9:11, 8:10] = 43  # a ventricle inside the WM
+    a[11:13, 9:11, 8:10] = 49  # a thalamus inside the WM
     a[19:21, 9:11, 12:14] = 42  # the enclosed pocket
     a[8:10, 6:10, 4:8] = 53
     a[25:37, 3:33, 22:28] = 41  # the ring round a 2 x 20 hole
@@ -54,9 +54,9 @@ def test_wm_topo_of_a_synthetic_aseg() -> None:
     # one voxel of the rod, given the label of the slit round it
     assert len(cut) == 1 and cut[0][0] == 27 and cut[0][2] == 25
     assert t.dseg[tuple(cut[0])] == 0 and t.cut_labels == {0: 1}
-    # nothing else changed: the ventricle and the hippocampus are kept
+    # nothing else changed: the thalamus and the hippocampus are kept
     assert np.array_equal(t.dseg[t.fixes == 0], a[t.fixes == 0])
-    assert (t.dseg == 43).sum() == 8 and (t.dseg == 53).sum() == 32
+    assert (t.dseg == 49).sum() == 8 and (t.dseg == 53).sum() == 32
     assert sorted(m["Kind"] for m in t.moves) == ["cut", "fill"]
     assert sum(m["Voxels"] for m in t.moves) == 5
 

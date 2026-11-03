@@ -385,10 +385,17 @@ void main() { gl_Position = mvp * vec4(pos, 1.0); vec3 n = rot * nrm; vlit = abs
 const FS = `#version 300 es
 precision mediump float; in vec3 vcol; in float vlit; in float vsulc; uniform float sulcw; out vec4 o;
 void main() { float s = 1.0 - sulcw * clamp(-vsulc / 2.0, 0.0, 1.0) * 0.45; o = vec4(vcol * (0.35 + 0.65 * vlit) * s, 1.0); }`;
+// A point is a flat disc that faces the camera, with one depth for all of it. To pass the depth
+// test against its own face, it moves toward the eye (screen position kept) by its own radius in
+// world units, rho = prad * distance: then it clears its face across the disc where the face slopes
+// up to 45 degrees from the screen. rho is about one mesh edge at the default zoom, so a fold more
+// than one disc radius in front hides the point. The hidden part is drawn again, faded (see points).
 const PVS = `#version 300 es
-in vec3 pos; uniform mat4 mvp; uniform float psize; void main() { gl_Position = mvp * vec4(pos, 1.0); gl_Position.z -= 0.002 * gl_Position.w; gl_PointSize = psize; }`;
+in vec3 pos; uniform mat4 mvp; uniform vec3 eye; uniform float prad; uniform float psize;
+void main() { gl_Position = mvp * vec4(pos + (eye - pos) * prad, 1.0); gl_PointSize = psize; }`;
 const PFS = `#version 300 es
-precision mediump float; uniform vec3 pcol; out vec4 o; void main() { vec2 d = gl_PointCoord - 0.5; if (dot(d, d) > 0.25) discard; o = vec4(pcol, 1.0); }`;
+precision mediump float; uniform vec3 pcol; uniform float palpha; out vec4 o;
+void main() { vec2 d = gl_PointCoord - 0.5; if (dot(d, d) > 0.25) discard; o = vec4(pcol, palpha); }`;
 async function loadMesh(level, faces) {
   const buf = await (await fetch(`/mesh?level=${level}${faces ? "&faces=1" : ""}`)).arrayBuffer();
   const hl = new Uint32Array(buf, 0, 1)[0], hdr = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hl)));
@@ -426,8 +433,16 @@ function points(g, M, arr, col, size) {
   if (!arr.length) return; g.useProgram(GL.pprog); g.bindVertexArray(GL.pvao);
   g.bindBuffer(g.ARRAY_BUFFER, GL.pbuf); g.bufferData(g.ARRAY_BUFFER, arr, g.DYNAMIC_DRAW);
   g.uniformMatrix4fv(g.getUniformLocation(GL.pprog, "mvp"), false, M);
-  g.uniform3fv(g.getUniformLocation(GL.pprog, "pcol"), col); g.uniform1f(g.getUniformLocation(GL.pprog, "psize"), size * (window.devicePixelRatio || 1));
-  g.drawArrays(g.POINTS, 0, arr.length / 3);
+  const R = GL.R, t = GL.target, u = n => g.getUniformLocation(GL.pprog, n);
+  g.uniform3fv(u("eye"), [t[0] + GL.dist * R[6], t[1] + GL.dist * R[7], t[2] + GL.dist * R[8]]);
+  // the disc's radius in world units for each unit of distance from the eye
+  g.uniform1f(u("prad"), size * Math.tan(0.35) / $("gl").clientHeight);
+  g.uniform3fv(u("pcol"), col); g.uniform1f(u("psize"), size * (window.devicePixelRatio || 1));
+  // the visible part, depth tested; then the part behind the surface, faded as if seen through it
+  g.uniform1f(u("palpha"), 1); g.drawArrays(g.POINTS, 0, arr.length / 3);
+  g.depthFunc(g.GREATER); g.depthMask(false); g.enable(g.BLEND); g.blendFunc(g.SRC_ALPHA, g.ONE_MINUS_SRC_ALPHA);
+  g.uniform1f(u("palpha"), 0.3); g.drawArrays(g.POINTS, 0, arr.length / 3);
+  g.depthFunc(g.LESS); g.depthMask(true); g.disable(g.BLEND);
 }
 function draw3d() {
   const c = $("gl"), g = GL.g; if (!g || !GL.nf) return; const dpr = window.devicePixelRatio || 1;

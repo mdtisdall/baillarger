@@ -14,19 +14,13 @@ WM_LABEL = {"R": 41, "L": 2}
 CORTEX_LABEL = {"R": 42, "L": 3}
 HIPPOCAMPUS_LABEL = {"R": 53, "L": 17}
 
-#: the lateral ventricle, and the labels that follow it: they are filled
-#: while the ventricle is filled, and outside with it if the ventricle is
-#: made outside
-VENTRICLE_LABEL = {"R": 43, "L": 4}
-FOLLOWS_VENTRICLE = {"R": (63,), "L": (31,)}
-
-#: the labels filled into the WM mask, by hemisphere: WM, lateral ventricle
-#: and the choroid plexus with it, thalamus, caudate, putamen, pallidum,
-#: corpus callosum, accumbens, ventral DC and vessel. The hippocampus is open
-#: (phase 1.8). The inferior lateral ventricle and the amygdala are outside.
+#: the labels filled into the WM mask, by hemisphere: WM, thalamus, caudate,
+#: putamen, pallidum, corpus callosum, accumbens, ventral DC and vessel. The
+#: lateral ventricle, the choroid plexus, the inferior lateral ventricle and
+#: the amygdala are outside. The hippocampus is open (phase 1.8).
 FILLED_LABELS = {
-    "R": (41, 43, 49, 50, 51, 52, 58, 60, 62, 63, 192),
-    "L": (2, 4, 10, 11, 12, 13, 26, 28, 30, 31, 192),
+    "R": (41, 49, 50, 51, 52, 58, 60, 62, 192),
+    "L": (2, 10, 11, 12, 13, 26, 28, 30, 192),
 }
 
 #: FreeSurferColorLUT names of the labels of the set
