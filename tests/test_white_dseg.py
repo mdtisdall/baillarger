@@ -1,6 +1,6 @@
 """Tests for the dseg command (baillarger.white_dseg.wm_topo, write_wm_topo): the
 segmentation with its WM mask made cavity- and handle-free, on a synthetic
-aseg."""
+aseg, and on excisions set to outside (cut faces)."""
 
 import json
 from pathlib import Path
@@ -10,8 +10,9 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from baillarger import bids, white_dseg
+from baillarger import bids, white_dseg, white_surf
 from baillarger.handles import kuhn_betti
+from baillarger.mesh import marching_tetrahedra
 
 SHAPE = (40, 36, 30)
 VOX = (0.2, 0.16, 0.2)
@@ -20,14 +21,14 @@ FILLED = white_dseg.FILLED_LABELS["R"]
 
 def synthetic_aseg() -> npt.NDArray[np.int16]:
     """Right hemisphere: a WM block drilled by a 2 x 2 tunnel of cortex (a
-    fill of 4), holding a ventricle and an enclosed pocket of cortex (a
+    fill of 4), holding a thalamus and an enclosed pocket of cortex (a
     cavity of 8); a WM ring 5 wide closed by a one-voxel rod across a slit of
     background (a cut of 1); a patch of hippocampus."""
     a = np.zeros(SHAPE, np.int16)
     a[8:24, 6:22, 4:20] = 42
     a[10:22, 8:20, 6:18] = 41
     a[15:17, 13:15, 6:18] = 42  # the tunnel
-    a[11:13, 9:11, 8:10] = 43  # a ventricle inside the WM
+    a[11:13, 9:11, 8:10] = 49  # a thalamus inside the WM
     a[19:21, 9:11, 12:14] = 42  # the enclosed pocket
     a[8:10, 6:10, 4:8] = 53
     a[25:37, 3:33, 22:28] = 41  # the ring round a 2 x 20 hole
@@ -53,9 +54,9 @@ def test_wm_topo_of_a_synthetic_aseg() -> None:
     # one voxel of the rod, given the label of the slit round it
     assert len(cut) == 1 and cut[0][0] == 27 and cut[0][2] == 25
     assert t.dseg[tuple(cut[0])] == 0 and t.cut_labels == {0: 1}
-    # nothing else changed: the ventricle and the hippocampus are kept
+    # nothing else changed: the thalamus and the hippocampus are kept
     assert np.array_equal(t.dseg[t.fixes == 0], a[t.fixes == 0])
-    assert (t.dseg == 43).sum() == 8 and (t.dseg == 53).sum() == 32
+    assert (t.dseg == 49).sum() == 8 and (t.dseg == 53).sum() == 32
     assert sorted(m["Kind"] for m in t.moves) == ["cut", "fill"]
     assert sum(m["Voxels"] for m in t.moves) == 5
 
@@ -136,3 +137,57 @@ def test_the_dseg_command_writes_the_bids_files(tmp_path: Path) -> None:
     assert json.loads((anat / f"{fx}.json").read_text())["SpecVersion"] == (
         "wm-dseg-fixes/1"
     )
+
+
+# ---------------------------------------------------------------- cut faces
+
+
+def excised_block() -> tuple[npt.NDArray[np.int16], npt.NDArray[np.bool_]]:
+    """Right hemisphere: a WM block 12 voxels a side in a cortex shell 2
+    thick. The excision is a 2 x 2 bore along k, through the shell and the
+    WM, from one face to the other."""
+    a = np.zeros(SHAPE, np.int16)
+    a[8:24, 8:24, 6:22] = 42
+    a[10:22, 10:22, 8:20] = 41
+    cut = np.zeros(SHAPE, bool)
+    cut[15:17, 15:17, 6:22] = True
+    return a, cut
+
+
+def test_an_excision_that_leaves_a_tunnel_is_plugged() -> None:
+    """With the excision set to outside, the WM mask is a block with a
+    tunnel (b1 = 1). The cheapest fix is a plug of 2 x 2 voxels in one
+    slice of the tunnel, not a cut through the 12 x 12 block. The plug is
+    in the excision: it is an ordinary fill into outside."""
+    a, cut = excised_block()
+    x = np.where(cut, 0, a).astype(a.dtype)
+    assert kuhn_betti(np.isin(x, FILLED)) == (1, 1, 0)
+    t = white_dseg.wm_topo(x, VOX)
+    assert t.betti_before == (1, 1, 0) and t.betti_after == (1, 0, 0)
+    fill = np.argwhere(t.fixes == 2)
+    assert len(fill) == 4 and len(np.unique(fill[:, 2])) == 1
+    assert {tuple(p[:2]) for p in fill} == {(15, 15), (15, 16), (16, 15), (16, 16)}
+    assert 10 <= fill[0, 2] < 20  # inside the WM part of the tunnel
+    assert all(t.dseg[tuple(p)] == 41 for p in fill)
+    assert not (t.fixes == 1).any() and not (t.fixes == 3).any()
+    # every other voxel of the excision stays outside
+    rest = cut & (t.fixes == 0)
+    assert (t.dseg[rest] == 0).all() and rest.sum() == cut.sum() - 4
+
+
+def test_an_excision_that_cuts_a_piece_off_adds_a_piece() -> None:
+    """The excision is a slab 2 voxels thick across the whole block, through
+    the shell and the WM. The WM mask then has two pieces (b0 = 2), and the
+    correction changes nothing. The surface of each piece is closed and has
+    genus 0."""
+    a, _ = excised_block()
+    cut = np.zeros(SHAPE, bool)
+    cut[8:24, 8:24, 13:15] = True
+    x = np.where(cut, 0, a).astype(a.dtype)
+    t = white_dseg.wm_topo(x, VOX)
+    assert t.betti_before == (2, 0, 0) and t.betti_after == (2, 0, 0)
+    assert not t.fixes.any() and np.array_equal(t.dseg, x)
+    v, f = marching_tetrahedra(np.isin(t.dseg, FILLED).astype(np.float64), 0.5)
+    pieces = white_surf.mesh_pieces(v, f, VOX)
+    assert len(pieces) == 2
+    assert all(p["genus"] == 0 and p["boundary_loops"] == 0 for p in pieces)

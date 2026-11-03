@@ -209,13 +209,27 @@ class MeshOps:
         g = G(x)
         return 2 * g - G(g)
 
-    def smooth_normals(self, x: torch.Tensor, iters: int = 10) -> torch.Tensor:
-        """mesh_smoothing.smooth_normals."""
+    def smooth_normals_and_length(
+        self, x: torch.Tensor, iters: int = 10
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """mesh_smoothing.smooth_normals_and_length: the unit normals and
+        the length of the normal smoothed with no division."""
+        if iters < 1:
+            raise ValueError("iters must be at least 1")
         n = self.vertex_normals(x)
+        m = n
         for _ in range(iters):
             n = 0.5 * n + 0.5 * self.mean_neighbours(n)
-            n = n / (torch.linalg.vector_norm(n, dim=1, keepdim=True) + 1e-12)
-        return n
+            length = torch.linalg.vector_norm(n, dim=1, keepdim=True)
+            n = n / (length + 1e-12)
+            m = 0.5 * m + 0.5 * self.mean_neighbours(m)
+        return n, torch.linalg.vector_norm(m, dim=1)
+
+    def smooth_normals(self, x: torch.Tensor, iters: int = 10) -> torch.Tensor:
+        """mesh_smoothing.smooth_normals."""
+        if iters < 1:
+            return self.vertex_normals(x)
+        return self.smooth_normals_and_length(x, iters)[0]
 
     def smooth(self, v0: AnyFloat, sigma: float) -> Float:
         """relax, then twice with sigma (as baillarger.white smooths the
@@ -225,8 +239,14 @@ class MeshOps:
         out: Float = self.twice(x, steps).cpu().numpy()
         return out
 
+    def normals_and_length(self, v: AnyFloat) -> tuple[Float, Float]:
+        """smooth_normals_and_length of v: float32 numpy in and out."""
+        x = torch.as_tensor(np.asarray(v, np.float32), device=self.dev)
+        n, length = self.smooth_normals_and_length(x)
+        nn: Float = n.cpu().numpy()
+        ll: Float = length.cpu().numpy()
+        return nn, ll
+
     def normals(self, v: AnyFloat) -> Float:
         """smooth_normals of v: float32 numpy in and out."""
-        x = torch.as_tensor(np.asarray(v, np.float32), device=self.dev)
-        out: Float = self.smooth_normals(x).cpu().numpy()
-        return out
+        return self.normals_and_length(v)[0]
