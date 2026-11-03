@@ -138,7 +138,10 @@ These bind every stream from its first version. A first version may be rough, bu
    - **On the next hemisphere.** The first pass on hemisphere N+1 is made by a generation that has seen none of its answers, and its queue and edits are recorded before any of them trains. Edits needed on N+1 against N is the clean measure of generalisation, and it costs only that ordering.
 
    Two cautions. The queue picks hard sites (low margin, high spread), so scores on site answers overstate the error elsewhere; scribbles, made wherever the reviewer sees an error, are less biased. And a model scored on answers it has already trained on measures only whether it learns what it is told: phase 9 reports the two apart.
-4. **A de novo hemisphere.** Later, only if a quantitative claim is wanted, for example for publication. It is the next-hemisphere reading done once, on a specimen chosen for the purpose, with its measure fixed in advance. Not having it costs nothing in the system.
+4. **A de novo hemisphere.** Deferred: its measure is decided when results are to be published, not now. It is the next-hemisphere reading done once, on a specimen no generation has trained on. Not having it costs nothing in the system. Three records are kept from the first generation on, so that it stays possible:
+   - **Training provenance per generation:** which hemispheres, and which answers by time, each generation trained on, so that an untouched hemisphere can be shown to be de novo.
+   - **Each generation's weights and settings,** kept and reproducible (the export, the nnU-Net plans and schedule, the code version).
+   - **The edit log** (`wm-edits/1`, append-only, each answer with its time and the SHA it was made against), which the prequential measure needs anyway. What counts as an edit is open.
 5. **Other data.**
    - **Exact tests** (phantoms, brute force, device equality) have known answers and need no held-out data (§1, working rules).
    - **A 50 µm scan of a specimen already scanned at 160 µm** gives tissue fractions at 160 µm with no labelling: a test of P as a fraction at mixed voxels, and training data for the phase 11 fraction outputs. Later, when such a scan exists.
@@ -148,7 +151,7 @@ These bind every stream from its first version. A first version may be rough, bu
 - Phase 8's folds stay, for the spread and the out-of-fold calibration, not for validation.
 - Phase 9's diagnostics score each generation on the answers made against it before it trained on them, and report the answers it trained on apart.
 - The retrospective replay scores each schedule prequentially.
-- The painting mode (stream 4, phase 1) has no evaluation role. Free painting has the `manual-paint` site answer and the ITK-SNAP escape hatch. It is needed only if the de novo hemisphere's measure needs dense labels (Open).
+- The painting mode (stream 4, phase 1) stays out of the plan. Free painting has the `manual-paint` site answer and the ITK-SNAP escape hatch. It returns only if the de novo measure, when decided, needs dense labels.
 
 ## 2. Facts that cut across streams
 
@@ -595,7 +598,7 @@ Order: phase 0 first. Phases 1, 3, 4, 5 and 6 can then start alongside each othe
   - Diagnostics against the purple-mri seed labels as a baseline, on the hemisphere: the length of the review queue and the number of manual edits it needs; calibration of P near 0.5; handles and cavities before correction; the phase 6 walls and their margins, with P ordering against the labels-only path's distance ordering (where the walls move, the normal metrics, views of the walls that move most); views of where ours and purple-mri's differ most.
   - With its data, mesh the hemisphere with the hippocampus inside and outside the filled mask, and decide from views of both (Open).
 - **Phase 9: generations through review.** As in step 6. Each generation is retrained from the previous one's weights with the verified labels added. Its diagnostics: those of phase 8, among them the length of the queue and the number of manual edits per hemisphere; views; and where the generation's own prediction, before the answers are applied, disagrees with verified voxels (a view and a count: those places are already answered), reported apart for answers it trained on (does it learn what it is told) and answers made against it (does it generalise; §1). The first pass on each new hemisphere is made and recorded before any of its answers trains.
-  - Keep every generation's weights and the time of every answer, from the first generation on: the update-frequency experiment needs both.
+  - Keep every generation's weights and settings, reproducibly, with the hemispheres and answers it trained on, and the time of every answer, from the first generation on: the update-frequency experiment and the prequential scores need them, and they keep a de novo measure possible (§1).
   - Once enough answers have accumulated, run the retrospective replay (step 1 Open) and set the update frequency, schedule length and replay from it.
 - **Phase 10: uncertainty.**
   - Two estimates that need no new network output:
@@ -1209,7 +1212,7 @@ Order: phase 0 needs stream 1's phase 0. Phases 1 and 2 follow phase 0 and can r
   - Port as is: `viewer.flatmap`, `viewer.inflation`, `viewer.sections`.
   - Bring in the brick volume viewer (#84) and the `--white` volume pane (#82); expect a small conflict between them.
   - Bring in the geodesic-patch flat map (#69), on the fixed `mesh_graph` (§7).
-- **Phase 1: a painting mode** (brush and fill by class, slice by slice with 3D checks). It has no evaluation role (§1, *Data for training, and for judging success*): scribbles and site answers are made in the review pane (phase 2), free painting has `manual-paint` and the ITK-SNAP escape hatch, and no test regions are labelled. Needed only if the de novo hemisphere's measure needs dense labels (open).
+- **Phase 1: a painting mode** (brush and fill by class, slice by slice with 3D checks): out of the plan. It has no evaluation role (§1, *Data for training, and for judging success*): scribbles and site answers are made in the review pane (phase 2), free painting has `manual-paint` and the ITK-SNAP escape hatch, and no test regions are labelled. It returns only if the de novo measure, when decided, needs dense labels.
 - **Phase 2: the stream 1 review pane:** the queue from `wm-sites/1`, the site-answer choices with previews (calling stream 1's published choice code), and scribbles (one class per stroke), writing `wm-edits/1`. Stream 1's phase 3 publishes all three; the pane holds no stream 1 logic of its own.
 - **Phase 3: columns.** Rewrite against the ray sampler, calling it for what is on screen: the viewer's `data`, `filters`, `labels`, `streamlines` and page, which read prototype `.npz` files today. Keep the filter-job pattern and the TCK writer.
 - **Phase 4: stream 3's outputs,** a pane for each as its spec appears: the columns sampled on request, z(τ) and its levels with their sources, bands, thickness, and the two banks' tops at contacts.
@@ -1304,7 +1307,7 @@ flowchart TB
   end
   subgraph S4["Stream 4: viewer"]
     S4P0["4.0 viewer on stream 1's outputs"]
-    S4P1["4.1 painting mode, if needed"]
+    S4P1["4.1 painting mode, out unless the de novo measure needs it"]
     S4P2["4.2 stream 1 review pane"]
     S4P3["4.3 columns"]
     S4P4["4.4 stream 3's outputs"]
@@ -1376,7 +1379,7 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 3.7 | 3.3 | writes `laminar-sites/1` and `laminar-edits/1` first |
 | Stream 3 scaling track | 3.3, 3.5 | done before the first whole brain |
 | 4.0 | 1.0 | porting and merging need only 1.0's formats and split; the hemisphere outputs only for its hemisphere check |
-| 4.1 | 4.0 | the painting mode; whether it is needed is open |
+| 4.1 | 4.0 | the painting mode; out of the plan unless the de novo measure, when decided, needs dense labels |
 | 4.2 | 4.0, 1.3 | the review pane, on 1.3's formats and choice code |
 | 4.3 | 2.0, 4.0 | |
 | 4.4 | 3.3, 3.4, 4.0 | 3.5 adds panes when it publishes |
