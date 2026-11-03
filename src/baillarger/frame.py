@@ -67,7 +67,7 @@ from scipy import sparse
 from scipy.spatial import cKDTree
 
 from baillarger._jit import njit
-from baillarger.excisions import TISSUE_LABELS, detect
+from baillarger.excisions import dark_tissue
 from baillarger.mesh import marching_tetrahedra
 
 type Bool = npt.NDArray[np.bool_]
@@ -145,11 +145,20 @@ def missing_tissue(
 ) -> Bool:
     """Tissue the aseg labels (WM or cortex) where the FLASH is black: blocks
     cut out of the specimen before the scan, imputed by the segmentation.
-    baillarger.excisions.detect on the rim labels (2 WM, 3 cortex), kept
-    with its old signature for the old callers."""
-    wm, ctx = TISSUE_LABELS["R"]
-    aseg = np.select([rim == 2, rim == 3], [wm, ctx], 0).astype(np.int16)
-    return detect(aseg, flash, voxel_mm, "R", frac, sigma, min_vox, margin_mm)
+    The detector of baillarger.excisions on the rim labels (2 WM, 3 cortex),
+    kept with its old signature and behaviour for the old callers: a box
+    without cortex gives an empty mask, and a box without WM is not
+    refused."""
+    return dark_tissue(
+        (rim == 2) | (rim == 3),
+        rim == 3,
+        flash,
+        voxel_mm,
+        frac,
+        sigma,
+        min_vox,
+        margin_mm,
+    )
 
 
 # ---------------------------------------------------------------- white mesh
