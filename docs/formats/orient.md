@@ -94,8 +94,15 @@ to the grid.
 
 ```python
 sampler = OrientSampler(echoes, dseg, cells=64, noise=noise_json)
-r = sampler.orient(superblock, level, halo_mm=0.0, sigma_mm=SIGMA,
-                   device="numpy", tensor=False, echo_tensor=False)
+r = sampler.orient(
+    superblock,
+    level,
+    halo_mm=0.0,
+    sigma_mm=SIGMA,
+    device="numpy",
+    tensor=False,
+    echo_tensor=False,
+)
 ```
 
 ### The method
