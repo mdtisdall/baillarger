@@ -43,6 +43,7 @@ from baillarger.bids import (
     sources,
     write_sidecar,
 )
+from baillarger.labels import CRUMB_MM3 as CRUMB_MM3
 from baillarger.timing import Laps, log_to_stderr
 from baillarger.white_dseg import LUT_NAMES
 
@@ -56,8 +57,8 @@ TISSUE_LABELS = {"R": (41, 42), "L": (2, 3)}
 FRAC, SIGMA, MIN_VOX, MARGIN_MM = 0.25, 2.0, 250, 0.3
 
 #: excision-map pieces below FRAGMENT_MM3 are dropped; tissue pieces below
-#: CRUMB_MM3 that touch the excision map are set to 0
-FRAGMENT_MM3, CRUMB_MM3 = 0.1, 1.0
+#: CRUMB_MM3 (baillarger.labels) that touch the excision map are set to 0
+FRAGMENT_MM3 = 0.1
 
 #: a piece is a bubble if its dark region is closed in each echo (within the
 #: piece's box, grown by BUBBLE_BOX voxels) and grows from echo 1 to echo 3 by

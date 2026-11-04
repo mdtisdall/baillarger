@@ -56,3 +56,8 @@ LUT_NAMES = {
     63: "Right-choroid-plexus",
     192: "Corpus_Callosum",
 }
+
+#: pieces of less than CRUMB_MM3 (mm³) are removed: tissue pieces cut off by
+#: an excision (baillarger.excisions, wm-excisions/1) and pieces of the WM
+#: mask (baillarger.white_dseg, wm-dseg/1)
+CRUMB_MM3 = 1.0
