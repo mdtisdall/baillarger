@@ -445,20 +445,22 @@ class Review:
 
     def paint_commands(self, site: Site) -> str:
         """The shell commands of manual-paint at the site (baillarger.wm_paint;
-        docs/formats/wm-paint.md). The crop goes next to the log."""
+        docs/formats/wm-paint.md), with absolute paths. The crop goes next to
+        the log."""
         i, j, k = site
-        crop = self.edits.parent / f"{self.edits.stem}_paint" / f"site-{i}-{j}-{k}"
-        echo = "".join(f" --echo {e}" for e in self.echoes)
+        log, dseg = self.edits.resolve(), self.dseg.resolve()
+        crop = log.parent / f"{log.stem}_paint" / f"site-{i}-{j}-{k}"
+        echo = "".join(f" --echo {e.resolve()}" for e in self.echoes)
         snap = (
             f"-g {crop}/echo-1.nii.gz -s {crop}/labels.nii.gz"
             if self.echoes
             else f"-g {crop}/labels.nii.gz"
         )
         return (
-            f"python -m baillarger.wm_paint export {self.dseg} --site {i} {j} {k} "
+            f"python -m baillarger.wm_paint export {dseg} --site {i} {j} {k} "
             f"--out {crop}{echo}\n"
             f"itksnap {snap}\n"
-            f"python -m baillarger.wm_paint import {crop} --log {self.edits} "
+            f"python -m baillarger.wm_paint import {crop} --log {log} "
             f"--session {self.session} --seconds <reviewer seconds>"
         )
 

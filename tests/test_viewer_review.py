@@ -392,10 +392,12 @@ def test_manual_paint_gives_the_commands_and_no_answer(server: Any) -> None:
     out = post(base + "/review/preview", dict(site="5,5,5", choice="manual-paint"))
     assert out["status"] == "done" and out["answer"] == [] and out["correction"] == []
     cmd = out["command"].splitlines()
-    assert cmd[0].startswith(f"python -m baillarger.wm_paint export {files['dseg']}")
-    assert "--site 5 5 5" in cmd[0] and f"--echo {files['dseg']}" in cmd[0]
+    assert cmd[0].startswith(
+        f"python -m baillarger.wm_paint export {files['dseg'].resolve()}"
+    )
+    assert "--site 5 5 5" in cmd[0] and f"--echo {files['dseg'].resolve()}" in cmd[0]
     assert cmd[1].startswith("itksnap -g ")
-    assert f"--log {files['log']} --session {rv.session}" in cmd[2]
+    assert f"--log {files['log'].resolve()} --session {rv.session}" in cmd[2]
     with pytest.raises(urllib.error.HTTPError) as e:
         post(
             base + "/review/answer",

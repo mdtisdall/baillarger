@@ -12,6 +12,7 @@ const CHOICES = [   // [name, key, label]
   ["remove-strand", "1", "remove strand"], ["thicken", "2", "thicken"], ["fill-gap", "3", "fill gap"],
   ["widen-gap", "4", "widen gap"], ["leave", "5", "leave"], ["manual-paint", "6", "manual paint"],
 ];
+const SITE_PX = 10;   // px per voxel (at least) when a site opens
 const COL = { answer: "rgba(64, 224, 255, 0.85)", correction: "rgba(255, 140, 0, 0.85)", site: "rgba(255, 255, 255, 0.9)" };
 const STROKE_RGB = { wm: [245, 245, 245], cortex: [255, 70, 90] };
 const PREVIEW_POLL_MS = 400;
@@ -122,6 +123,7 @@ async function open(id) {
 function show(site) {   // the site is shown (the server recorded it): move there, start its time
   R.cur = site; R.t0 = performance.now(); R.choice = null; R.preview = null; R.previewSeq++;
   const mm = site.mm, BV = R.api.BV; for (const t of BV.tiles) { BV.C[t.r] = mm[t.r]; BV.C[t.u] = mm[t.u]; }
+  BV.s = Math.max(BV.s, SITE_PX / R.vs);   // at least SITE_PX px per voxel, so that the preview squares show; a closer zoom stays
   R.api.crossHere(mm); R.api.update();
   $("rvsite").style.display = ""; $("rvsname").textContent = `site ${site.id}` + (site.kind ? ` (${site.kind})` : "");
   for (const b of document.querySelectorAll("#rvsite button[data-choice]")) b.style.outline = "";
@@ -145,6 +147,7 @@ async function choose(c) {
   const w = r.overrides ? "\n⚠ the correction overrides this answer: the automatic fix changes the voxels that the answer sets" : "";
   const cut = r.cut_by_box ? "\nthe preview's box cuts WM: the correction outside the box is not shown (approximate)" : "";
   const cmd = r.command ? `\nmanual paint (in a terminal; Submit does not apply):\n${r.command}` : "";
+  if (r.command) { $("rvprev").textContent = `manual paint (in a terminal; Submit does not apply):\n${r.command}`; $("rvprev").style.color = ""; return; }
   $("rvprev").textContent = `${c}: the answer changes ${r.answer.length} voxels, then the correction changes ${r.correction.length}` +
     ` (${(r.seconds ?? 0).toFixed(2)} s)` + w + cut + cmd;
   $("rvprev").style.color = r.overrides ? "#ffd23f" : "";
