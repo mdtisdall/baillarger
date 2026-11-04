@@ -1,6 +1,6 @@
 """The white surface as the viewer shows it, without the columns: its coordinates,
 mesh graph, flat map and inflation (cached), picking, and the bytes the panes load.
-baillarger.viewer.data.Site holds one and adds the traces.
+The viewer holds one on the overview of a white surface (baillarger.viewer.overview).
 
 Made from what a mesh reader gives: vertices in voxel coordinates of a grid, faces,
 the voxel size and the grid's voxel-to-world affine. Box mm: voxel index times the

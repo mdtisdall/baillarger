@@ -306,3 +306,81 @@ def test_no_echoes_no_profiles(data: dict[str, Path], tmp_path: Path) -> None:
 def test_the_dseg_next_to_the_surface(data: dict[str, Path]) -> None:
     side = WhiteSurface.load(data["surf"]).sidecar
     assert VC.dseg_for(data["surf"], side) == data["dseg"]
+
+
+def test_the_white_mode_serves_every_route(
+    data: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After the removal of the site mode: main() starts the server in --white
+    mode, and the server answers each route of phases 4.0 (the white surface and
+    its box), 4.0.5 (the bricks, the named volumes, the outlines) and 4.3 (the
+    columns)."""
+    ed = tmp_path / "data"
+    ed.mkdir()
+    for k in (1, 2, 3):  # echo k as .nii.gz in data: the defaults of main()
+        e = nib.load(echo_path(k, data["echoes"]).with_suffix(""))
+        nib.save(e, echo_path(k, ed))
+    monkeypatch.setenv("BAILLARGER_DATA", str(ed))
+    made: list[Any] = []
+    real = VS.serve
+
+    def capture(*a: Any, **k: Any) -> Any:
+        made.append(real(*a, **k))
+        return made[-1]
+
+    monkeypatch.setattr(VS, "serve", capture)
+    argv = ["--white", str(data["surf"]), "--cache", str(tmp_path / "cache")]
+    threading.Thread(
+        target=VS.main, args=(argv + ["--port", "0"],), daemon=True
+    ).start()
+    for _ in range(600):
+        if made:
+            break
+        threading.Event().wait(0.1)
+    assert made, "the server did not start"
+    srv = made[0]
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        meta = json.loads(get(f"{base}/meta")[1])
+        assert meta["surface_only"]
+        c = ",".join(str(x) for x in meta["box"]["centre"])
+        lo, hi = "-9,-9,-9", "9,9,9"
+        routes = [
+            "/",
+            "/static/columns.js",
+            "/static/overlays.js",
+            "/state",
+            "/mesh?level=0&faces=1",
+            "/vertex?v=0",
+            "/snap?mm=0,5,9",
+            "/white.gii",
+            f"/white/echo1.nii.gz?c={c}",
+            f"/white/echo2.nii.gz?c={c}",
+            f"/white/echo3.nii.gz?c={c}",
+            f"/white/surface.gii?c={c}",
+            f"/white/overlay.nii.gz?c={c}",
+            "/volume",
+            "/volume/meta",
+            "/volume/bricks?level=0&b=0,0,0",
+            "/volume/list",
+            f"/outline?axis=2&mm=9&box={lo},{hi}",
+            "/columns/meta",
+            "/columns?v=0&radius=0.5",
+            "/columns/profiles?v=0&radius=0.5",
+        ]
+        for r in routes:
+            assert get(base + r)[0] == 200, r
+        for name in json.loads(get(f"{base}/volume/list")[1]):
+            assert get(f"{base}/volume/{name['name']}/meta")[0] == 200, name
+        key = VC.decode(get(f"{base}/columns?v=0&radius=0.5")[1])[0]["key"]
+        assert get(f"{base}/columns/{key}.tck")[0] == 200
+        for gone in ["/filters", "/section?i=0", "/layer?name=x", "/labels/list"]:
+            assert get(base + gone)[0] == 404, gone
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        VS.Handler.white = None
+        VS.Handler.volume = None
+        VS.Handler.volumes = None
+        VS.Handler.outlines = None
+        VS.Handler.columns = None

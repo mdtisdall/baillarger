@@ -9,10 +9,6 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.35 system-ui, sans-serif; display: flex; flex-direction: column; }
-  #fbar { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; padding: 4px 10px;
-          background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
-  #fbar label { color: var(--mute); }
-  #fstat { font-size: 11px; color: var(--mute); }
   #bar { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; padding: 6px 10px;
          background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
   #bar label, .pbar label { color: var(--mute); }
@@ -29,63 +25,22 @@
   .fill canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   .help { position: absolute; right: 6px; bottom: 4px; font-size: 11px; color: var(--mute); background: #000a; padding: 1px 6px;
           border-radius: 4px; pointer-events: none; }
-  #legend { position: absolute; left: 8px; bottom: 6px; background: #000a; padding: 3px 6px; border-radius: 4px; font-size: 11px; }
-  #legend canvas { position: static; display: block; width: 160px; height: 10px; }
-  #sections { overflow-y: auto; }
-  .sec h3 { margin: 4px 8px 2px; font-size: 12px; font-weight: 600; color: var(--mute); }
-  .sec canvas { width: calc(100% - 16px); margin: 0 8px; height: 260px; display: block; background: #000; }
   #info { font-size: 12px; white-space: pre-wrap; padding: 4px 8px; height: 6.2em; overflow-y: auto; flex: none;
           border-top: 1px solid var(--line); }
   #log { font-size: 11px; color: var(--mute); white-space: pre-wrap; padding: 2px 8px 4px; max-height: 4.5em; overflow-y: auto; flex: none; }
   .key span { display: inline-block; margin-right: 10px; font-size: 11px; }
   .sw { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 3px; }
-  #ltable { overflow-y: auto; flex: 1; min-height: 0; font-size: 12px; }
-  #ltable table { border-collapse: collapse; width: 100%; }
-  #ltable td, #ltable th { padding: 1px 5px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
-  #ltable th { position: sticky; top: 0; background: var(--panel); color: var(--mute); font-weight: 600; }
-  #ltable tr { cursor: pointer; }
-  #ltable tr.cur { background: #3a2f48; }
-  .st-proposed { color: #ff6b6b; } .st-accepted { color: #7cff6b; } .st-rejected { color: #ffd23f; }
   #vstat { position: absolute; left: 6px; top: 4px; font-size: 11px; background: #000a; padding: 1px 6px; border-radius: 4px;
            pointer-events: none; white-space: pre-wrap; }
 </style>
-</head>
-<body>
 <div id="bar">
   <b id="title">Column viewer</b>
-  <label>Layer <select id="layer"></select></label>
-  <label>section half width <select id="half"><option>4</option><option selected>8</option><option>12</option></select> mm</label>
-  <span id="rotbar" title="turn both section axes about the normal at the WM selection (keys [ and ]: 5°, with shift 1°)">
-    <label>axes turned <input type="range" id="rot" min="-180" max="180" step="1" value="0" style="width:90px">
-      <input type="number" id="rotn" min="-180" max="180" step="any" value="0" style="width:62px">°</label>
-    <label>snap to <select id="snapto"><option value="">…</option><option value="nearest">nearest plane</option>
-      <option value="axial">axial</option><option value="coronal">coronal</option><option value="sagittal">sagittal</option></select></label></span>
-  <label>depth <select id="dmax"><option>3</option><option selected>5</option><option>8</option></select> mm</label>
-  <label>streamlines within <select id="radius"><option>0.5</option><option selected>1</option><option>2</option></select> mm</label>
-  <label>panes <select id="panesel" title="this window's panes; open more windows with other panes, they stay in step">
-    <option value="volume,surface,map,sections">all</option>
-    <option value="volume">volume</option><option value="surface,map">surface + map</option>
-    <option value="sections">sections</option><option value="volume,sections">volume + sections</option>
-    <option value="surface,map,sections">surface, map, sections</option>
-    <option value="volume,labels">volume + labels</option><option value="labels">labels</option></select></label>
   <button id="newwin" title="open another window with these panes">new window</button>
   <span id="sync">connecting…</span>
 </div>
-<div id="fbar" title="filters of the column data (baillarger.viewer.filters): run one, or pick a result; every window shows it">
-  <b>Filter</b>
-  <label>echo <select id="fecho"><option value="2">2</option><option value="3">3</option><option value="2+3">2 + 3</option></select></label>
-  <label>smooth along the column <select id="fsmooth"><option value="0">off</option><option>0.08</option><option>0.16</option><option>0.32</option></select> mm</label>
-  <label>flatten <select id="fflat"><option value="off">off</option><option value="lk">gradient shifts</option><option value="dyn">dynamic warping</option></select></label>
-  <label>shift bound <select id="fsmax"><option>0.3</option><option>0.45</option><option>0.6</option></select> mm</label>
-  <label>ε <select id="feps"><option>0.1</option><option selected>0.2</option><option>0.5</option><option>1</option></select></label>
-  <label>stack across columns <select id="fstack"><option value="0">off</option><option>0.25</option><option>0.5</option><option>1</option></select> mm</label>
-  <button id="frun" title="compute this filter (minutes when flattening), or load it if it was run before">run</button>
-  <label>show <select id="fshow"></select></label>
-  <span id="fstat"></span>
-</div>
 <div id="main">
   <div class="pane" id="p-volume">
-    <h2><span id="vtitle">Volume, meshes, streamlines (NiiVue, world mm)</span><span id="vcount"></span></h2>
+    <h2><span id="vtitle">Volume and white surface (NiiVue, world mm)</span></h2>
     <div class="pbar">
       <label title="the volume viewer: NiiVue, or our own (the volume as bricks at levels of detail; slices only for now)">viewer
         <select id="vengine"><option value="niivue">NiiVue</option><option value="bricks">bricks (ours)</option></select></label>
@@ -93,15 +48,8 @@
       <label>view <select id="vview"><option value="multi">orthogonal + 3D</option><option value="ax">axial</option>
         <option value="cor">coronal</option><option value="sag">sagittal</option><option value="render">3D</option></select></label>
       <label><input type="checkbox" id="vwhite" checked> white</label>
-      <label>GM <input type="range" id="vgm" min="0" max="1" step="0.05" value="0.25" style="width:70px"></label>
-      <label><input type="checkbox" id="vfrom" checked> from</label><label><input type="checkbox" id="vto" checked> to</label>
-      <label><input type="checkbox" id="vover"> all traces (every 4th)</label>
-      <label><input type="checkbox" id="vpts" checked> points</label>
-      <label title="the curves on the white surface that the u (cyan) and v (yellow) sections follow"><input type="checkbox" id="vaxes" checked> section axes</label>
       <span id="vlab" style="display:none"><label>echo <select id="vecho"><option>1</option><option selected>2</option><option>3</option></select></label>
-        <label>labels <input type="range" id="vlabop" min="0" max="1" step="0.05" value="0.6" style="width:60px"></label>
-        <label>brush <select id="brush"><option value="">off</option><option value="fluid">to fluid</option><option value="cortex">to cortex</option></select></label>
-        <label>radius <select id="bradius"><option>0</option><option selected>1</option><option>2</option><option>3</option></select></label></span>
+        <label>overlay <input type="range" id="vlabop" min="0" max="1" step="0.05" value="0.6" style="width:60px"></label></span>
     </div>
     <div class="key pbar" id="vkey"></div>
     <div class="fill"><canvas id="nv"></canvas><canvas id="bv" style="display:none"></canvas><canvas id="bvo" style="display:none;touch-action:none"></canvas><div id="vstat"></div>
@@ -110,84 +58,32 @@
   <div class="pane" id="p-surface">
     <h2><span>White surface</span><label>surface <select id="level"></select></label></h2>
     <div class="fill"><canvas id="gl"></canvas>
-      <div class="help">click: WM selection (sections along the screen's axes) · shift-click: crosshair to that point · drag: rotate · shift-drag: pan · wheel: zoom</div></div>
-  </div>
-  <div class="pane" id="p-map">
-    <h2><span>Flat overview</span></h2>
-    <div class="fill"><canvas id="map"></canvas>
-      <div id="legend"><div id="lname"></div><canvas id="lbar" width="160" height="10"></canvas>
-        <div style="display:flex;justify-content:space-between"><span id="lmin"></span><span id="lmax"></span></div></div></div>
-  </div>
-  <div class="pane" id="p-labels">
-    <h2><span>Pial labels: proposed relabels (cortex to fluid)</span><span id="lcount"></span></h2>
-    <div class="pbar">
-      <label>show <select id="lfilter"><option value="proposed">proposed</option><option value="open">proposed + accepted</option>
-        <option value="all" selected>all</option><option value="rejected">rejected</option></select></label>
-      <button id="lacc" title="a">accept</button><button id="lrej" title="r">reject</button><button id="lund" title="u">back to proposed</button>
-      <button id="lprev" title="k">prev</button><button id="lnext" title="j">next</button>
-    </div>
-    <div class="key pbar">
-      <span><i class="sw" style="background:#ff4040;height:8px"></i>proposed</span><span><i class="sw" style="background:#40ff40;height:8px"></i>accepted</span>
-      <span><i class="sw" style="background:#ffd000;height:8px"></i>rejected</span><span><i class="sw" style="background:#40c0ff;height:8px"></i>brush: fluid</span>
-      <span><i class="sw" style="background:#ff40ff;height:8px"></i>brush: cortex</span>
-    </div>
-    <div id="ltable"></div>
-    <div class="help" style="position:static;padding:2px 8px">row: crosshair to the cell · keys: j / k next / previous, a accept, r reject, u back to proposed · brush (volume pane): click a slice</div>
-  </div>
-  <div class="pane" id="p-sections">
-    <h2><span>Sections along the traces</span></h2>
-    <div class="key pbar">
-      <span><i class="sw" style="background:#ff2bd6"></i>pia</span>
-      <span><i class="sw" style="background:#ffa630"></i>inner levels</span>
-      <span><i class="sw" style="background:#e34948;height:8px;opacity:.5"></i>QPBO interval (not certified)</span>
-      <span><i class="sw" style="background:#30d5ff"></i>single-surface horizon</span>
-      <span><i class="sw" style="background:#7cff6b"></i>open top</span>
-      <span style="color:#ffd23f">★ your points</span><span style="color:#9aa0a8">▾ tie</span>
-    </div>
-    <div id="sections" style="flex:1;min-height:0">
-      <div class="sec"><h3 id="hu">u-section</h3><canvas id="cu"></canvas></div>
-      <div class="sec"><h3 id="hv">v-section</h3><canvas id="cv"></canvas></div>
-      <div class="sec" id="facing" style="display:none">
-        <h3 id="hfu">facing u</h3><canvas id="cfu"></canvas>
-        <h3 id="hfv">facing v</h3><canvas id="cfv"></canvas>
-      </div>
-    </div>
+      <div class="help">click: WM selection · shift-click: crosshair to that point · drag: rotate · shift-drag: pan · wheel: zoom</div></div>
   </div>
   <div class="pane" id="p-columns"></div>
 </div>
-<div id="info">Two points: the crosshair (the slices) and the WM selection (on the white surface: the sections and streamlines). In each pane a click moves that pane's own point and a shift-click moves the other one.</div>
+<div id="info">Two points: the crosshair (the slices) and the WM selection (a vertex of the white surface: the columns). In each pane a click moves that pane's own point and a shift-click moves the other one.</div>
 <div id="log"></div>
 <script type="module" src="/static/overlays.js"></script>
 <script type="module">
 import { Niivue, SLICE_TYPE, SHOW_RENDER } from "https://cdn.jsdelivr.net/npm/@niivue/niivue@0.69.0/+esm";
 const $ = id => document.getElementById(id);
 const ME = Math.random().toString(36).slice(2);
-let META = null, VALS = null, CUR = null, SEC = null, FRAME = null, SELN = null, CROSS = null, ROT = 0;
+let META = null, FRAME = null, SELN = null, CROSS = null;
 const q = new URLSearchParams(location.search);
-let OVTXT = "";   // a white surface alone: what the info line says with no selection
-let PANES = (q.get("panes") || "volume,surface,map,sections").split(",");
-const MAGMA = [[0,0,4],[40,11,84],[101,21,110],[159,42,99],[212,72,66],[245,125,21],[250,193,39],[252,253,191]];
-const RDBU = [[5,48,97],[67,147,195],[209,229,240],[247,247,247],[253,219,199],[214,96,77],[103,0,31]];
-const CLSCOL = [[27, 175, 122], [42, 120, 214], [235, 104, 52], [199, 154, 0], [227, 73, 72]];
-function ramp(stops, t) {
-  if (!isFinite(t)) return [70, 70, 70];
-  t = Math.min(1, Math.max(0, t)) * (stops.length - 1);
-  const i = Math.min(stops.length - 2, Math.floor(t)), f = t - i;
-  return stops[i].map((c, k) => Math.round(c + f * (stops[i + 1][k] - c)));
-}
+let OVTXT = "";   // what the info line says with no selection
+let PANES = ["volume", "surface"];
 async function get(u) { const r = await fetch(u); const j = await r.json(); if (j.error) { log("error: " + j.error); throw new Error(j.error); } return j; }
 function log(m) { const el = $("log"); el.textContent = new Date().toLocaleTimeString() + "  " + m + "\n" + el.textContent; }
 const has = p => PANES.includes(p);
 
 // ---------------------------------------------------------------- layout
 function layout() {
-  for (const p of ["volume", "surface", "map", "sections", "labels", "columns"]) $("p-" + p).style.display = has(p) ? "" : "none";
+  for (const p of ["volume", "surface", "columns"]) $("p-" + p).style.display = has(p) ? "" : "none";
   const n = PANES.length, m = $("main");
   m.style.setProperty("--cols", n >= 3 ? 2 : n);
   m.style.gridTemplateRows = n >= 3 ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(0, 1fr)";
-  $("panesel").value = PANES.join(",");
 }
-$("panesel").onchange = () => { q.set("panes", $("panesel").value); location.search = q.toString(); };
 $("newwin").onclick = () => window.open(location.pathname + "?" + q.toString(), "_blank", "width=1100,height=800");
 
 // ---------------------------------------------------------------- shared state (the server keeps it; every window gets every change)
@@ -198,13 +94,8 @@ async function share(patch) {
 async function apply(st) {
   applying = true;
   try {
-    if ("layer" in st && st.layer && st.layer !== $("layer").value) { $("layer").value = st.layer; await loadLayer(); }
     if ("crosshair" in st && st.crosshair) { CROSS = st.crosshair; moveVolumeCrosshair(st.crosshair); }
-    if ("rotation" in st) { ROT = +st.rotation || 0; showRot(); }
     if ("selection" in st) await setSelection(st.selection, st.frame || null);
-    else if ("rotation" in st && CUR !== null) await showTrace(CUR);
-    if ("labels_seq" in st && LAB.on && st.labels_seq !== LAB.seq) await loadLabels();
-    if ("filter" in st && !META.labels_only && !META.surface_only && st.filter !== FIL.key) await refreshFilters(true);
     vHook("state", st);
   } finally { applying = false; }
 }
@@ -215,152 +106,22 @@ function connect() {
   es.onerror = () => { $("sync").textContent = "not connected: retrying"; };
 }
 // the two points: the crosshair (a world point: the slices) and the WM selection (a vertex of the
-// true white surface, with the shown trace there: the sections, the streamlines, the markers)
+// overview, with its true vertex: the columns, the markers)
 async function setSelection(sel, frame) {
   SELN = sel; FRAME = frame;
-  if (META?.surface_only && sel && NV.nv) {
+  if (sel && NV.nv) {
     if (!inBox(sel.voxel)) await loadWhiteBox(sel.voxel);
     CROSS = sel.world_mm; moveVolumeCrosshair(sel.world_mm);
   }
   showSelectionMarker();
-  if (sel && sel.trace !== null) await showTrace(sel.trace);
-  else { CUR = null; SEC = null; clearSections(); drawMap(); draw3d();
-    if (sel && !META.surface_only) log(`no shown trace within 1 mm of vertex ${sel.vertex}: no sections there`); }
+  $("info").textContent = !sel ? OVTXT : `WM selection: true vertex ${sel.true_vertex} (overview vertex ${sel.vertex}) at (${sel.world_mm}) mm`;
+  draw3d();
   vHook("selection", sel, frame);
 }
 async function selectHere(sel, frame) { await setSelection(sel, frame); share({ selection: sel, frame }); }
 function crossHere(mm) { CROSS = mm; moveVolumeCrosshair(mm); share({ crosshair: mm }); }
 const selectVertex = async (v, frame) => selectHere(await get(`/vertex?v=${v}`), frame);
 const crossVertex = async v => crossHere((await get(`/vertex?v=${v}`)).world_mm);
-
-// ---------------------------------------------------------------- filters (baillarger.viewer.filters)
-const FIL = { key: null, frame: "depth", polling: false };
-function filterParams() {
-  return { echo: $("fecho").value, smooth_mm: +$("fsmooth").value, flatten: $("fflat").value,
-           smax: +$("fsmax").value, eps: +$("feps").value, stack_mm: +$("fstack").value };
-}
-function setFilterInputs(p) {
-  $("fecho").value = p.echo; $("fsmooth").value = p.smooth_mm ? String(p.smooth_mm) : "0"; $("fflat").value = p.flatten;
-  $("fsmax").value = String(p.smax); $("feps").value = String(p.eps); $("fstack").value = p.stack_mm ? String(p.stack_mm) : "0";
-}
-async function post(u, body) {
-  const r = await fetch(u, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from: ME, ...body }) });
-  const j = await r.json(); if (j.error) { log("error: " + j.error); throw new Error(j.error); } return j;
-}
-// the list of results, the one shown, the job's state; redraw = the shown one changed
-async function refreshFilters(redraw) {
-  const F = await get("/filters"), A = F.active;
-  const sel = $("fshow"); sel.innerHTML = "";
-  const raw = document.createElement("option"); raw.value = ""; raw.textContent = "raw echo 2"; sel.appendChild(raw);
-  for (const c of F.cached) { const o = document.createElement("option"); o.value = c.key; o.textContent = c.label; sel.appendChild(o); }
-  sel.value = A.key || "";
-  const st = F.status;
-  $("fstat").textContent = st.status === "running" ? `running: ${st.label} — ${st.log.length ? st.log[st.log.length - 1] : ""}`
-    : st.status === "error" ? `failed: ${st.error}` : `showing ${A.label}` + (A.key ? ` (${A.shown} traces, depth axis ${A.frame === "tau" ? "τ" : "mm from the root"})` : "");
-  const changed = FIL.key !== A.key;
-  FIL.key = A.key; FIL.frame = A.frame;
-  // the controls follow the shown result only when it changes, not on every poll
-  if (changed && A.key) { const c = F.cached.find(x => x.key === A.key); if (c) setFilterInputs(c.params); }
-  if (redraw || changed) {
-    const cur = $("layer").value; $("layer").innerHTML = "";
-    for (const n of A.layers) { const o = document.createElement("option"); o.textContent = n; $("layer").appendChild(o); }
-    $("layer").value = A.layers.includes(cur) ? cur : A.layers[0];
-    await loadLayer();
-    if (CUR !== null) await showTrace(CUR);
-  }
-  return F;
-}
-async function useFilter(key) { await post("/filters/use", { key: key || null }); await refreshFilters(true); }
-async function pollJob(key) {
-  if (FIL.polling) return; FIL.polling = true;
-  try {
-    let seen = 0;
-    for (;;) {
-      const F = await refreshFilters(false), st = F.status;
-      for (const m of st.log.slice(seen)) log("filter: " + m); seen = st.log.length;
-      if (st.status === "done") { if (st.key === key) await useFilter(key); return; }
-      if (st.status === "error") { log("filter failed: " + st.error); return; }
-      await new Promise(r => setTimeout(r, 2000));
-    }
-  } finally { FIL.polling = false; }
-}
-$("frun").onclick = async () => {
-  const out = await post("/filters/run", { params: filterParams() });
-  log(`filter ${out.label}: ${out.status === "done" ? "ready" : "started"}`);
-  if (out.status === "done") await useFilter(out.key); else pollJob(out.key);
-};
-$("fshow").onchange = () => useFilter($("fshow").value);
-
-// ---------------------------------------------------------------- layer
-let lo = 0, hi = 1, diverging = false;
-async function loadLayer() {
-  const name = $("layer").value;
-  VALS = (await get("/layer?name=" + encodeURIComponent(name))).values;
-  const f = VALS.filter(v => v !== null && isFinite(v)).sort((a, b) => a - b);
-  const qq = p => f.length ? f[Math.min(f.length - 1, Math.floor(p * f.length))] : 0;
-  diverging = /change|- single|log2/.test(name);
-  if (name.startsWith("filter: ") && /fraction/.test(name)) diverging = false;
-  if (diverging) { const m = Math.max(Math.abs(qq(0.02)), Math.abs(qq(0.98)), 1e-6); lo = -m; hi = m; }
-  else if (name.startsWith("rank_") || name === "combined") { lo = 0; hi = 1; }
-  else if (name === "class at the root") { lo = 0; hi = 4; }
-  else { lo = qq(0.02); hi = qq(0.98); if (hi <= lo) hi = lo + 1e-6; }
-  $("lname").textContent = name; $("lmin").textContent = (+lo.toPrecision(3)); $("lmax").textContent = (+hi.toPrecision(3));
-  const lb = $("lbar").getContext("2d");
-  for (let x = 0; x < 160; x++) { const c = ramp(diverging ? RDBU : MAGMA, x / 159); lb.fillStyle = `rgb(${c})`; lb.fillRect(x, 0, 1, 10); }
-  drawMap(); colour3d(); draw3d();
-}
-$("layer").onchange = async () => { await loadLayer(); share({ layer: $("layer").value }); };
-
-// ---------------------------------------------------------------- flat overview
-let view = { s: 1, x: 0, y: 0 };
-function fitMap() {
-  const c = $("map"); let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-  for (const p of META.uv) { if (p[0] === null) continue; x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]); }
-  const W = c.clientWidth, H = c.clientHeight;
-  view.s = 0.95 * Math.min(W / (x1 - x0), H / (y1 - y0));
-  view.x = (x0 + x1) / 2 - W / 2 / view.s; view.y = (y0 + y1) / 2 - H / 2 / view.s;
-}
-const toPx = p => [view.s * (p[0] - view.x), $("map").clientHeight - view.s * (p[1] - view.y)];
-const toMm = (px, py) => [px / view.s + view.x, ($("map").clientHeight - py) / view.s + view.y];
-function drawMap() {
-  if (!has("map")) return;
-  const c = $("map"), dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
-  c.width = W * dpr; c.height = H * dpr;
-  const g = c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  g.fillStyle = "#0d0e10"; g.fillRect(0, 0, W, H);
-  if (!META || !VALS) return;
-  const sz = Math.max(1.5, 1.25 * 0.16 * view.s), st = diverging ? RDBU : MAGMA;
-  META.uv.forEach((p, i) => {
-    if (p[0] === null) return; const [x, y] = toPx(p); if (x < -sz || y < -sz || x > W + sz || y > H + sz) return;
-    const v = VALS[i]; g.fillStyle = `rgb(${ramp(st, v === null ? NaN : (v - lo) / (hi - lo))})`; g.fillRect(x - sz / 2, y - sz / 2, sz, sz);
-  });
-  if (CUR !== null && META.uv[CUR][0] !== null) {
-    const [x, y] = toPx(META.uv[CUR]);
-    g.strokeStyle = "#ffffff99"; g.lineWidth = 1; g.setLineDash([4, 4]);
-    g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); g.setLineDash([]);
-    if (SEC) for (const [k, col] of [["u", "#30d5ff"], ["v", "#ffd23f"]]) {
-      g.fillStyle = col; for (const t of SEC[k].traces) { if (META.uv[t][0] === null) continue; const [a, b] = toPx(META.uv[t]); g.fillRect(a - 1.5, b - 1.5, 3, 3); } }
-    g.strokeStyle = "#fff"; g.lineWidth = 2; g.beginPath(); g.arc(x, y, 6, 0, 7); g.stroke();
-  }
-}
-function nearestTrace(mm) {
-  let best = -1, bd = Infinity;
-  META.uv.forEach((p, i) => { if (p[0] === null) return; const d = (p[0] - mm[0]) ** 2 + (p[1] - mm[1]) ** 2; if (d < bd) { bd = d; best = i; } });
-  return best;
-}
-let mdrag = null;
-$("map").addEventListener("mousedown", e => { mdrag = { x: e.offsetX, y: e.offsetY, vx: view.x, vy: view.y, moved: false }; });
-$("map").addEventListener("mousemove", e => {
-  if (!mdrag) return; const dx = e.offsetX - mdrag.x, dy = e.offsetY - mdrag.y; if (Math.abs(dx) + Math.abs(dy) > 3) mdrag.moved = true;
-  if (mdrag.moved) { view.x = mdrag.vx - dx / view.s; view.y = mdrag.vy + dy / view.s; drawMap(); }
-});
-$("map").addEventListener("mouseup", e => { const d = mdrag; mdrag = null; if (!d || d.moved) return;
-  const t = nearestTrace(toMm(e.offsetX, e.offsetY)); if (t < 0) return;
-  if (e.shiftKey) crossVertex(META.rv[t]); else selectVertex(META.rv[t], null); });
-$("map").addEventListener("wheel", e => {
-  e.preventDefault(); const m = toMm(e.offsetX, e.offsetY), f = Math.exp(-e.deltaY * 0.0015);
-  view.s *= f; view.x = m[0] - e.offsetX / view.s; view.y = m[1] - ($("map").clientHeight - e.offsetY) / view.s; drawMap();
-}, { passive: false });
 
 // ---------------------------------------------------------------- white surface (WebGL2, box mm)
 const GL = { g: null, nv: 0, nf: 0, pos: null, vtrace: null, R: [1,0,0, 0,1,0, 0,0,1], target: [0,0,0], dist: 50, radius: 25, level: 0 };
@@ -424,15 +185,10 @@ async function loadMesh(level, faces) {
   g.bindBuffer(g.ARRAY_BUFFER, GL.bnrm); g.bufferData(g.ARRAY_BUFFER, nrm, g.DYNAMIC_DRAW);
   g.bindBuffer(g.ARRAY_BUFFER, GL.bsulc); g.bufferData(g.ARRAY_BUFFER, sulc, g.DYNAMIC_DRAW);
 }
-function colour3d() {
-  if (!GL.vtrace || (!VALS && META.layers.length)) return;   // no layers: all grey
-  const st = diverging ? RDBU : MAGMA, col = new Float32Array(3 * GL.nv);
-  for (let v = 0; v < GL.nv; v++) { const t = GL.vtrace[v]; const x = t >= 0 && VALS ? VALS[t] : null;
-    const c = x === null ? [110, 110, 110] : ramp(st, (x - lo) / (hi - lo)); col[3*v] = c[0] / 255; col[3*v+1] = c[1] / 255; col[3*v+2] = c[2] / 255; }
-  GL.g.bindBuffer(GL.g.ARRAY_BUFFER, GL.bcol); GL.g.bufferData(GL.g.ARRAY_BUFFER, col, GL.g.DYNAMIC_DRAW);
+function colour3d() {   // all grey
+  if (!GL.nv) return;
+  GL.g.bindBuffer(GL.g.ARRAY_BUFFER, GL.bcol); GL.g.bufferData(GL.g.ARRAY_BUFFER, new Float32Array(3 * GL.nv).fill(110 / 255), GL.g.DYNAMIC_DRAW);
 }
-function rootPos(traces) { const a = new Float32Array(3 * traces.length);
-  traces.forEach((t, k) => { const v = META.rv[t]; a[3*k] = GL.pos[3*v]; a[3*k+1] = GL.pos[3*v+1]; a[3*k+2] = GL.pos[3*v+2]; }); return a; }
 function points(g, M, arr, col, size) {
   if (!arr.length) return; g.useProgram(GL.pprog); g.bindVertexArray(GL.pvao);
   g.bindBuffer(g.ARRAY_BUFFER, GL.pbuf); g.bufferData(g.ARRAY_BUFFER, arr, g.DYNAMIC_DRAW);
@@ -458,9 +214,6 @@ function draw3d() {
   g.uniformMatrix3fv(g.getUniformLocation(GL.prog, "rot"), false, new Float32Array([R[0], R[3], R[6], R[1], R[4], R[7], R[2], R[5], R[8]]));
   g.uniform1f(g.getUniformLocation(GL.prog, "sulcw"), GL.level > 0 ? 1 : 0);
   g.drawElements(g.TRIANGLES, 3 * GL.nf, g.UNSIGNED_INT, 0);
-  if (SEC) { points(g, M, rootPos(SEC.u.traces), [0.19, 0.84, 1], 3); points(g, M, rootPos(SEC.v.traces), [1, 0.82, 0.25], 3);
-    if (SEC.facing) points(g, M, rootPos(SEC.facing.u.traces.concat(SEC.facing.v.traces)), [1, 0.55, 0.26], 3); }
-  if (CUR !== null) points(g, M, rootPos([CUR]), [1, 1, 1], 7);
   if (SELN) { const v = SELN.vertex; points(g, M, new Float32Array([GL.pos[3*v], GL.pos[3*v+1], GL.pos[3*v+2]]), [0.2, 1, 1], 11); }
   vHook("draw3d", g, M);
 }
@@ -499,8 +252,8 @@ function initGL() {
 $("level").onchange = async () => { await loadMesh(+$("level").value, false); draw3d(); };
 
 // ---------------------------------------------------------------- volume pane (NiiVue, world mm)
-const NV = { nv: null, tracts: [], points: null, pia: null, over: [], axes: [] };
-// a white surface alone: the volume pane shows a box round voxel WB.c (the server's BOX each way)
+const NV = { nv: null };
+// the volume pane shows a box round voxel WB.c (the server's BOX each way)
 const WB = { c: null };
 const WBCOL = { R: [0, 255, 255, 64, 64], G: [0, 149, 59, 220, 140], B: [0, 0, 48, 80, 255], A: [0, 90, 255, 255, 255], I: [0, 1, 2, 3, 4],
                 labels: ["", "WM mask", "handle cut", "handle fill", "cavity fill"] };
@@ -523,42 +276,23 @@ async function initVolume() {
                           meshThicknessOn2D: 0.4 });
   NV.nv = nv; await nv.attachTo("nv");
   const t0 = performance.now();
-  if (META.surface_only) await loadWhiteBox(META.box.centre);
-  else {
-    await nv.loadVolumes([{ url: "/echo2.nii.gz", colormap: "gray" }]);
-    if (!META.labels_only)
-      await nv.loadMeshes([{ url: "/white.gii", rgba255: [210, 210, 214, 255] }, { url: "/gm.gii", rgba255: [140, 200, 255, 255], opacity: 0.25 }]);
-  }
+  await loadWhiteBox(META.box.centre);
   await nv.setVolumeRenderIllumination(-1);   // the 3D tile shows the three slices, so the meshes inside stay visible
   setView();
   nv.onLocationChange = d => {
     const mm = Array.from(d.mm).slice(0, 3);
     if (NV.shift) { const back = NV.shift.back; NV.shift = null; volumeShiftClick(mm, back); return; }
-    if (NV.paint) { NV.paint = false; brushAt(mm); }
     $("vstat").textContent = `crosshair ${mm.map(x => x.toFixed(2)).join(", ")} mm  voxel ${d.vox.join(", ")}`;
     if (!applying && !NV.moving) { CROSS = mm; share({ crosshair: mm }); }
   };
   // a shift-click: note it before NiiVue moves its crosshair, then treat that move as a WM click
-  $("nv").addEventListener("pointerdown", e => { NV.shift = e.shiftKey && e.button === 0 ? { back: CROSS } : null;
-                                                  NV.paint = !e.shiftKey && e.button === 0 && LAB.on && $("brush").value !== ""; }, true);
-  await loadPoints();
+  $("nv").addEventListener("pointerdown", e => { NV.shift = e.shiftKey && e.button === 0 ? { back: CROSS } : null; }, true);
   log(`volume pane ready (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
 }
 const VIEWS = { multi: SLICE_TYPE.MULTIPLANAR, ax: SLICE_TYPE.AXIAL, cor: SLICE_TYPE.CORONAL, sag: SLICE_TYPE.SAGITTAL, render: SLICE_TYPE.RENDER };
 function setView() { if (BV.on) { bvLayout(); bvUpdate(); return; } NV.nv.setSliceType(VIEWS[$("vview").value]); }
 $("vview").onchange = setView;
 $("vwhite").onchange = () => NV.nv.setMeshProperty(NV.nv.meshes[0].id, "visible", $("vwhite").checked);
-$("vgm").oninput = () => NV.nv.setMeshProperty(NV.nv.meshes[1].id, "opacity", +$("vgm").value);
-for (const id of ["vfrom", "vto"]) $(id).onchange = () => { for (const m of NV.tracts) NV.nv.setMeshProperty(m.mesh.id, "visible", $(m.kind === "from" ? "vfrom" : "vto").checked); };
-$("vaxes").onchange = () => { for (const m of NV.axes) NV.nv.setMeshProperty(m.id, "visible", $("vaxes").checked); };
-$("vpts").onchange = () => { for (const m of [NV.points, NV.pia]) if (m) NV.nv.setMeshProperty(m.id, "visible", $("vpts").checked); };
-$("vover").onchange = async () => {
-  const nv = NV.nv; dropMeshes(NV.over); NV.over = [];
-  if (!$("vover").checked) return;
-  for (let c = 0; c < CLSCOL.length; c++) {
-    const m = await nv.addMeshFromUrl({ url: `/overview/${c}/4.tck`, rgba255: [...CLSCOL[c], 255] }); nv.setMeshProperty(m.id, "fiberColor", "Fixed"); nv.setMeshProperty(m.id, "fiberRadius", 0); NV.over.push(m);
-  }
-};
 function moveVolumeCrosshair(mm) {
   if (BV.on && mm) { bvCross(mm); return; }
   if (!NV.nv || !mm) return; NV.moving = true;
@@ -583,42 +317,8 @@ function dropMesh(m) {   // removeMesh needs unloadMesh, which a connectome mesh
   const k = nv.meshes.indexOf(m); if (k >= 0) nv.meshes.splice(k, 1); nv.drawScene();
 }
 function addNodes(json) { const m = NV.nv.loadConnectomeAsMesh(json); NV.nv.addMesh(m); NV.nv.drawScene(); return m; }
-async function loadPoints() {
-  if (!META.points_world.length) return;
-  try { NV.points = addNodes(nodes("points", META.points_world, 1, 0.12)); }
-  catch (e) { log("points not shown in the volume pane: " + e.message); }
-}
-async function loadStreamlines(t) {
-  const nv = NV.nv; if (!nv) return;
-  dropMeshes(NV.tracts.map(m => m.mesh)); NV.tracts = [];
-  if (NV.pia) { dropMesh(NV.pia); NV.pia = null; }
-  const r = $("radius").value, S = await get(`/streamlines?i=${t}&radius=${r}`);
-  if (CUR !== t) return;
-  for (const [g, n] of Object.entries(S.groups)) {
-    if (!n) continue; const [kind, c] = g.split("_"); let col = CLSCOL[+c];
-    if (kind === "to") col = col.map(x => Math.round(x + 0.45 * (255 - x)));
-    const m = await nv.addMeshFromUrl({ url: `/tracts/${t}/${r}/${g}.tck`, rgba255: [...col, 255] }); nv.setMeshProperty(m.id, "fiberColor", "Fixed"); nv.setMeshProperty(m.id, "fiberRadius", 0.03);
-    nv.setMeshProperty(m.id, "visible", $(kind === "from" ? "vfrom" : "vto").checked); NV.tracts.push({ mesh: m, kind });
-  }
-  if (S.pia_world.length) { try { NV.pia = addNodes(nodes("pia", S.pia_world, 0, 0.05)); } catch (e) { log("pia points: " + e.message); } }
-  $("vcount").textContent = `${S.n_from} from, ${S.n_to} to (${S.n_fallback} by the fallback) · tracer: ${S.tracer} · WM label: ${S.wm_label}`;
-  $("vkey").innerHTML = META.classes.map((n, c) => `<span><i class="sw" style="background:rgb(${CLSCOL[c]})"></i>${n} (${(S.groups["from_" + c] || 0) + (S.groups["to_" + c] || 0)})</span>`).join("") + "<span>paler: to</span>";
-}
-$("radius").onchange = () => CUR !== null && loadStreamlines(CUR);
-// the curves on the white surface that the u and v sections follow (cyan, yellow: as on the map)
-// (addMeshFromUrl gives each load its own mesh: loads that overlap never take each other's)
-function dropMeshes(ms) { for (const m of ms) if (NV.nv.meshes.includes(m)) NV.nv.removeMesh(m); }   // removeMesh of a gone mesh drops the last one
-async function loadAxes(sec) {
-  const nv = NV.nv; if (!nv) return;
-  const ms = [];
-  for (const [a, col] of [["u", [48, 213, 255]], ["v", [255, 210, 63]]]) {
-    if (sec.axes.points[a] < 2) continue;
-    const m = await nv.addMeshFromUrl({ url: `/axes/${sec.axes.id}/${a}.tck`, rgba255: [...col, 255] }); ms.push(m);
-    nv.setMeshProperty(m.id, "fiberColor", "Fixed"); nv.setMeshProperty(m.id, "fiberRadius", 0.08); nv.setMeshProperty(m.id, "visible", $("vaxes").checked);
-  }
-  if (SEC !== sec) { dropMeshes(ms); return; }   // a newer section came while these loaded
-  dropMeshes(NV.axes); NV.axes = ms;
-}
+$("vecho").onchange = () => loadWhiteBox(WB.c);   // the background: echo 1, 2 or 3, under the overlay
+$("vlabop").oninput = () => { const vol = NV.nv?.volumes[1]; if (vol) { vol.opacity = +$("vlabop").value; NV.nv.updateGLVolume(); } };
 
 // ---------------------------------------------------------------- volume pane, our own (WebGL2: the volume as bricks at levels of detail, baillarger.viewer.bricks)
 // The slices are sampled in a shader from bricks in one 3D texture (the atlas), found through a page table per level; the
@@ -677,7 +377,7 @@ const BVVS = `#version 300 es
 void main() { vec2 p = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0))[gl_VertexID]; gl_Position = vec4(p, 0.0, 1.0); }`;
 async function initBricks() {
   BV.on = true; $("nv").style.display = "none"; $("bv").style.display = ""; $("bvo").style.display = ""; $("vfit").style.display = "";
-  for (const id of ["vwhite", "vgm", "vfrom", "vto", "vover", "vpts", "vaxes"]) $(id).closest("label").style.display = "none";
+  $("vwhite").closest("label").style.display = "none";
   $("vkey").style.display = "none"; $("vview").querySelector("option[value=render]").disabled = true;
   if ($("vview").value === "render") $("vview").value = "multi";
   $("vhelp").textContent = "click: crosshair · shift-click: WM selection to the nearest white-surface point · pinch or ctrl-wheel: zoom at the cursor · two-finger scroll or middle-drag: pan · ↑ ↓: next slice under the pointer (page up / down: 10)";
@@ -902,191 +602,6 @@ function bvEvents() {
 }
 $("vengine").onchange = () => { q.set("vol", $("vengine").value); location.search = q.toString(); };
 
-// ---------------------------------------------------------------- sections
-async function showTrace(i) {
-  if (i === null || i < 0) return; CUR = i;
-  const half = $("half").value;
-  let u = `/section?i=${i}&half=${half}`;
-  if (FRAME) u += `&right=${FRAME.right.join(",")}&up=${FRAME.up.join(",")}&level=${FRAME.level}`;
-  const rot = ROT, sec = await get(u + `&rot=${rot}`);
-  if (CUR !== i || ROT !== rot) return;
-  const moved = !SEC || SEC.trace !== i; SEC = sec;
-  showInfo(); drawMap(); draw3d(); if (has("sections")) drawSections();
-  if (NV.nv) { loadAxes(sec); if (moved) loadStreamlines(i); }
-}
-function clearSections() {
-  for (const id of ["cu", "cv", "cfu", "cfv"]) { const c = $(id); c.getContext("2d").clearRect(0, 0, c.width, c.height); }
-  $("facing").style.display = "none";
-  if (NV.nv) { dropMeshes(NV.tracts.map(m => m.mesh)); NV.tracts = []; if (NV.pia) { dropMesh(NV.pia); NV.pia = null; } dropMeshes(NV.axes); NV.axes = []; }
-  $("info").textContent = !SELN ? (META?.surface_only ? OVTXT : "")
-    : META.surface_only ? `WM selection: true vertex ${SELN.true_vertex} (overview vertex ${SELN.vertex}) at (${SELN.world_mm}) mm`
-    : `WM selection: vertex ${SELN.vertex} at (${SELN.world_mm}) mm; no shown trace within 1 mm`;
-}
-function showInfo() {
-  const f = SEC.info;
-  $("info").textContent =
-    (SELN ? `WM selection: vertex ${SELN.vertex} at (${SELN.world_mm}) mm; its trace's root is ${SELN.root_mm} mm away\n` : "") +
-    `trace ${f.trace} (${f.cls}${f.fallback ? ", fallback tracer" : ""})  root ITK-SNAP voxel (${f.root_itksnap})  full grid (${f.root_full_grid0})  world (${f.world_mm}) mm\n` +
-    (f.pia_mm !== null ? `pia ${f.pia_mm} mm  ${f.certified ? "certified" : "NOT certified"}` : "no levels (no joint result loaded)") +
-    (f.tie !== null ? `  tie -> ${f.tie}` : "") + `\nsections along the ${SEC.frame}${SEC.rot ? `, turned by ${SEC.rot}° (u toward v)` : ""}, orthogonal on the true surface; the carried v-axis is off by ${SEC.angle_error_deg}°` +
-    `\nsnap: ` + Object.entries(SEC.snap).map(([p, x]) => x ? `${p} ${x.rot}° (${x.axis} in it, the planes ${x.tilt_deg}° apart)` : `${p}: the surface lies in it`).join(" · ") +
-    (SEC.facing ? `\nfacing trace ${SEC.facing.trace} (${SEC.facing.via})` : "");
-}
-function drawSections() {
-  if (!SEC) return;
-  drawSection($("cu"), SEC.u, `u-section through trace ${SEC.trace} (cyan on the map)`, $("hu"));
-  drawSection($("cv"), SEC.v, `v-section through trace ${SEC.trace} (yellow on the map)`, $("hv"));
-  if (SEC.facing) { $("facing").style.display = "";
-    drawSection($("cfu"), SEC.facing.u, `facing trace ${SEC.facing.trace}: u`, $("hfu"));
-    drawSection($("cfv"), SEC.facing.v, `facing trace ${SEC.facing.trace}: v`, $("hfv")); }
-  else $("facing").style.display = "none";
-}
-function lay(c) { const W = c.clientWidth, H = c.clientHeight, half = +$("half").value, dmax = +$("dmax").value;
-  return { W, H, x: d => (d + half) / (2 * half) * W, y: z => z / dmax * H, dmax, half, z: py => py / H * dmax }; }
-function drawSection(c, S, title, h) {
-  const tau = S.frame === "tau";
-  h.textContent = title + ` — ${S.traces.length} traces` + (tau ? " — flattened: depth axis τ (mm)" : "");
-  const dpr = window.devicePixelRatio || 1, L = lay(c); c.width = L.W * dpr; c.height = L.H * dpr;
-  const g = c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.fillStyle = "#000"; g.fillRect(0, 0, L.W, L.H);
-  const n = S.traces.length; if (!n) return;
-  const xs = S.dist.map(L.x), step = 0.04, PW = c.width, PH = c.height, img = g.createImageData(PW, PH);
-  const edges = xs.map((x, k) => [k ? (xs[k - 1] + x) / 2 : x - 3, k < n - 1 ? (x + xs[k + 1]) / 2 : x + 3]);
-  const maxw = L.x(0.15) - L.x(0);
-  for (let k = 0; k < n; k++) {
-    const a = Math.max(0, Math.round(dpr * Math.max(edges[k][0], xs[k] - maxw))), b = Math.min(PW, Math.round(dpr * Math.min(edges[k][1], xs[k] + maxw)));
-    const col = S.img[k];
-    for (let py = 0; py < PH; py++) { const j = Math.floor(L.z((py + 0.5) / dpr) / step); if (j >= col.length) break; const v = Math.round(128 + col[j]);
-      for (let px = a; px < b; px++) { const o = 4 * (py * PW + px); img.data[o] = img.data[o + 1] = img.data[o + 2] = v; img.data[o + 3] = 255; } }
-  }
-  g.putImageData(img, 0, 0); g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  if (S.lo) { g.fillStyle = "#e3494870"; for (let k = 0; k < n; k++) if (S.lo[k] !== null) g.fillRect(edges[k][0], L.y(S.lo[k]), Math.max(1, edges[k][1] - edges[k][0]), Math.max(1, L.y(S.hi[k]) - L.y(S.lo[k]))); }
-  else if (S.levels.length) { g.fillStyle = "#e3494870"; for (let k = 0; k < n; k++) if (S.uncertified[k]) g.fillRect(edges[k][0], 0, edges[k][1] - edges[k][0], 3); }
-  const line = (arr, col, w, dash, alpha) => { if (!arr) return;
-    g.strokeStyle = col; g.lineWidth = w; g.setLineDash(dash || []); g.globalAlpha = alpha || 1; g.beginPath(); let on = false;
-    for (let k = 0; k < n; k++) { const v = arr[k]; if (v === null || (k && Math.abs(S.dist[k] - S.dist[k - 1]) > 0.5)) { on = false; if (v === null) continue; }
-      const x = xs[k], y = L.y(v); if (on) g.lineTo(x, y); else g.moveTo(x, y); on = true; }
-    g.stroke(); g.setLineDash([]); g.globalAlpha = 1; };
-  line(S.single, "#30d5ff", 1, [5, 4]);
-  for (let l = 0; l < S.levels.length - 1; l++) line(S.levels[l], "#ffa630", 1, [2, 2], 0.8);
-  if (S.levels.length) line(S.levels[S.levels.length - 1], "#ff2bd6", 1.6);
-  g.fillStyle = "#7cff6b"; for (let k = 0; k < n; k++) if (S.top[k] !== null) g.fillRect(xs[k] - 2, L.y(S.top[k]) - 1, 4, 2);
-  g.fillStyle = "#9aa0a8"; for (let k = 0; k < n; k++) if (S.tied[k]) { g.beginPath(); g.moveTo(xs[k] - 3, 0); g.lineTo(xs[k] + 3, 0); g.lineTo(xs[k], 5); g.fill(); }
-  g.font = "13px system-ui"; g.fillStyle = "#ffd23f"; g.textAlign = "center"; g.textBaseline = "middle";
-  for (const p of S.points) { g.fillText("★", xs[p.k], L.y(p.depth)); g.font = "10px system-ui"; g.fillText(p.point, xs[p.k] + 9, L.y(p.depth) - 8); g.font = "13px system-ui"; }
-  g.strokeStyle = "#ffffff80"; g.lineWidth = 1; g.beginPath(); g.moveTo(L.x(0), 0); g.lineTo(L.x(0), L.H); g.stroke();
-  g.fillStyle = "#9aa0a8"; g.font = "10px system-ui"; g.textAlign = "left";
-  for (let z = 1; z < L.dmax; z++) g.fillText(z + (tau ? " τ" : " mm"), 2, L.y(z));
-  for (let d = -L.half; d <= L.half; d += 2) g.fillText(d, L.x(d) + 2, L.H - 6);
-}
-$("half").onchange = () => CUR !== null && showTrace(CUR);
-// the turn of both section axes about the normal: shared, on top of the frame (which stays as it was)
-function showRot() { $("rot").value = ROT; $("rotn").value = ROT; }
-async function setRot(deg) {
-  deg = Math.round(100 * (((+deg % 360) + 540) % 360 - 180 || 0)) / 100; if (deg === -180) deg = 180;   // into (-180, 180]
-  if (deg === ROT) return; ROT = deg; showRot(); share({ rotation: deg });
-  if (CUR !== null) await showTrace(CUR);
-}
-$("rot").oninput = () => { $("rotn").value = $("rot").value; };
-$("rot").onchange = () => setRot($("rot").value);
-$("rotn").onchange = () => setRot($("rotn").value);
-$("snapto").onchange = () => {
-  const p = $("snapto").value; $("snapto").value = ""; if (!SEC || !p) return;
-  let best = p === "nearest" ? null : p;
-  if (p === "nearest") for (const [k, x] of Object.entries(SEC.snap)) if (x && (best === null || x.tilt_deg < SEC.snap[best].tilt_deg)) best = k;
-  const x = best && SEC.snap[best]; if (!x) { log(`snap: the surface lies in the ${p} plane here: every axis is in it`); return; }
-  log(`snap: ${x.axis} in the ${best} plane at ${x.rot}° (the section plane is ${x.tilt_deg}° from it)`);
-  setRot(x.rot);
-};
-document.addEventListener("keydown", e => {
-  if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey || META?.labels_only) return;
-  const d = { "[": -5, "]": 5, "{": -1, "}": 1 }[e.key]; if (d === undefined) return;
-  e.preventDefault(); setRot(ROT + d);
-});
-$("dmax").onchange = () => SEC && drawSections();
-
-// ---------------------------------------------------------------- pial labels (baillarger.viewer.labels)
-const LAB = { on: false, rows: [], seq: -1, cur: -1, vol: null };
-const LABCOL = { R: [0, 255, 64, 255, 64, 255, 150], G: [0, 64, 255, 208, 192, 64, 80], B: [0, 64, 64, 0, 255, 255, 255],
-                 A: [0, 255, 255, 255, 255, 255, 255], I: [0, 1, 2, 3, 4, 5, 6],
-                 labels: ["", "proposed", "accepted", "rejected", "brush: fluid", "brush: cortex", "dark, no cell"] };
-function shownRows() {
-  const f = $("lfilter").value;
-  return LAB.rows.filter(r => f === "all" || r.status === f || (f === "open" && r.status !== "rejected"));
-}
-function drawLabels() {
-  const rows = shownRows(), c = LAB.counts;
-  $("lcount").textContent = `${c.proposed} proposed · ${c.accepted} accepted · ${c.rejected} rejected · ${LAB.brush} brush voxels`;
-  const h = ["rank", "status", "auto", "kind", "voxels", "columns", "crest", "fluid frac", "touches fluid", "Betti local", "ITK-SNAP"];
-  let t = "<table><tr>" + h.map(x => `<th>${x}</th>`).join("") + "</tr>";
-  for (const r of rows) {
-    t += `<tr data-id="${r.id}" class="${r.id === LAB.cur ? "cur" : ""}"><td>${r.rank + 1}</td><td class="st-${r.status}">${r.status}</td><td>${r.auto}</td>`
-       + `<td>${r.kind}</td><td>${r.voxels}</td><td>${r.columns}</td><td>${r.crest}</td><td>${r.frac.toFixed(2)}</td><td>${r.touches ? "yes" : ""}</td>`
-       + `<td>${r.betti[0].join(",")} → ${r.betti[1].join(",")}</td><td>${r.itksnap.join(", ")}</td></tr>`;
-  }
-  $("ltable").innerHTML = t + "</table>";
-  for (const tr of $("ltable").querySelectorAll("tr[data-id]")) tr.onclick = () => goCell(+tr.dataset.id);
-}
-async function loadLabels() {
-  const L = await get("/labels/list");
-  Object.assign(LAB, { rows: L.rows, counts: L.counts, brush: L.brush, seq: L.seq });
-  if (has("labels")) drawLabels();
-  await loadLabelOverlay();
-}
-async function loadLabelOverlay() {
-  const nv = NV.nv; if (!nv) return;
-  if (LAB.vol) { nv.removeVolume(LAB.vol); LAB.vol = null; }
-  await nv.addVolumeFromUrl({ url: `/labels.nii.gz?seq=${LAB.seq}`, name: `labels${LAB.seq}.nii.gz`, opacity: +$("vlabop").value });
-  LAB.vol = nv.volumes[nv.volumes.length - 1];
-  LAB.vol.setColormapLabel(LABCOL); nv.updateGLVolume();
-}
-function goCell(id) {
-  const r = LAB.rows.find(x => x.id === id); if (!r) return;
-  LAB.cur = id; if (has("labels")) drawLabels();
-  const el = $("ltable").querySelector("tr.cur"); if (el) el.scrollIntoView({ block: "nearest" });
-  crossHere(r.world_mm);
-  $("info").textContent = `review cell ${r.id} (rank ${r.rank + 1}): ${r.status}, auto ${r.auto}; ${r.kind}, ${r.voxels} voxels; `
-    + `${r.columns} columns and ${r.crest} crest voxels; median fluid fraction ${r.frac}; local Betti of the tissue ${r.betti[0]} → ${r.betti[1]}; `
-    + `ITK-SNAP (full grid) ${r.itksnap.join(", ")}`;
-}
-function step(d) {
-  const rows = shownRows(); if (!rows.length) return;
-  const k = rows.findIndex(r => r.id === LAB.cur);
-  goCell(rows[Math.min(rows.length - 1, Math.max(0, k < 0 ? 0 : k + d))].id);
-}
-async function decide(status) {
-  if (LAB.cur < 0) return;
-  const r = await fetch("/labels/decide", { method: "POST", headers: { "Content-Type": "application/json" },
-                                             body: JSON.stringify({ from: ME, id: LAB.cur, status }) });
-  const j = await r.json(); if (j.error) { log("error: " + j.error); return; }
-  await loadLabels(); if (status !== "proposed") step(1);
-}
-async function brushAt(mm) {
-  const r = await fetch("/labels/brush", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ from: ME, mm, radius: +$("bradius").value, label: $("brush").value }) });
-  const j = await r.json(); if (j.error) { log("error: " + j.error); return; }
-  log(`brush: ${j.voxels} voxels to ${$("brush").value} at box voxel ${j.centre_box0.join(", ")}`);
-  await loadLabels();
-}
-$("lacc").onclick = () => decide("accepted"); $("lrej").onclick = () => decide("rejected"); $("lund").onclick = () => decide("proposed");
-$("lnext").onclick = () => step(1); $("lprev").onclick = () => step(-1);
-$("lfilter").onchange = drawLabels;
-$("vecho").onchange = async () => {   // the background: echo 1, 2 or 3, under the overlay
-  if (META.surface_only) { await loadWhiteBox(WB.c); return; }
-  const nv = NV.nv, old = nv.volumes[0], k = $("vecho").value;
-  await nv.addVolumeFromUrl({ url: `/labels/echo${k}.nii.gz`, name: `echo${k}.nii.gz`, colormap: "gray" });
-  nv.setVolume(nv.volumes[nv.volumes.length - 1], 0); nv.removeVolume(old); nv.updateGLVolume();
-  log(`volume pane: echo ${k}`);
-};
-$("vlabop").oninput = () => {
-  const vol = META.surface_only ? NV.nv?.volumes[1] : LAB.vol;
-  if (vol) { vol.opacity = +$("vlabop").value; NV.nv.updateGLVolume(); }
-};
-document.addEventListener("keydown", e => {
-  if (!LAB.on || e.target.tagName === "SELECT" || e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey) return;
-  const k = { j: () => step(1), k: () => step(-1), a: () => decide("accepted"), r: () => decide("rejected"), u: () => decide("proposed") }[e.key];
-  if (k) { e.preventDefault(); k(); }
-});
-
 // ---------------------------------------------------------------- hooks for panes in their own files (static/columns.js)
 // VIEWER.hooks: selection(sel, frame) after each WM selection; state(st) after each shared-state change; draw3d(g, mvp) at
 // the end of each 3D frame (box mm, the true surface at level 0); resize(). VIEWER.ready resolves when the page has started.
@@ -1098,57 +613,34 @@ const VIEWER = window.VIEWER = { $, get, log, share, GL, NV, mvp, program, draw3
 function vHook(name, ...a) { for (const h of VIEWER.hooks[name]) try { h(...a); } catch (e) { log(`${name}: ${e.message}`); } }
 
 // ---------------------------------------------------------------- start
-window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections")) drawSections(); vHook("resize"); });
+window.addEventListener("resize", () => { draw3d(); vHook("resize"); });
 (async () => {
   layout();
   META = await get("/meta");
-  if (META.labels_only) {   // no column volume: echo 2, the overlay, the list and the brush
-    PANES = ["volume", "labels"]; layout();
-    for (const id of ["vwhite", "vgm", "vfrom", "vto", "vover", "vpts", "vaxes", "layer", "half", "dmax", "radius", "panesel"])
-      $(id).closest("label").style.display = "none";
-    $("fbar").style.display = "none";
-    $("rotbar").style.display = "none";
-    $("newwin").style.display = "none";
-  } else if (META.surface_only) {   // a white surface alone: its overview, and the volume pane: NiiVue on a box, or ours on the whole volume (?vol=bricks)
-    PANES = ["volume", "surface"]; layout();
-    if (q.get("vol") === "bricks" && !(await fetch("/volume")).ok) { PANES = ["surface"]; layout(); }   // no volume for ours: the overview alone
-    if (q.get("columns") !== "0" && (await fetch("/columns/meta")).ok) {   // static/columns.js; ?panes= picks among the three
-      const want = (q.get("panes") || "").split(",").filter(p => ["volume", "surface", "columns"].includes(p));
-      PANES = want.length ? want : PANES.concat(["columns"]); layout(); }
-    for (const id of ["layer", "half", "dmax", "radius", "panesel", "vgm", "vfrom", "vto", "vover", "vpts", "vaxes", "brush", "bradius"])
-      $(id).closest("label").style.display = "none";
-    if (q.get("vol") !== "bricks") {
-      $("vlab").style.display = "";
-      $("vkey").textContent = "overlay: WM mask (orange) · handle cut (red) · handle fill (green) · cavity fill (blue); the box follows the WM selection";
-    }
-    $("fbar").style.display = "none";
-    $("rotbar").style.display = "none";
-    const o = META.overview;
-    OVTXT = `White surface ${META.site}: overview of ${o.faces.toLocaleString()} faces (true surface ${o.true_faces.toLocaleString()}), ` +
-      `every true vertex within ${o.max_distance_mm} mm of it (eps ${o.eps_mm} mm). Click: WM selection (its true vertex below); drag: turn; shift-drag: move; wheel: zoom.`;
-    $("info").textContent = OVTXT;
+  // the white surface: its overview, and the volume pane: NiiVue on a box, or ours on the whole volume (?vol=bricks)
+  if (q.get("vol") === "bricks" && !(await fetch("/volume")).ok) { PANES = ["surface"]; layout(); }   // no volume for ours: the overview alone
+  if (q.get("columns") !== "0" && (await fetch("/columns/meta")).ok) {   // static/columns.js; ?panes= picks among the three
+    const want = (q.get("panes") || "").split(",").filter(p => ["volume", "surface", "columns"].includes(p));
+    PANES = want.length ? want : PANES.concat(["columns"]); }
+  layout();
+  if (q.get("vol") !== "bricks") {
+    $("vlab").style.display = "";
+    $("vkey").textContent = "overlay: WM mask (orange) · handle cut (red) · handle fill (green) · cavity fill (blue); the box follows the WM selection";
   }
+  const o = META.overview;
+  OVTXT = `White surface ${META.site}: overview of ${o.faces.toLocaleString()} faces (true surface ${o.true_faces.toLocaleString()}), ` +
+    `every true vertex within ${o.max_distance_mm} mm of it (eps ${o.eps_mm} mm). Click: WM selection (its true vertex below); drag: turn; shift-drag: move; wheel: zoom.`;
+  $("info").textContent = OVTXT;
   // the volume viewer: NiiVue, or ours with ?vol=bricks (the select in the volume pane's bar)
   BRICKS = q.get("vol") === "bricks";
   $("vengine").value = BRICKS ? "bricks" : "niivue";
   $("title").textContent = `Column viewer — ${META.site}`; document.title = `Column viewer ${META.site}`;
-  for (const n of META.layers) { const o = document.createElement("option"); o.textContent = n; $("layer").appendChild(o); }
   META.levels.forEach((n, k) => { const o = document.createElement("option"); o.value = k; o.textContent = n; $("level").appendChild(o); });
-  if (META.layers.includes("combined")) $("layer").value = "combined";
   if (has("surface")) { initGL(); const lv = Math.min(2, META.levels.length - 1); $("level").value = lv; await loadMesh(lv, true);
-    if (!META.layers.length) { colour3d(); draw3d(); } }
-  if (has("map")) fitMap();
-  if (META.layers.length) await loadLayer();
-  if (!META.labels_only && !META.surface_only) {
-    const F = await refreshFilters(false);
-    if (F.status.status === "running") pollJob(F.status.key);
-  }
+    colour3d(); draw3d(); }
   if (has("volume")) { if (BRICKS) await initBricks(); else await initVolume(); }
-  try { await get("/labels/list"); LAB.on = true; } catch (e) { LAB.on = false; }
-  if (LAB.on) { if (!BRICKS) $("vlab").style.display = ""; await loadLabels(); }
-  else if (has("labels")) $("ltable").textContent = "no label changes: start the viewer with --labels pial_labels_<name>.npz";
   connect();
-  log(`loaded ${META.n} traces; tracer ${META.tracer}; WM label ${META.wm_label}`);
+  log(`loaded the white surface ${META.site}`);
   viewerReady();
 })();
 </script>

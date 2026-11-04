@@ -12,8 +12,7 @@ runs as a job, one job at a time, in a thread.
   restart, loads it and does not compute it again.
 
 The module reads no data files. Each user gives the work and the format of
-its results: baillarger.viewer.filters (filters of a column volume) and
-baillarger.viewer.columns (the columns near a vertex).
+its results: baillarger.viewer.columns (the columns near a vertex).
 """
 
 import threading

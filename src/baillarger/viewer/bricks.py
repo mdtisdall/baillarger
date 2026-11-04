@@ -34,14 +34,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 
 from baillarger.data import crop_affine
-from baillarger.viewer.data import nifti
 
 type Arr = npt.NDArray[Any]
 type Float = npt.NDArray[np.float64]
+
+
+def nifti(path: Path) -> nib.nifti1.Nifti1Image:
+    """The NIfTI-1 image at path (ValueError for another format)."""
+    img = nib.load(path)
+    if not isinstance(img, nib.nifti1.Nifti1Image):
+        raise ValueError(f"{path}: not a NIfTI-1 image")
+    return img
+
+
 # the finest level with at most this many voxels gives the default window
 WINDOW_VOXELS = 1 << 22
 WINDOW_PERCENTILES = (0.5, 99.5)
