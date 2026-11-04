@@ -174,7 +174,7 @@ rule for this file; the suffix `noise` and the description `orientnoise`
 are our choice. The file is JSON with SpecVersion `orient-noise/1`. Matrices
 are E × E, flattened row-major. The command:
 
-    python -m baillarger.orient_noise --echoes E1 E2 E3 --dseg DSEG --out DERIVATIVES [--level 1] [--sigma 0.64] [--report REPORT.json]
+    python -m baillarger.orient_noise --echoes E1 E2 E3 --dseg DSEG --out DERIVATIVES [--level 1] [--sigma 0.64] [--cache-mb 256] [--report REPORT.json]
 
 | Key | Type | Required | Meaning |
 |---|---|---|---|

@@ -523,11 +523,14 @@ def main(argv: list[str] | None = None) -> None:
         "--sigma", type=float, default=O.SIGMA, help="sigma of the local level, mm"
     )
     ap.add_argument(
+        "--cache-mb", type=int, default=256, help="chunk cache per volume, MB"
+    )
+    ap.add_argument(
         "--report", type=Path, help="a JSON file for the per-superblock sums"
     )
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    s = O.OrientSampler(a.echoes, a.dseg, cells=a.cells)
+    s = O.OrientSampler(a.echoes, a.dseg, cells=a.cells, cache_bytes=a.cache_mb << 20)
     t = time.perf_counter()
     th = measure_thermal(s)
     log.info(f"thermal: {th['blocks']} blocks, {time.perf_counter() - t:.0f} s")
