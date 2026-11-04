@@ -80,11 +80,11 @@ any definition chosen later can be computed from the history.
 
 | # | Where | Finding | Status |
 |---|---|---|---|
-| E1 | §7, the bug | "#94 has the fix; it lands first …": #94 and #113 are merged. | open (wave 2: text) |
-| E2 | About this document | "Only stream 1 has run on the whole hemisphere": stream 2 phase 0 reports a 27 s hemisphere run. | open (wave 2: text) |
-| E3 | §4c step 4 | The ray-sampler spec is "none yet" and the traces "a prototype `.npz`", but `docs/formats/ray-sampler.md` exists. | open (wave 2: 4.3) |
-| E4 | §8 | Mixes "exists" with phase names for specs that exist (ray sampler, column volume); no row for `label-set/1`; `wm-dseg-fixes/1` is inside `wm-dseg.md`, not a file of its own. | open (wave 2: text) |
-| E5 | §3c steps 4 and 5 | 12.7 M vertices, 25.3 M → 210 k faces: from before the ventricles moved outside (+5.9 %). | open (wave 2: text) |
-| E6 | §4d; §9 | Rerun lists differ: §4d names stream 1 phases 3, 4, 6, 8 (3 is formats, 6 phantoms only); §9 names 1.4, 1.8, 1.9. | open (wave 2: text) |
-| E7 | §6d; §9 | §6d says viewer phase 5 needs viewer phase 3; §9 says 4.0.5 and 3.7. §6d's order omits 4.0.5 before 4.2. Stream 3 scaling is "alongside phases 3–5" in §5d and "needs 3.3, 3.5" in §9. | open (wave 2: text) |
-| E8 | §3c step 2; §5c Open; §6c | Tight folds "152 at 91 sites" then "74 of 90 sites"; §5c Open says normal rays "use [the closed form] at 0.5 mm", but stream 2 now measures A(s); FreeSurfer's 0.1 weight stated under "Decided" before the result moves to 1. | open (wave 2: text) |
+| E1 | §7, the bug | "#94 has the fix; it lands first …": #94 and #113 are merged. | fixed |
+| E2 | About this document | "Only stream 1 has run on the whole hemisphere": stream 2 phase 0 reports a 27 s hemisphere run. | fixed |
+| E3 | §4c step 4 | The ray-sampler spec is "none yet" and the traces "a prototype `.npz`", but `docs/formats/ray-sampler.md` exists. | fixed |
+| E4 | §8 | Mixes "exists" with phase names for specs that exist (ray sampler, column volume); no row for `label-set/1`; `wm-dseg-fixes/1` is inside `wm-dseg.md`, not a file of its own. | fixed |
+| E5 | §3c steps 4 and 5 | 12.7 M vertices, 25.3 M → 210 k faces: from before the ventricles moved outside (+5.9 %). | fixed |
+| E6 | §4d; §9 | Rerun lists differ: §4d names stream 1 phases 3, 4, 6, 8 (3 is formats, 6 phantoms only); §9 names 1.4, 1.8, 1.9. | fixed |
+| E7 | §6d; §9 | §6d says viewer phase 5 needs viewer phase 3; §9 says 4.0.5 and 3.7. §6d's order omits 4.0.5 before 4.2. Stream 3 scaling is "alongside phases 3–5" in §5d and "needs 3.3, 3.5" in §9. | fixed |
+| E8 | §3c step 2; §5c Open; §6c | Tight folds "152 at 91 sites" then "74 of 90 sites"; §5c Open says normal rays "use [the closed form] at 0.5 mm", but stream 2 now measures A(s); FreeSurfer's 0.1 weight stated under "Decided" before the result moves to 1. | fixed |
