@@ -12,8 +12,10 @@ correction is made once, on the whole mask (baillarger.handles,
 remove_handles), because a box crop of a handle-free solid has planar surface
 pieces, while a box alone cannot tell a handle from a fold that closes outside
 it. wm_topo makes the corrected segmentation: the aseg's labels, with the
-mask's cavities and handle fills set to the WM label and each handle cut
-given the label of its nearest neighbour outside the mask. Every later stage
+mask's cavities and handle fills set to the WM label, each handle cut
+given the label of its nearest neighbour outside the mask, and each piece of
+the mask below CRUMB_MM3 given the labels of its neighbours outside the mask
+(small_pieces). Every later stage
 reads its labels from the corrected segmentation, never the aseg plus a list
 of changes: the whole-hemisphere surface (baillarger.white_surf) and the box
 stages (baillarger.column_traces.load_tissue, baillarger.pial_labels, whose
@@ -27,6 +29,7 @@ correction.
 """
 
 import argparse
+import itertools
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,6 +53,7 @@ from baillarger.bids import (
     write_sidecar,
 )
 from baillarger.handles import kuhn_betti, kuhn_structure, remove_handles
+from baillarger.labels import CRUMB_MM3 as CRUMB_MM3
 from baillarger.labels import FILLED_LABELS as FILLED_LABELS
 from baillarger.labels import LUT_NAMES as LUT_NAMES
 from baillarger.labels import WM_LABEL as WM_LABEL
@@ -62,8 +66,14 @@ type Betti = tuple[int, int, int]
 # ------------------------------------------------- the corrected segmentation
 
 #: values of the fixes image: a handle cut, a handle fill, a cavity fill, a
-#: manual edit (baillarger.wm_edits)
-FIXES = {1: "handle_cut", 2: "handle_fill", 3: "cavity_fill", 4: "manual_edit"}
+#: manual edit (baillarger.wm_edits), a voxel of a small piece (small_pieces)
+FIXES = {
+    1: "handle_cut",
+    2: "handle_fill",
+    3: "cavity_fill",
+    4: "manual_edit",
+    5: "small_piece",
+}
 
 #: docs/formats/wm-dseg.md
 DSEG_SPEC = SidecarSpec(
@@ -79,6 +89,8 @@ DSEG_SPEC = SidecarSpec(
         Key("HandleFillVoxels", "integer", True, "voxels set to WM: handle fills"),
         Key("HandleCutVoxels", "integer", True, "voxels cut from the mask"),
         Key("CutLabels", "object", True, "new label of the cut voxels: count"),
+        Key("SmallPieces", "integer", True, "pieces of the mask removed: small"),
+        Key("SmallPieceVoxels", "integer", True, "voxels of the small pieces"),
         Key("ManualVoxels", "integer", True, "voxels changed by manual edits"),
         Key("Moves", "array of objects", True, "each manual edit and handle move"),
     ),
@@ -149,6 +161,62 @@ def relabel_cuts(
         sub[sel] = sub[src]
 
 
+#: the 26 neighbours of a voxel, as offsets
+NEIGHBOURS_26 = np.array(
+    [o for o in itertools.product((-1, 0, 1), repeat=3) if any(o)], np.intp
+)
+
+
+def small_pieces(
+    obj: Bool, voxel_mm: npt.ArrayLike, max_mm3: float = CRUMB_MM3
+) -> tuple[tuple[npt.NDArray[np.intp], ...], npt.NDArray[np.intp]]:
+    """The voxels of the pieces of obj (Kuhn adjacency, as
+    baillarger.handles.kuhn_betti counts pieces) whose volume (voxels x
+    prod(voxel_mm)) is less than max_mm3: their indices (as np.nonzero
+    gives them), and the number of the piece of each voxel (1 to the number
+    of small pieces, in the order of ndimage.label)."""
+    lab, n = ndi.label(obj, kuhn_structure())
+    sz = np.bincount(lab.ravel(), minlength=n + 1)
+    sel = sz * float(np.prod(np.asarray(voxel_mm, np.float64))) < max_mm3
+    sel[0] = False
+    idx = np.nonzero(sel[lab])
+    renum = np.cumsum(sel).astype(np.intp)
+    return idx, renum[lab[idx]]
+
+
+def neighbour_labels(
+    labels: npt.NDArray[np.integer[Any]],
+    idx: tuple[npt.NDArray[np.intp], ...],
+    filled: tuple[int, ...],
+    origin: npt.ArrayLike = (0, 0, 0),
+) -> npt.NDArray[np.integer[Any]]:
+    """For each voxel at idx: the most common label among its 26-neighbours
+    (in the array) that do not have a filled label. If two labels have the
+    same count, the smaller label value wins. Raises RuntimeError for a voxel
+    with no such neighbour, because then there is no label to give it; the
+    error gives the voxel's index plus origin (the index in the whole grid,
+    for labels that are a crop)."""
+    p = np.stack(idx, axis=1)
+    if not len(p):
+        return labels[idx]
+    q = p[:, None, :] + NEIGHBOURS_26[None]
+    inside = ((q >= 0) & (q < np.array(labels.shape))).all(axis=2)
+    q = np.clip(q, 0, np.array(labels.shape) - 1)
+    v = labels[q[..., 0], q[..., 1], q[..., 2]]
+    ok = inside & ~np.isin(v, filled)
+    none = ~ok.any(axis=1)
+    if none.any():
+        at = (p[none][0] + np.asarray(origin)).tolist()
+        raise RuntimeError(
+            f"the voxel {at} of a small piece of the WM mask has no 26-neighbour "
+            "without a filled label: there is no label to give it"
+        )
+    cand = np.unique(v[ok])  # sorted, so argmax takes the smallest label of a tie
+    counts = ((v[..., None] == cand) & ok[..., None]).sum(axis=1)
+    out: npt.NDArray[np.integer[Any]] = cand[counts.argmax(axis=1)]
+    return out
+
+
 @dataclass(frozen=True)
 class WMTopo:
     """The corrected segmentation and what was changed."""
@@ -162,11 +230,13 @@ class WMTopo:
     betti_after: Betti
     #: label: count, for the cut voxels
     cut_labels: dict[int, int]
-    #: per manual edit (Answer: its Id) and handle move: Kind, Voxels, Centre
-    #: (0-based voxel of the grid)
+    #: per manual edit (Answer: its Id), handle move and small piece: Kind,
+    #: Voxels, Centre (0-based voxel of the grid)
     moves: list[dict[str, Any]]
     #: voxels changed by the manual edits
     manual_voxels: int = 0
+    #: pieces of the mask removed because they were below CRUMB_MM3
+    small_pieces: int = 0
 
 
 def wm_topo(
@@ -178,10 +248,13 @@ def wm_topo(
     with its cavities filled and its handles removed
     (baillarger.handles.remove_handles). Cavity and handle fills become the
     WM label; each handle cut takes the label of the nearest voxel that is
-    outside the corrected mask and not a cut. The corrected segmentation's
-    voxels with a filled label are exactly the corrected mask. Raises
-    RuntimeError if that mask still has a handle or a cavity (b1 or b2 not 0),
-    which a fill of one piece of the mask touching another can make."""
+    outside the corrected mask and not a cut. Then the pieces of the mask
+    below CRUMB_MM3 (small_pieces) are removed: each of their voxels takes
+    the most common label of its 26-neighbours outside the mask
+    (neighbour_labels). The corrected segmentation's voxels with a filled
+    label are exactly the corrected mask. Raises RuntimeError if that mask
+    still has a handle or a cavity (b1 or b2 not 0), which a fill of one
+    piece of the mask touching another can make."""
     lap = Laps()
     a0 = np.asarray(aseg)
     manual = None
@@ -215,6 +288,13 @@ def wm_topo(
     labels[cav | fill] = wm_label
     relabel_cuts(labels, cut, ~obj & ~cut, voxel_mm)
     lap("relabel cuts")
+    # the small pieces: each voxel reads the labels above, not those of the
+    # other voxels of its piece, so the order of the voxels does not matter
+    small, piece = small_pieces(obj, voxel_mm)
+    n_small = int(piece.max()) if len(piece) else 0
+    labels[small] = neighbour_labels(labels, small, filled, lo)
+    obj[small] = False
+    lap("small pieces")
     if not np.array_equal(np.isin(labels, filled), obj):
         raise AssertionError("the corrected labels do not give the corrected mask")
     after = kuhn_betti(obj)
@@ -235,6 +315,7 @@ def wm_topo(
     fx[cut] = 1
     fx[fill] = 2
     fx[cav] = 3
+    fx[small] = 5  # a removed voxel shows this, whatever came before
     new, cnt = np.unique(labels[cut], return_counts=True)
     moves = []
     if edits is not None:
@@ -257,6 +338,16 @@ def wm_topo(
         )
         for mv in r.moves
     ]
+    sp = np.stack(small, axis=1) + lo
+    vox_n = np.bincount(piece, minlength=n_small + 1)[1:]
+    for k in range(1, n_small + 1):
+        moves.append(
+            dict(
+                Kind="small_piece",
+                Voxels=int(vox_n[k - 1]),
+                Centre=np.round(sp[piece == k].mean(0)).astype(int).tolist(),
+            )
+        )
     return WMTopo(
         dseg,
         fixes,
@@ -266,6 +357,7 @@ def wm_topo(
         {int(k): int(c) for k, c in zip(new, cnt, strict=True)},
         moves,
         0 if manual is None else int(manual.sum()),
+        n_small,
     )
 
 
@@ -320,7 +412,7 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
         dict(
             SpecVersion=DSEG_SPEC.version,
             Description="The segmentation with its WM mask (FilledLabels) made "
-            "cavity- and handle-free.",
+            f"cavity- and handle-free, without pieces below {CRUMB_MM3:g} mm3.",
             **src,
             Provenance=prov,
             Hemisphere=t.hemi,
@@ -332,6 +424,8 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
             HandleFillVoxels=int((t.fixes == 2).sum()),
             HandleCutVoxels=int((t.fixes == 1).sum()),
             CutLabels={str(k): v for k, v in t.cut_labels.items()},
+            SmallPieces=t.small_pieces,
+            SmallPieceVoxels=int((t.fixes == 5).sum()),
             ManualVoxels=t.manual_voxels,
             Moves=t.moves,
         ),
@@ -342,7 +436,8 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
         dict(
             SpecVersion=FIXES_SPEC.version,
             Description="The voxels that the WM topology correction changed: "
-            "1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit.",
+            + ", ".join(f"{k} {v}" for k, v in sorted(FIXES.items()))
+            + ".",
             **src,
             Provenance=prov,
         ),

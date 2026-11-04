@@ -9,9 +9,10 @@ import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 import pytest
+from scipy import ndimage as ndi
 
 from baillarger import bids, white_dseg, white_surf
-from baillarger.handles import kuhn_betti
+from baillarger.handles import KUHN_OFFSETS, kuhn_betti, kuhn_structure
 from baillarger.mesh import marching_tetrahedra
 
 SHAPE = (40, 36, 30)
@@ -133,7 +134,11 @@ def test_the_dseg_command_writes_the_bids_files(tmp_path: Path) -> None:
     assert isinstance(fimg, nib.nifti1.Nifti1Image)
     f = np.asarray(fimg.dataobj)
     assert [(f == k).sum() for k in (1, 2, 3)] == [1, 4, 8]
-    bids.read_sidecar(anat / f"{fx}.json", white_dseg.FIXES_SPEC)
+    assert side["SmallPieces"] == 0 and side["SmallPieceVoxels"] == 0
+    fside = bids.read_sidecar(anat / f"{fx}.json", white_dseg.FIXES_SPEC)
+    assert "5 small_piece" in fside["Description"]
+    rows = (anat / f"{fx}.tsv").read_text().splitlines()
+    assert rows[1:] == [f"{k}\t{v}" for k, v in sorted(white_dseg.FIXES.items())]
     assert json.loads((anat / f"{fx}.json").read_text())["SpecVersion"] == (
         "wm-dseg-fixes/1"
     )
@@ -191,3 +196,109 @@ def test_an_excision_that_cuts_a_piece_off_adds_a_piece() -> None:
     pieces = white_surf.mesh_pieces(v, f, VOX)
     assert len(pieces) == 2
     assert all(p["genus"] == 0 and p["boundary_loops"] == 0 for p in pieces)
+
+
+# ---------------------------------------------------------------- small pieces
+
+V1 = float(np.prod(VOX))  # mm3 of one voxel
+
+
+def test_the_crumb_size_falls_between_156_and_157_voxels() -> None:
+    assert 156 * V1 < white_dseg.CRUMB_MM3 <= 157 * V1
+
+
+def test_a_speck_that_touches_a_piece_only_across_a_diagonal_is_removed() -> None:
+    """A WM voxel in the cortex shell of the block touches a WM voxel of the
+    block across an edge diagonal that the Kuhn adjacency does not join, and
+    across two corners. It is a piece of its own: it is removed, not joined,
+    and takes the label of its other neighbours (cortex)."""
+    a, _ = excised_block()
+    speck = (9, 22, 14)  # the block's WM is [10:22, 10:22, 8:20]
+    a[speck] = 41
+    touch = [
+        np.subtract(q, speck)
+        for q in np.argwhere(a == 41)
+        if np.abs(np.subtract(q, speck)).max() == 1
+    ]
+    assert sorted(sorted(np.abs(o).tolist()) for o in touch) == [
+        [0, 1, 1],
+        [1, 1, 1],
+        [1, 1, 1],
+    ]
+    assert not any((o == k).all() for o in touch for k in KUHN_OFFSETS)
+    m = np.isin(a, FILLED)
+    assert kuhn_betti(m) == (2, 0, 0)
+    assert ndi.label(m, np.ones((3, 3, 3), bool))[1] == 1  # 26-adjacency joins
+    t = white_dseg.wm_topo(a, VOX)
+    assert t.betti_before == (2, 0, 0) and t.betti_after == (1, 0, 0)
+    assert t.dseg[speck] == 42 and t.small_pieces == 1
+    assert np.argwhere(t.fixes == 5).tolist() == [list(speck)]
+    assert not (t.fixes % 5).any()  # no other fix
+    assert np.array_equal(t.dseg[t.fixes == 0], a[t.fixes == 0])
+    assert t.moves == [dict(Kind="small_piece", Voxels=1, Centre=list(speck))]
+
+
+def test_an_isolated_two_voxel_speck_becomes_cortex() -> None:
+    a, _ = excised_block()
+    a[28:36, 26:34, 22:28] = 42
+    a[31:33, 29, 24] = 41
+    t = white_dseg.wm_topo(a, VOX)
+    assert t.betti_before == (2, 0, 0) and t.betti_after == (1, 0, 0)
+    assert (t.dseg[31:33, 29, 24] == 42).all()
+    assert np.argwhere(t.fixes == 5).tolist() == [[31, 29, 24], [32, 29, 24]]
+    assert (t.fixes != 0).sum() == 2
+    assert t.moves == [dict(Kind="small_piece", Voxels=2, Centre=[32, 29, 24])]
+
+
+@pytest.mark.parametrize("extra, kept", [(False, False), (True, True)])
+def test_a_piece_is_kept_from_one_mm3(extra: bool, kept: bool) -> None:
+    """A WM sheet of 12 x 13 voxels (156 voxels, 0.9984 mm3) in cortex is
+    removed; with one more voxel (157, 1.0048 mm3) it is kept."""
+    a, _ = excised_block()
+    a[26:40, 0:15, 22:25] = 42
+    a[27:39, 1:14, 23] = 41
+    if extra:
+        a[27, 1, 24] = 41
+    t = white_dseg.wm_topo(a, VOX)
+    n = 157 if extra else 156
+    assert (n * V1 >= white_dseg.CRUMB_MM3) == kept
+    assert t.betti_before == (2, 0, 0)
+    assert t.betti_after == ((2, 0, 0) if kept else (1, 0, 0))
+    assert t.small_pieces == (0 if kept else 1)
+    assert (t.fixes == 5).sum() == (0 if kept else n)
+    sheet = t.dseg[27:39, 1:14, 23]
+    assert (sheet == (41 if kept else 42)).all()
+
+
+@pytest.mark.parametrize("first, second", [(53, 42), (42, 53)])
+def test_a_tie_goes_to_the_smaller_label(first: int, second: int) -> None:
+    """A WM voxel with 13 neighbours of one label and 13 of another takes
+    the smaller label, whichever label comes first in the offsets."""
+    a, _ = excised_block()
+    c = np.array([33, 30, 25])
+    for k, o in enumerate(white_dseg.NEIGHBOURS_26):
+        a[tuple(c + o)] = first if k < 13 else second
+    a[tuple(c)] = 41
+    t = white_dseg.wm_topo(a, VOX)
+    assert t.dseg[tuple(c)] == 42 and t.small_pieces == 1
+
+
+def test_a_voxel_with_no_neighbour_outside_the_mask_is_refused() -> None:
+    """The rule gives no label to a voxel whose 26 neighbours are all in the
+    mask: a 3 x 3 x 3 cube of WM (0.17 mm3) has one at its centre."""
+    a, _ = excised_block()
+    a[30:35, 27:32, 22:27] = 42
+    a[31:34, 28:31, 23:26] = 41
+    with pytest.raises(RuntimeError, match=r"\[32, 29, 24\] of a small piece"):
+        white_dseg.wm_topo(a, VOX)
+
+
+def test_small_pieces_counts_with_the_kuhn_adjacency() -> None:
+    obj = np.zeros((6, 6, 6), bool)
+    obj[1, 1, 1] = obj[2, 2, 2] = True  # a Kuhn neighbour: one piece
+    obj[4, 1, 1] = obj[3, 2, 1] = True  # (1, -1, 0) is not: two pieces
+    assert ndi.label(obj, kuhn_structure())[1] == 3
+    idx, piece = white_dseg.small_pieces(obj, (1.0, 1.0, 1.0), 2.5)
+    assert sorted(np.bincount(piece)[1:].tolist()) == [1, 1, 2]
+    idx, piece = white_dseg.small_pieces(obj, (1.0, 1.0, 1.0), 1.5)
+    assert len(piece) == 2 and set(piece.tolist()) == {1, 2}

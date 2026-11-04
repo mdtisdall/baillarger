@@ -17,7 +17,7 @@ In the BIDS derivatives root `DERIV`, for an input with entities `sub` and
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.nii.gz` | The corrected segmentation: the input's grid, affine, header and data type |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.tsv` | `index` and `name` (FreeSurfer LUT) of every label in it |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.json` | Sidecar, `wm-dseg/1` |
-| `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.nii.gz` | uint8, the changed voxels: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit; 0 elsewhere. A manually edited voxel that the correction then changes shows the correction's value |
+| `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.nii.gz` | uint8, the changed voxels: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit, 5 small piece; 0 elsewhere. A voxel that two steps change shows the value of the later step (the order: 4, then 1 to 3, then 5) |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.tsv` | `index` and `name` of those values |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.json` | Sidecar, `wm-dseg-fixes/1` |
 
@@ -42,10 +42,21 @@ stays.
 3. Cavity and handle fills get the WM label. Each cut voxel gets the label
    of the nearest voxel (Euclidean, mm) that is outside the corrected mask
    and not cut.
+4. Small pieces are removed. A small piece is a piece of the mask after
+   steps 1 to 3 (Kuhn adjacency) whose volume (voxels × the voxel volume)
+   is less than `CrumbMM3` (1 mm³, `baillarger.labels.CRUMB_MM3`; the
+   same value as in `wm-excisions/1`). Each voxel of a small piece gets the
+   most common label of its 26-neighbours (in the image) that do not have a
+   filled label, in the labels after step 3. If two labels have the same
+   count, the smaller label value wins. If a voxel has no such neighbour,
+   the command writes nothing and stops with an error. A speck that touches
+   a larger piece only across an edge or corner diagonal is a piece of its
+   own (Kuhn adjacency does not join them), so it is removed and not joined.
 
 Guarantee: the corrected segmentation's voxels with a filled label are the
 corrected mask exactly, and its Betti numbers (Kuhn adjacency) are
-(b0, 0, 0). Voxels outside the mask's bounding box are unchanged. Each piece
+(b0, 0, 0), and each of its b0 pieces has a volume of `CrumbMM3` or more.
+Voxels outside the mask's bounding box are unchanged. Each piece
 of the mask is made handle- and cavity-free by construction, with the other
 pieces as background; a fill of one piece can touch another and make a
 handle or a cavity of the union, so the command checks the Betti numbers and
@@ -81,8 +92,10 @@ whole by the command, so an edit costs a `dseg` run.
 | `HandleFillVoxels` | integer | yes | Voxels set to `WMLabel` by handle fills |
 | `HandleCutVoxels` | integer | yes | Voxels cut from the mask (cuts and stranded voxels) |
 | `CutLabels` | object | yes | New label of the cut voxels (as a string): number of voxels |
+| `SmallPieces` | integer | yes | Pieces removed by step 4 (small pieces) |
+| `SmallPieceVoxels` | integer | yes | Voxels of those pieces: their value is 5 in the fixes image |
 | `ManualVoxels` | integer | yes | Voxels changed by the manual edits (0 without `--edits`) |
-| `Moves` | array of objects | yes | Per manual answer with rows, then per handle move: `Kind` (`manual`, `cut`, `fill` or `stranded`), `Voxels` (count), `Centre` (0-based voxel of the grid), and for `manual` the `Answer` (its `Id`) |
+| `Moves` | array of objects | yes | Per manual answer with rows, then per handle move, then per small piece: `Kind` (`manual`, `cut`, `fill`, `stranded` or `small_piece`), `Voxels` (count), `Centre` (0-based voxel of the grid), and for `manual` the `Answer` (its `Id`) |
 
 ## Sidecar keys: wm-dseg-fixes/1
 
