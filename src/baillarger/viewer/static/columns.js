@@ -274,7 +274,7 @@ function setPick(c) { C.pick = c; section(); drawSection(); details(); redraw();
 function redraw() { if (C.data) upload3d(); V.draw3d(); redrawTiles(); }
 
 // ------------------------------------------------------------------ the shared state
-V.hooks.selection.push(() => { if (V.has("columns")) load(); });
+V.hooks.selection.push(() => { if (C.meta) load(); });
 V.hooks.state.push(st => {
   if (!("columns" in st) || !st.columns || !C.meta) return;
   const s = st.columns, old = settings();
@@ -288,7 +288,8 @@ V.hooks.state.push(st => {
 V.hooks.resize.push(() => drawSection());
 (async () => {
   await V.ready;
-  if (!V.has("columns")) return;
+  // the pane's settings drive the 3D view and the tiles too, so it is built also when it is not shown (?panes=volume)
+  if (!(await fetch("/columns/meta")).ok) return;
   build();
   C.meta = await V.get("/columns/meta");
   const r = $("crad"); for (const o of [...r.options]) if (+o.value > C.meta.max_radius) o.remove();
