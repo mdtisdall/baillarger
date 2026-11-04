@@ -45,8 +45,12 @@ Routes (Review.get, Review.post), JSON:
   the later one only (the log takes a voxel in at most one stroke).
 
 Each write holds the review's lock and is flushed to the disk before the
-response (EditLog appends and fsyncs). A preview reads a box of BOX voxels
-each way round its site, so no response scales with the volume.
+response (EditLog appends and fsyncs). A choice and its preview read a box
+round the site (Choices.half), so no response scales with the volume.
+
+manual-paint is not a choice of the server: its preview gives the commands of
+baillarger.wm_paint (export a crop, paint it in ITK-SNAP, import it into the
+log), and /review/answer refuses it.
 """
 
 import argparse
@@ -70,8 +74,8 @@ from baillarger.wm_sites import read_random_sites, read_sites
 type Arr = npt.NDArray[Any]
 type Site = tuple[int, int, int]
 
-#: voxels each way from a site: the box that a choice and its preview read
-BOX = 24
+#: the choice whose answer comes from ITK-SNAP through baillarger.wm_paint
+MANUAL = "manual-paint"
 #: seconds a preview request waits before it answers as a job
 WAIT_S = 1.5
 
@@ -143,17 +147,21 @@ class Answer:
 class Preview:
     """A choice's preview on the grid: the voxels the answer changes, the voxels
     the correction then changes, whether the correction overrides the answer,
-    and the ITK-SNAP command of manual-paint (or None)."""
+    the ITK-SNAP command of manual-paint (or None), and whether a face of the
+    preview's box has WM on it (then the preview is approximate)."""
 
     answer: npt.NDArray[np.int64]
     correction: npt.NDArray[np.int64]
     overrides: bool
     command: str | None = None
+    cut_by_box: bool = False
 
 
 class Choices(Protocol):
-    """Phase 1.3's choices at a site: labels is the box (lo: its first voxel
-    on the grid) round the site."""
+    """Phase 1.3's choices at a site: labels is a box of the grid round the
+    site (lo: its first voxel on the grid), half(params) voxels each way."""
+
+    def half(self, params: dict[str, Any]) -> int: ...
 
     def answer(
         self, labels: Arr, lo: Site, site: Site, choice: str, params: dict[str, Any]
@@ -165,42 +173,62 @@ class Choices(Protocol):
 
 
 class WmChoices:
-    """Choices through baillarger.wm_choices (phase 1.3, PR 4)."""
+    """Choices through baillarger.wm_choices (phase 1.3): run for the answer,
+    preview for the preview. Both get a box of the grid, not the whole grid
+    (wm_choices.preview copies the labels it is given). The box is one voxel
+    larger each way than the box that preview reads (support(radius, reach)
+    and the halo), so preview's cut_by_box sees the faces of its own box."""
 
-    def __init__(self, hemi: str) -> None:
+    def __init__(
+        self, hemi: str, voxel_mm: npt.ArrayLike, halo_mm: float = 1.0
+    ) -> None:
         self.hemi = hemi
+        self.voxel_mm = np.asarray(voxel_mm, np.float64)
+        self.halo_mm = float(halo_mm)
 
-    def _mod(self) -> Any:
-        try:
-            import baillarger.wm_choices as wc  # type: ignore[import-not-found]
-        except ImportError as e:
-            raise RuntimeError(
-                "baillarger.wm_choices is not here yet (phase 1.3)"
-            ) from e
-        return wc
+    def half(self, params: dict[str, Any]) -> int:
+        from baillarger import wm_choices as wc
+
+        halo = int(np.ceil(self.halo_mm / self.voxel_mm - 1e-9).max())
+        return wc.support(int(params.get("radius", 1)), int(params.get("reach", 4))) + (
+            halo + 1
+        )
 
     def answer(
         self, labels: Arr, lo: Site, site: Site, choice: str, params: dict[str, Any]
     ) -> Answer:
-        wc = self._mod()
-        local = tuple(s - o for s, o in zip(site, lo, strict=True))
-        ch = wc.CHOICES[choice](labels, local, self.hemi, **params)
+        from baillarger import wm_choices as wc
+
+        local = _local(site, lo)
+        ch = wc.run(choice, labels, local, self.hemi, **params)
         v = np.asarray(ch.voxels, np.int64).reshape(-1, 3) + np.asarray(lo)
         return Answer(v, np.asarray(ch.labels, np.int64).ravel(), dict(ch.params))
 
     def preview(
         self, labels: Arr, lo: Site, site: Site, choice: str, params: dict[str, Any]
     ) -> Preview:
-        wc = self._mod()
-        local = tuple(s - o for s, o in zip(site, lo, strict=True))
-        p = wc.preview(labels, np.asarray(lo), local, choice, **params)
+        from baillarger import wm_choices as wc
+
+        p = wc.preview(
+            labels,
+            _local(site, lo),
+            self.hemi,
+            choice,
+            voxel_mm=self.voxel_mm,
+            halo_mm=self.halo_mm,
+            **params,
+        )
         off = np.asarray(lo)
         return Preview(
-            np.asarray(p.answer, np.int64).reshape(-1, 3) + off,
-            np.asarray(p.correction, np.int64).reshape(-1, 3) + off,
+            np.asarray(p.answer.voxels, np.int64).reshape(-1, 3) + off,
+            np.asarray(p.correction.voxels, np.int64).reshape(-1, 3) + off,
             bool(p.overrides),
-            getattr(p, "command", None),
+            cut_by_box=bool(p.cut_by_box),
         )
+
+
+def _local(site: Site, lo: Site) -> Site:
+    return (site[0] - lo[0], site[1] - lo[1], site[2] - lo[2])
 
 
 # ------------------------------------------------------------------ the review
@@ -229,7 +257,7 @@ class Review:
         affine: npt.ArrayLike,
         random: Callable[[int, int], list[dict[str, Any]]],
         choices: Choices | None = None,
-        box: int = BOX,
+        echoes: Sequence[Path] = (),
     ) -> None:
         self.rows, self.side = read_sites(sites)
         self.hemi = str(self.side["Hemisphere"])
@@ -241,8 +269,10 @@ class Review:
         self.log = EditLog(self.edits)
         self.labels, self.random = labels, random
         self.affine = np.asarray(affine, np.float64)
-        self.choices: Choices = choices or WmChoices(self.hemi)
-        self.box = int(box)
+        voxel_mm = np.linalg.norm(self.affine[:3, :3], axis=0)
+        self.choices: Choices = choices or WmChoices(self.hemi, voxel_mm)
+        self.dseg = Path(dseg)
+        self.echoes = [Path(e) for e in echoes]
         self.lock = threading.Lock()  # every write, and the session
         self.session: int | None = None
         self.share: float | None = None
@@ -402,27 +432,53 @@ class Review:
         return dict(site=site_id(c), state="skipped")
 
     # -------------------------------------------------------------- choices
-    def window(self, site: Site) -> tuple[Arr, Site]:
-        """The labels in the box round a site, and the box's first voxel."""
+    def window(self, site: Site, params: dict[str, Any]) -> tuple[Arr, Site]:
+        """The labels (int64) in the box round a site that the choice with
+        these params reads (Choices.half), and the box's first voxel."""
         lab = self.labels()
+        half = self.choices.half(params)
         c = np.asarray(site, np.int64)
-        lo = np.clip(c - self.box, 0, np.array(lab.shape))
-        hi = np.clip(c + self.box + 1, 0, np.array(lab.shape))
-        box = np.array(lab[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]])
+        lo = np.clip(c - half, 0, np.array(lab.shape))
+        hi = np.clip(c + half + 1, 0, np.array(lab.shape))
+        box = np.array(lab[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]], np.int64)
         return box, (int(lo[0]), int(lo[1]), int(lo[2]))
+
+    def paint_commands(self, site: Site) -> str:
+        """The shell commands of manual-paint at the site (baillarger.wm_paint;
+        docs/formats/wm-paint.md). The crop goes next to the log."""
+        i, j, k = site
+        crop = self.edits.parent / f"{self.edits.stem}_paint" / f"site-{i}-{j}-{k}"
+        echo = "".join(f" --echo {e}" for e in self.echoes)
+        snap = (
+            f"-g {crop}/echo-1.nii.gz -s {crop}/labels.nii.gz"
+            if self.echoes
+            else f"-g {crop}/labels.nii.gz"
+        )
+        return (
+            f"python -m baillarger.wm_paint export {self.dseg} --site {i} {j} {k} "
+            f"--out {crop}{echo}\n"
+            f"itksnap {snap}\n"
+            f"python -m baillarger.wm_paint import {crop} --log {self.edits} "
+            f"--session {self.session} --seconds <reviewer seconds>"
+        )
 
     def _preview(
         self, site: Site, choice: str, params: dict[str, Any]
     ) -> dict[str, Any]:
         t0 = time.perf_counter()
-        box, lo = self.window(site)
-        p = self.choices.preview(box, lo, site, choice, params)
+        if choice == MANUAL:
+            none = np.zeros((0, 3), np.int64)
+            p = Preview(none, none, False, self.paint_commands(site))
+        else:
+            box, lo = self.window(site, params)
+            p = self.choices.preview(box, lo, site, choice, params)
         return dict(
             status="done",
             answer=p.answer.tolist(),
             correction=p.correction.tolist(),
             overrides=p.overrides,
             command=p.command,
+            cut_by_box=p.cut_by_box,
             seconds=time.perf_counter() - t0,
         )
 
@@ -469,8 +525,11 @@ class Review:
         s = self._need()
         c = parse_site(site)
         r = self._find(c)
-        box, lo = self.window(c)
-        a = self.choices.answer(box, lo, c, choice, dict(params or {}))
+        if choice == MANUAL:
+            raise ValueError("manual-paint: use the commands of its preview")
+        params = dict(params or {})
+        box, lo = self.window(c, params)
+        a = self.choices.answer(box, lo, c, choice, params)
         with self.lock:
             aid = self.log.answer(
                 s,
@@ -600,6 +659,7 @@ def for_white(
     dseg: Path,
     labels: Callable[[], Arr],
     affine: Arr,
+    echoes: Sequence[Path] = (),
 ) -> Review | None:
     """The review of --white mode, if --sites is given (--edits is then needed)."""
     if a.sites is None:
@@ -615,6 +675,7 @@ def for_white(
         labels,
         affine,
         lambda n, seed: read_random_sites(surf, n, seed),
+        echoes=echoes,
     )
 
 

@@ -47,6 +47,9 @@ class Fake:
         self.delay = delay
         self.seen: list[tuple[Any, ...]] = []
 
+    def half(self, params: dict[str, Any]) -> int:
+        return 4
+
     def answer(
         self, labels: Any, lo: Any, site: Any, choice: str, params: dict[str, Any]
     ) -> VR.Answer:
@@ -109,7 +112,7 @@ def randoms(n: int, seed: int) -> list[dict[str, Any]]:
 
 
 def make(files: dict[str, Path], choices: Fake | None = None) -> VR.Review:
-    lab = np.asarray(nib.load(files["dseg"]).dataobj)
+    lab = np.asarray(nib.nifti1.load(files["dseg"]).dataobj)
     return VR.Review(
         files["queue"],
         files["log"],
@@ -118,7 +121,7 @@ def make(files: dict[str, Path], choices: Fake | None = None) -> VR.Review:
         A,
         randoms,
         choices or Fake(),
-        box=4,
+        echoes=[files["dseg"]],
     )
 
 
@@ -320,7 +323,7 @@ def test_the_preview_route_equals_the_choices_preview(server: Any) -> None:
     out = post(
         base + "/review/preview", dict(site="5,5,5", choice="fill-gap", params={})
     )
-    box, lo = rv.window((5, 5, 5))
+    box, lo = rv.window((5, 5, 5), {})
     ref = Fake().preview(box, lo, (5, 5, 5), "fill-gap", {})
     assert out["status"] == "done"
     assert (
@@ -382,14 +385,47 @@ def test_random_count() -> None:
         VR.random_count(44, -0.1)
 
 
+def test_manual_paint_gives_the_commands_and_no_answer(server: Any) -> None:
+    base, rv, files = server
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    get(base + "/review/next")
+    out = post(base + "/review/preview", dict(site="5,5,5", choice="manual-paint"))
+    assert out["status"] == "done" and out["answer"] == [] and out["correction"] == []
+    cmd = out["command"].splitlines()
+    assert cmd[0].startswith(f"python -m baillarger.wm_paint export {files['dseg']}")
+    assert "--site 5 5 5" in cmd[0] and f"--echo {files['dseg']}" in cmd[0]
+    assert cmd[1].startswith("itksnap -g ")
+    assert f"--log {files['log']} --session {rv.session}" in cmd[2]
+    with pytest.raises(urllib.error.HTTPError) as e:
+        post(
+            base + "/review/answer",
+            dict(site="5,5,5", choice="manual-paint", reviewer_seconds=1),
+        )
+    assert e.value.code == 400
+
+
 def test_the_real_choices_through_the_route(files: dict[str, Path]) -> None:
-    wc = pytest.importorskip("baillarger.wm_choices")
-    lab = np.asarray(nib.load(files["dseg"]).dataobj)
+    from baillarger import wm_choices as wc
+
+    lab = np.asarray(nib.nifti1.load(files["dseg"]).dataobj).astype(np.int64)
     rv = VR.Review(files["queue"], files["log"], files["dseg"], lambda: lab, A, randoms)
     rv.start(0, None)
     rv.next()
-    out = rv.preview("5,5,5", "thicken", dict(radius=1))
-    box, lo = rv.window((5, 5, 5))
-    local = tuple(s - o for s, o in zip((5, 5, 5), lo, strict=True))
-    ref = wc.preview(box, np.asarray(lo), local, "thicken", radius=1)
-    assert out["answer"] == (np.asarray(ref.answer).reshape(-1, 3) + lo).tolist()
+    for choice, params in [("thicken", dict(radius=1)), ("remove-strand", {})]:
+        out = rv.preview("5,5,5", choice, params)
+        while out["status"] == "running":
+            time.sleep(0.1)
+            out = rv.job(out["job"])
+        assert out["status"] == "done", out
+        ref = wc.preview(lab, (5, 5, 5), "R", choice, voxel_mm=[0.16] * 3, **params)
+        assert out["answer"] == ref.answer.voxels.tolist()
+        assert out["correction"] == ref.correction.voxels.tolist()
+        assert out["overrides"] == ref.overrides
+        assert out["cut_by_box"] == ref.cut_by_box
+    # the answer writes the voxels and labels of wm_choices.run
+    a = rv.answer("5,5,5", "thicken", dict(radius=2), 3.0)
+    ch = wc.run("thicken", lab, (5, 5, 5), "R", radius=2)
+    v, labels, _ = E.read_log(files["log"]).voxels(a["answer"])
+    order = np.lexsort(ch.voxels.T[::-1])
+    assert v.tolist() == ch.voxels[order].tolist()
+    assert labels.tolist() == ch.labels[order].tolist()

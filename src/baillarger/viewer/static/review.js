@@ -143,9 +143,10 @@ async function choose(c) {
   if (r.status !== "done") { say(`preview: ${r.error || r.status}`, true); return; }
   R.preview = index(r); R.api.draw();
   const w = r.overrides ? "\n⚠ the correction overrides this answer: the automatic fix changes the voxels that the answer sets" : "";
-  const cmd = r.command ? `\nITK-SNAP: ${r.command}` : "";
+  const cut = r.cut_by_box ? "\nthe preview's box cuts WM: the correction outside the box is not shown (approximate)" : "";
+  const cmd = r.command ? `\nmanual paint (in a terminal; Submit does not apply):\n${r.command}` : "";
   $("rvprev").textContent = `${c}: the answer changes ${r.answer.length} voxels, then the correction changes ${r.correction.length}` +
-    ` (${(r.seconds ?? 0).toFixed(2)} s)` + w + cmd;
+    ` (${(r.seconds ?? 0).toFixed(2)} s)` + w + cut + cmd;
   $("rvprev").style.color = r.overrides ? "#ffd23f" : "";
 }
 // the preview voxels by slice: for each voxel axis a, a map from the voxel's index along a to its voxels
@@ -158,6 +159,7 @@ function index(r) {
 async function submit() {
   if (!R.cur || !R.choice) { say("open a site and pick a choice first", true); return; }
   if (!R.preview) { say("wait for the preview", true); return; }
+  if (R.choice === "manual-paint") { say("manual paint: run the commands of the preview; wm_paint import writes the answer", true); return; }
   const secs = (performance.now() - R.t0) / 1000;
   let r; try { r = await post("/review/answer", { site: R.cur.id, choice: R.choice, params: R.params, reviewer_seconds: secs }); }
   catch (e) { say(e.message, true); return; }

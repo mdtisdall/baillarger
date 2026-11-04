@@ -618,6 +618,7 @@ def main(argv: list[str] | None = None) -> None:
                 ],
                 lambda: lab.volume.source().arrays[0],  # type: ignore[attr-defined]
                 white.W.affine,
+                [e_] if volume is not None else [],
             )
         except ValueError as exc:
             ap.error(str(exc))
