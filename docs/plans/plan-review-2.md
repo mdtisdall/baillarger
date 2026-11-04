@@ -72,7 +72,7 @@ any definition chosen later can be computed from the history.
 | D4 | §5c step 4 | "Bands per region" and Ward merging, but `regions` is not ported and the design does not define a region. | deferred to 3.4 |
 | D5 | §1 constraints; §3c step 1 | How a network trained at 160 µm runs at 50 µm without resampling, under the native-resolution rule (the patch context shrinks about 3×). | deferred to 1.8 |
 | D6 | §3c step 4; §5c step 1; §7 | Scales fixed in mesh steps or mm: the 10 normal-smoothing steps (and so \|n̄\|), the 0.04 mm column step. §7 asks to restate hard-wired scales on purpose. | deferred to scaling track |
-| D7 | §3c step 3 outputs | Names "stream 3 (planned checks of laminar orientation)"; §5 has no such check. | open (wave 2: 1.2) |
+| D7 | §3c step 3 outputs | Names "stream 3 (planned checks of laminar orientation)"; §5 has no such check. | fixed |
 | D8 | §7 drop list; §3c step 2 | `wellcomposed` is dropped, but fold repair "makes the mask well-composed". Nothing in `src/` uses it; #85 is not merged. | deferred to 1.4 |
 | D9 | §6c flat map (#118) | "The `exp` patch method" is named but defined nowhere in the plan. #55's slit was "written for the box flat map", so it may need a port that §6d does not list. | fixed |
 
