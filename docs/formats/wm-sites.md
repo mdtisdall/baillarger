@@ -45,7 +45,7 @@ only: every row has `kind` `misfacing`.
 | `kind` | string | `misfacing` (a ranked site, in the table) or `random` (see Random sites) |
 | `i`, `j`, `k` | integer | The site's centre voxel (0-based) on the segmentation's grid |
 | `faces` | integer | Its misfacing faces (0 for a random site) |
-| `tissue` | string | The labels outside the WM mask within `TissueVoxels` (a cube): `grey matter` (cortex: 3 or 42), `fluid` (0 or 24), `mixed` (both) or `other` |
+| `tissue` | string | The labels outside the WM mask within `TissueVoxels` (a cube): `grey matter` (cortex: 3 or 42), `fluid` (0, 24, or a ventricle or choroid plexus label: 4, 5, 31, 43, 44, 63; `label-set/1` puts these outside the WM mask, and ex vivo they hold outside medium), `mixed` (both) or `other` |
 | `cut`, `fill`, `cavity` | integer | Voxels of each kind of topology fix (`desc-wmtopofixes` codes 1, 2, 3) within `FixVoxels` (a cube) |
 | `wm_face_pieces`, `wm_any_pieces` | integer | Pieces of the WM mask within `ContactVoxels` (a cube), with face adjacency and with any adjacency: more with face adjacency means pieces that touch only at an edge or a corner |
 | `gap_face_pieces`, `gap_any_pieces` | integer | The same for the voxels outside the mask |

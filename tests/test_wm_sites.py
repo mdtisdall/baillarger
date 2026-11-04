@@ -60,6 +60,11 @@ def test_grouping_links_points_within_the_radius() -> None:
 def test_tissue_names() -> None:
     assert WS.tissue([42, 42, 3]) == "grey matter"
     assert WS.tissue([0, 24]) == "fluid"
+    # the ventricles and the choroid plexus are outside the mask: fluid
+    for lab in (4, 5, 31, 43, 44, 63):
+        assert WS.tissue([lab]) == "fluid"
+    assert WS.tissue([42, 43]) == "mixed"
+    assert WS.tissue([53]) == "other"
     assert WS.tissue([42, 0]) == "mixed"
     assert WS.tissue([17, 53]) == "other"
 

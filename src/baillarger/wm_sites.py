@@ -22,7 +22,8 @@ Per site, from the corrected segmentation (desc-wmtopo_dseg) and its fixes
 
 - the topology fixes of each kind within FIX voxels (a cube) of its centre;
 - the tissue outside the WM mask within TISSUE voxels: grey matter (cortex
-  labels), fluid (background or CSF), mixed (both) or other;
+  labels), fluid (background, CSF, the ventricles, the choroid plexus),
+  mixed (both) or other;
 - in a cube of CONTACT voxels round it, the pieces of the mask and of the rest
   with face adjacency and with any adjacency: more with face adjacency means
   pieces that touch only at an edge or a corner;
@@ -75,7 +76,10 @@ TISSUE = 3  # voxels (a cube): labels outside the mask that name its tissue
 CONTACT = 4  # voxels (a cube): the window of the piece counts
 CORE = 2  # voxels (a cube): where thickness and gap are read
 CORTEX = (3, 42)  # FreeSurfer LUT: left and right cerebral cortex
-FLUID = (0, 24)  # background and CSF
+#: background, CSF, and the ventricles and the choroid plexus (left: 4, 5, 31;
+#: right: 43, 44, 63). label-set/1 puts the ventricles outside the WM mask:
+#: ex vivo they hold outside medium.
+FLUID = (0, 24, 4, 5, 31, 43, 44, 63)
 TISSUES = ("grey matter", "mixed", "fluid", "other")
 FIX_KINDS = ("cut", "fill", "cavity")  # codes 1, 2, 3 of desc-wmtopofixes
 
