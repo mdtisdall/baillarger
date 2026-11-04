@@ -1459,3 +1459,65 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 **Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.4, 1.8, each review's answers and each generation in 1.9, and 1.11 when it moves the surface; a new version of a sampler), the stored outputs that read it rerun on it: stream 1's own, and stream 3's z(τ), bands and thickness. Samplers need no rerun: they compute from whatever is published on the next call. Nothing waits for a new version: each phase works on whatever is published.
 
 **The first complete pass** through all four streams: 1.0; then 2.0 and 4.0 in parallel; then 3.0, 3.1 and 3.3, with 4.3 alongside, and 3.2 written from the start. It gives a white surface, columns, the viewer, and the first depth maps with a pial edge.
+
+## 10. Open points, by phase
+
+A review of this plan found points that do not bear on wave 2. Each is listed under the phase where it matters, and is settled when that phase's wave starts: the text it names is changed then, not before.
+
+**1.4 (tight folds and the #83 variants)**
+
+- The fold-repair scale s = 0.30 mm "must not be a whole number of voxels along any axis" (§3c step 2), but 0.30 mm is 6 voxels at 50 µm. The data table checks constants on the next hemisphere, not at a new resolution.
+- Phase 4 compares the #83 variants by tight-fold sites, voxels changed and area. The standing decision judges surfaces by normal quality (angle spread, misfacing faces, blade cancellation, agreement with the data normal), and "acceptable" is a judgment made from views, not a criterion.
+- `wellcomposed` is on §7's drop list, but fold repair "makes the mask well-composed" (§3c step 2). Nothing in `src/` uses it, and #85 is not merged.
+
+**1.8 (the first generation)**
+
+- Temperature scaling divides logits by T, so the P = 0.5 contour, where handle walls fall, does not move; only the margins change. Moving the 0.5 crossing needs a bias term (Platt or vector scaling). Generation 1 has no labels in the 0.5 band (seed labels are ignored there), so its calibration near 0.5 cannot be measured, yet phase 8 removes the labels-only path.
+- P has two meanings. §3c step 1 (coupling 5) and `antialias` read P as a tissue fraction (P − 0.5 a sub-voxel position); phase 10 reads it as a probability, P = Φ(−μ/σ). A calibrated classifier on majority labels estimates Pr(fraction > ½ | image), which sharpens to a step as the image gets more informative.
+- §1's "no discrete jump that rounding can flip" cannot hold as written: wall order by P and its ties, the 0.25× and 2.0 thresholds, majority labels and QPBO tie-breaks are discrete decisions on float inputs.
+- §2's "every intensity comparison here is local" conflicts with the excision detector's global threshold (bootstrap only; limit 1 admits it).
+- How a network trained at 160 µm runs at 50 µm without resampling, under the native-resolution rule (the patch context shrinks about 3×).
+
+**1.9 (the outcome measures)**
+
+- The outcome measures do not state the version they judge, a reference made against that version, the exposure (what was examined, and whether it was chosen by rank or at random), or the goal they serve. So counts are not rates, the queue (chosen by the model) scores the model, and σ, the spread and carry reach are judged on sites they chose. Proposed rule for §1: every outcome measure states these four; what the model computes about itself (queue length, margins, spread) is a diagnostic only. The edit log already records the raw facts (phase 1.3), so any definition chosen here can be computed from the history.
+- §1 counts "answers (site answers and scribbles) that change voxels of the `dseg`", but scribbles are not applied to the `dseg`, so for scribbles the count is always 0, and "corrects this hemisphere now" is false for them. Redefine the count, or settle the open item on applying scribbles.
+- "The number of handles and cavities … sets the length of the review queue" (§3c step 1, coupling 4), but the queue also holds folds, margins, spread, stream 3 sites and random sites, and it ranks with no threshold, so nothing sets its length; yet the data table calls its length a success measure.
+
+**1.10 (P as σ)**
+
+- With one hemisphere, inference runs on the training hemisphere: at each voxel 4 of 5 fold models trained on it. The spread is then mostly one out-of-fold model against four in-sample ones, not "what more labels can fix".
+- σ = −μ/Φ⁻¹(P) is 0/0 at the boundary (μ → 0, P → 0.5), where the antialias weight 1/σ² acts.
+
+**2.2 (the deflected ray)**
+
+- The case against fields counts "own-bank returns", which needs a same-bank test; the plan drops `SAME_MM` as "wrong at both faces" and no step labels banks. The same count is a criterion for the deflected ray.
+- Normal rays' 0.17 mm at M1/S1 is "the bar" for the deflected ray, but it was measured with the mirrored template, which §5c calls a record that assumes face-to-face banks. The case for straight rays over fields leans on the same measure.
+- |n̄| "separates thin blades" (§3c step 4) rests on a minimum of 0.038 and a Spearman 0.307 against blade thickness: weak support for weighting roots by it.
+
+**3.3 (the joint warp)**
+
+- Circularity in §5c steps 3–5: bands are found in τ from the warp, and the warp places levels at bands; thickness is a warp term, and thickness evidence comes from the warp; contact tops use "the end of its own layer sequence", which needs layer identity (step 4). There is no order of iteration or stopping rule. §9 says 3.4 needs only 3.1, but step 4's inputs list step 3.
+- "Since a sample does not depend on the extent, growing it changes no level that was already inside": the joint warp is a coupled energy, so new samples change the data term and can move levels in the same column and its neighbours.
+- τ "has no zero" and "only orders the levels", but r_ℓ comes "from the spacing of the levels", and bands sit at τ 0.18, 0.37, 0.81. Spacing needs a metric on τ.
+- "Certifies 96.6–100 % of variables, so the remaining errors belong to the model" holds only for the certified variables; up to 3.4 % can carry solver error.
+- Streams 2 and 3 "distrust samples inside" the bubble mask, but no input table of theirs lists it and no code reads it. After phase 8 no step makes it.
+
+**3.4 (bands)**
+
+- §5b's "only bands of at least 2–3 voxels; the stria is at this limit" conflicts with step 4's 1.5-voxel minimum, chosen because the stria is 1.67 voxels and a 2.5-voxel threshold drops it.
+- "Bands per region" and Ward merging, but `regions` is not ported and the design does not define a region.
+
+**3.5 (thickness and tops at contacts)**
+
+- §5b's "where there is none, depth follows equal volume" conflicts with "the current estimator is distance, until an equal-volume estimator is validated".
+- The excision map is the test set for cut tops, but it has a known one-voxel edge error at cut faces (limit 2), where cut tops are measured.
+- The curvature rank correlation 0.85–0.98 (§3c step 4) was measured on the old twicing mesh at 0.32 mm, not on the antialiased surface.
+
+**3.7 (review of tops and bottoms)**
+
+- How a point answer becomes anchors: which columns, how far it reaches, and what "two conflicting answers" are in phase 7's test.
+
+**The scaling tracks**
+
+- Scales fixed in mesh steps or mm: the 10 normal-smoothing steps (and so |n̄|), the 0.04 mm column step. §7 asks for hard-wired scales to be restated on purpose.
