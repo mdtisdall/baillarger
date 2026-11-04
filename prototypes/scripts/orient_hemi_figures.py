@@ -56,6 +56,9 @@ def summary(h: dict) -> dict:
             "agreement_within10": within(ag, gb, 10),
             "agreement_within20": within(ag, gb, 20),
             "agreement_over45": 1 - within(ag, gb, 45),
+            "coherence_mean_interior": float(
+                np.sum(r["coh_axis"][0]) / max(np.sum(r["coh_axis_n"][0]), 1)
+            ),
         }
     return out
 

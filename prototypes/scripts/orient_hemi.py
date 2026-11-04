@@ -18,7 +18,12 @@ site superblock. The per-root angles are saved, to map on the overview mesh.
 
 usage:
     orient_hemi.py ECHO1 ECHO2 ECHO3 --dseg DSEG --surf SURF --noise NOISE
-        --out OUT [--limit N] [--only I,J,K ...]
+        --out OUT [--limit N] [--only I,J,K ...] [--sigma MM] [--level 0|1]
+
+At level 0 the site slices are not made; the sites' histograms are the sums
+over the level-0 superblocks inside each site's level-1 superblock. orient
+gives the same values from each superblock, so the level changes only the
+memory and the time.
 """
 
 import argparse
@@ -35,7 +40,8 @@ from baillarger.orient_noise import superblocks
 from baillarger.rays import RaySampler
 from baillarger.timing import peak_rss_gb
 
-LEVEL = 1
+LEVEL = 1  # the superblock level (--level); the sites are level-1 superblocks
+SIGMA = O.SIGMA  # sigma of the local level, mm (--sigma)
 SITES = {
     "V1V2": (268, 128, 135),
     "M1S1": (455, 250, 496),
@@ -80,7 +86,7 @@ class Acc:
 def measure(s, rs, sb, acc: Acc) -> tuple[np.ndarray, np.ndarray, np.ndarray]:  # type: ignore[no-untyped-def]
     vs = float(np.min(s.voxel_mm))
     halo = 2 * vs
-    o = s.orient(sb, LEVEL, halo, echo_tensor=True)
+    o = s.orient(sb, LEVEL, halo, SIGMA, echo_tensor=True)
     core = s.output_box(sb, LEVEL, 0.0)
     crop = tuple(
         slice(c.start - b.start, c.stop - b.start)
@@ -152,7 +158,7 @@ def measure(s, rs, sb, acc: Acc) -> tuple[np.ndarray, np.ndarray, np.ndarray]:  
 
 def site_slices(s, sb, out: Path, name: str, centre) -> None:  # type: ignore[no-untyped-def]
     """The departure of each echo's normal at the site's centre slice (k)."""
-    o = s.orient(sb, LEVEL, 0.0, echo_tensor=True)
+    o = s.orient(sb, LEVEL, 0.0, SIGMA, echo_tensor=True)
     k = int(centre[2]) - o.box[2].start
     n = np.moveaxis(o.normal[:, :, :, k], 0, -1).astype(np.float64)
     dep = []
@@ -178,11 +184,17 @@ def main() -> None:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--only", nargs="*", default=[])
+    ap.add_argument(
+        "--sigma", type=float, default=O.SIGMA, help="sigma of the level, mm"
+    )
+    ap.add_argument("--level", type=int, default=1, choices=(0, 1))
     a = ap.parse_args()
+    global LEVEL, SIGMA
+    LEVEL, SIGMA = a.level, a.sigma
     a.out.mkdir(parents=True, exist_ok=True)
     s = O.OrientSampler(a.echoes, a.dseg, cache_bytes=256 << 20, noise=a.noise)
     rs = RaySampler(a.surf, a.dseg, cache_bytes=256 << 20)
-    side = s.cells << LEVEL
+    side = s.cells << 1
     site_sb = {n: tuple(int(c) // side for c in v) for n, v in SITES.items()}
     if a.only:
         sbs = [tuple(int(x) for x in t.split(",")) for t in a.only]
@@ -201,7 +213,7 @@ def main() -> None:
         acc = Acc()
         v, an, w = measure(s, rs, sb, acc)
         for n, ssb in site_sb.items():
-            if ssb == sb:
+            if ssb == sb and LEVEL == 1:
                 site_slices(s, sb, a.out, n, SITES[n])
         dt = time.perf_counter() - t
         tmp = parts / f"{sb[0]}_{sb[1]}_{sb[2]}.tmp.npz"
@@ -220,6 +232,11 @@ def main() -> None:
     collect(a.out, site_sb, time.perf_counter() - t0)
 
 
+def parent(sb: tuple[int, ...]) -> tuple[int, ...]:
+    """The level-1 superblock that holds superblock sb of LEVEL."""
+    return tuple(c >> (1 - LEVEL) for c in sb)
+
+
 def collect(out: Path, site_sb: dict, seconds: float) -> None:
     """Sums the superblock files of out/superblocks into out/hemi.json and
     out/agreement.npz."""
@@ -236,7 +253,7 @@ def collect(out: Path, site_sb: dict, seconds: float) -> None:
         sb = tuple(int(x) for x in z["superblock"])
         total.add(acc)
         for n, ssb in site_sb.items():
-            if ssb == sb:
+            if ssb == parent(sb):
                 sites[n].add(acc)
         vtx.append(z["vertex"])
         ang.append(z["angle"])
@@ -257,6 +274,7 @@ def collect(out: Path, site_sb: dict, seconds: float) -> None:
     )
     res = {
         "level": LEVEL,
+        "sigma_mm": SIGMA,
         "superblocks": log,
         "seconds_this_run": seconds,
         "bins": {
