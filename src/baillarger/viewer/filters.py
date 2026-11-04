@@ -24,16 +24,16 @@ misfit over levels, the fraction of its levels that fold (dz/dtau <= 0) and the
 fraction of its weighted shift samples at the bound; with stacking, the sum of its
 neighbours' weights.
 
-Jobs (FilterJobs) run one at a time in a thread, since a flattening of a whole box
-takes minutes and several GB. Each result is saved in the cache directory, keyed by
-the parameters and the column volume's mesh, so asking again loads it.
+Jobs (FilterJobs, on the job pattern of baillarger.viewer.jobs) run one at a time
+in a thread, since a flattening of a whole box takes minutes and several GB. Each
+result is saved in the cache directory, keyed by the parameters and the column
+volume's mesh, so asking again loads it.
 """
 
 import hashlib
 import json
 import threading
 import time
-import traceback
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -45,6 +45,7 @@ from scipy.spatial import cKDTree
 
 from baillarger import flatten as FL
 from baillarger.streamlines import STEP_MM
+from baillarger.viewer.jobs import Jobs
 
 type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.int64]
@@ -330,7 +331,7 @@ def compute(inp: Inputs, p: Params, key: str, log: Callable[[str], object]) -> R
 
 class FilterJobs:
     """Filter results of one column volume: computed one at a time in a thread, kept
-    in the cache directory, the last few kept in memory."""
+    in the cache directory, the last few kept in memory (baillarger.viewer.jobs)."""
 
     def __init__(
         self,
@@ -344,22 +345,27 @@ class FilterJobs:
         self.column_volume = Path(column_volume)
         self.cache = Path(cache)
         self.name, self.data_key = name, data_key
-        self.log_fn = log
-        self.keep_in_memory = keep_in_memory
-        self.results: dict[str, Result] = {}
-        self.lock = threading.Lock()
-        self.thread: threading.Thread | None = None
-        self.state: dict[str, Any] = dict(status="idle", key=None, label=None, log=[])
+        self.jobs: Jobs[Result] = Jobs(
+            self.cache,
+            f"filter_{name}",
+            ".npz",
+            save=Result.save,
+            load=Result.load,
+            log=log,
+            keep_in_memory=keep_in_memory,
+        )
         self._inputs: Inputs | None = None
+
+    @property
+    def thread(self) -> threading.Thread | None:
+        return self.jobs.thread
 
     def path(self, key: str) -> Path:
         return self.cache / f"filter_{self.name}_{key}.npz"
 
     def cached(self) -> list[dict[str, Any]]:
         out = []
-        for f in sorted(self.cache.glob(f"filter_{self.name}_*.npz")):
-            if f.name.endswith(".tmp.npz"):
-                continue
+        for f in self.jobs.files():
             try:
                 with np.load(f, allow_pickle=False) as Q:
                     meta = json.loads(str(Q["meta"]))
@@ -371,69 +377,27 @@ class FilterJobs:
         return out
 
     def log(self, msg: str) -> None:
-        with self.lock:
-            self.state["log"] = (self.state["log"] + [msg])[-50:]
-        self.log_fn(msg)
+        self.jobs.log(msg)
 
     def status(self) -> dict[str, Any]:
-        with self.lock:
-            return dict(self.state, log=list(self.state["log"]))
+        return self.jobs.status()
 
     def get(self, key: str) -> Result:
         """A finished result, from memory or the cache."""
-        with self.lock:
-            if key in self.results:
-                return self.results[key]
-        p = self.path(key)
-        if not p.exists():
-            raise KeyError(f"no filter result {key}")
-        r = Result.load(p)
-        self._remember(r)
-        return r
-
-    def _remember(self, r: Result) -> None:
-        with self.lock:
-            self.results[r.key] = r
-            while len(self.results) > self.keep_in_memory:
-                self.results.pop(next(iter(self.results)))
+        try:
+            return self.jobs.get(key)
+        except KeyError:
+            raise KeyError(f"no filter result {key}") from None
 
     def run(self, params: dict[str, Any], wait: bool = False) -> dict[str, Any]:
         """Start the filter (or find it done). Returns {key, label, status}; status
         "done" when the result is ready now."""
         p = Params.parse(params)
         key = p.key(self.data_key)
-        if key in self.results or self.path(key).exists():
-            with self.lock:
-                self.state.update(status="done", key=key, label=p.label())
-            return dict(key=key, label=p.label(), status="done")
-        with self.lock:
-            if self.thread is not None and self.thread.is_alive():
-                raise RuntimeError(
-                    f"a filter is already running ({self.state['label']}): "
-                    "one at a time"
-                )
-            self.state = dict(status="running", key=key, label=p.label(), log=[])
-            self.thread = threading.Thread(
-                target=self._work, args=(p, key), daemon=True
-            )
-            self.thread.start()
-            th = self.thread
-        if wait:
-            th.join()
-        return dict(key=key, label=p.label(), status=self.status()["status"])
+        return self.jobs.run(key, p.label(), lambda log: self._work(p, key, log), wait)
 
-    def _work(self, p: Params, key: str) -> None:
-        try:
-            if self._inputs is None:
-                self.log(f"reading {self.column_volume.name}")
-                self._inputs = Inputs.load(self.column_volume)
-            r = compute(self._inputs, p, key, self.log)
-            r.save(self.path(key))
-            self._remember(r)
-            with self.lock:
-                self.state["status"] = "done"
-        except Exception as exc:
-            traceback.print_exc()
-            with self.lock:
-                self.state["status"] = "error"
-                self.state["error"] = f"{type(exc).__name__}: {exc}"
+    def _work(self, p: Params, key: str, log: Callable[[str], object]) -> Result:
+        if self._inputs is None:
+            log(f"reading {self.column_volume.name}")
+            self._inputs = Inputs.load(self.column_volume)
+        return compute(self._inputs, p, key, log)
