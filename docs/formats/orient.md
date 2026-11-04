@@ -8,10 +8,9 @@ only. Nothing per voxel is stored. The one stored output is the noise file,
 a small JSON file for each acquisition.
 
 The specs in `docs/formats/` stay at version 1 until a release, and are
-edited in place (plan, §8). This version gives the local cortex level and
-the noise file. The structure tensor, the data normal, its sign and its
-coherence are added to this document by an edit in place (phase 1.2, the
-second PR).
+edited in place (plan, §8). This version gives the local cortex level, the
+whitened structure tensor, the data normal, its sign and its coherence, and
+the noise file.
 
 ## Words
 
@@ -33,6 +32,7 @@ second PR).
 | The echoes | the scan (NIfTI magnitude images, uncompressed or gzipped) | The intensities |
 | The corrected segmentation | `wm-dseg/1` (`_desc-wmtopo_dseg.nii.gz`) | The labels, the affine, and the sidecar (`FilledLabels`, `Hemisphere`) |
 | The noise file | this document, "The noise file" | C's parts (the tensor only) |
+| The WM distance | the sampler `wm-distance/1` on the same segmentation | The sign of the data normal |
 
 The echoes and the segmentation must have the same grid and the same affine
 (within 1e-5). The sampler refuses others. It reads them through the chunked
@@ -89,6 +89,97 @@ to the grid.
   `conv1d` for the separable convolutions, no float64 and no atomic
   additions. It gives the numpy value within float32 rounding: the tests
   require a relative difference below 4e-6 of the log value.
+
+## The tensor and the data normal
+
+```python
+sampler = OrientSampler(echoes, dseg, cells=64, noise=noise_json)
+r = sampler.orient(superblock, level, halo_mm=0.0, sigma_mm=SIGMA,
+                   device="numpy", tensor=False, echo_tensor=False)
+```
+
+### The method
+
+1. **The detrended log echoes:** the log echo minus its local cortex level
+   (σ = sigma_mm), in cortex; 0 elsewhere.
+2. **The gradients G_e:** the normalized convolution of the detrended log
+   echo over the cortex with the taps of `SD` = 1 voxel, then the central
+   difference (s[i + 1] − s[i − 1]) / 2 on each axis, divided by the voxel
+   size of the axis (so G_e is in mm⁻¹); 0 outside the cortex.
+3. **C at each voxel:** the model of the noise file, with I_e the exp of the
+   echo's level. C is per voxel step and G is per mm; for isotropic voxels
+   this scales J by one factor, which changes neither the normal nor the
+   coherence. For anisotropic voxels the model ignores the difference
+   between the axes.
+4. **J** = Σ_ef (C⁻¹)_ef G_e G_fᵀ at each voxel, then the normalized
+   convolution of each of its six components (`PAIRS`: xx, xy, xz, yy, yz,
+   zz) over the cortex with the taps of `SI` = 2 voxels. NaN outside the
+   cortex.
+5. **The data normal:** J's eigenvector of the largest eigenvalue, made
+   canonical (its component of largest magnitude positive).
+6. **The coherence** c = (λ₁ − λ₂)/(λ₁ + λ₂), λ₁ ≥ λ₂ the two largest
+   eigenvalues, clipped to [0, 1].
+7. **The sign:** D is the WM-distance sampler's value with the cap
+   `SIGN_CAP` = 5.0 mm (cortex is at most about 4.5 mm thick). ∇D on each
+   axis is the central difference where both neighbours are finite, else the
+   one-sided difference with the finite neighbour, else 0; it is not defined
+   where D is not finite or no axis has a finite neighbour. With
+   cos = n · ∇D / |∇D|, the sign is +1 where cos > `SIGN_EPS` (1e-3), −1
+   where cos < −`SIGN_EPS`, and 0 elsewhere, and where ∇D is not defined. The
+   output normal is the sign times the canonical normal, or the canonical
+   normal where the sign is 0. So the normal points away from the WM where
+   the sign is not 0.
+
+The WM distance is through tissue, with outside as an obstacle, so the sign
+does not flip beside an open sulcus (a straight-line distance flips it,
+plan §3c step 3). `SIGN_EPS` keeps the sign from depending on rounding
+where the normal is perpendicular to ∇D; there the sign is 0.
+
+The read box is the output box plus, on each axis, the level's taps, `SD`'s
+taps and 1 voxel, and `SI`'s taps. The WM distance is read for the output
+box plus one voxel.
+
+### Parameters of `orient`
+
+| Parameter | Type | Default | Rule |
+|---|---|---|---|
+| `superblock` | tuple of 3 integers | (required) | (I, J, K), each ≥ 0 |
+| `level` | integer | (required) | m ≥ 0 |
+| `halo_mm` | number | 0.0 | 0 ≤ halo_mm, finite, in mm |
+| `sigma_mm` | number | `SIGMA` (0.64) | σ of the level, > 0, in mm |
+| `device` | string or `Device` | `numpy` | `numpy`, `cpu`, `cuda` or `mps` |
+| `tensor` | boolean | false | Give J |
+| `echo_tensor` | boolean | false | Give each echo's own tensor |
+
+The sampler refuses a call without a noise file (`ValueError`).
+
+### `Orientation`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `normal` | float32 array (3, box shape) | The data normal (unit, mm axes of the grid). NaN outside the cortex |
+| `coherence` | float32 array (box shape) | c in [0, 1]. NaN outside the cortex |
+| `sign` | int8 array (box shape) | The factor (+1, −1) that turned the canonical normal away from the WM; 0 where not defined, and outside the cortex |
+| `tensor` | float32 array (6, box shape), or None | J's components (`PAIRS`), if `tensor` |
+| `echo_tensor` | float32 array (E, 6, box shape), or None | Each echo's own tensor: G_e G_eᵀ smoothed at `SI` over the cortex, not weighted, if `echo_tensor` |
+| `box` | tuple of 3 slices | The output box |
+| `sigma_mm` | number | σ of the level, in mm |
+
+### Determinism and devices
+
+- **numpy** (float64, output float32): the normal, the coherence and J are
+  the same, bit for bit, from every superblock. The sign uses the WM
+  distance, which two superblocks give within its `TOLERANCE` (1e-5 mm);
+  `SIGN_EPS` keeps that from changing the sign except at |cos| within about
+  1e-5 of `SIGN_EPS`.
+- **PyTorch** (float32): the separable convolutions use `conv1d`, the
+  inverse of C `torch.linalg.inv`, and the eigenvectors `torch.linalg.eigh`,
+  all on the device. No float64 and no atomic additions. The tests require,
+  against numpy: J within 1e-4 of its trace, the normal within 1e-3 rad and
+  the coherence within 1e-4 where c > 0.2, and the same sign there.
+- A plane of laminae gives the normal that the discrete filters see: on
+  axis a, sin(k_a) / vs_a, with k_a the wavenumber in radians per voxel.
+  At a period of 5 voxels and n = (1, 2, 2)/3 that is 1.7° from n.
 
 ## The noise covariance C
 

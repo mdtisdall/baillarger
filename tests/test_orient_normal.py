@@ -255,3 +255,19 @@ def test_orient_needs_the_noise(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         O.OrientSampler(paths, dseg, cells=8).orient((0, 0, 0), 0)
     _ = AFF
+
+
+def test_the_spec_of_orient() -> None:
+    import dataclasses
+    import inspect
+
+    from test_orient import DOC, doc_rows
+
+    sig = inspect.signature(O.OrientSampler.orient)
+    names = [p for p in sig.parameters if p != "self"]
+    assert [row[0] for row in doc_rows("### Parameters of `orient`")] == names
+    got = [row[0] for row in doc_rows("### `Orientation`")]
+    assert got == [f.name for f in dataclasses.fields(O.Orientation)]
+    text = DOC.read_text()
+    assert f"`SIGN_CAP` = {O.SIGN_CAP} mm" in text
+    assert "`SIGN_EPS` (1e-3)" in text and O.SIGN_EPS == 1e-3
