@@ -1,0 +1,308 @@
+"""Tests of baillarger.viewer.columns (the columns pane's server side), with
+exact answers, on a surface written by white_dseg, white_surf and
+white_overview from a synthetic segmentation: the columns of a request are the
+ray sampler's own, byte for byte; the halo is right at a superblock corner; the
+radius is along the surface; the profiles, the TCK and the routes."""
+
+import json
+import threading
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+import nibabel as nib
+import numpy as np
+import numpy.typing as npt
+import pytest
+from scipy.sparse.csgraph import dijkstra
+
+from baillarger import rays as R
+from baillarger import white_dseg, white_overview, white_surf
+from baillarger.blocks import open_volume
+from baillarger.column_volume import ColumnVolumeSampler
+from baillarger.data import echo_path
+from baillarger.mesh_graph import edge_graph
+from baillarger.viewer import columns as VC
+from baillarger.viewer import server as VS
+from baillarger.viewer.tck import read_tck
+from baillarger.viewer.white_view import WhiteView
+from baillarger.white_surf import WhiteSurface
+
+AFF = np.array([[0.2, 0, 0, -3.0], [0, 0.16, 0, 2.0], [0, 0, 0.2, 5.0], [0, 0, 0, 1.0]])
+CELLS = 8
+
+
+@pytest.fixture(scope="module")
+def data(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """A right hemisphere: a WM ball round a ventricle, in cortex, in a grid
+    of 8-voxel blocks (1.6 mm), with its overview and three echoes (echo k is
+    k times the linear index of each voxel)."""
+    d = tmp_path_factory.mktemp("cols")
+    shape = (44, 40, 36)
+    x = np.indices(shape).astype(float)
+    r = np.sqrt(((x - np.array([20.3, 19.6, 17.8])[:, None, None, None]) ** 2).sum(0))
+    a = np.zeros(shape, np.int16)
+    a[r < 15] = 42
+    a[r < 12] = 41
+    a[r < 4] = 43
+    src = d / "in" / "sub-T01_ses-S1_aseg.nii.gz"
+    src.parent.mkdir(parents=True)
+    nib.save(nib.nifti1.Nifti1Image(a, AFF), src)
+    white_dseg.main([str(src), "--out", str(d / "deriv")])
+    anat = d / "deriv/sub-T01/ses-S1/anat"
+    dseg = anat / "sub-T01_ses-S1_desc-wmtopo_dseg.nii.gz"
+    white_surf.main([str(dseg), "--out", str(d / "deriv"), "--block-cells", str(CELLS)])
+    surf = anat / "sub-T01_ses-S1_hemi-R_white.surf.gii"
+    white_overview.main([str(surf), "--eps", "0.05", "--workers", "1"])
+    ed = d / "echoes"
+    ed.mkdir()
+    for k in (1, 2, 3):
+        e = (k * np.arange(int(np.prod(shape)))).reshape(shape).astype(np.float32)
+        nib.save(nib.nifti1.Nifti1Image(e, AFF), echo_path(k, ed).with_suffix(""))
+    return dict(surf=surf, dseg=dseg, echoes=ed)
+
+
+@pytest.fixture(scope="module")
+def cols(data: dict[str, Path]) -> VC.Columns:
+    W = WhiteSurface.load(data["surf"])
+    return VC.Columns(
+        data["surf"], data["dseg"], W.v, W.f, VC.echo_files(data["echoes"]), log=quiet
+    )
+
+
+def quiet(m: str) -> None:
+    pass
+
+
+def as_column(r: R.Rays, c: int) -> tuple[bytes, ...]:
+    """Every value of column c of r, as bytes (tests/test_rays.py)."""
+    a, b = r.sample_start[c], r.sample_start[c + 1]
+    q0, q1 = r.interval_start[c], r.interval_start[c + 1]
+    ro = r.roots
+    return (
+        ro.edge_key[c].tobytes(),
+        ro.vertex[c].tobytes(),
+        ro.root[c].tobytes(),
+        ro.normal[c].tobytes(),
+        ro.normal_length[c].tobytes(),
+        r.k_in[c].tobytes(),
+        r.k_out[c].tobytes(),
+        r.s[a:b].tobytes(),
+        r.position[a:b].tobytes(),
+        r.interval_s0[q0:q1].tobytes(),
+        r.interval_s1[q0:q1].tobytes(),
+        r.interval_label[q0:q1].tobytes(),
+        r.interval_class[q0:q1].tobytes(),
+        r.derived_class[c].tobytes(),
+    )
+
+
+def owner(cols: VC.Columns, rays: dict[tuple[int, int, int], R.Rays], v: int) -> Any:
+    """Column v as the sampler gives it to the superblock (level 0) that owns
+    it, with the extents e_in = 1, e_out = 3."""
+    sb = cols.superblock(v)
+    if sb not in rays:
+        rays[sb] = cols.rays.sample(sb, 0, e_in=1.0, e_out=3.0)
+    r = rays[sb]
+    c = int(np.flatnonzero(r.roots.vertex == v)[0])
+    assert r.roots.owned[c]
+    return as_column(r, c)
+
+
+def whole_graph_near(cols: VC.Columns, v: int, radius: float) -> set[int]:
+    g = edge_graph(np.asarray(cols.v, float), cols.f, cols.vox)
+    d = dijkstra(g, indices=v, limit=radius)
+    return set(np.flatnonzero(np.isfinite(d)).tolist())
+
+
+def corner_vertex(cols: VC.Columns) -> int:
+    """The vertex nearest a corner of its block (in voxels)."""
+    v = np.asarray(cols.v, float)
+    f = v / CELLS - np.floor(v / CELLS)
+    dist = np.linalg.norm(np.minimum(f, 1 - f), axis=1)
+    return int(np.argmin(dist))
+
+
+def test_the_columns_are_the_samplers_own_byte_for_byte(cols: VC.Columns) -> None:
+    v = corner_vertex(cols)
+    req = VC.Request(vertex=v, radius=1.0, e_in=1.0, e_out=3.0)
+    res = cols.compute(req, quiet)
+    got = res.rays
+    assert len(got.roots.vertex) > 20
+    ref: dict[tuple[int, int, int], R.Rays] = {}
+    for c, u in enumerate(got.roots.vertex):
+        assert as_column(got, c) == owner(cols, ref, int(u))
+    # in the sampler's order: owned columns of v's superblock, then halo ones
+    sb_roots = cols.rays.roots(res.superblock, 0, 1.0)
+    order = {int(u): k for k, u in enumerate(sb_roots.vertex)}
+    assert np.all(np.diff([order[int(u)] for u in got.roots.vertex]) > 0)
+    # more than one superblock: the corner's radius crosses into its neighbours
+    assert len({cols.superblock(int(u)) for u in got.roots.vertex}) > 1
+
+
+def test_a_request_near_a_corner_gives_the_same_column_as_one_far_from_it(
+    cols: VC.Columns,
+) -> None:
+    """The corner vertex's column, from a request centred on it (its own
+    superblock with a halo) and from a request centred on a vertex of another
+    superblock whose radius holds it: the same bytes."""
+    v = corner_vertex(cols)
+    a = cols.compute(VC.Request(vertex=v, radius=0.5), quiet).rays
+    near = whole_graph_near(cols, v, 0.8)
+    other = next(
+        u
+        for u in sorted(near)
+        if cols.superblock(u) != cols.superblock(v)
+        and v in whole_graph_near(cols, u, 1.0)
+    )
+    b = cols.compute(VC.Request(vertex=other, radius=1.0), quiet).rays
+    ca = int(np.flatnonzero(a.roots.vertex == v)[0])
+    cb = int(np.flatnonzero(b.roots.vertex == v)[0])
+    assert a.roots.owned[ca] and not b.roots.owned[cb]
+    assert as_column(a, ca) == as_column(b, cb)
+
+
+@pytest.mark.parametrize("radius", [0.0, 0.3, 1.0, 2.5])
+def test_the_radius_is_along_the_surface(cols: VC.Columns, radius: float) -> None:
+    v = corner_vertex(cols)
+    got, d = cols.near(v, radius)
+    assert set(got.tolist()) == whole_graph_near(cols, v, radius)
+    g = edge_graph(np.asarray(cols.v, float), cols.f, cols.vox)
+    full = dijkstra(g, indices=v, limit=radius)
+    assert np.array_equal(d, full[got])
+    res = cols.compute(VC.Request(vertex=v, radius=radius), quiet)
+    assert sorted(res.rays.roots.vertex.tolist()) == sorted(got.tolist())
+    assert np.array_equal(np.sort(res.distance), np.sort(full[got].astype(np.float32)))
+
+
+def test_every_and_the_limit(cols: VC.Columns, monkeypatch: pytest.MonkeyPatch) -> None:
+    v = corner_vertex(cols)
+    all_ = cols.compute(VC.Request(vertex=v, radius=1.5), quiet).rays.roots.vertex
+    third = cols.compute(VC.Request(vertex=v, radius=1.5, every=3), quiet)
+    assert np.array_equal(third.rays.roots.vertex, all_[::3])
+    monkeypatch.setattr(VC, "MAX_COLUMNS", len(all_) - 1)
+    with pytest.raises(ValueError, match="more than"):
+        cols.compute(VC.Request(vertex=v, radius=1.5), quiet)
+    for bad in (dict(radius="9"), dict(method="x"), dict(every="0"), dict(e_out="9")):
+        with pytest.raises(ValueError):
+            VC.Request.parse(dict(v="0", **bad))
+
+
+def test_select_columns_keeps_each_column(cols: VC.Columns) -> None:
+    sb = cols.superblock(corner_vertex(cols))
+    r = cols.rays.sample(sb, 0, e_out=2.0)
+    idx = [5, 0, 3]
+    s = VC.select_columns(r, idx)
+    for k, c in enumerate(idx):
+        assert as_column(s, k) == as_column(r, c)
+    assert len(VC.select_columns(r, []).s) == 0
+
+
+def test_the_encoding_round_trips() -> None:
+    arrays: dict[str, npt.NDArray[Any]] = dict(
+        a=np.arange(5, dtype=np.int64),
+        b=np.ones((3, 3), np.float32),
+        c=np.array([True, False]),
+        d=np.arange(3, dtype=np.uint8),
+    )
+    head, back = VC.decode(VC.encode(dict(x=1), arrays))
+    assert head["x"] == 1
+    for k, a in arrays.items():
+        assert np.array_equal(back[k], a) and back[k].shape == a.shape
+    assert all(t["offset"] % 8 == 0 for t in head["arrays"])
+
+
+def get(url: str) -> tuple[int, bytes]:
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return int(r.status), bytes(r.read())
+    except urllib.error.HTTPError as e:
+        return int(e.code), bytes(e.read())
+
+
+def test_the_routes(
+    data: dict[str, Path],
+    cols: VC.Columns,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/columns gives compute's columns; /columns/profiles the column-volume
+    sampler's echoes of them; /columns/<key>.tck their positions; a slow
+    request answers 202 and then the columns."""
+    w = WhiteView(data["surf"], tmp_path / "cache", log=quiet)
+    srv = VS.serve(None, 0, white=w, columns=cols)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        v = corner_vertex(cols)
+        q = f"v={v}&radius=1&e_in=0.5&e_out=2"
+        code, body = get(f"{base}/columns?{q}")
+        assert code == 200
+        head, arr = VC.decode(body)
+        ref = cols.compute(VC.Request(vertex=v, radius=1.0, e_in=0.5, e_out=2.0))
+        for k, a in VC.ray_arrays(ref.rays).items():
+            assert (
+                arr[k].tobytes()
+                == np.ascontiguousarray(a)
+                .astype(np.uint8 if a.dtype == np.bool_ else a.dtype)
+                .tobytes()
+            ), k
+        assert head["n"] == len(ref.rays.roots.vertex) and head["key"] == ref.key
+        code, body = get(f"{base}/columns/profiles?{q}")
+        assert code == 200
+        _, pa = VC.decode(body)
+        srcs = [open_volume(p) for p in VC.echo_files(data["echoes"])]
+        smp = ColumnVolumeSampler(srcs, cols.rays.affine, [AFF] * 3, cols.rays.shape)  # type: ignore[arg-type]
+        cv = smp.sample(ref.rays, "numpy")
+        assert pa["echo"].tobytes() == cv.echo.tobytes()
+        assert np.array_equal(pa["valid"].astype(bool), cv.valid)
+        lines = read_tck(get(f"{base}/columns/{ref.key}.tck")[1])
+        st = ref.rays.sample_start
+        assert len(lines) == len(st) - 1
+        for c, line in enumerate(lines):
+            assert np.array_equal(line, ref.rays.position[st[c] : st[c + 1]])
+        meta = json.loads(get(f"{base}/columns/meta")[1])
+        assert meta["max_columns"] == VC.MAX_COLUMNS and meta["methods"] == ["normal"]
+        code, body = get(f"{base}/columns?v={v}&radius=99")
+        assert code == 400 and "radius" in json.loads(body)["error"]
+
+        gate = threading.Event()
+        real = cols.compute
+
+        def slow(req: VC.Request, log: Any = quiet) -> VC.Result:
+            gate.wait(10)
+            return real(req, log)
+
+        monkeypatch.setattr(cols, "compute", slow)
+        monkeypatch.setattr(VC, "WAIT_S", 0.05)
+        q2 = f"v={v}&radius=0.7"
+        code, body = get(f"{base}/columns?{q2}")
+        assert code == 202 and json.loads(body)["status"] == "running"
+        code, body = get(f"{base}/columns?v={v}&radius=0.6")
+        assert code == 202 and json.loads(body)["status"] == "busy"
+        gate.set()
+        assert cols.jobs.thread is not None
+        cols.jobs.thread.join(10)
+        code, body = get(f"{base}/columns?{q2}")
+        assert code == 200 and VC.decode(body)[0]["n"] > 0
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        VS.Handler.white = None
+        VS.Handler.columns = None
+
+
+def test_no_echoes_no_profiles(data: dict[str, Path], tmp_path: Path) -> None:
+    assert VC.echo_files(tmp_path) == []
+    W = WhiteSurface.load(data["surf"])
+    c = VC.Columns(data["surf"], data["dseg"], W.v, W.f, [], log=quiet)
+    key = c.compute(VC.Request(vertex=0, radius=0.2)).key
+    c.jobs.remember(key, c.compute(VC.Request(vertex=0, radius=0.2)))
+    with pytest.raises(ValueError, match="no echoes"):
+        c.profile(key)
+
+
+def test_the_dseg_next_to_the_surface(data: dict[str, Path]) -> None:
+    side = WhiteSurface.load(data["surf"]).sidecar
+    assert VC.dseg_for(data["surf"], side) == data["dseg"]

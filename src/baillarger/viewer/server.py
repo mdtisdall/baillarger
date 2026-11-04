@@ -42,6 +42,8 @@ Requests:
   and affines, the brick size, the dtype, the default window: read on first use),
   /volume/bricks?level=L&b=i,j,k;i,j,k;... (those bricks' bytes, one after another;
   gzip when the page accepts it).
+- The columns pane, with --white (baillarger.viewer.columns.route): /columns/meta,
+  /columns?v=&radius=..., /columns/profiles?..., /columns/<key>.tck.
 - POST /state {from, patch}: merge patch into the state; every page gets
   {from, seq, patch}.
 - POST /filters/run {from, params}: start a filter (one at a time, in a thread) or
@@ -65,6 +67,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 from baillarger.data import echo_path
+from baillarger.viewer import columns as VC
 from baillarger.viewer import filters as VF
 from baillarger.viewer import streamlines as SV
 from baillarger.viewer.bricks import ArrayPyramid, LazyVolume
@@ -143,6 +146,7 @@ class Handler(BaseHTTPRequestHandler):
     labels: LabelReview | None = None
     white: WhiteView | None = None
     volume: LazyVolume | None = None
+    columns: VC.Columns | None = None
     lock = threading.Lock()  # one site computation at a time
     groups: dict[tuple[int, float], dict[str, list[int]]] = {}
     axes: dict[int, dict[str, list[list[float]]]] = {}
@@ -270,6 +274,9 @@ class Handler(BaseHTTPRequestHandler):
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         if u.path == "/volume" or u.path.startswith("/volume/"):
             self.volume_route(u.path, q)
+            return
+        if u.path == "/columns" or u.path.startswith("/columns/"):
+            VC.route(self, u.path, q)
             return
         if self.white is not None:  # a white surface alone
             w = self.white
@@ -458,6 +465,7 @@ def serve(
     labels: LabelReview | None = None,
     white: WhiteView | None = None,
     volume: LazyVolume | None = None,
+    columns: VC.Columns | None = None,
 ) -> ThreadingHTTPServer:
     """The server; without a site, labels (labels only) or white (a white surface
     alone) is needed. volume: the bricks of the volume pane (baillarger.viewer.bricks),
@@ -467,6 +475,7 @@ def serve(
     Handler.site = site
     Handler.white = white
     Handler.volume = volume
+    Handler.columns = columns
     Handler.shared = Shared()
     Handler.groups = {}
     Handler.axes = {}
@@ -508,18 +517,39 @@ def main(argv: list[str] | None = None) -> None:
         help="a white surface from baillarger.white_surf (..._white.surf.gii) with "
         "its overview from baillarger.white_overview, alone",
     )
+    ap.add_argument(
+        "--echo-dir",
+        type=Path,
+        help="with --white: the directory of echoes 1-3 (.nii, else .nii.gz) for the "
+        "columns pane's profiles (default: data)",
+    )
+    ap.add_argument(
+        "--dseg",
+        type=Path,
+        help="with --white: the surface's _desc-wmtopo_dseg (default: the one next "
+        "to the surface, else the sidecar's Sources)",
+    )
     ap.add_argument("--port", type=int, default=8790)
     a = ap.parse_args(argv)
     t0 = time.time()
     site: Site | None = None
     review: LabelReview | None = None
     white: WhiteView | None = None
+    columns: VC.Columns | None = None
     if a.white is not None:
         if a.column_volume is not None or a.labels is not None:
             ap.error("--white is viewed alone: no column volume or --labels")
         if a.cache is None:
             ap.error("--cache is needed with --white")
         white = WhiteView(a.white, a.cache, log=print)
+        columns = VC.Columns(
+            a.white,
+            a.dseg or VC.dseg_for(a.white, white.W.sidecar),
+            white.W.v,
+            white.W.f,
+            VC.echo_files(a.echo_dir or echo_path(1).parent),
+            log=print,
+        )
     elif a.column_volume is None:
         if a.labels is None:
             ap.error("give a column volume, or --labels to review the labels alone")
@@ -549,7 +579,7 @@ def main(argv: list[str] | None = None) -> None:
         e_ = a.echo or echo_path(2)
         if e_.is_file():
             volume = LazyVolume(lambda: ArrayPyramid.from_nifti(e_), e_.name)
-    srv = serve(site, a.port, review, white, volume)
+    srv = serve(site, a.port, review, white, volume, columns)
     print(
         f"serving on http://127.0.0.1:{a.port}/ ({time.time() - t0:.0f} s)", flush=True
     )
