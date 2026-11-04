@@ -87,7 +87,7 @@ AFF = np.diag([0.16, 0.2, 0.12, 1.0])
 AFF[:3, 3] = [-3.0, 2.0, 5.0]
 
 
-def write_files(d: Path) -> tuple[list[Path], Path]:
+def write_files(d: Path, period_mm: float = 0.5) -> tuple[list[Path], Path]:
     """A sphere of laminae (op.laminae_sphere) as a right hemisphere: the
     dseg (via the dseg command, 8-cell blocks) and three echo images."""
     shape = (48, 48, 48)
@@ -97,7 +97,7 @@ def write_files(d: Path) -> tuple[list[Path], Path]:
         (3.8, 4.7, 2.9),
         1.6,
         3.6,
-        0.5,
+        period_mm,
         (0.3, 0.2, 0.1),
         (600.0, 350.0, 200.0),
     )
