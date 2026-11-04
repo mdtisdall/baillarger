@@ -5,9 +5,6 @@ A sampler computes its output on demand from the rays of the ray sampler
 (ray-sampler/1) and the echoes; nothing is stored. Each sample of a column
 keeps the value of every echo (trilinear, as acquired) and a validity flag.
 A column is the same, bit for bit, whichever superblock computes it.
-
-This version gives the types and the call; the sampler itself comes with
-Part B of phase 3.0.
 """
 
 from collections.abc import Sequence
@@ -22,8 +19,6 @@ from baillarger.blocks import Source
 from baillarger.rays import Rays
 
 VERSION = "column-volume/1"
-
-PENDING = "column-volume/1: the sampler comes in phase 3.0, Part B"
 
 Bool = npt.NDArray[np.bool_]
 F32 = npt.NDArray[np.float32]
