@@ -27,7 +27,7 @@ any definition chosen later can be computed from the history.
 | A4 | §3c step 2, tight folds | s = 0.30 mm "must not be a whole number of voxels along any axis", but 0.30 mm is 6 voxels at 50 µm. The data table checks constants on the next hemisphere, not at a new resolution. | deferred to 1.4 |
 | A5 | §4b standing decisions | The 8 mm cap is justified by "cortex is at most about 4.5 mm thick … crosses a fused contact into the far bank's WM even when the ray meets it at an angle". Two 4.5 mm banks face to face need 9 mm, more at an angle (1/cos θ). | fixed |
 | A6 | §5b standing decisions; §5c step 4 | "Only bands of at least 2–3 voxels; the stria is at this limit" against step 4's 1.5-voxel minimum, chosen because the stria is 1.67 voxels and a 2.5-voxel threshold drops it. | deferred to 3.4 |
-| A7 | §6c step 3 (PE lesson); §3c step 2; §5c step 7 | "Edits … replay exactly in any order" against stream 1 and stream 3 answers that replay in time order, the later winning. | open (wave 2: 1.3) |
+| A7 | §6c step 3 (PE lesson); §3c step 2; §5c step 7 | "Edits … replay exactly in any order" against stream 1 and stream 3 answers that replay in time order, the later winning. | fixed |
 | A8 | §3c Open, enclosed ventricles | One option keeps an enclosed ventricle as "an inner surface piece, b2 > 0", but `dseg` refuses to write unless Betti is (b0, 0, 0), and §3a and `wm-dseg/1` require genus-0 pieces with no cavities. The option needs a spec change that the plan does not state. | fixed |
 | A9 | §3c step 1 coupling 4; §1 data table; step 6 | "The number of handles and cavities … sets the length of the review queue", but the queue also holds folds, margins, spread, stream 3 sites and random sites. It ranks with no threshold, so nothing sets its length, yet the data table calls its length a success measure. | deferred to 1.9 |
 | A10 | §5b standing decisions; §5c steps 3 and 5 | "Where there is none, depth follows equal volume" against "the current estimator is distance, until an equal-volume estimator is validated". | deferred to 3.5 |
@@ -43,7 +43,7 @@ any definition chosen later can be computed from the history.
 | B2 | §4c step 2; §4c Open; §5c step 5 | Normal rays' 0.17 mm at M1/S1 is "the bar" for the deflected ray, but it was measured with the mirrored template, which §5c calls a record that assumes face-to-face banks. The case for straight rays over fields leans on the same measure. | deferred to 2.2 |
 | B3 | §5c steps 3, 4 and 5; §9 | Bands are found in τ from the warp, and the warp places levels at bands. Thickness is a warp term, and thickness evidence comes from the warp. Contact tops use "the end of its own layer sequence", which needs layer identity (step 4). No order of iteration or stopping rule. The §9 table says 3.4 needs only 3.1, but step 4's inputs list step 3. | deferred to 3.3 |
 | B4 | §1 item 2; phase 8; phase 10 | With one hemisphere, inference runs on the training hemisphere: at each voxel 4 of 5 fold models trained on it. The spread is mostly one out-of-fold model against four in-sample ones, not "what more labels can fix". | deferred to 1.10 |
-| B5 | §3c step 2, the topology guarantee | An answer overridden by the guarantee goes back to the queue, is answered again, and can be overridden again. No exit from the loop. | open (wave 2: 1.3) |
+| B5 | §3c step 2, the topology guarantee | An answer overridden by the guarantee goes back to the queue, is answered again, and can be overridden again. No exit from the loop. | fixed |
 
 ## C. Unsupported or doubtful claims
 
