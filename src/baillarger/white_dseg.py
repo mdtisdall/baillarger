@@ -216,37 +216,50 @@ def small_pieces(
     return idx, renum[lab[idx]]
 
 
-def neighbour_labels(
+def relabel_small_pieces(
     labels: npt.NDArray[np.integer[Any]],
     idx: tuple[npt.NDArray[np.intp], ...],
     filled: tuple[int, ...],
     origin: npt.ArrayLike = (0, 0, 0),
-) -> npt.NDArray[np.integer[Any]]:
-    """For each voxel at idx: the most common label among its 26-neighbours
-    (in the array) that do not have a filled label. If two labels have the
-    same count, the smaller label value wins. Raises RuntimeError for a voxel
-    with no such neighbour, because then there is no label to give it; the
-    error gives the voxel's index plus origin (the index in the whole grid,
-    for labels that are a crop)."""
+) -> int:
+    """Give each voxel at idx (each has a filled label) a label that is not
+    filled, in place, layer by layer from the outside in. Layer 1: each voxel
+    with a 26-neighbour (in the array) that does not have a filled label
+    takes the most common label of those neighbours. Layer k: each voxel
+    that is left and has such a neighbour, outside idx or given its label in
+    layers 1 to k-1, takes the most common label of those neighbours. Each
+    layer reads only the labels before it, so the order of the voxels does
+    not matter. If two labels have the same count, the smaller label value
+    wins. Returns the number of layers. Raises RuntimeError if a layer gives
+    no label while voxels are left (a piece with no voxel outside the mask
+    round it: it fills the array); the error gives a voxel's index plus
+    origin (the index in the whole grid, for labels that are a crop)."""
     p = np.stack(idx, axis=1)
-    if not len(p):
-        return labels[idx]
-    q = p[:, None, :] + NEIGHBOURS_26[None]
-    inside = ((q >= 0) & (q < np.array(labels.shape))).all(axis=2)
-    q = np.clip(q, 0, np.array(labels.shape) - 1)
-    v = labels[q[..., 0], q[..., 1], q[..., 2]]
-    ok = inside & ~np.isin(v, filled)
-    none = ~ok.any(axis=1)
-    if none.any():
-        at = (p[none][0] + np.asarray(origin)).tolist()
-        raise RuntimeError(
-            f"the voxel {at} of a small piece of the WM mask has no 26-neighbour "
-            "without a filled label: there is no label to give it"
-        )
-    cand = np.unique(v[ok])  # sorted, so argmax takes the smallest label of a tie
-    counts = ((v[..., None] == cand) & ok[..., None]).sum(axis=1)
-    out: npt.NDArray[np.integer[Any]] = cand[counts.argmax(axis=1)]
-    return out
+    shape = np.array(labels.shape)
+    if not np.isin(labels[idx], filled).all():
+        raise ValueError("a voxel of a small piece does not have a filled label")
+    layers = 0
+    while len(p):
+        q = p[:, None, :] + NEIGHBOURS_26[None]
+        inside = ((q >= 0) & (q < shape)).all(axis=2)
+        q = np.clip(q, 0, shape - 1)
+        v = labels[q[..., 0], q[..., 1], q[..., 2]]
+        ok = inside & ~np.isin(v, filled)
+        now = ok.any(axis=1)
+        if not now.any():
+            at = (p[0] + np.asarray(origin)).tolist()
+            raise RuntimeError(
+                f"the voxel {at} of a small piece of the WM mask has no "
+                "26-neighbour outside the mask, and no voxel of its piece has "
+                "one: there is no label to give it"
+            )
+        v, ok = v[now], ok[now]
+        cand = np.unique(v[ok])  # sorted: argmax takes the smallest label of a tie
+        counts = ((v[..., None] == cand) & ok[..., None]).sum(axis=1)
+        labels[tuple(p[now].T)] = cand[counts.argmax(axis=1)]
+        p = p[~now]
+        layers += 1
+    return layers
 
 
 @dataclass(frozen=True)
@@ -287,9 +300,10 @@ def wm_topo(
     WM label; each handle cut takes the label of the nearest voxel that is
     outside the corrected mask and not a cut. Then the pieces of the mask
     below CRUMB_MM3 (small_pieces) are removed: each of their voxels takes
-    the most common label of its 26-neighbours outside the mask
-    (neighbour_labels). The corrected segmentation's voxels with a filled
-    label are exactly the corrected mask. Raises RuntimeError if that mask
+    the most common label of its 26-neighbours outside the mask, layer by
+    layer from the outside in (relabel_small_pieces). The corrected
+    segmentation's voxels with a filled label are exactly the corrected
+    mask. Raises RuntimeError if that mask
     still has a handle or a cavity (b1 or b2 not 0), which a fill of one
     piece of the mask touching another can make."""
     lap = Laps()
@@ -325,11 +339,10 @@ def wm_topo(
     labels[cav | fill] = wm_label
     relabel_cuts(labels, cut, ~obj & ~cut, voxel_mm)
     lap("relabel cuts")
-    # the small pieces: each voxel reads the labels above, not those of the
-    # other voxels of its piece, so the order of the voxels does not matter
+    # the small pieces, from the labels above, layer by layer
     small, piece = small_pieces(obj, voxel_mm)
     n_small = int(piece.max()) if len(piece) else 0
-    labels[small] = neighbour_labels(labels, small, filled, lo)
+    relabel_small_pieces(labels, small, filled, lo)
     obj[small] = False
     lap("small pieces")
     if not np.array_equal(np.isin(labels, filled), obj):
