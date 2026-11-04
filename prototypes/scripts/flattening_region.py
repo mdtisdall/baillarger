@@ -69,6 +69,9 @@ def main() -> None:
     ap.add_argument("--decay", action="store_true")
     ap.add_argument("--proximity", action="store_true")
     ap.add_argument("--delta", type=float, default=0.08)
+    ap.add_argument("--warp-from", type=Path, default=None,
+                    help="the region's warp from an earlier run's npz (skips the fit)")
+    ap.add_argument("--n-outer", type=int, default=4)
     ap.add_argument("--precond", default="jacobi", choices=["jacobi", "line"])
     ap.add_argument(
         "--local",
@@ -143,7 +146,14 @@ def main() -> None:
     stats["energy_ref"] = ps.energy_ref
     say(f"shifts; energy ref {ps.energy_ref:.4g}; peak {peak_gb():.2f} GB")
     t = time.time()
-    warp = FG.fit(ps, n, p.s_lo, p.step, log=say, precond=A.precond)
+    if A.warp_from is not None:
+        z = np.load(A.warp_from)
+        assert np.array_equal(z["edge_key"], rays.roots.edge_key)
+        rr = z["r"].astype(np.float64)
+        warp = FG.Warp(float(z["s_lo"]), z["tau"], rr, int(z["anchor_level"]), [])
+        say("warp from " + str(A.warp_from))
+    else:
+        warp = FG.fit(ps, n, p.s_lo, p.step, log=say, precond=A.precond, n_outer=A.n_outer)
     stats["seconds_fit"] = round(time.time() - t, 1)
     stats["fit"] = warp.info
     say(f"fit; peak {peak_gb():.2f} GB")
@@ -262,7 +272,9 @@ def local(A, ps, warp, pairs, vox, voxel_mm, stats) -> None:  # type: ignore[no-
             loc[pairs[keep]], ps.shift[keep], ps.weight[keep], ps.energy_ref
         )
         t = time.time()
-        w = FG.fit(sub, len(sel), warp.s_lo, float(A.step_mm), precond=A.precond)
+        w = FG.fit(
+            sub, len(sel), warp.s_lo, float(A.step_mm), precond=A.precond, n_outer=A.n_outer
+        )
         dt = time.time() - t
         o = own[sel]
         dd = w.r[o] - warp.r[sel[o]]
@@ -271,6 +283,43 @@ def local(A, ps, warp, pairs, vox, voxel_mm, stats) -> None:  # type: ignore[no-
         # mean_v r_v(tau) = 0 over the solve's columns, at each level)
         dg = np.abs(dd - dd.mean(0, keepdims=True))
         gauge = np.abs(dd.mean(0))
+        # per connected piece of the local graph (a piece has its own gauge)
+        from scipy.sparse import coo_matrix as _coo
+        from scipy.sparse.csgraph import connected_components
+
+        lp = loc[pairs[keep]]
+        ncomp, comp = connected_components(
+            _coo((np.ones(len(lp)), (lp[:, 0], lp[:, 1])), shape=(len(sel), len(sel))),
+            directed=False,
+        )
+        co = comp[o]
+        dp = dd.copy()
+        for k in np.unique(co):
+            dp[co == k] -= dd[co == k].mean(0)
+        # the same horizon family: for each local level, the region's horizon
+        # with the same mean depth over the owned columns (a reparametrisation
+        # of tau: z(tau) -> z(phi(tau)) leaves the data rows unchanged)
+        zl = warp.tau[None] + w.r[o]
+        zg = warp.tau[None] + warp.r[sel[o]]
+        mg = np.maximum.accumulate(zg.mean(0))
+        ml = zl.mean(0)
+        tp = np.interp(ml, mg, warp.tau)
+        zgm = np.stack([np.interp(tp, warp.tau, row) for row in zg])
+        drp = np.abs(zl - zgm)
+        inside = (ml > mg[0]) & (ml < mg[-1])
+        sizes = np.bincount(co)
+        pieces = dict(
+            reparam_abs_dz_p50_p99_max=np.percentile(drp[:, inside], [50, 99, 100]).tolist(),
+            reparam_abs_dz_cortex_p50_p99_max=np.percentile(
+                drp[:, inside & (warp.s_lo + warp.tau > 0) & (warp.s_lo + warp.tau < 3)],
+                [50, 99, 100],
+            ).tolist(),
+            pieces_with_owned=int((sizes > 0).sum()),
+            owned_in_largest=int(sizes.max()),
+            degauged_per_piece_abs_dr_p50_p99_max=np.percentile(
+                np.abs(dp), [50, 99, 100]
+            ).tolist(),
+        )
         row = dict(
             halo_mm=h,
             columns=int(len(sel)),
@@ -282,6 +331,7 @@ def local(A, ps, warp, pairs, vox, voxel_mm, stats) -> None:  # type: ignore[no-
             gauge_abs_max=float(gauge.max()),
             degauged_abs_dr_p50_p99_max=np.percentile(dg, [50, 99, 100]).tolist(),
             local_mean_of_region_r_abs_max=float(np.abs(warp.r[sel].mean(0)).max()),
+            **pieces,
         )
         say(f"local h={h}: {row}")
         rows.append(row)

@@ -252,13 +252,16 @@ def fit_warp(
     log: Callable[[str], object] | None = None,
     anchor_level: int = 0,
     precond: str = "jacobi",
+    fixed: Bool | None = None,
 ) -> tuple[Float, Float, list[dict[str, Any]]]:
     """Fit r (n_traces, K) on tau_j = j dtau, j < K = tau_max / dtau + 1.
 
     pairs (P, 2) trace indices (v, w); S, W (P, n) the pair's shift (mm) and weight at
     each sample of v. The anchor rows tie r_v to 0 at level anchor_level (default 0,
     the first sample of each trace). precond: "jacobi" (the diagonal) or "line"
-    (each trace's own tridiagonal block along tau, solved exactly). Returns tau (K,),
+    (each trace's own tridiagonal block along tau, solved exactly). fixed (n_traces,):
+    traces whose r stays at r0 (a boundary condition, for overlapping Schwarz); the
+    others are solved with them as known values. Returns tau (K,),
     r (n_traces, K), info (per outer iteration: cg iterations, weighted rms)."""
     K = int(round(tau_max / dtau)) + 1
     tau: Float = np.arange(K, dtype=float) * dtau
@@ -270,9 +273,15 @@ def fit_warp(
         Ad, bd, sw = data_rows(pairs, S, W, r, tau, step)
         M = (Ad.T @ Ad + R).tocsr()
         rhs = Ad.T @ bd
+        if fixed is not None:
+            fr = np.repeat(~np.asarray(fixed, bool), K)
+            xd = r.ravel()[~fr]
+            Mf = M[fr]
+            rhs = rhs[fr] - Mf[:, ~fr] @ xd
+            M = Mf[:, fr].tocsr()
         dg = M.diagonal()
         if precond == "line":
-            pre = line_preconditioner(dg.reshape(N, K), -(eps**2))
+            pre = line_preconditioner(dg.reshape(-1, K), -(eps**2))
         else:
             pre = diags(1.0 / np.where(dg > 0, dg, 1.0))
         n_it = [0]
@@ -280,9 +289,12 @@ def fit_warp(
         def cb(_: Any, n_it: list[int] = n_it) -> None:
             n_it[0] += 1
 
-        x, flag = cg(
-            M, rhs, x0=r.ravel(), rtol=rtol, maxiter=maxiter, M=pre, callback=cb
-        )
+        x0 = r.ravel() if fixed is None else r.ravel()[fr]
+        x, flag = cg(M, rhs, x0=x0, rtol=rtol, maxiter=maxiter, M=pre, callback=cb)
+        if fixed is not None:
+            full = r.ravel().copy()
+            full[fr] = x
+            x = full
         r = x.reshape(N, K)
         res = Ad @ x - bd
         den = float(np.sum(sw**2))
