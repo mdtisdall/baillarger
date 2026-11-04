@@ -125,7 +125,7 @@ These bind every stream from its first version. A first version may be rough, bu
 | Thickness carried sideways (§5c, step 5) | own-bank evidence at visible tops and bottoms | the thickness field, and how far carry reaches | Yes, inside the fit: mask stretches of columns that do have own evidence, carry across them, and compare. This needs no labels and measures carry where the answer is known |
 | Equal-volume depth (§5c, step 5) | V(s) between two named levels | depth within a column | Yes: it is validated against visible bands, so a band that the warp used as a level cannot also validate it. Leave each band out of the levels in turn |
 | The joint warp's anchors (§5c, steps 3 and 7) | the profiles and the user's points | z(τ) per column | No training. Each answer is scored against the carried level it replaced, before the warp reads it; that is how far carry can reach (§5c, Open) |
-| A data-normal term in `antialias`, or normals corrected by laminar contrast (§5c, step 6), if adopted (§3c, Open) | the data normal; stream 3's profiles | surface normals | Yes: agreement with the data normal is then no longer an independent check, so part of the evidence (one echo, or some regions) stays out of the term |
+| A normal term in `antialias`, towards the data normal or stream 3's normal corrections from laminar contrast (§5c, step 6), if adopted (§3c, Open) | the data normal; stream 3's profiles | the surface and its normals | Yes: agreement with the data normal is then no longer an independent check, so part of the evidence (one echo, or some regions) stays out of the term |
 
 **The kinds of data apart from training**
 
@@ -203,7 +203,7 @@ The restart does not work on boxes. Two things from them still matter:
 - **Vertex identity is the grid-edge key:** lin(p) × 7 + (4 s_i + 2 s_j + s_k − 1), in int64. It survives remeshing, so anything stored per vertex keys on it.
 - **The block layout:** the grid starts at voxel 0, with 64-voxel blocks in Morton order (i at bit 3b+2, j at 3b+1, k at 3b). A vertex is owned by the first block that uses it.
 - **Precision:** mesh steps run in float32, with float64 only for the affine, area sums and intersection tests. Torch kernels use no float64, no CSR and no atomics, so each run gives the same result. An unavailable device is an error.
-- **Manual inputs** are replayable and never baked into the source (`wm-edits/1`, #78). Answers at sites are edits, applied before the automatic step; scribbles are verified training labels only, too sparse to apply, and reach the labels through the next generation. Feedback from a later stream enters as review sites, so it reaches the labels only through a person's answer; stream 3's normals corrected by laminar contrast change no label (§5c, step 6).
+- **Manual inputs** are replayable and never baked into the source (`wm-edits/1`, #78). Answers at sites are edits, applied before the automatic step; scribbles are verified training labels only, too sparse to apply, and reach the labels through the next generation. Feedback from a later stream enters as review sites, so it reaches the labels only through a person's answer; stream 3's normal corrections move the surface only through `antialias`, within its sign constraints, and change no label (§5c, step 6).
 
 **Licences**
 
@@ -459,7 +459,6 @@ The coupling that is real, decided once:
 |---|---|---|
 | `_hemi-<h>_white.surf.gii` (+ `.dat`): vertices and triangles | `white-surf/1` | step 5; stream 2 (roots); stream 3 (column graph); the viewer |
 | `_desc-normals_white.func.gii`: unit normals | `white-surf/1` | stream 2 (ray directions) |
-| `_desc-laminarnormals_white.func.gii`: unit normals corrected by stream 3's laminar contrast (planned; 3d, phase 11) | `white-surf/1` | stream 2 (ray directions, in place of the smoothed normals where present) |
 | `_desc-normlen_white.func.gii`: the normal length \|n̄\| in [0, 1]: the norm of the unit normals smoothed by the same 10 steps with no renormalisation between steps, so it measures how much they cancel over about 10 edges (phase 0, #106) | `white-surf/1` | stream 2 (recorded per column); stream 3 (weighing evidence) |
 | `_desc-edgekeys_white.func.gii`: each vertex's grid-edge key | `white-surf/1` | every per-vertex output downstream |
 | `_desc-blocks_white.tsv`: the block index | `white-surf/1` | blocked readers downstream |
@@ -570,7 +569,7 @@ The design follows `wm-edits/1` (#78), the review plan in #80 and the site finde
 - Whether `orient`'s window should stop where the WM-distance fronts of two banks meet, so that it never spans a fused sulcus (step 3).
 - Whether `orient` should subtract the local cortex level at all: compare with and without, by echo agreement, coherence and the misalignment diagnostic.
 - Whether `orient` needs a robust window near the pia, vessels and fused sulci, where tissue-edge gradients (largest in echo 1) can outweigh the laminae (step 3).
-- **Whether antialiasing should align the surface with the data normal.** A data term in step 4 would pull the surface normals towards step 3's data normal near the boundary, weighted by its coherence (high in most cortex, low at contacts and fundi). The sign constraints stay, so the topology stays guaranteed. The cost: agreement with the data normal would stop being an independent check of the surface. Keep part of the evidence out of the term (one echo, or held-out regions), or judge the surface by something else, such as how straight the columns run.
+- **Whether antialiasing should align the surface with the image's normal.** A term in step 4 would pull the surface normals towards a target near the boundary: step 3's data normal, weighted by its coherence (high in most cortex, low at contacts and fundi), or stream 3's normal corrections from laminar contrast (§5c, step 6), weighted by how much each improves the fit, which can hold where coherence is low. The sign constraints stay, so the topology stays guaranteed. The cost: agreement with the data normal would stop being an independent check of the surface. Keep part of the evidence out of the term (one echo, or held-out regions), or judge the surface by something else, such as how straight the columns run.
   - Its reach is limited: the sign constraints keep the surface within about half a voxel of the mask, so the term can smooth the staircase and short-wavelength tilt, but cannot turn a region whose mask faces the wrong way; that needs a different label.
   - The data normal at the boundary comes from the deepest layers (WM has no laminar texture), where coherence may be lower.
   - Whether to use it is decided by stream 2's misalignment diagnostic (§4c, Open): misalignment set at the root and constant along the rays points here; misalignment that grows with depth points to steering the rays instead.
@@ -650,8 +649,7 @@ Order: phase 0 first. Phases 0.5, 1, 3 and 5 can then start alongside each other
   - Synthetic training images from label maps (SynthSeg, PostSynth), as augmentation, if the problem is generalising to other hemispheres or protocols.
   - Outputs that hold more than one interface per voxel, if stream 3's contacts need more than the profiles give: an unsigned distance to the pial interface (a channel narrower than a voxel is a valley that never reaches zero, which a signed distance cannot hold), or tissue fractions trained on 50 µm data averaged down to 160 µm, where the fractions are known.
   - A topology loss (clDice, Betti matching), if the queue is too long. It can only reduce defects; the guarantee stays in step 2's correction.
-  - A data-normal term in `antialias` (§3c Open), if stream 2's misalignment diagnostic (its phase 2) finds misalignment set at the root and constant along the rays.
-  - Normals corrected by laminar contrast (`_desc-laminarnormals_white.func.gii` in `white-surf/1`), from stream 3's phase 6, if its corrections improve the fit; the ray sampler reads them in place of the smoothed normals, and streams 2 and 3 rerun once.
+  - A normal term in `antialias` (§3c Open), pulling the surface's normals towards a target near the boundary, with the sign constraints kept: the data normal, if stream 2's misalignment diagnostic (its phase 2) finds misalignment set at the root and constant along the rays; stream 3's normal corrections from laminar contrast (its phase 6), if they improve the fit; or both. The surface moves, its normals stay its shape's own, and streams 2 and 3 rerun once on it.
   - Cut seeds for excisions through cortex (§3c Open), if stream 3's cut-top test (its phase 5) finds that profiles cannot find them.
 
 **Whole-brain scaling** (alongside phases 1–11; `docs/scaling.md`)
@@ -1073,15 +1071,15 @@ Where each layer lies along every column, read from the image's own contrast and
 | Output | Spec | Used by |
 |---|---|---|
 | Sites for stream 1's review queue: where the GM/WM transition along the columns disagrees with the WM label | `wm-sites/1` | stream 1, step 6 |
-| Per root: a corrected normal from laminar contrast, with how much it improves the fit | a spec of its own, written in phase 6 | stream 1, phase 11 (`_desc-laminarnormals`) |
+| Per root: a corrected normal from laminar contrast, with how much it improves the fit | a spec of its own, written in phase 6 | stream 1, step 4 (a normal term in `antialias`; phase 11) |
 
 *Design and lessons*
 
 - Nothing is built. The feedback arrives as sites in stream 1's queue, in `wm-sites/1`, never as a code dependency and never as labels. Stream 3's output is a machine output: it neither edits the labels nor trains the model unless a person answers its site (stream 1's rule against drift).
 - **Normal correction from laminar contrast.** Per column, the tilt of the ray that makes its measured contrast most consistent with the cortex's laminar structure: for example sharper bands, or a better fit to the joint warp's levels in neighbouring columns. It reads the whole laminar sequence, not a 2-voxel window, so it can hold at contacts and fundi, where `orient`'s coherence falls to 0.05–0.38. It is compared with the data normal, and published per root with how much it improves the fit; the estimator is chosen in phase 6.
-  - **It reaches the surface as published normals,** not as a change of the surface's shape: stream 1 publishes them in `white-surf/1` (`_desc-laminarnormals`), and the ray sampler reads them in place of the smoothed normals. The surface's position, topology and guarantees stay as they are, but those normals are no longer computed from its shape.
-  - **One round, then measure.** Streams 2 and 3 rerun on the corrected normals (reruns, §9), and the change in fit and in the corrections is measured. Another round only if the diagnostics ask for it.
-  - It changes no label, so stream 1's rule against drift is untouched; but agreement between the normals and the laminar contrast is then no longer an independent check (§1).
+  - **It moves the white surface.** Stream 1 takes the corrections as a target for a normal term in `antialias` (§3c, Open; phase 11): the surface moves until its own normals agree, within the sign constraints, so its topology and freedom from self-intersection stay guaranteed and its normals stay those of its shape. The new surface gives new roots and normals.
+  - **One round, then measure.** Streams 2 and 3 rerun on the moved surface (reruns, §9), and the change in fit and in the corrections is measured. Another round only if the diagnostics ask for it.
+  - It changes no label, so stream 1's rule against drift is untouched; but agreement between the surface's normals and the laminar contrast is then no longer an independent check (§1).
 
 #### Step 7: review of tops and bottoms
 
@@ -1384,7 +1382,7 @@ flowchart TB
   S1P8 -.-> S2P2
   S2P2 -.-> S2P3
   S2P2 -. "antialiasing term, if called for" .-> S1P11
-  S3P6 -. "laminar normals, if they improve the fit" .-> S1P11
+  S3P6 -. "normal corrections, an antialiasing term" .-> S1P11
 
   S2P0 --> S3P0 --> S3P1 --> S3P3
   S3P2 --> S3P3
@@ -1427,7 +1425,7 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 1.8 | later |  | 1.6, 1.7 | replaces the purple-mri aseg; first P on the hemisphere, then the labels-only path goes; streams 2–4 rerun; decides the hippocampus |
 | 1.9 | later |  | 1.8, 4.2 | queues 3.6's sites when they exist |
 | 1.10 | later |  | 1.8 | |
-| 1.11 | later |  | each item when its own diagnostic asks: 1.9, 1.10; 2.2 for the antialiasing term; 3.5 for cut seeds; 3.6 for laminar normals | only if their diagnostics ask |
+| 1.11 | later |  | each item when its own diagnostic asks: 1.9, 1.10; 2.2 for the antialiasing term; 3.5 for cut seeds; 3.6 for the antialiasing term towards laminar normals | only if their diagnostics ask |
 | Scaling track | later |  | 1.0 | alongside 1.1–1.11; done before the first whole brain |
 | 2.0 | 1 | **Done** (#94, #100, #101, #102, #108, #113) | 1.0 | writes the ray-sampler spec first; 1.0's hemisphere outputs only for its hemisphere run |
 | 2.1 | 2 |  | 2.0 | |
@@ -1439,7 +1437,7 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 3.3 | 3 |  | 3.1, 3.2 | gains from 3.4 (bands as levels); reads 3.7's answers as anchors once 4.5 writes them |
 | 3.4 | 3 |  | 3.1 | alongside 3.3 |
 | 3.5 | later |  | 3.3 | gains from 2.1 (V(s), for equal-volume depth); tests cut tops against the excision map |
-| 3.6 | later |  | 3.3 | feeds stream 1 as review sites, and with normals corrected by laminar contrast (1.11); gains from 3.7 (reviewed bottoms) |
+| 3.6 | later |  | 3.3 | feeds stream 1 as review sites, and with normal corrections for its antialiasing term (1.11); gains from 3.7 (reviewed bottoms) |
 | 3.7 | later |  | 3.3 | writes `laminar-sites/1` and `laminar-edits/1` first |
 | Stream 3 scaling track | later |  | 3.3, 3.5 | done before the first whole brain |
 | 4.0 | 1 | **Done** (#92, #97, #99, #114, #115, #116) | 1.0 | porting and merging need only 1.0's formats and split; the hemisphere outputs only for its hemisphere check |
