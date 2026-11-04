@@ -283,14 +283,36 @@ def test_a_tie_goes_to_the_smaller_label(first: int, second: int) -> None:
     assert t.dseg[tuple(c)] == 42 and t.small_pieces == 1
 
 
-def test_a_voxel_with_no_neighbour_outside_the_mask_is_refused() -> None:
-    """The rule gives no label to a voxel whose 26 neighbours are all in the
-    mask: a 3 x 3 x 3 cube of WM (0.17 mm3) has one at its centre."""
+def test_a_solid_cube_is_relabelled_from_the_outside_in() -> None:
+    """A 3 x 3 x 3 cube of WM (0.11 mm3) in cortex and hippocampus: its 26
+    shell voxels have neighbours outside the mask and take their labels in
+    layer 1. Its centre has none, and takes the most common label of the 26
+    shell voxels in layer 2."""
     a, _ = excised_block()
     a[30:35, 27:32, 22:27] = 42
+    a[30:32, 27:32, 22:27] = 53
     a[31:34, 28:31, 23:26] = 41
-    with pytest.raises(RuntimeError, match=r"\[32, 29, 24\] of a small piece"):
-        white_dseg.wm_topo(a, VOX)
+    t = white_dseg.wm_topo(a, VOX)
+    assert t.small_pieces == 1 and t.betti_after == (1, 0, 0)
+    assert (t.fixes[31:34, 28:31, 23:26] == 5).all() and (t.fixes == 5).sum() == 27
+    c = np.array([32, 29, 24])
+    shell = [int(t.dseg[tuple(c + o)]) for o in white_dseg.NEIGHBOURS_26]
+    assert set(shell) == {42, 53}  # both labels reach the shell
+    lab, cnt = np.unique(shell, return_counts=True)
+    assert t.dseg[tuple(c)] == lab[cnt.argmax()]
+
+
+def test_relabel_small_pieces_counts_its_layers() -> None:
+    """A 5 x 5 x 5 cube in an array of 7 x 7 x 7 of label 0: three layers.
+    The array's own border is no neighbour."""
+    labels = np.zeros((7, 7, 7), np.int16)
+    labels[1:6, 1:6, 1:6] = 41
+    idx = np.nonzero(labels)
+    assert white_dseg.relabel_small_pieces(labels, idx, FILLED) == 3
+    assert not labels.any()
+    labels = np.full((3, 3, 3), 41, np.int16)
+    with pytest.raises(RuntimeError, match=r"\[4, 4, 4\] of a small piece"):
+        white_dseg.relabel_small_pieces(labels, np.nonzero(labels), FILLED, (4, 4, 4))
 
 
 def test_small_pieces_counts_with_the_kuhn_adjacency() -> None:

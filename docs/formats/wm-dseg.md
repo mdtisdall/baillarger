@@ -45,11 +45,16 @@ stays.
 4. Small pieces are removed. A small piece is a piece of the mask after
    steps 1 to 3 (Kuhn adjacency) whose volume (voxels × the voxel volume)
    is less than `CrumbMM3` (1 mm³, `baillarger.labels.CRUMB_MM3`; the
-   same value as in `wm-excisions/1`). Each voxel of a small piece gets the
-   most common label of its 26-neighbours (in the image) that do not have a
-   filled label, in the labels after step 3. If two labels have the same
-   count, the smaller label value wins. If a voxel has no such neighbour,
-   the command writes nothing and stops with an error. A speck that touches
+   same value as in `wm-excisions/1`). The voxels of the small pieces get
+   new labels in layers, from the outside in. Layer 1: each voxel with a
+   26-neighbour (in the image) that does not have a filled label, in the
+   labels after step 3, gets the most common label of those neighbours.
+   Layer k: each voxel that is left and has such a neighbour (outside the
+   small pieces, or given its label in layers 1 to k-1) gets the most common
+   label of those neighbours. Each layer reads only the labels before it,
+   so the order of the voxels does not matter. If two labels have the same
+   count, the smaller label value wins. The layers continue until no voxel
+   is left. A speck that touches
    a larger piece only across an edge or corner diagonal is a piece of its
    own (Kuhn adjacency does not join them), so it is removed and not joined.
 
