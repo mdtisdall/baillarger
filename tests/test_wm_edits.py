@@ -8,7 +8,6 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import pytest
-
 from test_white_dseg import FILLED, VOX, synthetic_aseg
 
 from baillarger import bids, white_dseg

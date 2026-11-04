@@ -269,8 +269,8 @@ def _ring_run(
             )
     w = white_dseg.write_wm_topo(src, out, log.path)
     diff = fix_diff.read_diff(w["diff"], a.shape)
-    seg = np.asarray(nib.load(w["dseg"]).dataobj)
-    fx = np.asarray(nib.load(w["fixes"]).dataobj)
+    seg = np.asarray(nib.nifti1.load(w["dseg"]).dataobj)
+    fx = np.asarray(nib.nifti1.load(w["fixes"]).dataobj)
     acc = WS.accepted_fixes(log.read(), white_dseg.history_dir(w["dseg"]), a.shape)
     rows = WS.fix_sites(
         fix_diff.read_table(w["table"]),
