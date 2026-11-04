@@ -156,6 +156,7 @@
 </div>
 <div id="info">Two points: the crosshair (the slices) and the WM selection (on the white surface: the sections and streamlines). In each pane a click moves that pane's own point and a shift-click moves the other one.</div>
 <div id="log"></div>
+<script type="module" src="/static/overlays.js"></script>
 <script type="module">
 import { Niivue, SLICE_TYPE, SHOW_RENDER } from "https://cdn.jsdelivr.net/npm/@niivue/niivue@0.69.0/+esm";
 const $ = id => document.getElementById(id);
@@ -631,6 +632,11 @@ const SIDE = [["L", "R"], ["P", "A"], ["I", "S"]];   // world axes x, y, z (RAS)
 const BV = { on: false, g: null, M: null, C: [0, 0, 0], s: 1, fit: 1, tiles: [], hover: null, drag: null, gesture: null,
              cache: new Map(), pending: new Set(), free: [], want: new Set(), inflight: 0, frame: 0 };
 let BRICKS = false;
+// plug-ins of the brick pane (static/overlays.js, ...): objects in window.BVP with hooks init(api), update(), render(g, geoms, dpr),
+// draw2d(g2d, tile), text(tile) -> string, pointer(type, event, hit) -> true to take the event; api: window.BVAPI
+const BVP = window.BVP = window.BVP || [];
+const bvHook = (name, ...a) => { for (const p of BVP) if (p[name]) try { p[name](...a); } catch (e) { log(`${name}: ${e.message}`); } };
+const bvTook = (type, e, h) => BVP.some(p => p.pointer && p.pointer(type, e, h));
 function affInv(A) {   // the inverse of a 4x4 affine (rows)
   const [a, b, c] = A[0], [d, e, f] = A[1], [g, h, i] = A[2];
   const D = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
@@ -701,6 +707,9 @@ async function initBricks() {
   if (!CROSS) CROSS = [0, 1, 2].map(k => (BV.lo[k] + BV.hi[k]) / 2);
   bvEvents(); bvFit();
   new ResizeObserver(() => { bvLayout(); bvUpdate(); }).observe(c.parentElement);
+  window.BVAPI = { BV, $, get, log, share, crossHere, program, affInv, affApply, VS: BVVS, px2w: bvPx2W, w2px: bvW2Px, draw: bvDraw,
+                   update: bvUpdate, get cross() { return CROSS; } };
+  for (const p of BVP) if (p.init) try { await p.init(window.BVAPI); } catch (e) { log(`init: ${e.message}`); }
   log(`volume pane (ours) ready: ${M.name}, level 0 ${sh.join(" × ")}, atlas ${BV.nslots} bricks (${(performance.now() - t0) / 1000 | 0} s)`);
 }
 // the tiles of the view (CSS px in the canvas): one slice, or axial, coronal and sagittal in a 2 x 2 grid (the fourth: 3D, later)
@@ -746,7 +755,7 @@ function bvUpdate() {
     for (let i = r.lo[0]; i <= r.hi[0]; i++) for (let j = r.lo[1]; j <= r.hi[1]; j++) for (let k = r.lo[2]; k <= r.hi[2]; k++) BV.want.add(bkey(L, [i, j, k]));
   }
   for (const k of BV.want) if (BV.cache.has(k)) { const s = BV.cache.get(k); BV.cache.delete(k); BV.cache.set(k, s); }
-  bvFetch(); bvDraw();
+  bvHook("update"); bvFetch(); bvDraw();
 }
 function bvFetch() {
   while (BV.inflight < INFLIGHT) {
@@ -799,7 +808,7 @@ function bvRender() {
     shp.set(M.levels[L].shape, 3 * L); }
   g.uniformMatrix4fv(u("w2v"), false, w2v); g.uniform3iv(u("shp"), shp); g.uniform1iv(u("pz"), new Int32Array(BV.pz));
   g.uniform1i(u("nlev"), nl); g.uniform1i(u("B"), M.brick); g.uniform3i(u("slots"), BV.sx, BV.sy, BV.sz); g.uniform2f(u("win"), BV.win[0], BV.win[1]);
-  g.enable(g.SCISSOR_TEST);
+  g.enable(g.SCISSOR_TEST); const geoms = [];
   for (const t of BV.tiles) {
     const x0 = t.x * dpr, y0 = (H - t.y - t.h) * dpr, X = Math.round(x0), Y = Math.round(y0);
     g.viewport(X, Y, Math.round((t.x + t.w) * dpr) - X, Math.round((H - t.y) * dpr) - Y); g.scissor(X, Y, Math.round((t.x + t.w) * dpr) - X, Math.round((H - t.y) * dpr) - Y);
@@ -807,7 +816,9 @@ function bvRender() {
     w0[t.r] = BV.C[t.r] - t.w / 2 / BV.s; w0[t.u] = BV.C[t.u] - t.h / 2 / BV.s; du[t.r] = 1 / (BV.s * dpr); dv[t.u] = 1 / (BV.s * dpr);
     g.uniform3fv(u("w0"), w0); g.uniform3fv(u("du"), du); g.uniform3fv(u("dv"), dv); g.uniform2f(u("org"), x0, y0); g.uniform1i(u("lev"), t.L);
     g.drawArrays(g.TRIANGLES, 0, 3);
+    geoms.push({ t, X, Y, W: Math.round((t.x + t.w) * dpr) - X, H: Math.round((H - t.y) * dpr) - Y, x0, y0, w0, du, dv });
   }
+  bvHook("render", g, geoms, dpr);
   bvOverlay(o, dpr, W, H);
 }
 // the crosshair, the sides (L R, P A, I S) and each tile's plane and level, on a 2D canvas over the slices
@@ -817,12 +828,14 @@ function bvOverlay(o, dpr, W, H) {
   for (const t of BV.tiles) {
     g.save(); g.beginPath(); g.rect(t.x, t.y, t.w, t.h); g.clip(); g.translate(t.x, t.y);
     const [px, py] = bvW2Px(t, CROSS);
+    bvHook("draw2d", g, t);
     g.strokeStyle = "rgba(255, 51, 204, 0.9)"; g.lineWidth = 1; g.beginPath();
     g.moveTo(0, py + 0.5); g.lineTo(t.w, py + 0.5); g.moveTo(px + 0.5, 0); g.lineTo(px + 0.5, t.h); g.stroke();
     g.fillStyle = "#c8ccd2"; g.textAlign = "left"; g.fillText(SIDE[t.r][0], 4, t.h / 2); g.textAlign = "right"; g.fillText(SIDE[t.r][1], t.w - 4, t.h / 2);
     g.textAlign = "center"; g.fillText(SIDE[t.u][1], t.w / 2, 9); g.fillText(SIDE[t.u][0], t.w / 2, t.h - 9);
     g.textAlign = "left"; g.fillStyle = "#9aa0a8";
     g.fillText(`${t.name} ${"xyz"[t.n]} = ${CROSS[t.n].toFixed(2)} mm · level ${t.L} (${(BV.vs0 * 2 ** t.L).toFixed(2)} mm voxels, ${t.nb} bricks)`, 6, t.h - 24);
+    const ptext = BVP.map(p => p.text ? p.text(t) : "").join(""); if (ptext) g.fillText(ptext.replace(/^ · /, ""), 6, t.h - 38);
     g.restore();
   }
   if (BV.tiles.length === 3) { const t = BV.tiles[1]; g.fillStyle = "#6a7078"; g.textAlign = "center";
@@ -847,16 +860,18 @@ function bvEvents() {
   const o = $("bvo"), xy = e => { const r = o.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };   // CSS px in the canvas
   const at = e => { const [x, y] = xy(e), t = bvTileAt(x, y); return t && { t, x: x - t.x, y: y - t.y }; };
   o.addEventListener("pointerdown", e => {
-    const h = at(e); if (!h) return; o.setPointerCapture(e.pointerId); BV.hover = h.t;
+    const h = at(e); if (!h) return; o.setPointerCapture(e.pointerId); BV.hover = h.t; if (bvTook("down", e, h)) return;
     const [X, Y] = xy(e); BV.drag = { ...h, X, Y, button: e.button, shift: e.shiftKey, moved: false };
   });
   o.addEventListener("pointermove", e => {
+    if (bvTook("move", e, at(e))) return;
     const d = BV.drag; if (!d) { const h = at(e); if (h) BV.hover = h.t; return; }
     const [X, Y] = xy(e), dx = X - d.X, dy = Y - d.Y; if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
     if (d.button === 1) { bvPan(d.t, dx, dy); d.X = X; d.Y = Y; return; }
     if (d.button === 0 && !d.shift && d.moved) { CROSS = bvPx2W(d.t, X - d.t.x, Y - d.t.y); bvUpdate(); }
   });
   o.addEventListener("pointerup", e => {
+    if (bvTook("up", e, at(e))) { BV.drag = null; return; }
     const d = BV.drag; BV.drag = null; if (!d || d.button !== 0) return;
     const [X, Y] = xy(e), mm = bvPx2W(d.t, X - d.t.x, Y - d.t.y);
     if (d.shift) { if (!d.moved) volumeShiftClick(mm, null); return; }   // the WM selection; the crosshair stays

@@ -15,9 +15,12 @@ nibabel's rule). The voxel grid of every level is regular: the edge voxel of a c
 level has the same spacing, though its block may hold fewer voxels.
 
 Values: integer images keep int16 (rounded to the nearest, ties to even, in the
-coarse levels) when every value fits; any other image is float32. Brick bytes are
-little-endian, x fastest, then y, then z (the order of a WebGL 3D texture), with no
-header: the page knows each brick's shape from the level's shape.
+coarse levels) when every value fits; any other image is float32. A label image uses
+the reducer `mode` in place of `mean`: level L + 1 holds the most common label of each
+block (at the far edge of an odd axis, of the voxels there; a tie goes to the smallest
+label). Labels stay integers: int16 when every label fits, else int32, never float.
+Brick bytes are little-endian, x fastest, then y, then z (the order of a WebGL 3D
+texture), with no header: the page knows each brick's shape from the level's shape.
 
 BrickSource is what the server needs: `levels` (shape and affine of each) and
 `read(level, b)`. ArrayPyramid holds the levels in memory (the hemisphere at 160 um:
@@ -83,13 +86,30 @@ def level_shapes(shape: Sequence[int], brick: int) -> list[tuple[int, int, int]]
     return out
 
 
-def wire_dtype(a: Arr) -> np.dtype[Any]:
-    """int16 for an integer image whose values fit, else float32."""
-    if np.issubdtype(a.dtype, np.integer) or a.dtype == np.bool_:
-        info = np.iinfo(np.int16)
-        if a.size == 0 or (int(a.min()) >= info.min and int(a.max()) <= info.max):
-            return np.dtype("<i2")
-    return np.dtype("<f4")
+def _fits(a: Arr, t: type[np.integer[Any]]) -> bool:
+    info = np.iinfo(t)
+    return a.size == 0 or (int(a.min()) >= info.min and int(a.max()) <= info.max)
+
+
+def wire_dtype(a: Arr, labels: bool = False) -> np.dtype[Any]:
+    """int16 for an integer image whose values fit, else float32. Labels: int16 when
+    they fit, else int32; labels that are not integers or do not fit int32 raise."""
+    integer = np.issubdtype(a.dtype, np.integer) or a.dtype == np.bool_
+    if integer and _fits(a, np.int16):
+        return np.dtype("<i2")
+    if not labels:
+        return np.dtype("<f4")
+    if not integer or not _fits(a, np.int32):
+        raise ValueError(f"labels must be integers that fit int32, not {a.dtype}")
+    return np.dtype("<i4")
+
+
+#: the dtype names of the wire dtypes (meta)
+WIRE_NAMES = {
+    np.dtype("<i2"): "int16",
+    np.dtype("<i4"): "int32",
+    np.dtype("<f4"): "float32",
+}
 
 
 def halve(a: Arr, dtype: np.dtype[Any]) -> Arr:
@@ -109,19 +129,67 @@ def halve(a: Arr, dtype: np.dtype[Any]) -> Arr:
     return out
 
 
-class ArrayPyramid:
-    """The levels of an image in memory (level 0: the image, in its wire dtype)."""
+def mode(a: Arr, dtype: np.dtype[Any]) -> Arr:
+    """Level L + 1 from level L of a label image: the most common label of each
+    2 x 2 x 2 block (of the voxels there, at the far edge of an odd axis); a tie goes
+    to the smallest label. One pair of x-slices at a time.
 
-    def __init__(self, volume: Arr, affine: npt.ArrayLike, brick: int = 32) -> None:
+    Method: the (up to) 8 labels of each block are sorted; a label's count is the run
+    length of its value in the sorted list. The first run of the greatest length is
+    the answer, and in sorted order that is the smallest of the tied labels. The
+    missing voxels of an edge block are padded with a sentinel above every label
+    (sorted last) and never counted."""
+    nx, ny, nz = a.shape
+    out = np.empty((-(-nx // 2), -(-ny // 2), -(-nz // 2)), dtype)
+    my, mz = out.shape[1], out.shape[2]
+    big = np.iinfo(np.int64).max
+    for i, x in enumerate(range(0, nx, 2)):
+        slab = np.full((2, 2 * my, 2 * mz), big, np.int64)
+        part = np.asarray(a[x : x + 2], np.int64)
+        slab[: len(part), :ny, :nz] = part
+        # (my, mz, 8): the voxels of each block
+        blk = slab.reshape(2, my, 2, mz, 2).transpose(1, 3, 0, 2, 4).reshape(my, mz, 8)
+        s = np.sort(blk, axis=2)
+        # run length ending at each position: start a new run where the value changes
+        new = np.ones(s.shape, bool)
+        new[..., 1:] = s[..., 1:] != s[..., :-1]
+        idx = np.arange(8)
+        start = np.maximum.accumulate(np.where(new, idx, 0), axis=2)
+        run = idx - start + 1
+        run[s == big] = 0  # padding is never the answer
+        best = np.argmax(run, axis=2)  # the first greatest run: the smallest label
+        out[i] = np.take_along_axis(s, best[..., None], axis=2)[..., 0]
+    return out
+
+
+#: the reducers of ArrayPyramid, by name
+REDUCERS: dict[str, Callable[[Arr, np.dtype[Any]], Arr]] = dict(mean=halve, mode=mode)
+
+
+class ArrayPyramid:
+    """The levels of an image in memory (level 0: the image, in its wire dtype).
+    reducer: "mean" (an image) or "mode" (a label image: the module docstring)."""
+
+    def __init__(
+        self,
+        volume: Arr,
+        affine: npt.ArrayLike,
+        brick: int = 32,
+        reducer: str = "mean",
+    ) -> None:
         if brick < 1:
             raise ValueError("a brick needs at least one voxel a side")
+        if reducer not in REDUCERS:
+            raise ValueError(f"no reducer {reducer!r}: {sorted(REDUCERS)}")
         self.brick = int(brick)
-        self.dtype = wire_dtype(volume)
+        self.reducer = reducer
+        self.dtype = wire_dtype(np.asarray(volume), labels=reducer == "mode")
         a0 = np.asarray(volume).astype(self.dtype, copy=False)
         shapes = level_shapes(a0.shape, self.brick)
         self.arrays: list[Arr] = [a0]
+        reduce = REDUCERS[reducer]
         for _ in shapes[1:]:
-            self.arrays.append(halve(self.arrays[-1], self.dtype))
+            self.arrays.append(reduce(self.arrays[-1], self.dtype))
         A = np.asarray(affine, np.float64)
         self._levels = [Level(s, level_affine(A, k)) for k, s in enumerate(shapes)]
 
@@ -148,19 +216,20 @@ class ArrayPyramid:
         lo: npt.ArrayLike | None = None,
         shape: Sequence[int] | None = None,
         brick: int = 32,
+        reducer: str = "mean",
     ) -> "ArrayPyramid":
         """The image at path, or its box from voxel lo of the given shape (the crop's
         affine: crop_affine)."""
         img = nifti(path)
         if lo is None:
             data = np.asanyarray(img.dataobj)
-            return cls(data, img.affine, brick)
+            return cls(data, img.affine, brick, reducer)
         a = np.asarray(lo, np.int64)
         n = np.asarray(shape, np.int64)
         b = a + n
         data = np.asanyarray(img.dataobj[a[0] : b[0], a[1] : b[1], a[2] : b[2]])
         box = (int(a[0]), int(a[1]), int(a[2]))
-        return cls(data, crop_affine(img.affine, box), brick)
+        return cls(data, crop_affine(img.affine, box), brick, reducer)
 
 
 def brick_shape(level: Level, b: Sequence[int], brick: int) -> tuple[int, ...]:
@@ -206,7 +275,7 @@ def meta(src: BrickSource, name: str) -> dict[str, Any]:
     return dict(
         name=name,
         brick=src.brick,
-        dtype="int16" if src.dtype == np.dtype("<i2") else "float32",
+        dtype=WIRE_NAMES[np.dtype(src.dtype)],
         levels=[
             dict(shape=list(lv.shape), affine=lv.affine.tolist()) for lv in src.levels
         ],
