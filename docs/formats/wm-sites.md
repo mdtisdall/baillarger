@@ -7,9 +7,28 @@ corrected segmentation and its fixes (`wm-dseg/1`); read by
 `baillarger.wm_sites.SITES_SPEC`, and `tests/test_bids.py` checks that the table
 below lists the same keys, types and requirements.
 
-The sites are the review queue for manual edits of the WM mask (`wm-edits/1`):
-a reviewer looks at each in turn and records an answer. Nothing else reads
-them.
+The sites are the review queue of the WM mask, one file per hemisphere: a
+reviewer looks at each in turn and records an answer (`wm-edits/1`). The
+review pane reads them with `baillarger.wm_sites.read_sites`. Nothing else
+reads them.
+
+## Site kinds
+
+| Kind | From | In the file |
+|---|---|---|
+| `override` | A fix that changes a verified voxel of an answer (the fix table's `overrides`, `wm-dseg-fixes/1`), unless a `leave` answer accepts it (below) | yes |
+| `misfacing` | Misfacing faces of the surface (below) | yes |
+| `handle-fix` | A handle fix (`handle_cut` or `handle_fill`) with a wall of `MinWallVoxels` or more, that is not an override | yes |
+| `random` | A random vertex of the surface, drawn for a session (Random sites) | no |
+
+An override fix is not a site if a `leave` answer of the log accepts a fix
+that matches it: the two fixes overlap (share a voxel) and have the same
+voxels with the same new labels (`docs/formats/wm-edits.md`, The way out of
+the queue). The accepted fix is read from the kept run that the answer
+names. The log is the one in the `Sources` of the corrected segmentation.
+
+Without a fix table next to the corrected segmentation (an output older
+than `wm-dseg-fixes/1` with its table), the file has misfacing sites only.
 
 ## Files
 
@@ -36,24 +55,29 @@ voxel nearest the mean of its faces' centroids.
 
 ## The table
 
-Tab-separated, with a header row, one row per site. The file has ranked sites
-only: every row has `kind` `misfacing`.
+Tab-separated, with a header row, one row per site, in queue order: the
+override sites (by fix id), then the misfacing sites (in their order,
+below), then the handle-fix sites (larger walls first; ties: by fix id).
 
 | Column | Type | Meaning |
 |---|---|---|
 | `rank` | integer | Place in the queue, from 1. 0 means no rank (a random site) |
-| `kind` | string | `misfacing` (a ranked site, in the table) or `random` (see Random sites) |
+| `kind` | string | `override`, `misfacing`, `handle-fix` (in the file) or `random` (see Random sites) |
 | `i`, `j`, `k` | integer | The site's centre voxel (0-based) on the segmentation's grid |
-| `faces` | integer | Its misfacing faces (0 for a random site) |
+| `faces` | integer | Its misfacing faces (0 for the other kinds) |
 | `tissue` | string | The labels outside the WM mask within `TissueVoxels` (a cube): `grey matter` (cortex: 3 or 42), `fluid` (0, 24, or a ventricle or choroid plexus label: 4, 5, 31, 43, 44, 63; `label-set/1` puts these outside the WM mask, and ex vivo they hold outside medium), `mixed` (both) or `other` |
 | `cut`, `fill`, `cavity` | integer | Voxels of each kind of topology fix (`desc-wmtopofixes` codes 1, 2, 3) within `FixVoxels` (a cube) |
 | `wm_face_pieces`, `wm_any_pieces` | integer | Pieces of the WM mask within `ContactVoxels` (a cube), with face adjacency and with any adjacency: more with face adjacency means pieces that touch only at an edge or a corner |
 | `gap_face_pieces`, `gap_any_pieces` | integer | The same for the voxels outside the mask |
 | `wm_thickness` | number | The largest distance (voxels) from a WM voxel to the nearest voxel outside the mask, within `CoreVoxels` (a cube); 1 for a strand one voxel wide |
 | `gap_width` | number | The same outside the mask; 1 for a gap one voxel wide |
+| `fix` | integer | The fix's id in the fix table, for `override` and `handle-fix`; 0 for the other kinds |
+| `wall` | integer | The fix's wall (the fix table's `wall`); 0 if none |
 
-The queue order: by `tissue` (grey matter, mixed, fluid, other), then more
-faces first, then more fixes, then by the centre voxel.
+For a fix site, the centre voxel is the fix table's `i`, `j`, `k`.
+
+The order of the misfacing sites: by `tissue` (grey matter, mixed, fluid,
+other), then more faces first, then more fixes, then by the centre voxel.
 
 ## Random sites
 
@@ -84,7 +108,7 @@ measures are those of a ranked site, taken at that voxel. `kind` is `random`,
 |---|---|---|---|
 | `SpecVersion` | string | yes | `wm-sites/1` |
 | `Description` | string | yes | What the files are |
-| `Sources` | array of strings | yes | The white surface's `.surf.gii` and `.dat`, the corrected segmentation and its fixes (absolute paths) |
+| `Sources` | array of strings | yes | The white surface's `.surf.gii` and `.dat`, the corrected segmentation and its fixes image, then (if there) the fix table, the fix diff and the answer log (absolute paths) |
 | `SourcesSHA256` | object | yes | SHA-256 of each source, by path (the segmentation's is the `DecidedAgainst` of answers decided on these sites) |
 | `Provenance` | object | yes | `Created` (ISO 8601), `Function`, `Version` (baillarger), `Commit`, `Dirty` |
 | `Hemisphere` | string | yes | `R` or `L` |
@@ -96,3 +120,5 @@ measures are those of a ranked site, taken at that voxel. `kind` is `random`,
 | `TissueVoxels` | integer | yes | Half-side of the cube that names the tissue |
 | `ContactVoxels` | integer | yes | Half-side of the cube in which pieces are counted |
 | `CoreVoxels` | integer | yes | Half-side of the cube in which thickness and gap are read |
+| `MinWallVoxels` | integer | yes | The smallest wall of a `handle-fix` site |
+| `SitesByKind` | object | yes | Rows of the table, by kind |
