@@ -13,6 +13,15 @@ The intervals come from an exact traversal of the voxels the ray crosses
 every value of a column is computed from that column's root alone, in the
 same operations whatever else the call holds, so a column does not depend
 on the superblock that asks for it.
+
+The method equivolume adds the column's cross-section A(s): the root's dual
+area vector on its 1-ring, with each vertex moved along its own normal,
+taken on the root's normal. Each vertex moves linearly in s, so A(s) is a
+quadratic in s, a0 + a1 s + a2 s^2, exactly. The sampler computes the three
+coefficients per column in float64 (the 1-ring's faces in the order of the
+file), and from them A, the volume V (the exact integral of A from the
+inward cap, to the first focal point on each side of the root) and the
+mark past a focal point.
 """
 
 from dataclasses import dataclass
@@ -35,8 +44,13 @@ CAP_IN = 2.0
 CAP_OUT = 8.0
 #: the default step between samples, mm
 STEP = 0.04
-#: the methods of this version (phase 2.1 adds "equivolume")
-METHODS = ("normal",)
+#: the methods of this version
+METHODS = ("normal", "equivolume")
+#: the margin on the halo box for the faces that equivolume reads, voxels
+FACE_MARGIN = 2.0
+#: the error of each input of A(s) (positions and normals, float32), as a
+#: fraction of its value: one unit in the last place of float32
+U_IN = 2.0**-23
 
 
 #: the classes of a label interval
@@ -112,6 +126,19 @@ class Rays:
     interval_class: U8
     #: (n,) the derived class of each column (OPEN, IN_WM, NEITHER)
     derived_class: U8
+    #: equivolume: (n, 3) a0, a1, a2 of A(s) = a0 + a1 s + a2 s^2 (mm^2,
+    #: mm, 1); (0, 3) for normal
+    area_coef: Float
+    #: equivolume: (n, 2) r_lo and r_hi, the first focal point inward and
+    #: outward, mm (-inf and inf if none); (0, 2) for normal
+    focus: Float
+    #: equivolume: (N,) A(s) at each sample, mm^2; (0,) for normal
+    area: F32
+    #: equivolume: (N,) V(s) at each sample, mm^3; (0,) for normal
+    volume: F32
+    #: equivolume: (N,) true at a sample at or past a focal point; (0,) for
+    #: normal
+    past_focus: Bool
 
 
 class RaySampler:
@@ -148,6 +175,7 @@ class RaySampler:
         self.cortex = L.CORTEX_LABEL[hemi]
         g = GiftiImage.from_filename(str(self.surf), mmap=True)
         self.x: npt.NDArray[np.float32] = g.darrays[0].data
+        self.f: npt.NDArray[np.int32] = g.darrays[1].data
         ng = GiftiImage.from_filename(
             str(self.surf.with_name(side["NormalsFile"])), mmap=True
         )
@@ -167,6 +195,7 @@ class RaySampler:
         self.block_ijk = idx[:, :3].astype(np.int64)
         self.block_code = morton(self.block_ijk)
         self.block_vertices = idx[:, 3:5].astype(np.int64)
+        self.block_faces = idx[:, 5:7].astype(np.int64)
         self.block_box = idx[:, 7:13]
 
     def _halo_box(
@@ -263,6 +292,17 @@ class RaySampler:
             k_out,
             float(step),
         )
+        if method == "equivolume":
+            coef, err = self.area_coef(roots, superblock, level, halo_mm)
+            area, volume, past, focus = _cross_section(
+                coef, err, k_in, k_out, float(step), CAP_IN
+            )
+        else:
+            coef = np.zeros((0, 3), np.float64)
+            focus = np.zeros((0, 2), np.float64)
+            area = np.zeros(0, np.float32)
+            volume = np.zeros(0, np.float32)
+            past = np.zeros(0, np.bool_)
         return Rays(
             roots=roots,
             method=method,
@@ -278,7 +318,69 @@ class RaySampler:
             interval_label=ilab,
             interval_class=cls,
             derived_class=derived,
+            area_coef=coef,
+            focus=focus,
+            area=area,
+            volume=volume,
+            past_focus=past,
         )
+
+    def faces(
+        self, superblock: tuple[int, int, int], level: int, halo_mm: float
+    ) -> npt.NDArray[np.int64]:
+        """The faces (k, 3) of every block whose box meets the halo box
+        widened by FACE_MARGIN voxels, in the order of the file. They hold
+        the 1-ring of every root of roots(superblock, level, halo_mm): a
+        block's box holds every vertex its faces use, and so the root of
+        each of them."""
+        lo, hi = self._halo_box(superblock, level, halo_mm)
+        lo, hi = lo - FACE_MARGIN, hi + FACE_MARGIN
+        b = self.block_box
+        meet = np.all((b[:, :3] <= hi) & (b[:, 3:] >= lo), axis=1)
+        rows = _ranges(self.block_faces[meet])
+        return np.asarray(self.f[rows], np.int64).reshape(-1, 3)
+
+    def area_coef(
+        self,
+        roots: Roots,
+        superblock: tuple[int, int, int],
+        level: int,
+        halo_mm: float,
+    ) -> tuple[Float, Float]:
+        """(n, 3) each: a0, a1, a2 of each column's A(s) (spec, "The
+        cross-section"), from the faces of the call, and the bound on their
+        error (spec, "The focal points"). Raises RuntimeError if a root's
+        1-ring is not a closed fan (a mesh boundary, or a face not read)."""
+        f = self.faces(superblock, level, halo_mm)
+        used, local = np.unique(f, return_inverse=True)
+        local = local.reshape(-1, 3).astype(np.int64)
+        flat = local.ravel()
+        order = np.argsort(flat, kind="stable")
+        corner = flat[order]
+        face_of = (order // 3).astype(np.int64)
+        root = np.searchsorted(used, roots.vertex)
+        ok = root < len(used)
+        ok[ok] = used[root[ok]] == roots.vertex[ok]
+        if not np.all(ok):
+            c = int(np.flatnonzero(~ok)[0])
+            raise RuntimeError(f"column {c}: no face of its root was read")
+        start = np.searchsorted(corner, root, "left").astype(np.int64)
+        stop = np.searchsorted(corner, root, "right").astype(np.int64)
+        coef, err, bad = _area_coef(
+            np.asarray(self.x[used], np.float64),
+            np.asarray(self.n[used], np.float64),
+            local,
+            face_of,
+            start,
+            stop,
+            root.astype(np.int64),
+            U_IN,
+        )
+        if bad >= 0:
+            raise RuntimeError(
+                f"column {bad}: the 1-ring of its root is not a closed fan"
+            )
+        return coef, err
 
 
 def label_classes(
@@ -525,3 +627,183 @@ def _samples(
             for a in range(3):
                 p[q, a] = x[c, a] + sk * n[c, a]
     return start, s, p
+
+
+@njit(cache=True)
+def _abs_cross(a: Float, b: Float) -> Float:
+    """|a| x |b| without the minus signs: (a_j b_k + a_k b_j) on each axis i,
+    with (i, j, k) cyclic; a bound on the change of a cross product."""
+    return np.array(
+        [
+            a[1] * b[2] + a[2] * b[1],
+            a[2] * b[0] + a[0] * b[2],
+            a[0] * b[1] + a[1] * b[0],
+        ]
+    )
+
+
+@njit(cache=True)
+def _cross_err(p: Float, ep: Float, r: Float, er: Float) -> Float:
+    """A bound, per axis, on |(p + dp) x (r + dr) - p x r| for |dp| <= ep and
+    |dr| <= er on each axis."""
+    return _abs_cross(ep, np.abs(r)) + _abs_cross(np.abs(p), er) + _abs_cross(ep, er)
+
+
+@njit(cache=True, parallel=True)
+def _area_coef(
+    x: Float,
+    n: Float,
+    f: I64,
+    face_of: I64,
+    start: I64,
+    stop: I64,
+    root: I64,
+    u_in: float,
+) -> tuple[Float, Float, int]:
+    """Per column, a0, a1, a2 of A(s) = n0 . (1/6) sum over the faces round
+    the root of (x_b(s) - x_a(s)) x (x_c(s) - x_a(s)), x_i(s) = x_i + s n_i,
+    in float64, the faces in the order of face_of; and a bound on the change
+    of each coefficient when each input changes by u_in of its value (spec,
+    "The focal points"). The last value is a column whose 1-ring is not a
+    closed fan, or -1."""
+    m = len(root)
+    out = np.zeros((m, 3), np.float64)
+    err = np.zeros((m, 3), np.float64)
+    bad = np.full(m, False)
+    for c in prange(m):
+        k = stop[c] - start[c]
+        r = root[c]
+        nxt = np.empty(k, np.int64)
+        prv = np.empty(k, np.int64)
+        acc = np.zeros((3, 3), np.float64)
+        eacc = np.zeros((3, 3), np.float64)
+        for j in range(k):
+            t = face_of[start[c] + j]
+            a, b, d = f[t, 0], f[t, 1], f[t, 2]
+            if a == r:
+                nxt[j], prv[j] = b, d
+            elif b == r:
+                nxt[j], prv[j] = d, a
+            else:
+                nxt[j], prv[j] = a, b
+            p = x[b] - x[a]
+            q = n[b] - n[a]
+            v = x[d] - x[a]
+            w = n[d] - n[a]
+            ep = u_in * (np.abs(x[b]) + np.abs(x[a]))
+            eq = u_in * (np.abs(n[b]) + np.abs(n[a]))
+            ev = u_in * (np.abs(x[d]) + np.abs(x[a]))
+            ew = u_in * (np.abs(n[d]) + np.abs(n[a]))
+            acc[0] += np.cross(p, v)
+            acc[1] += np.cross(p, w) + np.cross(q, v)
+            acc[2] += np.cross(q, w)
+            eacc[0] += _cross_err(p, ep, v, ev)
+            eacc[1] += _cross_err(p, ep, w, ew) + _cross_err(q, eq, v, ev)
+            eacc[2] += _cross_err(q, eq, w, ew)
+        # a closed fan: each neighbour starts one edge and ends one edge
+        sn = np.sort(nxt)
+        sp = np.sort(prv)
+        closed = k >= 3
+        for j in range(k):
+            if sn[j] != sp[j] or (j > 0 and sn[j] == sn[j - 1]):
+                closed = False
+        bad[c] = not closed
+        n0 = n[r]
+        a0 = np.abs(n0)
+        e0 = u_in * a0
+        for i in range(3):
+            out[c, i] = (n0[0] * acc[i, 0] + n0[1] * acc[i, 1] + n0[2] * acc[i, 2]) / 6
+            sa = np.abs(acc[i])
+            err[c, i] = (
+                (a0 * eacc[i]).sum() + (e0 * sa).sum() + (e0 * eacc[i]).sum()
+            ) / 6
+    for c in range(m):
+        if bad[c]:
+            return out, err, c
+    return out, err, -1
+
+
+@njit(cache=True)
+def disc_bound(a0: float, a1: float, a2: float, e: Float) -> float:
+    """A bound on the change of a1^2 - 4 a0 a2 when each coefficient a_i
+    changes by at most e[i]."""
+    e0, e1, e2 = float(e[0]), float(e[1]), float(e[2])
+    return 2 * abs(a1) * e1 + e1 * e1 + 4 * (abs(a0) * e2 + abs(a2) * e0 + e0 * e2)
+
+
+@njit(cache=True)
+def focal_bounds(a0: float, a1: float, a2: float, bound: float) -> tuple[float, float]:
+    """(r_lo, r_hi): the first focal point of A(s) = a0 + a1 s + a2 s^2 on
+    each side of s = 0 (-inf or inf if none), with bound the error bound on
+    the discriminant (spec, "The focal points"); (0, 0) if A(0) <= 0."""
+    if not a0 > 0:
+        return 0.0, 0.0
+    cand = np.full(2, np.nan)
+    disc = a1 * a1 - 4 * a0 * a2
+    if a2 == 0:
+        if a1 != 0:
+            cand[0] = -a0 / a1
+    elif disc > bound or a2 < 0:
+        # two real roots (with a0 > 0 and a2 < 0, disc > 0)
+        sq = np.sqrt(disc)
+        q = -0.5 * (a1 + sq) if a1 >= 0 else -0.5 * (a1 - sq)
+        cand[0] = q / a2
+        cand[1] = a0 / q
+    elif disc >= -bound:
+        # a double root, within the error of the inputs
+        cand[0] = -a1 / (2 * a2)
+    lo = -np.inf
+    hi = np.inf
+    for r in cand:
+        if np.isnan(r):
+            continue
+        if r < 0:
+            lo = max(lo, r)
+        elif r > 0:
+            hi = min(hi, r)
+        else:
+            return 0.0, 0.0
+    return lo, hi
+
+
+@njit(cache=True)
+def _primitive(t: float, a0: float, a1: float, a2: float) -> float:
+    """The integral of A from 0 to t."""
+    return t * (a0 + t * (a1 / 2 + t * (a2 / 3)))
+
+
+@njit(cache=True, parallel=True)
+def _cross_section(
+    coef: Float,
+    err: Float,
+    k_in: npt.NDArray[np.int32],
+    k_out: npt.NDArray[np.int32],
+    step: float,
+    cap_in: float,
+) -> tuple[F32, F32, Bool, Float]:
+    """A(s), V(s) and the mark at the samples of every column, at
+    s_k = k step in float64 as _samples gives them, and each column's focal
+    bounds (spec, "The cross-section")."""
+    m = len(coef)
+    start = np.zeros(m + 1, np.int64)
+    for c in range(m):
+        start[c + 1] = start[c] + k_in[c] + k_out[c] + 1
+    area = np.empty(start[m], np.float32)
+    vol = np.empty(start[m], np.float32)
+    past = np.empty(start[m], np.bool_)
+    focus = np.empty((m, 2), np.float64)
+    for c in prange(m):
+        a0, a1, a2 = coef[c, 0], coef[c, 1], coef[c, 2]
+        r_lo, r_hi = focal_bounds(a0, a1, a2, disc_bound(a0, a1, a2, err[c]))
+        focus[c, 0] = r_lo
+        focus[c, 1] = r_hi
+        lo = max(-cap_in, r_lo)
+        p_lo = _primitive(lo, a0, a1, a2)
+        for j in range(k_in[c] + k_out[c] + 1):
+            sk = (j - k_in[c]) * step
+            q = start[c] + j
+            area[q] = a0 + sk * (a1 + sk * a2)
+            t = min(max(sk, lo), r_hi)
+            vol[q] = max(_primitive(t, a0, a1, a2) - p_lo, 0.0)
+            past[q] = sk <= r_lo or sk >= r_hi
+    return area, vol, past, focus

@@ -12,7 +12,7 @@ shown as they are: the positions the column volume saved, nothing re-traced.
 - The white mesh cropped to a box, and the boundary of a label (the cortex) contoured
   by marching tetrahedra (smoothed by sigma voxels, for display only), clipped to the
   box and left open where the box cuts it.
-- TCK: the MRtrix track format, which NiiVue reads.
+- TCK: the MRtrix track format, which NiiVue reads (baillarger.viewer.tck).
 Everything is 3D.
 """
 
@@ -26,6 +26,8 @@ from scipy.sparse.csgraph import dijkstra
 
 from baillarger.mesh import marching_tetrahedra
 from baillarger.streamlines import STEP_MM
+from baillarger.viewer.tck import read_tck as read_tck
+from baillarger.viewer.tck import tck as tck
 
 type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.int64]
@@ -124,41 +126,4 @@ def at_depth(
     p = (1 - w) * pos[k, i] + w * np.where(w > 0, nxt, 0)
     out: Float = p.astype(float) * np.asarray(vox)
     out[~ok] = np.nan
-    return out
-
-
-def tck(lines: list[Float]) -> bytes:
-    """MRtrix .tck bytes (float32 little-endian) of polylines in mm: a row of nan, then
-    each line's points and a row of nan; an inf row ends the file. NiiVue (0.69) takes
-    each nan row as the end of a line and the first offset as 0 only after a nan row:
-    without the leading one it draws every line but the first (none of one line)."""
-    body = [np.full((1, 3), np.nan, np.float32)]
-    for p in lines:
-        body.append(np.asarray(p, np.float32).reshape(-1, 3))
-        body.append(np.full((1, 3), np.nan, np.float32))
-    body.append(np.full((1, 3), np.inf, np.float32))
-    head = f"mrtrix tracks\ndatatype: Float32LE\ncount: {len(lines)}\nfile: . "
-    off = len(head) + 20
-    hdr = f"{head}{off}\nEND\n".ljust(off).encode()
-    return hdr + np.vstack(body).astype("<f4").tobytes()
-
-
-def read_tck(data: bytes) -> list[Float]:
-    """The polylines of .tck bytes as tck writes them (a leading nan row starts no
-    line)."""
-    head = data[: data.index(b"END\n")].decode()
-    off = int(next(x for x in head.splitlines() if x.startswith("file:")).split()[-1])
-    a = np.frombuffer(data[off:], "<f4").reshape(-1, 3).astype(float)
-    if len(a) and np.isnan(a[0]).any():
-        a = a[1:]
-    out: list[Float] = []
-    cur: list[Float] = []
-    for row in a:
-        if np.isinf(row).any():
-            break
-        if np.isnan(row).any():
-            out.append(np.array(cur).reshape(-1, 3))
-            cur = []
-        else:
-            cur.append(row)
     return out

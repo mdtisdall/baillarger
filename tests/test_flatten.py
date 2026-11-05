@@ -328,3 +328,37 @@ def test_dynamic_matches_gradient_on_a_smooth_small_shift() -> None:
     good = (z > 0.4) & (z < 4.0)
     assert np.median(np.abs(s_lk[0, good] - true[good])) < 0.0005
     assert np.median(np.abs(s[0, good] - true[good])) < 0.0005
+
+
+def test_fixed_traces() -> None:
+    """fixed: with no trace fixed, the result is that of fixed=None. With some
+    traces fixed, they keep r0, and the others solve the normal equations of
+    the free unknowns with the fixed ones as known values (one pass, exact
+    sparse solve)."""
+    from scipy.sparse.linalg import spsolve
+
+    F, ns, pairs, *_ = grid_volume(nx=8, ny=6)
+    M = np.isfinite(F[0])
+    Fz = np.nan_to_num(F)
+    v, w = pairs[:, 0], pairs[:, 1]
+    s, ncc, en, valid = FL.shifts(Fz[:, v], Fz[:, w], M[v], M[w], STEP)
+    W = FL.pair_weights(ncc, en, valid, np.median(en[valid]))
+    N = F.shape[1]
+    kw: dict[str, Any] = dict(tau_max=4.4, n_outer=1, rtol=1e-12, maxiter=20000)
+    tau, r_none, _ = FL.fit_warp(pairs, s, W, N, STEP, **kw)
+    _, r_no, _ = FL.fit_warp(pairs, s, W, N, STEP, fixed=np.zeros(N, bool), **kw)
+    np.testing.assert_allclose(r_no, r_none, rtol=0, atol=1e-12)
+
+    K = len(tau)
+    rng = np.random.default_rng(1)
+    r0 = 0.05 * rng.standard_normal((N, K))
+    fixed = np.zeros(N, bool)
+    fixed[: N // 3] = True
+    _, r, _ = FL.fit_warp(pairs, s, W, N, STEP, r0=r0, fixed=fixed, **kw)
+    assert np.array_equal(r[fixed], r0[fixed])
+    Ad, bd, _ = FL.data_rows(pairs, s, W, r0, tau, STEP)
+    A = (Ad.T @ Ad + FL.prior_matrix(N, K, 0.2, 10.0, 0)).tocsr()
+    rhs = Ad.T @ bd
+    fr = np.repeat(~fixed, K)
+    x = spsolve(A[fr][:, fr].tocsc(), rhs[fr] - A[fr][:, ~fr] @ r0[fixed].ravel())
+    np.testing.assert_allclose(r[~fixed].ravel(), x, rtol=0, atol=1e-8)

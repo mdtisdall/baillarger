@@ -42,6 +42,10 @@ Requests:
   and affines, the brick size, the dtype, the default window: read on first use),
   /volume/bricks?level=L&b=i,j,k;i,j,k;... (those bricks' bytes, one after another;
   gzip when the page accepts it).
+- Named volumes (baillarger.viewer.volumes; with --white: echo, labels, fixes):
+  /volume/list, /volume/<name>/meta, /volume/<name>/bricks?level=&b=.
+- Surface outlines (baillarger.viewer.outlines; with --white):
+  /outline?axis=&mm=&box= (float32 segment ends, world mm).
 - POST /state {from, patch}: merge patch into the state; every page gets
   {from, seq, patch}.
 - POST /filters/run {from, params}: start a filter (one at a time, in a thread) or
@@ -66,9 +70,11 @@ import numpy as np
 
 from baillarger.data import echo_path
 from baillarger.viewer import filters as VF
+from baillarger.viewer import outlines as VO
 from baillarger.viewer import streamlines as SV
+from baillarger.viewer import volumes as VV
 from baillarger.viewer.bricks import ArrayPyramid, LazyVolume
-from baillarger.viewer.data import Site
+from baillarger.viewer.data import Site, nifti
 from baillarger.viewer.labels import LabelReview
 from baillarger.viewer.white_view import WhiteView
 
@@ -143,6 +149,8 @@ class Handler(BaseHTTPRequestHandler):
     labels: LabelReview | None = None
     white: WhiteView | None = None
     volume: LazyVolume | None = None
+    volumes: VV.Volumes | None = None  # named volumes (baillarger.viewer.volumes)
+    outlines: VO.Outlines | None = None  # surface outlines (baillarger.viewer.outlines)
     lock = threading.Lock()  # one site computation at a time
     groups: dict[tuple[int, float], dict[str, list[int]]] = {}
     axes: dict[int, dict[str, list[list[float]]]] = {}
@@ -265,11 +273,35 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def outline(self, q: dict[str, str]) -> None:
+        """/outline (baillarger.viewer.outlines.outline_response)."""
+        if self.outlines is None:
+            self.send_error(404)
+            return
+        try:
+            body, hdr = VO.outline_response(self.outlines, q)
+        except ValueError as exc:
+            self.send(str(exc).encode(), "text/plain", 400)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        for k, v in hdr.items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if u.path.startswith("/volume/") and VV.route(self, u.path, q):
+            return
         if u.path == "/volume" or u.path.startswith("/volume/"):
             self.volume_route(u.path, q)
+            return
+        if u.path == "/outline":
+            self.outline(q)
             return
         if self.white is not None:  # a white surface alone
             w = self.white
@@ -458,6 +490,8 @@ def serve(
     labels: LabelReview | None = None,
     white: WhiteView | None = None,
     volume: LazyVolume | None = None,
+    volumes: VV.Volumes | None = None,
+    outlines: VO.Outlines | None = None,
 ) -> ThreadingHTTPServer:
     """The server; without a site, labels (labels only) or white (a white surface
     alone) is needed. volume: the bricks of the volume pane (baillarger.viewer.bricks),
@@ -467,6 +501,8 @@ def serve(
     Handler.site = site
     Handler.white = white
     Handler.volume = volume
+    Handler.volumes = volumes
+    Handler.outlines = outlines
     Handler.shared = Shared()
     Handler.groups = {}
     Handler.axes = {}
@@ -508,6 +544,7 @@ def main(argv: list[str] | None = None) -> None:
         help="a white surface from baillarger.white_surf (..._white.surf.gii) with "
         "its overview from baillarger.white_overview, alone",
     )
+    VV.add_arguments(ap)
     ap.add_argument("--port", type=int, default=8790)
     a = ap.parse_args(argv)
     t0 = time.time()
@@ -549,7 +586,15 @@ def main(argv: list[str] | None = None) -> None:
         e_ = a.echo or echo_path(2)
         if e_.is_file():
             volume = LazyVolume(lambda: ArrayPyramid.from_nifti(e_), e_.name)
-    srv = serve(site, a.port, review, white, volume)
+    volumes: VV.Volumes | None = None
+    outlines: VO.Outlines | None = None
+    if white is not None:
+        dt = str(nifti(e_).get_data_dtype()) if volume is not None else ""
+        volumes = VV.for_white(
+            white.surf, white.W.sidecar["Sources"], volume, dt, a.dseg, a.fixes
+        )
+        outlines = VO.Outlines.from_white_view(white)
+    srv = serve(site, a.port, review, white, volume, volumes, outlines)
     print(
         f"serving on http://127.0.0.1:{a.port}/ ({time.time() - t0:.0f} s)", flush=True
     )
