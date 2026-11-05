@@ -4,6 +4,7 @@ rounding), the bricks (inside, at the edges, on coarse levels) and their bytes; 
 server's /volume routes."""
 
 import gzip
+import hashlib
 import json
 import threading
 import urllib.error
@@ -91,6 +92,92 @@ def test_integers_out_of_int16_are_float32() -> None:
     a[0, 0, 0] = 40000
     assert VB.wire_dtype(a) == np.dtype("<f4")
     assert VB.wire_dtype(a.astype(np.uint8)) == np.dtype("<i2")
+
+
+def test_mode_takes_the_clear_majority() -> None:
+    a = np.full((2, 2, 2), 41, np.int16)
+    a[0, 0, 0], a[1, 1, 1], a[0, 1, 0] = 0, 42, 42
+    # 41: 5 voxels, 42: 2, 0: 1
+    assert VB.mode(a, np.dtype("<i2")).tolist() == [[[41]]]
+
+
+def test_mode_tie_goes_to_the_smallest_label() -> None:
+    a = np.full((2, 2, 2), 42, np.int16)
+    a[0] = 3  # four of 3, four of 42
+    assert VB.mode(a, np.dtype("<i2")).tolist() == [[[3]]]
+    a[0] = 0  # outside against tissue: outside
+    assert VB.mode(a, np.dtype("<i2")).tolist() == [[[0]]]
+    b = np.array([7, 7, 5, 5, 9, 9, 1, 2], np.int16).reshape(2, 2, 2)
+    assert VB.mode(b, np.dtype("<i2")).tolist() == [[[5]]]
+
+
+def test_mode_at_an_odd_edge_counts_the_voxels_there() -> None:
+    # (3, 1, 1): block 0 is x 0..1, block 1 is x = 2 alone
+    a = np.array([5, 5, 2], np.int16).reshape(3, 1, 1)
+    assert VB.mode(a, np.dtype("<i2")).ravel().tolist() == [5, 2]
+    # (3, 3, 3): the far corner block is one voxel; an edge block of 2 voxels ties
+    v = np.zeros((3, 3, 3), np.int16)
+    v[2, 2, 2] = 9
+    v[2, 0, 2], v[2, 1, 2] = 8, 4
+    m = VB.mode(v, np.dtype("<i2"))
+    assert m.shape == (2, 2, 2)
+    assert m[1, 1, 1] == 9  # the one voxel there
+    assert m[1, 0, 1] == 4  # 8 against 4: the smallest
+    assert m[0, 0, 0] == 0
+
+
+def test_mode_equals_a_brute_force_count() -> None:
+    rng = np.random.default_rng(1)
+    a = rng.choice(np.array([0, 2, 3, 41, 42, 192], np.int16), (7, 5, 6))
+    m = VB.mode(a, np.dtype("<i2"))
+    for i, j, k in np.ndindex(m.shape):
+        blk = a[2 * i : 2 * i + 2, 2 * j : 2 * j + 2, 2 * k : 2 * k + 2].ravel()
+        vals, counts = np.unique(blk, return_counts=True)  # sorted values
+        assert m[i, j, k] == vals[np.argmax(counts)]
+
+
+def test_label_pyramid_levels_are_modes() -> None:
+    a = (vol() % 3).astype(np.int16)
+    P = VB.ArrayPyramid(a, A0, brick=2, reducer="mode")
+    assert P.dtype == np.dtype("<i2")
+    assert np.array_equal(P.arrays[1], VB.mode(a, P.dtype))
+    assert np.array_equal(P.arrays[2], VB.mode(P.arrays[1], P.dtype))
+    assert VB.meta(P, "l")["dtype"] == "int16"
+    with pytest.raises(ValueError):
+        VB.ArrayPyramid(a, A0, reducer="median")
+
+
+def test_labels_above_int16_stay_exact_int32() -> None:
+    a = np.full((4, 2, 2), 40000, np.int32)
+    a[2:, :, :] = 70001
+    a[3, 1, 1] = 5
+    P = VB.ArrayPyramid(a, A0, brick=2, reducer="mode")
+    assert P.dtype == np.dtype("<i4")
+    assert P.arrays[1].ravel().tolist() == [40000, 70001]
+    assert VB.meta(P, "l")["dtype"] == "int32"
+    assert np.frombuffer(VB.encode(P, 0, [(1, 0, 0)]), "<i4")[-1] == 5
+    # an image keeps float32 above int16, and labels are never float
+    assert VB.wire_dtype(a) == np.dtype("<f4")
+    with pytest.raises(ValueError):
+        VB.wire_dtype(a.astype(np.float32), labels=True)
+
+
+def test_the_echo_pyramid_is_unchanged_byte_for_byte() -> None:
+    # SHA-256 of the levels' bytes, from the code before the reducers existed (main at
+    # 2692bd7): the default (mean) reducer gives the same bytes
+    rng = np.random.default_rng(0)
+    a = rng.integers(-300, 3000, (9, 6, 11)).astype(np.int16)
+    f = np.random.default_rng(0).normal(size=(9, 6, 11))
+    for x, sha in [
+        (a, "0588195f660534a87d17ee6a9711d95d32ee646c8b965c709fcff0cdec66f0d4"),
+        (f, "879f0296e89900fc3e71b96fab91736dd5728742a077a103358681eb358bbb23"),
+    ]:
+        for P in (
+            VB.ArrayPyramid(x, A0, brick=2),
+            VB.ArrayPyramid(x, A0, brick=2, reducer="mean"),
+        ):
+            got = hashlib.sha256(b"".join(y.tobytes() for y in P.arrays)).hexdigest()
+            assert got == sha
 
 
 def test_bricks_inside_at_the_edges_and_coarse() -> None:
