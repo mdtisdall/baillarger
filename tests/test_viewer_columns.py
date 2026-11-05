@@ -263,7 +263,9 @@ def test_the_routes(
         for c, line in enumerate(lines):
             assert np.array_equal(line, ref.rays.position[st[c] : st[c + 1]])
         meta = json.loads(get(f"{base}/columns/meta")[1])
-        assert meta["max_columns"] == VC.MAX_COLUMNS and meta["methods"] == ["normal"]
+        assert meta["max_columns"] == VC.MAX_COLUMNS and meta["methods"] == list(
+            R.METHODS
+        )
         code, body = get(f"{base}/columns?v={v}&radius=99")
         assert code == 400 and "radius" in json.loads(body)["error"]
 
