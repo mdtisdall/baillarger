@@ -28,6 +28,11 @@ A file that loads modules by names computed at run time depends on every
 module of its top-level package (every module, outside a package). Names in string literals ("pkg.mod") count
 as imports. Any failure of the selection gives ALL.
 
+A stale map is an error (exit 2, in all modes): a map pattern that matches
+no file, or a map target that does not exist. A selected test path that does
+not exist is also an error. When code changed, and the selection is empty
+because no test reaches the changed files, a warning names those files.
+
 Default output: ALL, or one path on each line (no lines: no tests). --run
 runs the command with the selected paths as more arguments; with no affected
 tests it runs nothing. pytest exit 5 (no tests collected) is a pass when the
@@ -90,6 +95,28 @@ GLOB = re.compile(r"^(?=.*\*)(?=.*[./])(?=.*[\w-])[\w.*/-]+$")
 
 class SelectAll(Exception):
     pass
+
+
+class ConfigError(Exception):
+    """A setting that cannot be right, for example a stale map entry."""
+
+
+def loud(kind, text):
+    """Write a warning or an error to stderr, as a GitHub annotation in Actions."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::{kind} title=affected-tests::{text}", file=sys.stderr)
+    print(f"affected-tests: {kind.upper()}: {text}", file=sys.stderr)
+
+
+def check_map(mapping, files):
+    """Raise ConfigError for a map pattern that matches no file or a target that does not exist."""
+    on_disk = [p for p in files if os.path.exists(p)]
+    for pattern, targets in mapping.items():
+        if not any(matches(p, [pattern]) for p in on_disk):
+            raise ConfigError(f"the map pattern {pattern!r} matches no file")
+        for t in as_list(targets):
+            if not os.path.exists(t.split("::")[0]):
+                raise ConfigError(f"the map pattern {pattern!r} names {t}, which does not exist")
 
 
 def git(*args):
@@ -362,8 +389,10 @@ def select(base, explain):
                 config_text += f.read()
     doc_plugin = any(name in config_text for name in DOC_PLUGINS)
 
+    check_map(mapping, files)
     graph = Graph(files, as_list(settings.get("source-roots")), is_test)
     selected, check, any_docs = set(), False, False
+    untested = []  # changed code that reaches no test
 
     def note(path, text):
         if explain:
@@ -408,12 +437,20 @@ def select(base, explain):
             check = True
         if tests:
             check = True
+        elif check and exists and not matches(path, docs):
+            untested.append(path)
         selected |= tests
         note(path, f"{len(tests)} test path(s)")
 
+    missing = sorted(p for p in selected if not os.path.exists(p.split("::")[0]))
+    if missing:
+        raise ConfigError(f"the selection names test paths that do not exist: {', '.join(missing)}")
     all_tests = {p for p in files if is_test(p) and os.path.exists(p)}
     if all_tests and all_tests <= selected:
         raise SelectAll("every test file is affected")
+    if not selected and untested:
+        loud("warning", "code changed, but no test reaches it, so no test runs: "
+             + ", ".join(untested) + ". Add a test or a map entry in [tool.affected-tests.map].")
     return sorted(selected), check, any_docs
 
 
@@ -445,6 +482,9 @@ def main():
     try:
         tests, check, docs = select(args.base, explain)
         everything = False
+    except ConfigError as e:
+        loud("error", f"{e}. Correct [tool.affected-tests] in pyproject.toml.")
+        return 2
     except SelectAll as e:
         print(f"affected-tests: ALL: {e}", file=sys.stderr)
         tests, check, docs, everything = [], True, True, True
