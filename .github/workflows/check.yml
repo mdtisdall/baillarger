@@ -3,6 +3,9 @@
 # Pull request: scripts/affected-tests selects the tests that the change can
 #   affect. When the change has only docs or ignored files, the check job
 #   does not start. A newer push to the PR cancels the older run.
+# The check job is a matrix: one runner for lint, format, and types, and
+#   GROUPS runners for the tests. pytest-split forms the groups from the
+#   times in .test_durations; each runner runs its group with pytest-xdist.
 # main, after each merge: all the tests. One run at a time: while a run is in
 #   progress, newer merges replace the queued run, so the next run tests all
 #   of them. A failure opens an issue with the label ci-main, or comments on
@@ -46,6 +49,14 @@ jobs:
     # For bash 3.2 and BSD tools, add a matrix with macos-latest. macOS
     # minutes cost 10 times more.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # lint, and the test groups 1..GROUPS: keep the list and GROUPS equal
+        part: [lint, "1", "2", "3", "4"]
+    name: check (${{ matrix.part }})
+    env:
+      GROUPS: 4
     steps:
       - uses: actions/checkout@v7
         with:
@@ -57,7 +68,7 @@ jobs:
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
-          save: ${{ github.event_name == 'push' }}
+          save: ${{ github.event_name == 'push' && matrix.part == 'lint' }}
           gc-max-store-size-linux: 2G
           gc-max-store-size-macos: 2G
       # uv's cache (the downloaded wheels), in the GitHub Actions cache, so
@@ -73,13 +84,19 @@ jobs:
           path: ${{ env.UV_CACHE_DIR }}
           key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: uv-${{ runner.os }}-
-      - name: scripts/check (the affected tests)
-        if: github.event_name == 'pull_request'
-        run: nix develop --command scripts/check --changed-since HEAD^1
-      - name: scripts/check (all tests)
-        if: github.event_name == 'push'
-        run: nix develop --command scripts/check
-      - if: github.event_name == 'push' && steps.uv-cache.outputs.cache-hit != 'true'
+      - name: scripts/check (lint, format, types)
+        if: matrix.part == 'lint'
+        run: nix develop --command scripts/check --lint-only
+      # memguard reports the peak memory of the group (the runner has 16 GB).
+      - name: scripts/check (test group ${{ matrix.part }}/${{ env.GROUPS }})
+        if: matrix.part != 'lint'
+        run: >-
+          nix develop --command scripts/memguard 15 scripts/check
+          --group "${{ matrix.part }}/$GROUPS"
+          ${{ github.event_name == 'pull_request' && '--changed-since HEAD^1' || '' }}
+      - if: >-
+          github.event_name == 'push' && matrix.part == 'lint' &&
+          steps.uv-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: ${{ env.UV_CACHE_DIR }}

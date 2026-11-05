@@ -21,6 +21,8 @@ dev = [
   "matplotlib>=3.11.2",
   "mypy",
   "pytest",
+  "pytest-split>=0.11.0",
+  "pytest-xdist>=3.8.0",
   "ruff",
   "scikit-image>=0.26.0",
   "scikit-learn>=1.9.1",
