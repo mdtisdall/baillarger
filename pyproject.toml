@@ -87,6 +87,6 @@ ignore = [".claude/hooks/**", "reports/figures/**", "prototypes/data/**"]
 source-roots = ["src", "prototypes/scripts"]
 
 [tool.affected-tests.map]
-# The viewer's page scripts: no Python test runs them; the server test serves
-# the static directory.
-"src/baillarger/viewer/static/*.js" = "tests/test_viewer_data.py"
+# The viewer's page and its scripts: no Python test runs them. The white-mode
+# server test asks for each file of the static directory.
+"src/baillarger/viewer/static/*" = "tests/test_viewer_columns.py"
