@@ -1,21 +1,35 @@
-"""Manual label edits for the WM topology correction (docs/formats/wm-edits.md).
+"""The answer log of the WM review (docs/formats/wm-edits.md).
 
-The edits are diffs against one input segmentation (the aseg), which is never
-changed: per voxel its old and new label and the answer it belongs to, and per
-answer the site, the choice and when. The dseg command
-(baillarger.white_dseg.write_wm_topo) applies them before its automatic correction,
-so no edit can leave a handle, and they apply again when the correction
-changes.
+The log is append-only. It holds the answers in the order that they were
+made, and the records of each review session: when it started, its random
+share and seed, and every site shown or skipped. It holds raw facts only, and
+no measure.
 
-Edits is immutable: with_answer adds an answer and its voxels, without removes
-one (to revert it). write_edits checks the edits against their segmentation
-and writes the table and its sidecar; read_edits reads and checks them;
-apply_edits gives the segmentation with the edits made.
+An answer stands on its own: it is the verified label of each voxel that it
+covers, valid for any input labels on the same grid. There are two kinds:
+
+- a site answer (a choice at a site of the queue): dseg replays its voxels
+  over the input labels, in log order, before the correction (replay);
+- a scribble (strokes, each with one class): a training label only. dseg does
+  not apply it.
+
+A correction is a new answer. Where two answers cover the same voxel, the
+later one wins. Nothing in the log is changed or removed. Log.without gives a
+log without one answer, in memory only, for inspection.
+
+Three files: the log (.jsonl, one JSON object per line), the voxels (.bin,
+VOXEL_DTYPE records) and the sidecar (.json, written one time). EditLog
+appends to them; read_log reads them.
 """
 
-import csv
 import datetime
-from dataclasses import dataclass, field, replace
+import fcntl
+import hashlib
+import json
+import os
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -28,241 +42,609 @@ from baillarger.bids import (
     Key,
     SidecarSpec,
     derivative_path,
-    file_sha256,
     provenance,
     read_sidecar,
     sidecar_path,
     sources,
     write_sidecar,
 )
+from baillarger.labels import LUT_NAMES
 
 type Int = npt.NDArray[np.int64]
+type Site = tuple[int, int, int]
 
 #: docs/formats/wm-edits.md
 EDITS_SPEC = SidecarSpec(
     "wm-edits/1",
-    COMMON_KEYS + (Key("Answers", "array of objects", True, "the answers"),),
+    COMMON_KEYS
+    + (
+        Key("Hemisphere", "string", True, "R or L"),
+        Key("Shape", "array of integers", True, "the grid's shape"),
+        Key("Affine", "array of numbers", True, "voxel to mm, 4 x 4, by rows"),
+    ),
 )
 
-COLUMNS = ("i", "j", "k", "old", "new", "answer")
+#: one voxel of an answer in the .bin file: its linear index (C order of the
+#: grid), its label (the new label, or the stroke's class) and its stroke (-1
+#: for a site answer)
+VOXEL_DTYPE = np.dtype([("index", "<i8"), ("label", "<i4"), ("stroke", "<i4")])
+
+#: the choices of a site answer (scribbles have the choice "scribble")
+SITE_CHOICES = (
+    "remove-strand",
+    "thicken",
+    "fill-gap",
+    "widen-gap",
+    "leave",
+    "manual-paint",
+)
+#: how a site was chosen
+HOW = ("ranked", "random", "none")
 
 
-def edits_path(root: Path, ents: dict[str, str]) -> Path:
-    """The edits table of an input with entities ents, in the derivatives
-    root."""
-    return derivative_path(root, ents, "edits", ".tsv", desc="wmedits")
-
-
-@dataclass(frozen=True)
-class Answer:
-    """One answer: Id (unique), the site voxel, the choice, the SHA-256 of the
-    dseg looked at (None if none) and when (ISO 8601)."""
-
-    id: int
-    site: tuple[int, int, int]
-    choice: str
-    decided_against: str | None = None
-    time: str = field(
-        default_factory=lambda: (
-            datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-        )
+def edits_paths(
+    root: Path, ents: dict[str, str], desc: str = "wmedits"
+) -> dict[str, Path]:
+    """The three files of the log of an input with entities ents, in the
+    derivatives root: log (.jsonl), voxels (.bin) and sidecar (.json). desc
+    "wmeditstest" names a test log."""
+    log = derivative_path(root, ents, "edits", ".jsonl", desc=desc)
+    return dict(
+        log=log, voxels=log.with_suffix(".bin"), sidecar=log.with_suffix(".json")
     )
 
-    def to_json(self) -> dict[str, Any]:
-        return dict(
-            Id=self.id,
-            Site=list(self.site),
-            Choice=self.choice,
-            DecidedAgainst=self.decided_against,
-            Time=self.time,
-        )
 
-    @staticmethod
-    def from_json(d: dict[str, Any]) -> "Answer":
-        if set(d) != {"Id", "Site", "Choice", "DecidedAgainst", "Time"}:
-            raise ValueError(f"an answer has the fields {sorted(d)}")
-        site = d["Site"]
-        ok = (
-            _is_int(d["Id"])
-            and isinstance(site, list)
-            and len(site) == 3
-            and all(_is_int(t) for t in site)
-            and isinstance(d["Choice"], str)
-            and (d["DecidedAgainst"] is None or isinstance(d["DecidedAgainst"], str))
-            and isinstance(d["Time"], str)
-        )
-        if not ok:
-            raise ValueError(f"answer {d.get('Id')!r}: a field has the wrong type")
-        return Answer(
-            d["Id"],
-            (site[0], site[1], site[2]),
-            d["Choice"],
-            d["DecidedAgainst"],
-            d["Time"],
-        )
+def _paths(log: Path) -> dict[str, Path]:
+    if log.suffix != ".jsonl":
+        raise ValueError(f"{log.name}: the log is a .jsonl file")
+    return dict(log=log, voxels=log.with_suffix(".bin"), sidecar=sidecar_path(log))
+
+
+def now() -> str:
+    """The time now, ISO 8601 with the time zone, to the second."""
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def _is_int(x: Any) -> bool:
     return isinstance(x, int) and not isinstance(x, bool)
 
 
+def _is_num(x: Any) -> bool:
+    return isinstance(x, int | float) and not isinstance(x, bool)
+
+
+def _site(x: Any) -> Site | None:
+    if x is None:
+        return None
+    t = tuple(int(c) for c in x)
+    if len(t) != 3:
+        raise ValueError(f"a site has 3 coordinates, not {len(t)}")
+    return (t[0], t[1], t[2])
+
+
+# ----------------------------------------------------------------- the reader
+
+
 @dataclass(frozen=True)
-class Edits:
-    """The rows (voxel (N, 3), old, new, answer: one per changed voxel) and
-    the answers."""
+class Log:
+    """A log, read: its sidecar, its records in order (dicts, as in the
+    file) and its voxels (VOXEL_DTYPE, the whole .bin file)."""
 
-    voxels: Int = field(default_factory=lambda: np.zeros((0, 3), np.int64))
-    old: Int = field(default_factory=lambda: np.zeros(0, np.int64))
-    new: Int = field(default_factory=lambda: np.zeros(0, np.int64))
-    answer: Int = field(default_factory=lambda: np.zeros(0, np.int64))
-    answers: tuple[Answer, ...] = ()
+    side: dict[str, Any]
+    records: tuple[dict[str, Any], ...]
+    data: npt.NDArray[np.void]
 
-    def with_answer(
-        self,
-        a: Answer,
-        voxels: npt.ArrayLike = (),
-        old: npt.ArrayLike = (),
-        new: npt.ArrayLike = (),
-    ) -> "Edits":
-        """These edits and answer a with its rows (none for an answer that
-        changes nothing). Raises ValueError for an Id already used."""
-        if any(b.id == a.id for b in self.answers):
-            raise ValueError(f"answer {a.id} is there already")
-        v = np.asarray(voxels, np.int64).reshape(-1, 3)
-        o = np.asarray(old, np.int64).ravel()
-        n = np.asarray(new, np.int64).ravel()
-        if not len(v) == len(o) == len(n):
-            raise ValueError("voxels, old and new differ in length")
-        return Edits(
-            np.concatenate([self.voxels, v]),
-            np.concatenate([self.old, o]),
-            np.concatenate([self.new, n]),
-            np.concatenate([self.answer, np.full(len(v), a.id, np.int64)]),
-            self.answers + (a,),
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        s = self.side["Shape"]
+        return (int(s[0]), int(s[1]), int(s[2]))
+
+    def answers(self) -> list[dict[str, Any]]:
+        """The answer records (site answers and scribbles), in log order."""
+        return [r for r in self.records if r["Record"] == "answer"]
+
+    def answer(self, answer_id: int) -> dict[str, Any]:
+        """The answer record with this Id. Raises KeyError if there is none."""
+        for r in self.answers():
+            if r["Id"] == answer_id:
+                return r
+        raise KeyError(f"no answer {answer_id}")
+
+    def rows(self, answer_id: int) -> npt.NDArray[np.void]:
+        """The VOXEL_DTYPE rows of an answer."""
+        v = self.answer(answer_id)["Voxels"]
+        out: npt.NDArray[np.void] = self.data[v["Offset"] : v["Offset"] + v["Count"]]
+        return out
+
+    def voxels(self, answer_id: int) -> tuple[Int, Int, Int]:
+        """An answer's voxels (N, 3) on the grid, their labels and their
+        strokes (-1 for a site answer)."""
+        r = self.rows(answer_id)
+        ijk = np.stack(np.unravel_index(r["index"].astype(np.int64), self.shape), 1)
+        return (
+            ijk.astype(np.int64),
+            r["label"].astype(np.int64),
+            r["stroke"].astype(np.int64),
         )
 
-    def without(self, answer_id: int) -> "Edits":
-        """These edits without one answer and its rows."""
-        keep = self.answer != answer_id
-        return replace(
-            self,
-            voxels=self.voxels[keep],
-            old=self.old[keep],
-            new=self.new[keep],
-            answer=self.answer[keep],
-            answers=tuple(a for a in self.answers if a.id != answer_id),
+    def sessions(self) -> list[dict[str, Any]]:
+        """The session records, in log order."""
+        return [r for r in self.records if r["Record"] == "session"]
+
+    def shown(self, session: int) -> list[dict[str, Any]]:
+        """The shown records of a session, in log order."""
+        return [
+            r
+            for r in self.records
+            if r["Record"] == "shown" and r["Session"] == session
+        ]
+
+    def answered(self, session: int) -> set[Site]:
+        """The sites that an answer of this session names."""
+        out = set()
+        for r in self.answers():
+            s = _site(r["Site"])
+            if r["Session"] == session and s is not None:
+                out.add(s)
+        return out
+
+    def without(self, answer_id: int) -> "Log":
+        """This log without one answer, for inspection. The file does not
+        change. Raises KeyError if there is no such answer."""
+        self.answer(answer_id)
+        recs = tuple(
+            r
+            for r in self.records
+            if not (r["Record"] == "answer" and r["Id"] == answer_id)
         )
-
-    def check(self, labels: npt.ArrayLike) -> None:
-        """Raises ValueError unless the edits are consistent and fit the
-        segmentation labels: unique answer Ids, rows naming them, voxels inside
-        the grid and each at most once, old the label there, new not old."""
-        a = np.asarray(labels)
-        ids = [b.id for b in self.answers]
-        problems = []
-        if len(set(ids)) != len(ids):
-            problems.append("answer Ids are not unique")
-        if not np.isin(self.answer, ids).all():
-            problems.append("rows name answers that are not there")
-        inside = np.all((self.voxels >= 0) & (self.voxels < a.shape), axis=1)
-        if not inside.all():
-            problems.append(f"{int((~inside).sum())} voxels outside the grid")
-        elif len(self.voxels):
-            if len(np.unique(self.voxels, axis=0)) != len(self.voxels):
-                problems.append("a voxel appears twice")
-            got = a[tuple(self.voxels.T)]
-            wrong = got != self.old
-            if wrong.any():
-                first = int(np.argmax(wrong))
-                v, g, o = self.voxels[first].tolist(), got[first], self.old[first]
-                problems.append(
-                    f"{int(wrong.sum())} voxels do not have their old label "
-                    f"(the first: {v} has {g}, not {o})"
-                )
-        if (self.new == self.old).any():
-            problems.append("a row's new label is its old label")
-        if problems:
-            raise ValueError("; ".join(problems))
+        return replace(self, records=recs)
 
 
-def apply_edits(
-    labels: npt.ArrayLike, edits: Edits
-) -> tuple[npt.NDArray[Any], npt.NDArray[np.bool_]]:
-    """A copy of the segmentation labels with the edits made, and the mask of
-    the voxels they changed. Raises ValueError for edits that do not fit it
-    (Edits.check)."""
-    a = np.asarray(labels)
-    edits.check(a)
-    out = a.copy()
-    changed = np.zeros(a.shape, bool)
-    if len(edits.voxels):
-        ix = tuple(edits.voxels.T)
-        new = edits.new
-        if np.any(new != new.astype(a.dtype)):
-            raise ValueError(f"a new label does not fit the labels' type {a.dtype}")
-        out[ix] = new
-        changed[ix] = True
-    return out, changed
+def _check_record(r: dict[str, Any], seen: dict[str, Any]) -> None:
+    """Raises ValueError unless r is a valid record after the records seen
+    (sessions: set of ids; shown: {(session, site)}; ids: set of answer ids)."""
+    kind = r.get("Record")
+    if kind == "session":
+        if not (_is_int(r["Session"]) and r["Session"] not in seen["sessions"]):
+            raise ValueError(f"session {r.get('Session')!r}: not a new integer")
+        if not (_is_num(r["RandomShare"]) and 0 <= r["RandomShare"] <= 1):
+            raise ValueError("RandomShare is not a number in [0, 1]")
+        if not (r["RandomSeed"] is None or _is_int(r["RandomSeed"])):
+            raise ValueError("RandomSeed is not an integer or null")
+        seen["sessions"].add(r["Session"])
+        return
+    if kind not in ("shown", "skipped", "answer"):
+        raise ValueError(f"unknown record {kind!r}")
+    if r["Session"] not in seen["sessions"]:
+        raise ValueError(f"{kind}: session {r['Session']!r} has not started")
+    site = _site(r["Site"])
+    if kind == "shown":
+        if r["How"] not in HOW:
+            raise ValueError(f"How {r['How']!r} is not one of {HOW}")
+        assert site is not None
+        seen["shown"][(r["Session"], site)] = r
+        return
+    if kind == "skipped":
+        if (r["Session"], site) not in seen["shown"]:
+            raise ValueError(f"skipped: site {site} was not shown in the session")
+        return
+    if not (_is_int(r["Id"]) and r["Id"] not in seen["ids"]):
+        raise ValueError(f"answer {r.get('Id')!r}: not a new integer Id")
+    if r["Kind"] == "site":
+        if r["Choice"] not in SITE_CHOICES:
+            raise ValueError(f"answer {r['Id']}: unknown choice {r['Choice']!r}")
+        if site is None:
+            raise ValueError(f"answer {r['Id']}: a site answer has a site")
+        if r["Choice"] == "leave" and r["Voxels"]["Count"]:
+            raise ValueError(f"answer {r['Id']}: leave has no voxels")
+        if r["Accepts"] is not None and r["Choice"] != "leave":
+            raise ValueError(f"answer {r['Id']}: only leave accepts a fix")
+    elif r["Kind"] == "scribble":
+        if r["Choice"] != "scribble":
+            raise ValueError(f"answer {r['Id']}: a scribble has choice scribble")
+    else:
+        raise ValueError(f"answer {r['Id']}: unknown kind {r['Kind']!r}")
+    if site is not None and (r["Session"], site) not in seen["shown"]:
+        raise ValueError(f"answer {r['Id']}: site {site} was not shown in the session")
+    bad = [s for s in r["Supersedes"] if s not in seen["ids"]]
+    if bad:
+        raise ValueError(f"answer {r['Id']}: supersedes unknown answers {bad}")
+    seen["ids"].add(r["Id"])
 
 
-def write_edits(
-    path: Path, labels_path: Path, edits: Edits, labels: npt.ArrayLike | None = None
-) -> Path:
-    """Write the edits table at path (edits_path) and its sidecar, after
-    checking the edits against the segmentation at labels_path (labels: its
-    voxels, if already read). Returns the sidecar's path."""
-    if labels is None:
-        img = nib.load(labels_path)
+def read_log(path: Path) -> Log:
+    """The log at path (.jsonl), with its sidecar and voxels, checked against
+    wm-edits/1: each record valid after the ones before it, and each answer's
+    voxels inside the .bin file with their SHA-256. A last line with no line
+    end (an append that did not finish) is ignored, and so are the bytes of
+    the .bin file that no record names."""
+    p = _paths(path)
+    side = read_sidecar(p["sidecar"], EDITS_SPEC)
+    raw = p["voxels"].read_bytes()
+    n = len(raw) // VOXEL_DTYPE.itemsize
+    data = np.frombuffer(raw[: n * VOXEL_DTYPE.itemsize], VOXEL_DTYPE)
+    text = p["log"].read_text()
+    lines = text.split("\n")
+    lines = lines[:-1]  # the part after the last line end: empty, or unfinished
+    seen: dict[str, Any] = dict(sessions=set(), shown={}, ids=set())
+    recs = []
+    size = int(np.prod(side["Shape"]))
+    for k, line in enumerate(lines, 1):
+        r = json.loads(line)
+        try:
+            _check_record(r, seen)
+            if r["Record"] == "answer":
+                v = r["Voxels"]
+                if v["Offset"] < 0 or v["Offset"] + v["Count"] > n:
+                    raise ValueError("its voxels are not in the .bin file")
+                rows = data[v["Offset"] : v["Offset"] + v["Count"]]
+                if hashlib.sha256(rows.tobytes()).hexdigest() != v["SHA256"]:
+                    raise ValueError("the SHA-256 of its voxels does not agree")
+                if len(rows) and (
+                    rows["index"].min() < 0 or rows["index"].max() >= size
+                ):
+                    raise ValueError("a voxel is outside the grid")
+        except (KeyError, ValueError, TypeError) as e:
+            raise ValueError(f"{path.name}, line {k}: {e}") from e
+        recs.append(r)
+    return Log(side, tuple(recs), data)
+
+
+# ----------------------------------------------------------------- the writer
+
+
+@contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    with path.open("a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+class EditLog:
+    """The writer of a log. Each call appends; nothing is changed or removed.
+    Each append holds an exclusive lock (fcntl.flock) on the log, appends the
+    voxels to the .bin file first, then the record to the .jsonl file, and
+    flushes both to the disk."""
+
+    def __init__(self, path: Path) -> None:
+        self.paths = _paths(path)
+        self.path = self.paths["log"]
+        read_sidecar(self.paths["sidecar"], EDITS_SPEC)
+
+    @staticmethod
+    def create(path: Path, dseg: Path, hemi: str) -> "EditLog":
+        """Make a new, empty log at path (.jsonl) for the grid of the
+        segmentation at dseg (its shape and affine), and its sidecar. Raises
+        FileExistsError if a log is there."""
+        p = _paths(path)
+        if any(q.exists() for q in p.values()):
+            raise FileExistsError(f"{path.name}: a log is there already")
+        img = nib.load(dseg)
         if not isinstance(img, nib.nifti1.Nifti1Image):
-            raise ValueError(f"{labels_path.name}: not a NIfTI-1 image")
-        labels = np.asarray(img.dataobj)
-    edits.check(labels)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as fh:
-        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
-        w.writerow(COLUMNS)
-        for (i, j, k), o, n, b in zip(
-            edits.voxels.tolist(),
-            edits.old.tolist(),
-            edits.new.tolist(),
-            edits.answer.tolist(),
-            strict=True,
-        ):
-            w.writerow((i, j, k, o, n, b))
-    side = sidecar_path(path)
-    write_sidecar(
-        side,
-        EDITS_SPEC,
-        dict(
-            SpecVersion=EDITS_SPEC.version,
-            Description="Manual label edits of the input segmentation, applied "
-            "by dseg before the WM topology correction.",
-            **sources(labels_path),
-            Provenance=provenance("baillarger.wm_edits.write_edits"),
-            Answers=[a.to_json() for a in edits.answers],
-        ),
-    )
-    return side
+            raise ValueError(f"{dseg.name}: not a NIfTI-1 image")
+        write_sidecar(
+            p["sidecar"],
+            EDITS_SPEC,
+            dict(
+                SpecVersion=EDITS_SPEC.version,
+                Description="The answer log of the WM review: answers and "
+                "session records, append-only.",
+                **sources(dseg),
+                Provenance=provenance("baillarger.wm_edits.EditLog.create"),
+                Hemisphere=hemi,
+                Shape=[int(s) for s in img.shape[:3]],
+                Affine=[float(x) for x in np.asarray(img.affine, float).ravel()],
+            ),
+        )
+        p["log"].touch()
+        p["voxels"].touch()
+        return EditLog(path)
+
+    def read(self) -> Log:
+        """The log as it is now (read_log)."""
+        return read_log(self.path)
+
+    def sessions(self) -> list[dict[str, Any]]:
+        """The session records."""
+        return self.read().sessions()
+
+    def answered(self, session: int) -> set[Site]:
+        """The sites that an answer of this session names."""
+        return self.read().answered(session)
+
+    def _append(
+        self, rec: dict[str, Any], rows: npt.NDArray[np.void] | None = None
+    ) -> dict[str, Any]:
+        with _locked(self.path):
+            log = self.read()
+            if rec["Record"] == "session" and rec["Session"] is None:
+                rec["Session"] = 1 + max(
+                    (s["Session"] for s in log.sessions()), default=0
+                )
+            if rec["Record"] == "answer":
+                rec["Id"] = 1 + max((a["Id"] for a in log.answers()), default=0)
+                shown = log.shown(rec["Session"])
+                site = _site(rec["Site"])
+                if site is not None:
+                    hit = [s for s in shown if _site(s["Site"]) == site]
+                    if not hit:
+                        raise ValueError(
+                            f"site {site} was not shown in session {rec['Session']}"
+                        )
+                    for k in ("SiteKind", "How", "Rank", "Score"):
+                        rec[k] = hit[-1][k]
+                else:
+                    rec.update(SiteKind=None, How="none", Rank=None, Score=None)
+                assert rows is not None
+                # the end of the voxels that a record names: bytes after it are
+                # from an append that did not finish
+                off = max(
+                    (
+                        x["Voxels"]["Offset"] + x["Voxels"]["Count"]
+                        for x in log.answers()
+                    ),
+                    default=0,
+                )
+                rec["Voxels"] = dict(
+                    Offset=int(off),
+                    Count=len(rows),
+                    SHA256=hashlib.sha256(rows.tobytes()).hexdigest(),
+                )
+            seen: dict[str, Any] = dict(
+                sessions={s["Session"] for s in log.sessions()},
+                shown={
+                    (r["Session"], _site(r["Site"])): r
+                    for r in log.records
+                    if r["Record"] == "shown"
+                },
+                ids={a["Id"] for a in log.answers()},
+            )
+            _check_record(rec, seen)
+            if rows is not None:
+                with self.paths["voxels"].open("r+b") as fh:
+                    # bytes that no record names (an append that did not
+                    # finish) are written over
+                    fh.seek(rec["Voxels"]["Offset"] * VOXEL_DTYPE.itemsize)
+                    fh.write(rows.tobytes())
+                    fh.truncate()
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            line = json.dumps(rec, separators=(",", ":")) + "\n"
+            with self.path.open("r+") as fh:
+                text = fh.read()
+                if text and not text.endswith("\n"):
+                    # an unfinished last line: write over it
+                    fh.seek(text.rfind("\n") + 1)
+                    fh.truncate()
+                fh.write(line)
+                fh.flush()
+                os.fsync(fh.fileno())
+        return rec
+
+    def start_session(
+        self,
+        random_share: float,
+        random_seed: int | None,
+        dseg_sha256: str,
+        queue_sha256: str,
+        time: str | None = None,
+    ) -> int:
+        """Start a review session: the share of random sites that the reviewer
+        chose (0 to 1), their seed (None if the share is 0), the SHA-256 of the
+        dseg and of the queue file shown. Returns the session's id (1, 2,
+        ...)."""
+        r = self._append(
+            dict(
+                Record="session",
+                Session=None,
+                Time=time or now(),
+                RandomShare=random_share,
+                RandomSeed=random_seed,
+                DsegSHA256=dseg_sha256,
+                QueueSHA256=queue_sha256,
+            )
+        )
+        return int(r["Session"])
+
+    def shown(
+        self,
+        session: int,
+        site: Sequence[int],
+        site_kind: str,
+        rank: int | None,
+        score: float | None = None,
+        time: str | None = None,
+    ) -> None:
+        """Record that a site was shown in a session: its kind (wm-sites/1,
+        for example misfacing or random), its rank in the queue (None for a
+        random site) and its score (None if the queue has none). A random site
+        has How "random"; any other site has How "ranked"."""
+        self._append(
+            dict(
+                Record="shown",
+                Session=session,
+                Time=time or now(),
+                Site=list(_site(site) or ()),
+                SiteKind=site_kind,
+                How="random" if site_kind == "random" else "ranked",
+                Rank=rank,
+                Score=score,
+            )
+        )
+
+    def skipped(
+        self, session: int, site: Sequence[int], time: str | None = None
+    ) -> None:
+        """Record that the reviewer skipped a site shown in the session."""
+        self._append(
+            dict(
+                Record="skipped",
+                Session=session,
+                Time=time or now(),
+                Site=list(_site(site) or ()),
+            )
+        )
+
+    def _rows(
+        self, voxels: npt.ArrayLike, labels: npt.ArrayLike, strokes: npt.ArrayLike
+    ) -> npt.NDArray[np.void]:
+        shape = tuple(self.read().shape)
+        v = np.asarray(voxels, np.int64).reshape(-1, 3)
+        lab = np.asarray(labels, np.int64).ravel()
+        st = np.asarray(strokes, np.int64).ravel()
+        if not len(v) == len(lab) == len(st):
+            raise ValueError("voxels, labels and strokes differ in length")
+        if len(v) and not np.all((v >= 0) & (v < shape)):
+            raise ValueError("a voxel is outside the grid")
+        bad = sorted(set(lab.tolist()) - set(LUT_NAMES))
+        if bad:
+            raise ValueError(f"labels {bad} are not in the label set")
+        index: Int = np.zeros(0, np.int64)
+        if len(v):
+            index = np.asarray(np.ravel_multi_index(tuple(v.T), shape), np.int64)
+        if len(np.unique(index)) != len(index):
+            raise ValueError("a voxel appears twice in one answer")
+        rows = np.zeros(len(v), VOXEL_DTYPE)
+        rows["index"], rows["label"], rows["stroke"] = index, lab, st
+        return rows
+
+    def answer(
+        self,
+        session: int,
+        site: Sequence[int],
+        choice: str,
+        voxels: npt.ArrayLike,
+        labels: npt.ArrayLike,
+        decided_against: str | None,
+        reviewer_seconds: float,
+        params: dict[str, Any] | None = None,
+        supersedes: Sequence[int] = (),
+        accepts: dict[str, Any] | None = None,
+        time: str | None = None,
+    ) -> int:
+        """Append a site answer: at a site shown in the session (ValueError
+        if it was not), the choice (SITE_CHOICES), its voxels (N, 3) on the
+        grid and their new labels, the SHA-256 of the dseg looked at, the
+        reviewer time (seconds, from opening the site to submitting the
+        answer), the choice's parameters, the Ids of the answers it supersedes
+        and, for leave at an override site, the fix it accepts ({"FixId",
+        "FixDiffSHA256"}). How the site was chosen comes from its shown
+        record. Returns the answer's Id."""
+        rows = self._rows(voxels, labels, np.full(len(np.asarray(labels).ravel()), -1))
+        r = self._append(
+            dict(
+                Record="answer",
+                Id=None,
+                Session=session,
+                Kind="site",
+                Site=list(_site(site) or ()),
+                Choice=choice,
+                Params=dict(params or {}),
+                Supersedes=[int(s) for s in supersedes],
+                Accepts=accepts,
+                DecidedAgainst=decided_against,
+                Time=time or now(),
+                ReviewerSeconds=float(reviewer_seconds),
+                Strokes=None,
+            ),
+            rows,
+        )
+        return int(r["Id"])
+
+    def scribble(
+        self,
+        session: int,
+        strokes: Sequence[tuple[int, npt.ArrayLike]],
+        decided_against: str | None,
+        reviewer_seconds: float,
+        site: Sequence[int] | None = None,
+        supersedes: Sequence[int] = (),
+        time: str | None = None,
+    ) -> int:
+        """Append a scribble: strokes, each (class, voxels (N, 3) on the
+        grid), made in the session, at a site shown in it or at no site
+        (None). A voxel is in at most one stroke. Returns the answer's Id."""
+        vox = [np.asarray(v, np.int64).reshape(-1, 3) for _, v in strokes]
+        cls = [int(c) for c, _ in strokes]
+        rows = self._rows(
+            np.concatenate(vox) if vox else np.zeros((0, 3), np.int64),
+            np.concatenate([np.full(len(v), c) for v, c in zip(vox, cls, strict=True)])
+            if vox
+            else np.zeros(0, np.int64),
+            np.concatenate([np.full(len(v), k) for k, v in enumerate(vox)])
+            if vox
+            else np.zeros(0, np.int64),
+        )
+        r = self._append(
+            dict(
+                Record="answer",
+                Id=None,
+                Session=session,
+                Kind="scribble",
+                Site=None if site is None else list(_site(site) or ()),
+                Choice="scribble",
+                Params={},
+                Supersedes=[int(s) for s in supersedes],
+                Accepts=None,
+                DecidedAgainst=decided_against,
+                Time=time or now(),
+                ReviewerSeconds=float(reviewer_seconds),
+                Strokes=[dict(Stroke=k, Class=c) for k, c in enumerate(cls)],
+            ),
+            rows,
+        )
+        return int(r["Id"])
 
 
-def read_edits(path: Path) -> tuple[Edits, dict[str, Any]]:
-    """The edits in the table at path and its sidecar, checked against
-    wm-edits/1 (not against a segmentation: Edits.check, or apply_edits)."""
-    side = read_sidecar(sidecar_path(path), EDITS_SPEC)
-    with path.open(newline="") as fh:
-        rows = list(csv.reader(fh, delimiter="\t"))
-    if not rows or tuple(rows[0]) != COLUMNS:
-        raise ValueError(f"{path.name}: the columns are not {COLUMNS}")
-    try:
-        t = np.array(rows[1:], np.int64).reshape(-1, len(COLUMNS))
-    except ValueError as e:
-        raise ValueError(f"{path.name}: a value is not an integer") from e
-    answers = tuple(Answer.from_json(d) for d in side["Answers"])
-    edits = Edits(t[:, :3], t[:, 3], t[:, 4], t[:, 5], answers)
-    return edits, side
+# ---------------------------------------------------------------- the replay
 
 
-def sources_match(side: dict[str, Any], labels_path: Path) -> bool:
-    """Whether the edits (their sidecar) are against the segmentation at
-    labels_path: the same SHA-256."""
-    return list(side["SourcesSHA256"].values()) == [file_sha256(labels_path)]
+@dataclass(frozen=True)
+class Replay:
+    """The input labels with the site answers replayed, and the verified
+    voxels: their linear indices (sorted), the Id of the answer that set each
+    (the last one), and its label."""
+
+    labels: npt.NDArray[Any]
+    index: Int
+    answer: Int
+    label: Int
+
+
+def replay(labels: npt.ArrayLike, log: Log) -> Replay:
+    """A copy of the labels with the site answers of the log written over
+    them, in log order: where answers overlap, the later one wins. Scribbles
+    are not applied. Raises ValueError if the labels' shape is not the log's
+    grid, or a label does not fit the labels' type."""
+    a = np.asarray(labels)
+    if a.shape != log.shape:
+        raise ValueError(f"the labels have shape {a.shape}, the log's grid {log.shape}")
+    out = a.copy()
+    flat = out.reshape(-1)
+    idx_parts, id_parts, lab_parts = [], [], []
+    for r in log.answers():
+        if r["Kind"] != "site" or not r["Voxels"]["Count"]:
+            continue
+        rows = log.rows(r["Id"])
+        lab = rows["label"].astype(np.int64)
+        if np.any(lab != lab.astype(a.dtype)):
+            raise ValueError(f"answer {r['Id']}: a label does not fit {a.dtype}")
+        flat[rows["index"]] = lab
+        idx_parts.append(rows["index"].astype(np.int64))
+        id_parts.append(np.full(len(rows), r["Id"], np.int64))
+        lab_parts.append(lab)
+    if idx_parts:
+        idx = np.concatenate(idx_parts)
+        ids = np.concatenate(id_parts)
+        lab = np.concatenate(lab_parts)
+        # the last answer of each voxel: a stable sort keeps log order
+        order = np.argsort(idx, kind="stable")
+        idx, ids, lab = idx[order], ids[order], lab[order]
+        last = np.r_[idx[1:] != idx[:-1], True]
+        idx, ids, lab = idx[last], ids[last], lab[last]
+    else:
+        idx = ids = lab = np.zeros(0, np.int64)
+    return Replay(out, idx, ids, lab)

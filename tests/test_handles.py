@@ -371,3 +371,53 @@ def test_output_is_the_reference_output() -> None:
     # per-pass work was cut down: any change in the order of claims shows here
     assert H.kuhn_betti(perforated_slab(16, 16)) == (1, 16, 0)
     assert reference_digests() == REFERENCE
+
+
+def thin_ring(tail: bool = False) -> Bool3:
+    """A square ring of a bar 2 x 2 voxels round a 10 x 10 hole; with tail, a
+    bar 12 voxels long that leaves the ring's corner."""
+    a = np.zeros((40, 20, 8), bool)
+    a[3:17, 3:17, 3:5] = True
+    a[5:15, 5:15, :] = False
+    if tail:
+        a[17:35, 3:5, 3:5] = True
+    return a
+
+
+def cut_voxels(r: H.HandleRemoval) -> set[tuple[int, ...]]:
+    return {tuple(v) for m in r.moves for v in m.voxels.tolist()}
+
+
+def test_no_verified_voxel_gives_the_same_moves() -> None:
+    a = thin_ring()
+    r0 = H.remove_handles(a)
+    r1 = H.remove_handles(a, np.zeros(a.shape, bool))
+    assert digest(r0.obj, r0.moves) == digest(r1.obj, r1.moves)
+
+
+def test_a_verified_wall_moves_the_fix_elsewhere() -> None:
+    a = thin_ring()
+    r0 = H.remove_handles(a)
+    first = cut_voxels(r0)
+    assert first and H.kuhn_betti(r0.obj) == (1, 0, 0)
+    ver = np.zeros(a.shape, bool)
+    ver[tuple(np.array(sorted(first)).T)] = True
+    r1 = H.remove_handles(a, ver)
+    assert H.kuhn_betti(r1.obj) == (1, 0, 0)
+    assert not cut_voxels(r1) & first  # no verified voxel changes
+    assert len(cut_voxels(r1)) == len(first)  # an equal wall elsewhere
+
+
+def test_a_fix_goes_through_verified_voxels_if_it_must() -> None:
+    a = thin_ring()
+    r = H.remove_handles(a, np.ones(a.shape, bool))  # every voxel verified
+    assert H.kuhn_betti(r.obj) == (1, 0, 0)
+    assert cut_voxels(r) == cut_voxels(H.remove_handles(a))
+
+
+def test_a_verified_voxel_far_from_the_handle_changes_no_move() -> None:
+    a = thin_ring(tail=True)
+    ver = np.zeros(a.shape, bool)
+    ver[33, 3, 3] = True  # the end of the tail, far from the ring
+    r0, r1 = H.remove_handles(a), H.remove_handles(a, ver)
+    assert digest(r0.obj, r0.moves) == digest(r1.obj, r1.moves)

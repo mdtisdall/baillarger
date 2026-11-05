@@ -13,11 +13,15 @@ laminar profiles.md, *Flattening in the volume*). Pure functions.
   a band spacing).
 - fit_warp: the horizon volume z_v(tau) = tau + r_v(tau), from
   r_w - r_v = s_vw(tau + r_v) over all pairs and levels,
-  eps (r_v(tau + dtau) - r_v(tau)) = 0, r_v(0) = 0; weighted least squares by
-  conjugate gradients, with Gauss-Newton outer iterations (the shift is read where v's
-  horizon is). The per-level constant left free by the pair equations is fixed by the
-  eps rows: mean_v r_v(tau) = 0 in each connected piece, so tau is the mean depth of
-  its horizon.
+  eps (r_v(tau + dtau) - r_v(tau)) = 0, r_v(tau_a) = 0 (the anchor level a, default
+  0); weighted least squares by conjugate gradients, with Gauss-Newton outer
+  iterations (the shift is read where v's horizon is).
+  The gauge: the pair equations leave one constant per level free (the same for every
+  trace of a connected piece). The right-hand side has no part along it, so the
+  solution has mean_v r_v(tau) = 0 in each connected piece, at each level: tau is the
+  mean depth of its horizon over the traces of the solve. So a solve over part of the
+  traces has a different gauge from a solve over all of them, whatever its halo
+  (baillarger.flattening, "The gauge").
 - resample / tau_of: a trace at constant tau, and the tau of a depth on a trace.
 
 Units: mm. Traces are sampled at `step` mm from the root; a trace's features are nan
@@ -246,19 +250,106 @@ def fit_warp(
     rtol: float = 1e-7,
     r0: Float | None = None,
     log: Callable[[str], object] | None = None,
+    anchor_level: int = 0,
+    precond: str = "jacobi",
+    fixed: Bool | None = None,
 ) -> tuple[Float, Float, list[dict[str, Any]]]:
     """Fit r (n_traces, K) on tau_j = j dtau, j < K = tau_max / dtau + 1.
 
     pairs (P, 2) trace indices (v, w); S, W (P, n) the pair's shift (mm) and weight at
-    each sample of v. Returns tau (K,), r (n_traces, K), info (per outer iteration: cg
-    iterations, weighted rms)."""
+    each sample of v. The anchor rows tie r_v to 0 at level anchor_level (default 0,
+    the first sample of each trace). precond: "jacobi" (the diagonal) or "line"
+    (each trace's own tridiagonal block along tau, solved exactly). fixed (n_traces,):
+    traces whose r stays at r0 (a boundary condition, for overlapping Schwarz); the
+    others are solved with them as known values. Returns tau (K,),
+    r (n_traces, K), info (per outer iteration: cg iterations, weighted rms)."""
     K = int(round(tau_max / dtau)) + 1
     tau: Float = np.arange(K, dtype=float) * dtau
     N = n_traces
     r = np.zeros((N, K)) if r0 is None else r0.copy()
-    v, w = pairs[:, 0], pairs[:, 1]
+    R = prior_matrix(N, K, eps, anchor, anchor_level)
+    info: list[dict[str, Any]] = []
+    for it in range(n_outer):
+        Ad, bd, sw = data_rows(pairs, S, W, r, tau, step)
+        M = (Ad.T @ Ad + R).tocsr()
+        rhs = Ad.T @ bd
+        if fixed is not None:
+            fr = np.repeat(~np.asarray(fixed, bool), K)
+            xd = r.ravel()[~fr]
+            Mf = M[fr]
+            rhs = rhs[fr] - Mf[:, ~fr] @ xd
+            M = Mf[:, fr].tocsr()
+        dg = M.diagonal()
+        if precond == "line":
+            pre = line_preconditioner(dg.reshape(-1, K), -(eps**2))
+        else:
+            pre = diags(1.0 / np.where(dg > 0, dg, 1.0))
+        n_it = [0]
+
+        def cb(_: Any, n_it: list[int] = n_it) -> None:
+            n_it[0] += 1
+
+        x0 = r.ravel() if fixed is None else r.ravel()[fr]
+        x, flag = cg(M, rhs, x0=x0, rtol=rtol, maxiter=maxiter, M=pre, callback=cb)
+        if fixed is not None:
+            full = r.ravel().copy()
+            full[fr] = x
+            x = full
+        r = x.reshape(N, K)
+        res = Ad @ x - bd
+        den = float(np.sum(sw**2))
+        rms = float(np.sqrt(np.sum(res**2) / den)) if den > 0 else 0.0
+        info.append(
+            dict(
+                outer=it,
+                cg_iters=n_it[0],
+                cg_flag=int(flag),
+                data_rows=int(sw.size),
+                weighted_rms_mm=rms,
+            )
+        )
+        if log:
+            log(
+                f"outer {it}: {sw.size:,} data rows, cg {n_it[0]} iterations "
+                f"(flag {flag}), weighted rms {rms:.4f} mm"
+            )
+    return tau, r, info
+
+
+def line_preconditioner(d: Float, off: float) -> Any:
+    """The inverse of the block-diagonal part of fit_warp's matrix: for each
+    trace, the tridiagonal matrix along tau with diagonal d (N, K) and
+    off-diagonal `off`, as a LinearOperator (the Thomas algorithm, vectorised
+    over the traces)."""
+    from scipy.sparse.linalg import LinearOperator
+
+    N, K = d.shape
+    # forward elimination factors, once
+    c = np.zeros((N, K))
+    m = np.zeros((N, K))
+    m[:, 0] = d[:, 0]
+    for j in range(1, K):
+        c[:, j] = off / m[:, j - 1]
+        m[:, j] = d[:, j] - c[:, j] * off
+
+    def solve(b: Any) -> Float:
+        y = np.asarray(b, float).reshape(N, K).copy()
+        for j in range(1, K):
+            y[:, j] -= c[:, j] * y[:, j - 1]
+        x = np.empty_like(y)
+        x[:, -1] = y[:, -1] / m[:, -1]
+        for j in range(K - 2, -1, -1):
+            x[:, j] = (y[:, j] - off * x[:, j + 1]) / m[:, j]
+        out: Float = x.ravel()
+        return out
+
+    return LinearOperator((N * K, N * K), matvec=solve, dtype=float)
+
+
+def prior_matrix(N: int, K: int, eps: float, anchor: float, anchor_level: int) -> Any:
+    """The normal matrix (N K, N K) of fit_warp's fixed rows: smoothness
+    eps (r_v(tau_j+1) - r_v(tau_j)) = 0 and anchor r_v(tau_anchor_level) = 0."""
     idx = np.arange(N * K).reshape(N, K)
-    # eps and anchor rows: fixed
     ev = idx[:, :-1].ravel()
     rows_e = np.arange(ev.size)
     Ae = coo_matrix(
@@ -269,57 +360,36 @@ def fit_warp(
         shape=(ev.size, N * K),
     ).tocsr()
     Aa = coo_matrix(
-        (np.full(N, anchor), (np.arange(N), idx[:, 0])), shape=(N, N * K)
+        (np.full(N, anchor), (np.arange(N), idx[:, anchor_level])), shape=(N, N * K)
     ).tocsr()
-    R = (Ae.T @ Ae + Aa.T @ Aa).tocsr()
-    info: list[dict[str, Any]] = []
-    for it in range(n_outer):
-        q = (tau[None] + r[v]) / step  # (P, K) samples on v
-        s, ins = interp_last(S, q)
-        wt, _ = interp_last(W, q)
-        wt = np.where(ins, np.maximum(wt, 0.0), 0.0)
-        p_, j_ = np.nonzero(wt > 0)
-        sw = np.sqrt(wt[p_, j_])
-        rows = np.arange(p_.size)
-        Ad = coo_matrix(
-            (
-                np.r_[sw, -sw],
-                (np.r_[rows, rows], np.r_[idx[w[p_], j_], idx[v[p_], j_]]),
-            ),
-            shape=(p_.size, N * K),
-        ).tocsr()
-        bd = sw * s[p_, j_]
-        M = (Ad.T @ Ad + R).tocsr()
-        rhs = Ad.T @ bd
-        dg = M.diagonal()
-        pre = diags(1.0 / np.where(dg > 0, dg, 1.0))
-        n_it = [0]
+    return (Ae.T @ Ae + Aa.T @ Aa).tocsr()
 
-        def cb(_: Any, n_it: list[int] = n_it) -> None:
-            n_it[0] += 1
 
-        x, flag = cg(
-            M, rhs, x0=r.ravel(), rtol=rtol, maxiter=maxiter, M=pre, callback=cb
-        )
-        r = x.reshape(N, K)
-        res = Ad @ x - bd
-        den = float(np.sum(sw**2))
-        rms = float(np.sqrt(np.sum(res**2) / den)) if den > 0 else 0.0
-        info.append(
-            dict(
-                outer=it,
-                cg_iters=n_it[0],
-                cg_flag=int(flag),
-                data_rows=int(p_.size),
-                weighted_rms_mm=rms,
-            )
-        )
-        if log:
-            log(
-                f"outer {it}: {p_.size:,} data rows, cg {n_it[0]} iterations "
-                f"(flag {flag}), weighted rms {rms:.4f} mm"
-            )
-    return tau, r, info
+def data_rows(
+    pairs: Int, S: Arr, W: Arr, r: Float, tau: Float, step: float
+) -> tuple[Any, Float, Float]:
+    """fit_warp's data rows, linearised at r: sqrt(w) (r_w - r_v) = sqrt(w) s_vw,
+    with s and w read where v's horizon is (tau + r_v). Returns the matrix
+    (rows, N K), the right-hand side and sqrt(w) of each row."""
+    N, K = r.shape
+    v, w = pairs[:, 0], pairs[:, 1]
+    idx = np.arange(N * K).reshape(N, K)
+    q = (tau[None] + r[v]) / step  # (P, K) samples on v
+    s, ins = interp_last(S, q)
+    wt, _ = interp_last(W, q)
+    wt = np.where(ins, np.maximum(wt, 0.0), 0.0)
+    p_, j_ = np.nonzero(wt > 0)
+    sw = np.sqrt(wt[p_, j_])
+    rows = np.arange(p_.size)
+    Ad = coo_matrix(
+        (
+            np.r_[sw, -sw],
+            (np.r_[rows, rows], np.r_[idx[w[p_], j_], idx[v[p_], j_]]),
+        ),
+        shape=(p_.size, N * K),
+    ).tocsr()
+    bd: Float = sw * s[p_, j_]
+    return Ad, bd, sw
 
 
 def residuals(

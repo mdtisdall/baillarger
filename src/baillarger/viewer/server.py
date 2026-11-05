@@ -28,6 +28,9 @@ Requests:
   gzip when the page accepts it).
 - Named volumes (baillarger.viewer.volumes: echo, labels, fixes):
   /volume/list, /volume/<name>/meta, /volume/<name>/bricks?level=&b=.
+- The stream 1 review (baillarger.viewer.review; with --sites and --edits):
+  GET /review/queue, /review/next, /review/preview?job=; POST /review/session,
+  /review/skip, /review/preview, /review/answer, /review/scribble.
 - Surface outlines (baillarger.viewer.outlines):
   /outline?axis=&mm=&box= (float32 segment ends, world mm).
 - The columns pane (baillarger.viewer.columns.route): /columns/meta,
@@ -50,6 +53,7 @@ from urllib.parse import parse_qs, urlparse
 from baillarger.data import echo_path
 from baillarger.viewer import columns as VC
 from baillarger.viewer import outlines as VO
+from baillarger.viewer import review as VR
 from baillarger.viewer import volumes as VV
 from baillarger.viewer.bricks import ArrayPyramid, LazyVolume, nifti
 from baillarger.viewer.white_view import WhiteView
@@ -116,6 +120,7 @@ class Handler(BaseHTTPRequestHandler):
     volumes: VV.Volumes | None = None  # named volumes (baillarger.viewer.volumes)
     outlines: VO.Outlines | None = None  # surface outlines (baillarger.viewer.outlines)
     columns: VC.Columns | None = None
+    wmreview: VR.Review | None = None  # the stream 1 review (baillarger.viewer.review)
     lock = threading.Lock()  # one computation at a time
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -241,6 +246,8 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/columns" or u.path.startswith("/columns/"):
             VC.route(self, u.path, q)
             return
+        if VR.route(self, "GET", u.path, q, {}):
+            return
         w = self.white
         if w is None:
             self.send_error(404)
@@ -288,6 +295,8 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         req = json.loads(self.rfile.read(n)) if n else {}
         sender = str(req.get("from", ""))
+        if VR.route(self, "POST", self.path, {}, req):
+            return
         if self.path != "/state":
             self.send_error(404)
             return
@@ -304,6 +313,7 @@ def serve(
     volumes: VV.Volumes | None = None,
     outlines: VO.Outlines | None = None,
     columns: VC.Columns | None = None,
+    wmreview: VR.Review | None = None,
 ) -> ThreadingHTTPServer:
     """The server on a white surface (white). volume: the bricks of the volume pane
     (baillarger.viewer.bricks); volumes, outlines, columns: the other panes' data, if
@@ -316,6 +326,7 @@ def serve(
     Handler.volumes = volumes
     Handler.outlines = outlines
     Handler.columns = columns
+    Handler.wmreview = wmreview
     Handler.shared = Shared()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     srv.daemon_threads = True
@@ -348,6 +359,7 @@ def main(argv: list[str] | None = None) -> None:
         help="the directory of echoes 1-3 (.nii, else .nii.gz) for the columns pane's "
         "profiles (default: data)",
     )
+    VR.add_arguments(ap)
     ap.add_argument("--port", type=int, default=8790)
     a = ap.parse_args(argv)
     t0 = time.time()
@@ -369,6 +381,19 @@ def main(argv: list[str] | None = None) -> None:
         white.surf, white.W.sidecar["Sources"], volume, dt, a.dseg, a.fixes
     )
     outlines = VO.Outlines.from_white_view(white)
+    lab = volumes.items["labels"]
+    wmreview: VR.Review | None = None
+    try:
+        wmreview = VR.for_white(
+            a,
+            white.surf,
+            VV.white_paths(white.surf, white.W.sidecar["Sources"], a.dseg, a.fixes)[0],
+            lambda: lab.volume.source().arrays[0],  # type: ignore[attr-defined]
+            white.W.affine,
+            [e_] if volume is not None else [],
+        )
+    except ValueError as exc:
+        ap.error(str(exc))
     srv = serve(
         None,
         a.port,
@@ -377,6 +402,7 @@ def main(argv: list[str] | None = None) -> None:
         volumes=volumes,
         outlines=outlines,
         columns=columns,
+        wmreview=wmreview,
     )
     print(
         f"serving on http://127.0.0.1:{a.port}/ ({time.time() - t0:.0f} s)", flush=True
