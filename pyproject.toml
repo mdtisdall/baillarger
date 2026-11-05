@@ -77,7 +77,14 @@ testpaths = [
 ]
 
 [tool.affected-tests]
-# Claude Code hooks: no Python test depends on them.
-ignore = [".claude/hooks/**"]
+# Claude Code hooks: no Python test depends on them. The report figures are
+# PNGs that a report shows, and prototypes/data holds the points that the
+# prototype scripts take as arguments; no test reads either.
+ignore = [".claude/hooks/**", "reports/figures/**", "prototypes/data/**"]
 # the prototype tests import their modules from prototypes/scripts
 source-roots = ["src", "prototypes/scripts"]
+
+[tool.affected-tests.map]
+# The viewer's page scripts: no Python test runs them; the server test serves
+# the static directory.
+"src/baillarger/viewer/static/*.js" = "tests/test_viewer_data.py"
