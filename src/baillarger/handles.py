@@ -91,6 +91,10 @@ type Int = npt.NDArray[np.int64]
 
 _U, _OBJ, _BG = 0, 1, 2  # voxel states: unclaimed, object front, background front
 _IDX_BITS = 30  # flat index bits in a heap key
+_PRIO_BITS = 32  # depth bits in a heap key, above the index
+# heap key, high to low: 1 if not verified | depth (dmax - d2) | flat index;
+# phase 1.6's P order can take the depth's place, below the verified bit
+_VER_SHIFT = _IDX_BITS + _PRIO_BITS
 
 
 def _kuhn_tets() -> npt.NDArray[np.int_]:
@@ -274,12 +278,14 @@ def _grow(
     simple: Bool,
     dmax: int,
     queued: Bool,
+    ver: Bool,
 ) -> int:
     """Each unclaimed voxel joins the front of its own phase (phase[i]: _OBJ or
-    _BG), deepest first, when it is simple for that front. cand: the voxels to
-    start from (those next to their front are queued). queued: all False, the
-    size of state; all False again on return (every voxel queued is popped).
-    Returns the number of voxels claimed."""
+    _BG), verified voxels (ver[i]) first, then deepest first, when it is
+    simple for that front. cand: the voxels to start from (those next to
+    their front are queued). queued: all False, the size of state; all False
+    again on return (every voxel queued is popped). Returns the number of
+    voxels claimed."""
     heap = np.empty(1024, np.int64)
     size = 0
     for i in cand:
@@ -287,7 +293,8 @@ def _grow(
             continue
         for k in range(14):
             if state[i + offs[k]] == phase[i]:
-                heap, size = _push(heap, size, ((dmax - d2[i]) << _IDX_BITS) | i)
+                key = (int(not ver[i]) << _VER_SHIFT) | ((dmax - d2[i]) << _IDX_BITS)
+                heap, size = _push(heap, size, key | i)
                 queued[i] = True
                 break
     n = 0
@@ -306,7 +313,8 @@ def _grow(
         for k in range(14):
             j = i + offs[k]
             if state[j] == _U and phase[j] == f and not queued[j]:
-                heap, size = _push(heap, size, ((dmax - d2[j]) << _IDX_BITS) | j)
+                key = (int(not ver[j]) << _VER_SHIFT) | ((dmax - d2[j]) << _IDX_BITS)
+                heap, size = _push(heap, size, key | j)
                 queued[j] = True
     return n
 
@@ -358,10 +366,12 @@ def _walls(
     phase: npt.NDArray[np.uint8],
     offs: Int,
     mixed: bool = False,
+    ver: Bool | None = None,
 ) -> list[Int]:
     """Connected pieces (Kuhn adjacency, one phase, or both phases together
     when mixed) of the voxels u (sorted flat indices: the unclaimed voxels),
-    smallest first; ties: object walls first, then lowest index."""
+    fewest verified voxels (ver, flat) first, then smallest; ties: object
+    walls first, then lowest index."""
     if not u.size:
         return []
     ph = phase[u]
@@ -378,7 +388,15 @@ def _walls(
     order = np.argsort(lab, kind="stable")
     cuts = np.flatnonzero(np.diff(lab[order])) + 1
     walls = np.split(u[order], cuts)
-    return sorted(walls, key=lambda w: (w.size, int(phase[w[0]] != _OBJ), int(w[0])))
+    return sorted(
+        walls,
+        key=lambda w: (
+            0 if ver is None else int(ver[w].sum()),
+            w.size,
+            int(phase[w[0]] != _OBJ),
+            int(w[0]),
+        ),
+    )
 
 
 def _set_simple(state: npt.NDArray[np.uint8], front: int, p: Int) -> bool:
@@ -405,6 +423,7 @@ def _resolve_cluster(
     offs: Int,
     shape: tuple[int, ...],
     u: Int,
+    ver: Bool,
 ) -> Move | None | bool:
     """When no wall can be claimed voxel by voxel: claim the smallest set of
     unclaimed voxels that one front can take whole (_set_simple), by the front
@@ -412,11 +431,12 @@ def _resolve_cluster(
     are the walls, the pairs of touching walls of opposite phase and the
     clusters (Kuhn-connected pieces of both phases; a ring of walls is one
     that no front can take whole). u: the unclaimed voxels (sorted flat
-    indices). Ties in size: lowest index. Returns the
+    indices). Sets with fewer verified voxels (ver, flat) go first; ties in
+    size: lowest index. Returns the
     move, None if nothing changed (a set of one phase claimed by its own
     front), or False if no set can be claimed."""
     s3 = state.reshape(shape)
-    walls = _walls(u, phase, offs)
+    walls = _walls(u, phase, offs, ver=ver)
     lab = np.full(state.size, -1, np.int64)
     for k, w in enumerate(walls):
         lab[w] = k
@@ -428,7 +448,7 @@ def _resolve_cluster(
                 pairs.add((k, j))
     sets = walls + [np.sort(np.r_[walls[k], walls[j]]) for k, j in sorted(pairs)]
     sets += [c for c in _walls(u, phase, offs, mixed=True) if len(c) > 1]
-    for c in sorted(sets, key=lambda c: (c.size, int(c[0]))):
+    for c in sorted(sets, key=lambda c: (int(ver[c].sum()), c.size, int(c[0]))):
         n_obj = int((phase[c] == _OBJ).sum())
         options = sorted(
             ((n_obj, _BG, _OBJ, "cut"), (c.size - n_obj, _OBJ, _BG, "fill"))
@@ -443,9 +463,10 @@ def _resolve_cluster(
     return False
 
 
-def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
+def _remove_one(obj: Bool, verified: Bool | None = None) -> tuple[Bool, list[Move]]:
     """remove_handles for an object with one component."""
     x = np.pad(obj, 2)
+    ver = np.zeros(x.size, bool) if verified is None else np.pad(verified, 2).ravel()
     if x.size >= 1 << _IDX_BITS:
         raise ValueError("array too large for the heap keys")
     s = kuhn_structure()
@@ -461,6 +482,8 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
     d2 = np.rint(d2a).astype(np.int32)
     del d2a
     dmax = int(d2.max()) + 1
+    if dmax >= 1 << _PRIO_BITS:
+        raise ValueError("depths too large for the heap keys")
     phase = np.where(xf, _OBJ, _BG).astype(np.uint8)
     state = np.zeros(x.shape, np.uint8)
     state[:2], state[-2:], state[:, :2], state[:, -2:] = _BG, _BG, _BG, _BG
@@ -474,7 +497,7 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
     ).astype(np.int64)
     st, ph, dd = state.ravel(), phase.ravel(), d2.ravel()
     queued = np.zeros(st.size, np.bool_)
-    _grow(st, ph, dd, np.flatnonzero(st == _U), offs, SIMPLE, dmax, queued)
+    _grow(st, ph, dd, np.flatnonzero(st == _U), offs, SIMPLE, dmax, queued, ver)
 
     # u: the unclaimed voxels, sorted. Voxels are only ever claimed, so each
     # pass refreshes u from its last value instead of from the whole array.
@@ -482,7 +505,7 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
     moves: list[Move] = []
     while True:
         u = u[st[u] == _U]
-        walls = _walls(u, ph, offs)
+        walls = _walls(u, ph, offs, ver=ver)
         done = False
         for w in walls:
             own = int(ph[w[0]])
@@ -494,17 +517,17 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
             vox = np.stack(np.unravel_index(taken, x.shape), 1) - 2
             moves.append(Move("cut" if own == _OBJ else "fill", vox))
             u = u[st[u] == _U]
-            _grow(st, ph, dd, u, offs, SIMPLE, dmax, queued)
+            _grow(st, ph, dd, u, offs, SIMPLE, dmax, queued, ver)
             done = True
             break
         if not done:
-            m = _resolve_cluster(st, ph, offs, x.shape, u)
+            m = _resolve_cluster(st, ph, offs, x.shape, u, ver)
             if m is False:
                 break
             if isinstance(m, Move):
                 moves.append(m)
             u = u[st[u] == _U]
-            _grow(st, ph, dd, u, offs, SIMPLE, dmax, queued)
+            _grow(st, ph, dd, u, offs, SIMPLE, dmax, queued, ver)
 
     # the rest of the background stays background; the rest of the object
     # joins the object front where it can (simple for it, alone or as a
@@ -521,12 +544,20 @@ def _remove_one(obj: Bool) -> tuple[Bool, list[Move]]:
     return out[2:-2, 2:-2, 2:-2], moves
 
 
-def remove_handles(obj: npt.ArrayLike) -> HandleRemoval:
+def remove_handles(
+    obj: npt.ArrayLike, verified: npt.ArrayLike | None = None
+) -> HandleRemoval:
     """Remove every handle of the object (3D bool) with the Kuhn adjacency,
     keeping its components and cavities: each handle is cut or filled,
     whichever changes fewer voxels (module docstring). Outside the array is
-    background."""
+    background. verified (3D bool, the shape of obj): the voxels that an
+    answer set. They change last: they join their own front before other
+    voxels, and a wall with fewer of them is claimed first. With None, no
+    voxel is verified."""
     a = np.asarray(obj, bool)
+    v = np.zeros(a.shape, bool) if verified is None else np.asarray(verified, bool)
+    if v.shape != a.shape:
+        raise ValueError(f"verified has shape {v.shape}, obj {a.shape}")
     lab, n = ndi.label(a, kuhn_structure())
     out = np.zeros_like(a)
     moves: list[Move] = []
@@ -536,7 +567,7 @@ def remove_handles(obj: npt.ArrayLike) -> HandleRemoval:
         lo = np.array([max(t.start - 2, 0) for t in sl])
         hi = np.array([min(t.stop + 2, m) for t, m in zip(sl, a.shape, strict=True)])
         box = tuple(slice(int(p), int(q)) for p, q in zip(lo, hi, strict=True))
-        got, mv = _remove_one(lab[box] == k)
+        got, mv = _remove_one(lab[box] == k, v[box])
         out[box] |= got
         moves += [Move(m.kind, m.voxels + lo) for m in mv]
     stranded = sum(len(m.voxels) for m in moves if m.kind == "stranded")

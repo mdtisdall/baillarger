@@ -63,8 +63,11 @@ from baillarger.bids import (
 )
 from baillarger.blocks import open_volume
 from baillarger.decimate import CHUNK, normals
+from baillarger.fix_diff import fix_voxels, overlap, read_diff, read_table, same_fix
 from baillarger.timing import log_to_stderr
+from baillarger.white_dseg import DSEG_SPEC, history_dir
 from baillarger.white_surf import SURF_SPEC, WhiteSurface
+from baillarger.wm_edits import Log, read_log
 
 type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.int64]
@@ -101,7 +104,18 @@ COLUMNS = (
     "gap_any_pieces",
     "wm_thickness",
     "gap_width",
+    "fix",
+    "wall",
 )
+#: the integer columns of the table
+_INTS = tuple(
+    c for c in COLUMNS if c not in ("kind", "tissue", "wm_thickness", "gap_width")
+)
+
+#: voxels: a handle fix with a wall of this size or more is a site
+MIN_WALL = 10
+#: the kinds of site, in queue order (random sites are not in the file)
+KINDS = ("override", "misfacing", "handle-fix")
 
 #: docs/formats/wm-sites.md
 SITES_SPEC = SidecarSpec(
@@ -117,6 +131,8 @@ SITES_SPEC = SidecarSpec(
         Key("TissueVoxels", "integer", True, "half-side of the tissue window"),
         Key("ContactVoxels", "integer", True, "half-side of the piece window"),
         Key("CoreVoxels", "integer", True, "half-side of the thickness window"),
+        Key("MinWallVoxels", "integer", True, "smallest wall of a handle-fix site"),
+        Key("SitesByKind", "object", True, "rows of the table, by kind"),
     ),
 )
 
@@ -231,8 +247,81 @@ def find_sites(
     )
     out = []
     for rank, r in enumerate(order, 1):
-        out.append(dict(rank=rank, kind="misfacing", **rows[r]))
+        out.append(dict(rank=rank, kind="misfacing", **rows[r], fix=0, wall=0))
     return Sites(out, len(bad))
+
+
+def accepted_fixes(
+    log: Log | None, history: Path, shape: tuple[int, ...]
+) -> list[tuple[Int, Int]]:
+    """The fixes (baillarger.fix_diff.fix_voxels) that a leave answer of the
+    log accepts (its Accepts), read from the kept runs in the history
+    directory. Raises FileNotFoundError if a kept run is not there."""
+    out = []
+    for a in [] if log is None else log.answers():
+        acc = a.get("Accepts")
+        if acc is None:
+            continue
+        rows = read_diff(history / f"{acc['FixDiffSHA256']}.npy", shape)
+        out.append(fix_voxels(rows, int(acc["FixId"])))
+    return out
+
+
+def fix_sites(
+    table: list[dict[str, Any]],
+    diff: npt.NDArray[np.void],
+    accepted: list[tuple[Int, Int]],
+    seg: npt.NDArray[np.integer[Any]],
+    filled: tuple[int, ...],
+    fixes: npt.NDArray[np.integer[Any]],
+    min_wall: int = MIN_WALL,
+) -> list[dict[str, Any]]:
+    """The sites of the fix table (baillarger.fix_diff.read_table) and the
+    fix diff, with no rank: kind override for each fix that overrides an
+    answer, unless an accepted fix matches it (it overlaps the fix and has the
+    same voxels with the same new labels); kind handle-fix for each other
+    handle fix with a wall of min_wall voxels or more. The site is the fix's
+    i, j, k."""
+    mask = np.isin(seg, filled)
+    out = []
+    for r in table:
+        if r["i"] is None:
+            continue
+        if r["overrides"] is not None:
+            mine = fix_voxels(diff, r["id"])
+            if any(overlap(mine, a) and same_fix(mine, a) for a in accepted):
+                continue
+            kind = "override"
+        elif (
+            r["kind"] in ("handle_cut", "handle_fill") and (r["wall"] or 0) >= min_wall
+        ):
+            kind = "handle-fix"
+        else:
+            continue
+        c = np.array([r["i"], r["j"], r["k"]], np.int64)
+        row: dict[str, Any] = dict(
+            rank=0, kind=kind, i=int(c[0]), j=int(c[1]), k=int(c[2]), faces=0
+        )
+        row.update(measure(seg, mask, fixes, c))
+        row.update(fix=int(r["id"]), wall=int(r["wall"] or 0))
+        out.append(row)
+    return out
+
+
+def queue(
+    misfacing_rows: list[dict[str, Any]], fix_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The queue: override sites (by fix id), then the misfacing sites (in
+    their order), then the handle-fix sites (larger walls first; ties: by fix
+    id), ranked from 1."""
+    over = sorted(
+        (r for r in fix_rows if r["kind"] == "override"), key=lambda r: r["fix"]
+    )
+    hand = sorted(
+        (r for r in fix_rows if r["kind"] == "handle-fix"),
+        key=lambda r: (-r["wall"], r["fix"]),
+    )
+    return [dict(r, rank=k) for k, r in enumerate(over + misfacing_rows + hand, 1)]
 
 
 def sites_paths(surf: Path, out: Path | None = None) -> dict[str, Path]:
@@ -310,6 +399,7 @@ def random_sites(
             rank=0, kind="random", i=int(c[0]), j=int(c[1]), k=int(c[2]), faces=0
         )
         row.update(measure(seg, mask, fixes, c))
+        row.update(fix=0, wall=0)
         rows.append(row)
     return rows
 
@@ -330,38 +420,55 @@ def write_sites(surf: Path, out: Path | None = None) -> dict[str, Path]:
     dseg, fixes, side = L.dseg, L.fixes, L.side
     filled = L.filled
     S = find_sites(L.v_vox, L.f, L.v_mm, L.seg, filled, L.fx)
+    stem = dseg.name.removesuffix("_desc-wmtopo_dseg.nii.gz")
+    table_path = dseg.with_name(f"{stem}_desc-wmtopofixes_fixes.tsv")
+    diff_path = dseg.with_name(f"{stem}_desc-wmtopofixes_diff.npy")
+    extra: list[Path] = []
+    fix_rows: list[dict[str, Any]] = []
+    if table_path.exists():
+        dside = read_sidecar(sidecar_path(dseg), DSEG_SPEC)
+        logs = [Path(q) for q in dside["Sources"] if q.endswith(".jsonl")]
+        log = read_log(logs[0]) if logs else None
+        diff = read_diff(diff_path, L.seg.shape)
+        acc = accepted_fixes(log, history_dir(dseg), L.seg.shape)
+        fix_rows = fix_sites(read_table(table_path), diff, acc, L.seg, filled, L.fx)
+        extra = [table_path, diff_path, *logs]
+    rows = queue(S.rows, fix_rows)
     p = sites_paths(surf, out)
     p["table"].parent.mkdir(parents=True, exist_ok=True)
     dat = surf.with_name(surf.name.removesuffix(".surf.gii") + ".dat")
     with p["table"].open("w") as fh:
         fh.write("\t".join(COLUMNS) + "\n")
-        for r in S.rows:
+        for r in rows:
             fh.write("\t".join(str(r[c]) for c in COLUMNS) + "\n")
     write_sidecar(
         p["sidecar"],
         SITES_SPEC,
         dict(
             SpecVersion=SITES_SPEC.version,
-            Description="Where the white surface folds tightest, for review: "
-            "sites of misfacing faces, in queue order.",
-            **sources(surf, dat, dseg, fixes),
+            Description="The review queue of the WM mask: the sites that "
+            "need judgment, in queue order.",
+            **sources(surf, dat, dseg, fixes, *extra),
             Provenance=provenance("baillarger.wm_sites.write_sites"),
             Hemisphere=side["Hemisphere"],
             FilledLabels=list(filled),
             MisfacingFaces=S.misfacing_faces,
-            Sites=len(S.rows),
+            Sites=len(rows),
             GroupVoxels=GROUP,
             FixVoxels=FIX,
             TissueVoxels=TISSUE,
             ContactVoxels=CONTACT,
             CoreVoxels=CORE,
+            MinWallVoxels=MIN_WALL,
+            SitesByKind={k: sum(r["kind"] == k for r in rows) for k in KINDS},
         ),
     )
     return p
 
 
 def read_sites(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """The sites' table at path (a list of rows, typed) and its sidecar."""
+    """The sites' table at path (a list of rows, typed) and its sidecar. The
+    review pane reads the queue of a hemisphere with it."""
     side = read_sidecar(sidecar_path(path), SITES_SPEC)
     lines = path.read_text().splitlines()
     head = lines[0].split("\t")
@@ -371,9 +478,10 @@ def read_sites(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     for line in lines[1:]:
         d: dict[str, Any] = dict(zip(head, line.split("\t"), strict=True))
         for k in COLUMNS:
-            if k in ("tissue", "kind"):
-                continue
-            d[k] = float(d[k]) if k in ("wm_thickness", "gap_width") else int(d[k])
+            if k in _INTS:
+                d[k] = int(d[k])
+            elif k in ("wm_thickness", "gap_width"):
+                d[k] = float(d[k])
         rows.append(d)
     return rows, side
 

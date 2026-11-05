@@ -2,6 +2,7 @@
 measures, the queue order, and the files through the sites command (wm_sites.main)."""
 
 from pathlib import Path
+from typing import Any
 
 import nibabel as nib
 import numpy as np
@@ -214,3 +215,109 @@ def test_random_sites_from_a_surface_file(surf: Path) -> None:
     a = WS.read_random_sites(surf, 5, 1)
     assert a == WS.read_random_sites(surf, 5, 1)
     assert len(a) == 5 and all(r["kind"] == "random" and r["rank"] == 0 for r in a)
+
+
+# ------------------------------------------------------- fix sites and queue
+
+
+def _ring_run(
+    tmp_path: Path, answers: list[str]
+) -> tuple[Path, list[dict[str, Any]], np.ndarray]:
+    """dseg on the synthetic aseg of test_white_dseg, with a log whose
+    answers are given by name ("ring": verify the ring and its hole; "move":
+    move the rod 2 voxels). Returns the dseg, its fix sites and the fix
+    diff."""
+    from test_white_dseg import VOX, synthetic_aseg
+
+    from baillarger import fix_diff, white_dseg
+    from baillarger import wm_edits as E
+
+    a = synthetic_aseg()
+    src = tmp_path / "in" / "sub-T01_ses-S1_aseg.nii.gz"
+    if not src.exists():
+        src.parent.mkdir(parents=True)
+        nib.save(nib.nifti1.Nifti1Image(a, np.diag([*VOX, 1.0])), src)
+    out = tmp_path / "deriv"
+    p = E.edits_paths(out, dict(sub="T01", ses="S1"))
+    log = (
+        E.EditLog(p["log"])
+        if p["log"].exists()
+        else E.EditLog.create(p["log"], src, "R")
+    )
+    rod = (27, 16, 25)
+    for name in answers:
+        s = log.start_session(0.0, None, "x", "y")
+        log.shown(s, rod, "override", 1)
+        if name == "ring":
+            box = np.zeros(a.shape, bool)
+            box[25:37, 3:33, 22:28] = True
+            log.answer(s, rod, "manual-paint", np.argwhere(box), a[box], "x", 1.0)
+        elif name == "move":
+            v = [(27, 16, 25), (27, 17, 25), (27, 16, 23), (27, 17, 23)]
+            log.answer(s, rod, "manual-paint", v, [0, 0, 41, 41], "x", 1.0)
+        elif name.startswith("leave:"):
+            fix_id, sha = name.split(":")[1:]
+            log.answer(
+                s,
+                rod,
+                "leave",
+                [],
+                [],
+                "x",
+                1.0,
+                accepts=dict(FixId=int(fix_id), FixDiffSHA256=sha),
+            )
+    w = white_dseg.write_wm_topo(src, out, log.path)
+    diff = fix_diff.read_diff(w["diff"], a.shape)
+    seg = np.asarray(nib.nifti1.load(w["dseg"]).dataobj)
+    fx = np.asarray(nib.nifti1.load(w["fixes"]).dataobj)
+    acc = WS.accepted_fixes(log.read(), white_dseg.history_dir(w["dseg"]), a.shape)
+    rows = WS.fix_sites(
+        fix_diff.read_table(w["table"]),
+        diff,
+        acc,
+        seg,
+        white_dseg.FILLED_LABELS["R"],
+        fx,
+    )
+    return w["dseg"], rows, diff
+
+
+def test_an_override_is_a_site_until_leave_accepts_it(tmp_path: Path) -> None:
+    from baillarger import bids
+
+    dseg, rows, _ = _ring_run(tmp_path, ["ring"])
+    over = [r for r in rows if r["kind"] == "override"]
+    assert len(over) == 1 and (over[0]["i"], over[0]["k"]) == (27, 25)
+    fixes = dseg.with_name(
+        dseg.name.replace("wmtopo_dseg.nii.gz", "wmtopofixes_diff.json")
+    )
+    sha = bids.read_sidecar(fixes, white_dseg.FIXES_SPEC)["DiffSHA256"]
+    # leave at the site accepts the fix: a rerun with the same input does
+    # not queue it
+    _, rows, _ = _ring_run(tmp_path, [f"leave:{over[0]['fix']}:{sha}"])
+    assert not [r for r in rows if r["kind"] == "override"]
+    # an answer that moves the rod moves the fix: the site is back
+    _, rows, _ = _ring_run(tmp_path, ["move"])
+    over2 = [r for r in rows if r["kind"] == "override"]
+    assert len(over2) == 1 and over2[0]["k"] == 23
+
+
+def test_the_queue_order() -> None:
+    m = [dict(kind="misfacing", fix=0, wall=0, n=k) for k in range(2)]
+    f = [
+        dict(kind="handle-fix", fix=5, wall=12),
+        dict(kind="override", fix=7, wall=1),
+        dict(kind="handle-fix", fix=3, wall=40),
+        dict(kind="override", fix=2, wall=0),
+    ]
+    q = WS.queue(m, f)
+    assert [(r["kind"], r["fix"]) for r in q] == [
+        ("override", 2),
+        ("override", 7),
+        ("misfacing", 0),
+        ("misfacing", 0),
+        ("handle-fix", 3),
+        ("handle-fix", 5),
+    ]
+    assert [r["rank"] for r in q] == list(range(1, 7))

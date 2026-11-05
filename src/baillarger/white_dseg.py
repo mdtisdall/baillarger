@@ -1,7 +1,7 @@
 """The WM topology correction of a hemisphere (dseg): the first of the three
 white-surface commands. Run them in this order:
 
-    python -m baillarger.white_dseg ASEG [--edits EDITS] --out DERIVATIVES
+    python -m baillarger.white_dseg ASEG [--edits LOG] --out DERIVATIVES
     python -m baillarger.white_surf DSEG --out DERIVATIVES [--block-cells N]
         [--device DEVICE]
     python -m baillarger.white_overview SURF [--eps MM] [--workers N]
@@ -21,11 +21,11 @@ of changes: the whole-hemisphere surface (baillarger.white_surf) and the box
 stages (baillarger.column_traces.load_tissue, baillarger.pial_labels, whose
 WM is the corrected mask of their box: filled_labels).
 
-The command writes the corrected segmentation (desc-wmtopo_dseg) and the
-changed voxels (desc-wmtopofixes_dseg), with their .tsv and .json sidecars
-(docs/formats/wm-dseg.md); EDITS, manual edits of the aseg
-(desc-wmedits_edits.tsv, baillarger.wm_edits), are made before the automatic
-correction.
+The command writes the corrected segmentation (desc-wmtopo_dseg), the
+changed voxels (desc-wmtopofixes_dseg), the fix table and the fix diff, with
+their .tsv and .json sidecars (docs/formats/wm-dseg.md). LOG is the answer
+log of the review (desc-wmedits_edits.jsonl, baillarger.wm_edits): its site
+answers are replayed before the automatic correction.
 """
 
 import argparse
@@ -69,7 +69,7 @@ from baillarger.labels import FILLED_LABELS as FILLED_LABELS
 from baillarger.labels import LUT_NAMES as LUT_NAMES
 from baillarger.labels import WM_LABEL as WM_LABEL
 from baillarger.timing import Laps, log_to_stderr
-from baillarger.wm_edits import Edits, apply_edits, read_edits, sources_match
+from baillarger.wm_edits import Log, read_log, replay
 
 type Bool = npt.NDArray[np.bool_]
 type Int = npt.NDArray[np.int64]
@@ -290,11 +290,12 @@ class WMTopo:
 
 
 def wm_topo(
-    aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike, edits: Edits | None = None
+    aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike, log: Log | None = None
 ) -> WMTopo:
-    """The corrected segmentation of an aseg: the manual edits made first
-    (baillarger.wm_edits.apply_edits; it raises ValueError for edits that do
-    not fit the aseg), then the mask of its FILLED_LABELS,
+    """The corrected segmentation of an aseg: the site answers of the log
+    replayed first (baillarger.wm_edits.replay: in log order, each writes its
+    voxels over the labels; scribbles are not applied), then the mask of its
+    FILLED_LABELS,
     with its cavities filled and its handles removed
     (baillarger.handles.remove_handles). Cavity and handle fills become the
     WM label; each handle cut takes the label of the nearest voxel that is
@@ -305,13 +306,22 @@ def wm_topo(
     segmentation's voxels with a filled label are exactly the corrected
     mask. Raises RuntimeError if that mask
     still has a handle or a cavity (b1 or b2 not 0), which a fill of one
-    piece of the mask touching another can make."""
+    piece of the mask touching another can make. The voxels that the answers
+    set are verified: handle removal changes them last (remove_handles,
+    verified), and a fix that changes one records the answer that it
+    overrides (Fix.overrides)."""
     lap = Laps()
-    a0 = np.asarray(aseg)
-    manual = None
-    if edits is not None:
-        a0, manual = apply_edits(a0, edits)
-        lap("manual edits")
+    a_in = np.asarray(aseg)
+    a0, manual = a_in, None
+    shape = a_in.shape
+    ver_idx = ver_ans = np.zeros(0, np.int64)
+    if log is not None:
+        rp = replay(a_in, log)
+        a0, ver_idx, ver_ans = rp.labels, rp.index, rp.answer
+        manual = np.zeros(shape, bool)
+        flat_in, flat0 = a_in.reshape(-1), a0.reshape(-1)
+        manual.reshape(-1)[ver_idx] = flat0[ver_idx] != flat_in[ver_idx]
+        lap("answers")
     hemi = hemisphere(a0)
     filled, wm_label = FILLED_LABELS[hemi], WM_LABEL[hemi]
     m = np.isin(a0, filled)
@@ -330,7 +340,10 @@ def wm_topo(
     cav = cavities(x)
     x |= cav
     lap("cavities")
-    r = remove_handles(x)
+    verified = np.zeros(shape, bool)
+    verified.reshape(-1)[ver_idx] = True
+    r = remove_handles(x, verified[box])
+    del verified
     obj = r.obj
     lap("handles")
     cut, fill = x & ~obj, obj & ~x
@@ -362,14 +375,18 @@ def wm_topo(
     # the fixes, with their ids in the fixed order: the manual answers, the
     # handle moves (in the order of remove_handles), the cavities (one fix a
     # connected cavity, in the order of ndimage.label), the small pieces
-    shape = a0.shape
     steps: list[tuple[str, Int, int | None]] = []  # kind, voxels (flat), wall
-    if edits is not None:
-        for ans in edits.answers:
-            v = edits.voxels[edits.answer == ans.id]
+    answer_of_step: list[int] = []
+    if log is not None and manual is not None:
+        did = manual.reshape(-1)[ver_idx]
+        changed_by, changed_idx = ver_ans[did], ver_idx[did]
+        for ans in log.answers():
+            if ans["Kind"] != "site":
+                continue
+            v = changed_idx[changed_by == ans["Id"]]
             if len(v):
-                flat = np.ravel_multi_index(tuple(v.T), shape)
-                steps.append(("manual_edit", np.asarray(flat, np.int64), None))
+                steps.append(("manual_edit", v, None))
+                answer_of_step.append(int(ans["Id"]))
     n_manual = len(steps)
 
     def flat_of(ijk: npt.ArrayLike) -> Int:
@@ -432,22 +449,28 @@ def wm_topo(
             idx = np.setdiff1d(vox, diff["index"])
         else:
             idx = np.sort(diff["index"][by_fix[starts[s + 1] : starts[s + 2]]])
-        fix_list.append(Fix(s + 1, kind, idx.astype(np.int64), wall))
+        over = None
+        if kind != "manual_edit" and len(ver_idx) and len(idx):
+            # the answer whose verified voxels the fix changes (the most of
+            # them; ties: the lowest Id)
+            hit = np.isin(ver_idx, idx)
+            if hit.any():
+                ids, cnt = np.unique(ver_ans[hit], return_counts=True)
+                over = int(ids[np.argmax(cnt)])
+        fix_list.append(Fix(s + 1, kind, idx.astype(np.int64), wall, over))
     lap("fix table")
     new, cnt = np.unique(labels[cut], return_counts=True)
     moves = []
-    if edits is not None:
-        for ans in edits.answers:
-            v = edits.voxels[edits.answer == ans.id]
-            if len(v):
-                moves.append(
-                    dict(
-                        Kind="manual",
-                        Voxels=len(v),
-                        Centre=np.round(v.mean(0)).astype(int).tolist(),
-                        Answer=ans.id,
-                    )
-                )
+    for (_, flat, _), aid in zip(steps[:n_manual], answer_of_step, strict=True):
+        v = np.stack(np.unravel_index(flat, shape), 1)
+        moves.append(
+            dict(
+                Kind="manual",
+                Voxels=len(v),
+                Centre=np.round(v.mean(0)).astype(int).tolist(),
+                Answer=aid,
+            )
+        )
     moves += [
         dict(
             Kind=mv.kind,
@@ -487,11 +510,11 @@ def _write_tsv(path: Path, names: dict[int, str]) -> None:
 
 
 def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str, Path]:
-    """The dseg command: wm_topo of the aseg at aseg, with the manual edits in
-    the table at edits (docs/formats/wm-edits.md) if given, written to the BIDS
-    derivatives root out (docs/formats/wm-dseg.md). Raises ValueError for edits
-    made against another aseg, or that do not fit it. Returns the paths
-    written, by role."""
+    """The dseg command: wm_topo of the aseg at aseg, with the site answers of
+    the answer log at edits (a .jsonl, docs/formats/wm-edits.md) if given,
+    written to the BIDS derivatives root out (docs/formats/wm-dseg.md). The
+    answers apply to any input on the log's grid. Raises ValueError for a
+    log on another grid. Returns the paths written, by role."""
     img = nib.load(aseg)
     if not isinstance(img, nib.nifti1.Nifti1Image):
         raise ValueError(f"{aseg.name}: not a NIfTI-1 image")
@@ -499,9 +522,12 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
     vox = tuple(float(z) for z in img.header.get_zooms()[:3])
     e = None
     if edits is not None:
-        e, side = read_edits(edits)
-        if not sources_match(side, aseg):
-            raise ValueError(f"{edits.name}: the edits are not against {aseg.name}")
+        e = read_log(edits)
+        if tuple(img.shape[:3]) != e.shape:
+            raise ValueError(
+                f"{edits.name}: the log's grid {e.shape} is not the grid "
+                f"{tuple(img.shape[:3])} of {aseg.name}"
+            )
     lap = Laps()
     a = np.asarray(img.dataobj)
     lap("read")
@@ -514,7 +540,11 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
         table=derivative_path(out, ents, "fixes", ".tsv", desc="wmtopofixes"),
         diff=derivative_path(out, ents, "diff", ".npy", desc="wmtopofixes"),
     )
-    src = sources(aseg) if edits is None else sources(aseg, edits, sidecar_path(edits))
+    src = (
+        sources(aseg)
+        if edits is None
+        else sources(aseg, edits, edits.with_suffix(".bin"), sidecar_path(edits))
+    )
     prov = provenance("baillarger.white_dseg.write_wm_topo")
     sha = list(src["SourcesSHA256"].values())
     inputs = dict(Labels=sha[0], Code=f"{prov['Version']}+{prov['Commit']}")
@@ -612,13 +642,14 @@ def check_reproduced(
 
 
 def replay_dseg(
-    aseg: npt.ArrayLike, diff: npt.NDArray[np.void], edits: Edits | None = None
+    aseg: npt.ArrayLike, diff: npt.NDArray[np.void], log: Log | None = None
 ) -> npt.NDArray[Any]:
-    """desc-wmtopo rebuilt from the input labels, the manual edits and the
-    fix diff (baillarger.fix_diff.apply_diff), with no correction run."""
+    """desc-wmtopo rebuilt from the input labels, the site answers of the log
+    (baillarger.wm_edits.replay) and the fix diff
+    (baillarger.fix_diff.apply_diff), with no correction run."""
     a = np.asarray(aseg)
-    if edits is not None:
-        a = apply_edits(a, edits)[0]
+    if log is not None:
+        a = replay(a, log).labels
     return apply_diff(a, diff)
 
 
@@ -639,7 +670,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     ap.add_argument("aseg", type=Path, help="a BIDS-named segmentation (NIfTI)")
     ap.add_argument(
-        "--edits", type=Path, help="manual edits of the aseg (desc-wmedits_edits.tsv)"
+        "--edits", type=Path, help="the answer log (desc-wmedits_edits.jsonl)"
     )
     ap.add_argument("--out", required=True, type=Path, help="BIDS derivatives root")
     a = ap.parse_args(argv)
