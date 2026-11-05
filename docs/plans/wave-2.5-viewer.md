@@ -2,7 +2,8 @@
 
 Session V. Stream 4. Read the plan's §1 (working rules), §4b (*What a
 correct column looks like*), §6 and §9 (wave 2.5), and
-`docs/plans/wave-2.5-signals.md` (the `column-signals/1` format). The rules
+`docs/plans/wave-2.5-signals.md` (the `column-signals/1` files and the
+provisional `edges.npz`). The rules
 in `docs/plans/round-2.5.md` and `round-2.md` apply.
 
 ## Goal
@@ -158,18 +159,24 @@ All references are to `main` at 1f67376.
 ### Part B: the signals (PR 2)
 
 1. A new module `viewer/signals.py`. It reads the `column-signals/1`
-   sidecar and memory-maps the `.dat` files. The flag `--signals PATH`
-   gives the sidecar. Without the flag, the viewer uses the sidecar next to
-   the white surface if it exists. Without a sidecar, the signals routes
-   give 404 and the page hides the signal controls.
-2. It checks that the sidecar's white surface is the one that `--white`
-   gives (SHA-256). If not, it refuses to start with a clear message.
-3. Routes:
-   - `GET /signals/meta`: for each signal in the sidecar's `Signals`: the
-     name, domain, unit, `LookAt`, `From`, `Limits`, and the 1st, 50th and
+   files: `desc-signals_white.func.gii` (the named maps, with each map's
+   metadata), `desc-datanormal_white.func.gii` and their sidecar. It
+   memory-maps the `.dat` files. The flag `--signals PATH` gives the
+   sidecar. Without the flag, the viewer uses the sidecar next to the white
+   surface if it exists. Without one, the signals routes give 404 and the
+   page hides the signal controls.
+2. The flag `--edges PATH` gives the provisional `edges.npz`. It is
+   optional. Without it, `/signals/at` gives no edges and faces, and the
+   page hides them.
+3. It checks that the sidecar's input set and the `white_sha256` of
+   `edges.npz` are those of the white surface that `--white` gives. If not,
+   it refuses to start with a clear message.
+4. Routes:
+   - `GET /signals/meta`: for each map in the file: the name, unit,
+     `LookAt`, `From`, `Limits` (from the map's metadata), and the 1st, 50th and
      99th percentiles of its finite values.
    - `GET /signals/<name>/overview`: f32, one value for each overview
-     vertex, for vertex signals. The value is the worst one (the `LookAt`
+     vertex. The value is the worst one (the `LookAt`
      end) of the overview vertex and of the true vertices carried by the
      overview faces that touch it. A point sample would hide a bad true
      vertex inside an overview face.
@@ -177,13 +184,13 @@ All references are to `main` at 1f67376.
      the worst finite value, keep it as a site, drop all vertices within
      `spacing` mm of it in 3D, and repeat until n sites. Each site: rank,
      true vertex, edge key, value. No threshold.
-   - `GET /signals/at?v=v1,v2,...`: all vertex signals at the given true
-     vertices, and for each vertex its edges (the other vertex, the two
+   - `GET /signals/at?v=v1,v2,...`: all maps and the data normal at the
+     given true vertices, and, with `--edges`, for each vertex its edges (the other vertex, the two
      `edgeshift` values, `edgeweight`, `edgeclip`) and its faces
      (`facecirc`). At most the columns pane's `max_columns` vertices.
-4. Cache the overview values and the site lists for each signal. They do
+5. Cache the overview values and the site lists for each signal. They do
    not change while the server runs.
-5. A new page module `static/signals.js`:
+6. A new page module `static/signals.js`:
    - The overlay: a signal choice, a sequential colour map (the `LookAt` end
      is the bright end), a range from the 1st to the 99th percentile that
      the user can change, and a colour bar. It writes `GL.bcol` through a
@@ -193,7 +200,7 @@ All references are to `main` at 1f67376.
    - The ranked list: a table (rank, value, vertex) for the chosen signal.
      A row click selects the true vertex through the shared state, turns the
      3D view to the site, and the columns pane loads it.
-6. In the columns pane (`static/columns.js`):
+7. In the columns pane (`static/columns.js`):
    - The details panel shows the picked column's signals, with units, and
      its edges sorted by |root shift|.
    - A strip above the section: one cell for each column in u order,
@@ -252,7 +259,9 @@ All references are to `main` at 1f67376.
   signal ranks from the lowest.
 - `/signals/at` gives the file's values for those vertices, and the edges
   and faces that touch them.
-- A sidecar for another white surface: the server refuses to start.
+- A signals sidecar or an `edges.npz` for another white surface: the
+  server refuses to start.
+- Without `edges.npz`, `/signals/at` gives the maps and no edges.
 - Without a signals sidecar and a notes log, `main()` serves every route of
   4.0, 4.0.5, 4.2 and 4.3, and the new routes give 404 (extend
   `test_the_white_mode_serves_every_route`).
@@ -268,7 +277,7 @@ All references are to `main` at 1f67376.
 
 1. Start the viewer on the new input set with the echoes, the signals and a
    notes log in `scratch/wave-2.5-viewer/`. Until session S publishes the
-   hemisphere signals, use a phantom sidecar or a partial run.
+   hemisphere signals, use phantom files or a partial run.
 2. In the built-in browser pane: choose each signal as the overlay; open the
    first three sites of `orientangle` and of `shiftmax` from the ranked
    list; write a note at one of them; reload the page; open the note again
@@ -281,7 +290,7 @@ All references are to `main` at 1f67376.
 | Step | Work | Who | Can run with |
 |---|---|---|---|
 | 1 | Part A: reproduce and fix bugs 2 and 3 in the browser pane; bugs 1 and 4 | Phase session | 2 |
-| 2 | Part B: `viewer/signals.py`, its routes and tests, on a phantom sidecar | Sonnet sub-agent, the phase session reviews | 1 |
+| 2 | Part B: `viewer/signals.py`, its routes and tests, on phantom files | Sonnet sub-agent, the phase session reviews | 1 |
 | 3 | Part B: `static/signals.js`, the `colour` hook, the columns-pane additions | Phase session (Opus) | after 2 |
 | 4 | Part C: the spec and `viewer/notes.py`, with its tests | Sonnet sub-agent, the phase session reviews | 3 |
 | 5 | Part C: the notes panel, the stored u, open and recheck on the page | Phase session | after 3, 4 |

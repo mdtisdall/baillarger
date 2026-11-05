@@ -7,12 +7,13 @@ looks like*) and §9 (wave 2.5). The rules in `docs/plans/round-2.5.md` and
 ## Goal
 
 One batch command computes, for the whole hemisphere, the signals that show
-where a column can be wrong. It writes them as published per-vertex,
-per-edge and per-face files in one format, `column-signals/1`. The viewer
-(session V) shows them as an overlay and as ranked lists.
+where a column can be wrong. It writes the per-vertex signals as standard
+GIFTI files (`column-signals/1`), and the per-edge and per-face values as a
+provisional file in the work directory. The viewer (session V) shows them
+as an overlay and as ranked lists.
 
 Each signal comes from a working version. Each signal has its provisional
-limits in the sidecar, so that the user does not blame the column for an
+limits in its metadata, so that the user does not blame the column for an
 error of the signal.
 
 The signals:
@@ -29,10 +30,11 @@ The signals:
 
 ## Done when
 
-1. `python -m baillarger.column_signals` writes all the signals of the
+1. `python -m baillarger.column_signals` writes all the files of the
    format below on the new input set (`scratch/v2/derivatives-main/`).
 2. The spec `docs/formats/column-signals.md` exists, at version 1, and
-   `tests/test_bids.py` checks its sidecar table.
+   `tests/test_bids.py` checks its sidecar table. nibabel reads the
+   published files with no project code.
 3. The exact tests below pass.
 4. The PR bodies give the hemisphere run's time and peak, a map of each
    signal on the overview (PNG), its histogram, and its provisional limits.
@@ -150,60 +152,78 @@ All references are to `main` at 1f67376.
 
 ## The format: `column-signals/1`
 
-All files are next to the white surface, with BIDS names
-`<sub>_<ses>_hemi-<h>_desc-<name>_white.func.gii` and an external `.dat`.
-One sidecar, `<sub>_<ses>_hemi-<h>_desc-signals_white.json`, describes all
-of them.
+The published signals are standard GIFTI files with BIDS names, next to the
+white surface. Per-edge and per-face values have no standard format, so
+they are not published in wave 2.5 (see "Provisional files" below).
 
-### Vertex signals (one row for each vertex of the white surface)
+### Published files
 
-| desc | dtype, shape | Unit | Value |
+1. `<sub>_<ses>_hemi-<h>_desc-signals_white.func.gii`: one GIFTI file with
+   one named scalar map for each vertex signal. Each `DataArray` has Dim0 =
+   the vertex count of the white surface, the intent `NIFTI_INTENT_NONE`,
+   and its data in an external `.dat`, as the published normals do.
+2. `<sub>_<ses>_hemi-<h>_desc-datanormal_white.func.gii`: the data normal,
+   one array (n, 3) f32 with the intent `NIFTI_INTENT_VECTOR`, in the same
+   form as `desc-normals_white.func.gii`.
+3. `<sub>_<ses>_hemi-<h>_desc-signals_white.json`: the JSON sidecar of both
+   files.
+
+### The maps of `desc-signals`
+
+Each map's GIFTI metadata holds `Name` (the name below), `Unit`, `From`
+(the working version and its PRs), `LookAt` (`high` or `low`: the end of
+the range where the user looks first), and `Limits` (the provisional
+limits, as text). A tool that knows only GIFTI shows the maps by `Name`.
+
+| Name | dtype | Unit | Value |
 |---|---|---|---|
-| `orientangle` | f32 (n,) | degree | angle between m and the published normal, in [0, 180]; NaN where no voxel counts |
-| `orientcoh` | f32 (n,) | — | Σ c divided by the number of voxels that count; NaN where none |
-| `datanormal` | f32 (n, 3) | — | m / \|m\| in RAS; NaN where no voxel counts |
-| `misfacing` | u8 (n,) | faces | the number of misfacing faces that touch the vertex |
-| `focusout` | f32 (n,) | mm | r_hi; +inf where none; NaN where A(0) ≤ 0 |
-| `focusin` | f32 (n,) | mm | −r_lo; +inf where none; NaN where A(0) ≤ 0 |
-| `cortexs0` | f32 (n,) | mm | s0 of the first cortex interval with s1 > 0 (can be < 0); NaN where none |
-| `cortexlen` | f32 (n,) | mm | s1 − s0 of that interval; NaN where none |
-| `shiftmax` | f32 (n,) | mm | the largest \|`edgeshift` root value\| of the edges that touch the vertex |
-| `circmax` | f32 (n,) | mm | the largest \|`facecirc`\| of the faces that touch the vertex |
+| `orientangle` | f32 | degree | the angle between m and the published normal, in [0, 180]; NaN where no voxel counts |
+| `orientcoh` | f32 | — | Σ c divided by the number of voxels that count; NaN where none |
+| `misfacing` | f32 | faces | the number of misfacing faces that touch the vertex |
+| `focusout` | f32 | mm | r_hi; +inf where none; NaN where A(0) ≤ 0 |
+| `focusin` | f32 | mm | −r_lo; +inf where none; NaN where A(0) ≤ 0 |
+| `cortexs0` | f32 | mm | s0 of the first cortex interval with s1 > 0 (can be < 0); NaN where none |
+| `cortexlen` | f32 | mm | s1 − s0 of that interval; NaN where none |
+| `shiftmax` | f32 | mm | the largest \|root shift\| of the edges that touch the vertex (PR 2) |
+| `circmax` | f32 | mm | the largest \|face sum\| of the faces that touch the vertex (PR 2) |
 
-### Edge signals (one row for each edge of `mesh_smoothing.edges(f)`)
-
-| desc | dtype, shape | Value |
-|---|---|---|
-| `edges` | i32 (P, 2) | the vertex pair (a, b), a < b, in the order of `mesh_smoothing.edges` |
-| `edgeshift` | f32 (P, 2) | the shift of b's profile against a's, in mm: column 0 is the weighted mean over the first 1 mm of a's first cortex run (the root value), column 1 over the whole run |
-| `edgeweight` | f32 (P,) | Σ weight over the samples of the root value |
-| `edgeclip` | f32 (P,) | the weighted share of the samples of the root value where \|shift\| = smax |
-
-### Face signals (one row for each face of the white surface)
-
-| desc | dtype, shape | Value |
-|---|---|---|
-| `facecirc` | f32 (m,) | the sum of the signed root values of `edgeshift` round the face, in the face's winding order, in mm; NaN if an edge is NaN |
-
-For correct columns the shifts come from a smooth depth field, so the sum
-round a face is near 0. A sum far from 0 means that no depth field fits the
-three shifts.
+All maps are f32, so that one reader handles them all. A map that a run
+did not make is not in the file. PR 2 writes the file again with its two
+maps added.
 
 ### The sidecar
 
 - `SpecVersion`: `column-signals/1`.
-- `Sources` and `SourcesSHA256`: the white surface, the dseg, the echoes,
-  and the noise file. `Provenance`.
+- `Sources` and `SourcesSHA256`: the white surface, the dseg, the echoes and
+  the noise file. `Provenance`.
 - `InputSet`: the derivatives root, and the SHA-256 of the white-surface
   sidecar.
-- `Level`, `HaloMM`, `SigmaMM`, `Method` (of the rays), `Scales` and
-  `EnergyRef` (the fixed values of the pair-shift step), `SMaxMM`.
-- `Signals`: for each desc, `File`, `Domain` (vertex, edge or face),
-  `Unit`, `From` (the working version and its PRs), `LookAt` (`high` or
-  `low`: the end of the range where the user looks first), and `Limits`
-  (the provisional limits, as text).
-- A signal that a run did not make is not in `Signals`. The viewer shows
-  only the signals that are in `Signals`.
+- `Level`, `HaloMM`, `SigmaMM`, `Method` (of the rays), and for PR 2
+  `Scales`, `EnergyRef` and `SMaxMM`.
+- `Maps`: the names of the maps in the file, in file order.
+- `DataSHA256`: the SHA-256 of each `.dat`.
+
+The spec `docs/formats/column-signals.md` records these choices and says
+that the layout is BIDS-like: BIDS has no rule for named maps of this kind.
+
+### Provisional files (not published)
+
+The per-edge and per-face values go to the work directory as one `.npz`
+for the input set: `edges.npz`. They have no spec in wave 2.5. The review
+decides whether they become a published format.
+
+| Array | dtype, shape | Value |
+|---|---|---|
+| `edges` | i32 (P, 2) | the vertex pair (a, b), a < b, in the order of `mesh_smoothing.edges` |
+| `edgeshift` | f32 (P, 2) | the shift of b's profile against a's, in mm: column 0 is the weighted mean over the first 1 mm of a's first cortex run (the root shift), column 1 over the whole run |
+| `edgeweight` | f32 (P,) | Σ weight over the samples of the root shift |
+| `edgeclip` | f32 (P,) | the weighted share of the samples of the root shift where \|shift\| = smax |
+| `facecirc` | f32 (m,) | the sum of the signed root shifts round each face, in the face's winding order, in mm; NaN if an edge is NaN |
+| `white_sha256` | str | the SHA-256 of the white-surface sidecar, so that a reader can check the mesh |
+
+For correct columns the shifts come from a smooth depth field, so the sum
+round a face is near 0. A sum far from 0 means that no depth field fits the
+three shifts.
 
 ## Design
 
@@ -212,11 +232,13 @@ three shifts.
 1. A new module `src/baillarger/column_signals.py`. CLI:
    `python -m baillarger.column_signals SURF --echoes E1 E2 E3 --noise NOISE
    --work DIR [--only orient,misfacing,focus,cortex,shifts] [--level 1]
-   [--device numpy]`. It writes next to SURF.
+   [--device numpy]`. It writes the published files next to SURF, and
+   `edges.npz` to the work directory.
 2. The work directory holds one resumable result for each superblock and
    each signal group. A rerun skips the superblocks that are done. A final
    step collects them into the published files. This is the pattern of the
-   prototype drivers.
+   prototype drivers. Write the GIFTI files with `gifti.write_external`, as
+   `white_surf` writes the normals.
 3. The orient group: the logic of `prototypes/scripts/orient_hemi.py`,
    moved into `src/`. Add the voxel count and m to the reduction without
    a change to `surface_agreement`'s return value: a new function next to
@@ -246,20 +268,21 @@ three shifts.
    smaller edge key, as `orient` gives). The halo is large enough to sample
    the second column. A test shows that an edge across a superblock border
    gets the same value as in one call that holds both columns.
-4. The reduction to the two edge values and the face sums, as the format
-   gives. The sign: the shift of b against a, with a < b by vertex id in the
-   published file, whatever order the call used.
+4. The reduction to the arrays of `edges.npz` and to the vertex maps
+   `shiftmax` and `circmax`, as the format gives. The sign: the shift of b
+   against a, with a < b by vertex id in `edges.npz`, whatever order the
+   call used.
 5. Measure one superblock first (M1S1, (7, 4, 7)): time, peak and the share
    of clipped edges. Send them to the coordinator before the hemisphere run.
 
-### Provisional limits to state in the sidecar
+### Provisional limits to state in each map's `Limits`
 
-- `orientangle`, `orientcoh`, `datanormal`: those of 1.2 above.
+- `orientangle`, `orientcoh`, and the data normal: those of 1.2 above.
 - `misfacing`: it uses the raw vertex normals, not the published ones.
 - `focusout`, `focusin`: the 1-ring A(s) follows voxel-scale curvature
   (#125).
 - `cortexs0`, `cortexlen`: the cap at 8 mm, broken runs, fused banks.
-- `edgeshift`, `facecirc`, `shiftmax`, `circmax`: the shift is clipped at
+- `shiftmax`, `circmax`, and the arrays of `edges.npz`: the shift is clipped at
   ±0.3 mm, so a large jump shows as a value at the clip (see `edgeclip`),
   not as its true size. It needs profile contrast. The stria makes its
   contrast differ by area. Low `edgeweight` means little evidence.
@@ -291,6 +314,10 @@ clipped edges, with a map. Whether to raise it, or to use
   byte.
 - The sidecar passes `bids.write_sidecar` with the spec, and
   `tests/test_bids.py` checks the spec table.
+- nibabel loads `desc-signals` and `desc-datanormal`, and each map's
+  `Name` and data equal what the command computed.
+- A rerun of PR 2 adds `shiftmax` and `circmax` and leaves the other maps
+  byte for byte the same.
 
 ## The hemisphere run
 
@@ -334,8 +361,12 @@ Tell the coordinator when each PR opens.
 
 ## Decisions for review (made by the coordinator)
 
-- One batch command for all the signals, with one sidecar, so that the
-  viewer reads one format. The groups run one at a time.
+- The vertex signals are standard GIFTI: one file of named scalar maps,
+  and one vector file for the data normal, so that any GIFTI tool can open
+  them. A short spec records the BIDS-like choices.
+- The per-edge and per-face values are not published in wave 2.5, because
+  no standard format holds them and the review may change them.
+- One batch command for all the signals. The groups run one at a time.
 - The root value of the edge shift is the weighted mean over the first 1 mm
   of cortex, because the samples are anchored at the WM and a jump near the
   root is the strongest sign (§4b). The whole-run value is stored next to

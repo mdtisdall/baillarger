@@ -57,11 +57,11 @@ The two sessions change different files. Session S changes no file in
 `docs/formats/review-notes.md`. It can also change the local, untracked
 `.claude/launch.json`.
 
-The format of the signals (`column-signals/1`) is in
-`wave-2.5-signals.md`. Session S writes the spec file
-`docs/formats/column-signals.md` from it in its first PR. If session S must
-change the format, it asks the coordinator first. The coordinator tells
-session V.
+The format of the signals is in `wave-2.5-signals.md`: the published GIFTI
+files (`column-signals/1`) and the provisional `edges.npz`. Session S
+writes the spec file `docs/formats/column-signals.md` in its first PR. If
+session S must change the format, it asks the coordinator first. The
+coordinator tells session V.
 
 ## Heavy runs
 
