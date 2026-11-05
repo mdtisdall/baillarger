@@ -35,6 +35,9 @@ Requests:
   /outline?axis=&mm=&box= (float32 segment ends, world mm).
 - The columns pane (baillarger.viewer.columns.route): /columns/meta,
   /columns?v=&radius=..., /columns/profiles?..., /columns/<key>.tck.
+- Per-vertex scalar maps (baillarger.viewer.overlay; with --overlay): /overlay/meta,
+  /overlay/<file>/<map>?agg=max|min (float32 on the overview vertices),
+  /overlay/<file>/<map>/sites?n=&spacing=&order=, /overlay/at?v=1,2,3.
 - POST /state {from, patch}: merge patch into the state; every page gets
   {from, seq, patch}.
 """
@@ -53,6 +56,7 @@ from urllib.parse import parse_qs, urlparse
 from baillarger.data import echo_path
 from baillarger.viewer import columns as VC
 from baillarger.viewer import outlines as VO
+from baillarger.viewer import overlay as VOL
 from baillarger.viewer import review as VR
 from baillarger.viewer import volumes as VV
 from baillarger.viewer.bricks import ArrayPyramid, LazyVolume, nifti
@@ -121,6 +125,7 @@ class Handler(BaseHTTPRequestHandler):
     outlines: VO.Outlines | None = None  # surface outlines (baillarger.viewer.outlines)
     columns: VC.Columns | None = None
     wmreview: VR.Review | None = None  # the stream 1 review (baillarger.viewer.review)
+    overlays: VOL.Overlays | None = None  # per-vertex maps (baillarger.viewer.overlay)
     lock = threading.Lock()  # one computation at a time
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -248,6 +253,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if VR.route(self, "GET", u.path, q, {}):
             return
+        if VOL.route(self, u.path, q):
+            return
         w = self.white
         if w is None:
             self.send_error(404)
@@ -314,6 +321,7 @@ def serve(
     outlines: VO.Outlines | None = None,
     columns: VC.Columns | None = None,
     wmreview: VR.Review | None = None,
+    overlays: VOL.Overlays | None = None,
 ) -> ThreadingHTTPServer:
     """The server on a white surface (white). volume: the bricks of the volume pane
     (baillarger.viewer.bricks); volumes, outlines, columns: the other panes' data, if
@@ -327,6 +335,7 @@ def serve(
     Handler.outlines = outlines
     Handler.columns = columns
     Handler.wmreview = wmreview
+    Handler.overlays = overlays
     Handler.shared = Shared()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     srv.daemon_threads = True
@@ -360,6 +369,7 @@ def main(argv: list[str] | None = None) -> None:
         "profiles (default: data)",
     )
     VR.add_arguments(ap)
+    VOL.add_arguments(ap)
     ap.add_argument("--port", type=int, default=8790)
     a = ap.parse_args(argv)
     t0 = time.time()
@@ -394,6 +404,11 @@ def main(argv: list[str] | None = None) -> None:
         )
     except ValueError as exc:
         ap.error(str(exc))
+    overlays: VOL.Overlays | None = None
+    try:
+        overlays = VOL.for_white(a, white)
+    except ValueError as exc:
+        ap.error(str(exc))
     srv = serve(
         None,
         a.port,
@@ -403,6 +418,7 @@ def main(argv: list[str] | None = None) -> None:
         outlines=outlines,
         columns=columns,
         wmreview=wmreview,
+        overlays=overlays,
     )
     print(
         f"serving on http://127.0.0.1:{a.port}/ ({time.time() - t0:.0f} s)", flush=True

@@ -181,14 +181,19 @@ async function loadMesh(level, faces) {
     g.bindVertexArray(null);
     GL.target = hdr.centre; GL.radius = hdr.radius; GL.dist = 2.6 * hdr.radius;
   }
-  GL.pos = pos; GL.level = level;
+  GL.pos = pos; GL.nrm = nrm; GL.level = level;
   g.bindBuffer(g.ARRAY_BUFFER, GL.bpos); g.bufferData(g.ARRAY_BUFFER, pos, g.DYNAMIC_DRAW);
   g.bindBuffer(g.ARRAY_BUFFER, GL.bnrm); g.bufferData(g.ARRAY_BUFFER, nrm, g.DYNAMIC_DRAW);
   g.bindBuffer(g.ARRAY_BUFFER, GL.bsulc); g.bufferData(g.ARRAY_BUFFER, sulc, g.DYNAMIC_DRAW);
 }
-function colour3d() {   // all grey
+// the overview's colours: the last colour hook (VIEWER.hooks.colour, static/overlay.js) that gives a Float32Array of
+// 3 * GL.nv RGB values in [0, 1]; all grey when none does
+function colour3d() {
   if (!GL.nv) return;
-  GL.g.bindBuffer(GL.g.ARRAY_BUFFER, GL.bcol); GL.g.bufferData(GL.g.ARRAY_BUFFER, new Float32Array(3 * GL.nv).fill(110 / 255), GL.g.DYNAMIC_DRAW);
+  let col = null;
+  for (const h of VIEWER.hooks.colour) try { col = h(GL.nv) || col; } catch (e) { log(`colour: ${e.message}`); }
+  if (!col || col.length !== 3 * GL.nv) col = new Float32Array(3 * GL.nv).fill(110 / 255);
+  GL.g.bindBuffer(GL.g.ARRAY_BUFFER, GL.bcol); GL.g.bufferData(GL.g.ARRAY_BUFFER, col, GL.g.DYNAMIC_DRAW);
 }
 function points(g, M, arr, col, size) {
   if (!arr.length) return; g.useProgram(GL.pprog); g.bindVertexArray(GL.pvao);
@@ -605,11 +610,15 @@ $("vengine").onchange = () => { q.set("vol", $("vengine").value); location.searc
 
 // ---------------------------------------------------------------- hooks for panes in their own files (static/columns.js)
 // VIEWER.hooks: selection(sel, frame) after each WM selection; state(st) after each shared-state change; draw3d(g, mvp) at
-// the end of each 3D frame (box mm, the true surface at level 0); resize(). VIEWER.ready resolves when the page has started.
+// the end of each 3D frame (box mm, the true surface at level 0); resize(); colour(nv) gives the overview's RGB colours or
+// null (colour3d). VIEWER.recolour() applies the colour hooks again. VIEWER.select(sel, frame) makes sel (a /vertex answer,
+// or one like it) the WM selection; VIEWER.screenFrame() is the 3D view's frame. VIEWER.ready resolves when the page has
+// started.
 let viewerReady;
 const VIEWER = window.VIEWER = { $, get, log, share, GL, NV, mvp, program, draw3d: () => draw3d(), has,
-  selectVertex: v => selectVertex(v, null), get selection() { return SELN; }, get frame() { return FRAME; },
-  get meta() { return META; }, hooks: { selection: [], state: [], draw3d: [], resize: [] },
+  selectVertex: v => selectVertex(v, null), select: (sel, frame) => selectHere(sel, frame), screenFrame: () => screenFrame(),
+  recolour: () => { colour3d(); draw3d(); }, get selection() { return SELN; }, get frame() { return FRAME; },
+  get meta() { return META; }, hooks: { selection: [], state: [], draw3d: [], resize: [], colour: [] },
   ready: new Promise(r => { viewerReady = r; }) };
 function vHook(name, ...a) { for (const h of VIEWER.hooks[name]) try { h(...a); } catch (e) { log(`${name}: ${e.message}`); } }
 
@@ -646,5 +655,6 @@ window.addEventListener("resize", () => { draw3d(); vHook("resize"); });
 })();
 </script>
 <script type="module" src="/static/columns.js"></script>
+<script type="module" src="/static/overlay.js"></script>
 </body>
 </html>
