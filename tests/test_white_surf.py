@@ -107,8 +107,13 @@ def test_nibabel_reads_the_external_data(surface: tuple[Path, Path]) -> None:
     assert nl.data.dtype == np.float32 and nl.data.shape == (len(s.v),)
     assert np.array_equal(nl.data, s.normlen)
     assert nl.ext_fname == surf.name.replace(
-        "_white.surf.gii", "_desc-normlen_white.dat"
+        "_white.surf.gii", "_desc-smoothnormlen_white.dat"
     )
+    # the names and the sidecar say that the normals are smoothed, and how much
+    assert s.sidecar["NormalsFile"] == surf.name.replace(
+        "_white.surf.gii", "_desc-smoothnormals_white.func.gii"
+    )
+    assert s.sidecar["NormalSmoothingSteps"] == white_surf.NORMAL_STEPS == 10
     # the edge keys: int64 as (low, high) int32 words, one per vertex
     k = (
         GiftiImage.from_filename(
