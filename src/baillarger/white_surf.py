@@ -79,6 +79,9 @@ def mesh_pieces(
 
 # ------------------------------------------------- the whole-hemisphere surface
 
+#: steps of smoothing along the mesh for the published normals and |n|
+NORMAL_STEPS = 10
+
 #: docs/formats/white-surf.md
 SURF_SPEC = SidecarSpec(
     "white-surf/1",
@@ -92,9 +95,15 @@ SURF_SPEC = SidecarSpec(
         Key("Faces", "integer", True, "number of faces"),
         Key("Blocks", "integer", True, "rows of the block index"),
         Key("Pieces", "array of objects", True, "per connected piece"),
-        Key("NormalsFile", "string", True, "the normals' GIfTI (name)"),
+        Key("NormalsFile", "string", True, "the smoothed normals' GIfTI (name)"),
         Key("EdgeKeysFile", "string", True, "the vertices' edge keys (name)"),
         Key("NormLenFile", "string", True, "the normals' length |n| (name)"),
+        Key(
+            "NormalSmoothingSteps",
+            "integer",
+            True,
+            "steps of smoothing along the mesh for the normals and |n|",
+        ),
         Key("GridShape", "array of integers", True, "the segmentation's grid"),
         Key("BlocksFile", "string", True, "the block index (name)"),
         Key("DataSHA256", "object", True, "SHA-256 of each .dat, by name"),
@@ -128,13 +137,13 @@ def surface_paths(out: Path, ents: dict[str, str], hemi: str) -> dict[str, Path]
     return dict(
         surf=derivative_path(out, ents, "white", ".surf.gii", hemi=hemi),
         normals=derivative_path(
-            out, ents, "white", ".func.gii", hemi=hemi, desc="normals"
+            out, ents, "white", ".func.gii", hemi=hemi, desc="smoothnormals"
         ),
         keys=derivative_path(
             out, ents, "white", ".func.gii", hemi=hemi, desc="edgekeys"
         ),
         normlen=derivative_path(
-            out, ents, "white", ".func.gii", hemi=hemi, desc="normlen"
+            out, ents, "white", ".func.gii", hemi=hemi, desc="smoothnormlen"
         ),
         blocks=derivative_path(out, ents, "white", ".tsv", hemi=hemi, desc="blocks"),
         sidecar=derivative_path(out, ents, "white", ".json", hemi=hemi),
@@ -234,9 +243,9 @@ def write_white_surface(
         return out
 
     if dev.torch is None:
-        n, nlen = S.smooth_normals_and_length(v, f)
+        n, nlen = S.smooth_normals_and_length(v, f, NORMAL_STEPS)
     else:
-        n, nlen = MeshOps(f, len(v), dev.torch).normals_and_length(v)
+        n, nlen = MeshOps(f, len(v), dev.torch).normals_and_length(v, NORMAL_STEPS)
     # an average of unit vectors: at most 1, but for rounding
     nlen = np.minimum(nlen, 1)
     lap("normals")
@@ -258,7 +267,13 @@ def write_white_surface(
     )
     ndat = write_external(
         paths["normals"],
-        [DataArray(n.astype("<f4"), "NIFTI_INTENT_VECTOR", dict(Name="normals"))],
+        [
+            DataArray(
+                n.astype("<f4"),
+                "NIFTI_INTENT_VECTOR",
+                dict(Name="normals, smoothed along the mesh"),
+            )
+        ],
         dict(AnatomicalStructurePrimary=STRUCTURE[hemi]),
     )
     ldat = write_external(
@@ -326,6 +341,7 @@ def write_white_surface(
             NormalsFile=paths["normals"].name,
             EdgeKeysFile=paths["keys"].name,
             NormLenFile=paths["normlen"].name,
+            NormalSmoothingSteps=NORMAL_STEPS,
             GridShape=[int(x) for x in img.shape[:3]],
             BlocksFile=paths["blocks"].name,
             DataSHA256={d.name: file_sha256(d) for d in (dat, ndat, kdat, ldat)},

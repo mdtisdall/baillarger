@@ -239,10 +239,10 @@ class MeshOps:
         out: Float = self.twice(x, steps).cpu().numpy()
         return out
 
-    def normals_and_length(self, v: AnyFloat) -> tuple[Float, Float]:
+    def normals_and_length(self, v: AnyFloat, iters: int = 10) -> tuple[Float, Float]:
         """smooth_normals_and_length of v: float32 numpy in and out."""
         x = torch.as_tensor(np.asarray(v, np.float32), device=self.dev)
-        n, length = self.smooth_normals_and_length(x)
+        n, length = self.smooth_normals_and_length(x, iters)
         nn: Float = n.cpu().numpy()
         ll: Float = length.cpu().numpy()
         return nn, ll
