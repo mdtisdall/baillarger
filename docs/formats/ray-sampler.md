@@ -7,8 +7,9 @@ only. Nothing per column is stored. `tests/test_rays.py` checks that the
 tables below list the same names, types and values as the code.
 
 The specs in `docs/formats/` stay at version 1 until a release, and are
-edited in place (plan, §8). Phase 2.1 adds the method `equivolume` and the
-fields A(s) and V(s) by an edit in place.
+edited in place (plan, §8). Phase 2.1 added the method `equivolume`: the
+cross-section A(s), the volume V(s), the focal points and the mark past a
+focal point.
 
 ## Words
 
@@ -28,7 +29,7 @@ The sampler reads these files and no other data:
 
 | Input | Spec | What the sampler reads |
 |---|---|---|
-| The white surface | `white-surf/1` | The vertices (scanner mm), the unit normals, the normal lengths \|n̄\|, the edge keys, the block index, the sidecar (`VoxelToRAS`, `BlockCells`, `GridShape`, `FilledLabels`, `Hemisphere`, `SourcesSHA256`) |
+| The white surface | `white-surf/1` | The vertices (scanner mm), the unit normals, the normal lengths \|n̄\|, the edge keys, the block index, the sidecar (`VoxelToRAS`, `BlockCells`, `GridShape`, `FilledLabels`, `Hemisphere`, `SourcesSHA256`). For `equivolume` also the triangles, and the face ranges of the block index |
 | The corrected segmentation | `wm-dseg/1` (`_desc-wmtopo_dseg.nii.gz`) | The labels, and the affine of its header |
 
 The sampler refuses a segmentation that is not the source of the surface
@@ -66,7 +67,7 @@ the same order, with their rays (`rays.roots` is equal to `roots`).
 |---|---|---|---|
 | `superblock` | tuple of 3 integers | (required) | (I, J, K), each ≥ 0 |
 | `level` | integer | (required) | m ≥ 0 |
-| `method` | string | `normal` | One of `METHODS`. Version 1 has `normal` only |
+| `method` | string | `normal` | One of `METHODS`: `normal` or `equivolume` |
 | `e_in` | number, or float array (n,) | `CAP_IN` | 0 ≤ e_in ≤ `CAP_IN`, in mm. An array has one value per column, in the order of `roots` |
 | `e_out` | number, or float array (n,) | `CAP_OUT` | 0 ≤ e_out ≤ `CAP_OUT`, in mm. An array as for `e_in` |
 | `step` | number | `STEP` (0.04) | step > 0, in mm. One value for the call |
@@ -100,9 +101,9 @@ the vertices in `white-surf/1`. Each edge key occurs one time in a call.
 The root's voxel coordinates v are A⁻¹ applied to the vertex's scanner mm
 position, in float64, with A the `VoxelToRAS` affine in float64.
 
-## The ray of a column (method `normal`)
+## The ray of a column
 
-The ray is straight, along the root's unit normal n (the smoothed white
+The two methods give the same ray and the same samples. The ray is straight, along the root's unit normal n (the smoothed white
 normal of `white-surf/1`, out of the WM), from the root x₀:
 
     p(s) = x₀ + s n
@@ -127,6 +128,120 @@ The values: s_k is the float64 product k × step, rounded to float32. The
 position is p(s_k) computed in float64 from x₀, n and the float64 s_k, then
 rounded to float32. A sample beyond the grid has its position like any
 other sample. Its label is "off the grid" (see below).
+
+## The cross-section (method `equivolume`)
+
+The method `equivolume` adds, to each column, its cross-section A(s) and
+its volume V(s) (plan, §4c, step 2). Stream 3 normalises V between its two
+named levels. The method `normal` does not compute them.
+
+### The 1-ring
+
+The 1-ring of a root is the faces of `white-surf/1` that use the root.
+
+1. A call reads the faces of every block whose box (in the block index)
+   meets the halo box widened by `FACE_MARGIN` (2.0) voxels on each side.
+   A block's box holds every vertex that its faces use. So each face of a
+   root's 1-ring is in a block whose box holds the root, and the call reads
+   it.
+2. The pieces of `white-surf/1` are closed. So the 1-ring of each root is a
+   closed fan: each neighbour of the root starts one edge of the fan and
+   ends one edge. If a 1-ring is not a closed fan, the sampler raises
+   `RuntimeError`.
+
+### The coefficients
+
+Each vertex i of the 1-ring moves along its own unit normal n_i:
+x_i(s) = x_i + s n_i. The cross-section is the root's dual area vector at
+s, on the root's normal n₀:
+
+    A(s) = n₀ · Σ_f (1/6) (x_b(s) − x_a(s)) × (x_c(s) − x_a(s))
+
+The sum is over the faces f = (a, b, c) of the 1-ring, each with its
+vertices in the order of the triangle array. Each x_i(s) is linear in s, so
+each cross product is quadratic in s, and
+
+    A(s) = a₀ + a₁ s + a₂ s²
+
+exactly. With p = x_b − x_a, q = n_b − n_a, r = x_c − x_a and
+w = n_c − n_a, the face gives p × r to a₀, p × w + q × r to a₁, and q × w
+to a₂. The sampler computes the three coefficients in float64, from the
+float32 values of the files, with the faces in the order of the triangle
+array. A(s) is in mm², a₁ in mm and a₂ is a number.
+
+On a plane, A is constant. On a sphere of radius R with radial unit
+normals, x_i(s) = x_i (1 + s/R), so A(s) = A(0) (1 + s/R)².
+
+### The focal points
+
+A(s) reaches 0 where the rays of the 1-ring meet: a focal point. In
+general A(s)/A(0) is near (1 + κ₁ s)(1 + κ₂ s), with κ₁ and κ₂ the
+principal curvatures. Past both focal points, A is positive again (the
+triangles turn over two times). So a focal point is a root of A, not a
+sample where A ≤ 0.
+
+`focus` gives r_lo and r_hi: the first focal point on each side of the
+root (−∞ or ∞ if there is none). With disc = a₁² − 4 a₀ a₂ and B its error
+bound (below):
+
+1. If a₀ ≤ 0 (A(0) ≤ 0): r_lo = r_hi = 0.
+2. If a₂ = 0: the root −a₀/a₁ of the line, if a₁ ≠ 0.
+3. If disc > B, or a₂ < 0: the two real roots of A.
+4. If −B ≤ disc ≤ B and a₂ > 0: a double root at s* = −a₁ / (2 a₂). Here
+   A(s*) = −disc / (4 a₂) is 0 within the error of the inputs.
+5. If disc < −B: no root.
+
+r_lo is the largest root below 0, and r_hi the smallest root above 0. A
+root at 0 gives r_lo = r_hi = 0.
+
+**The error bound B.** On a sphere, A has a double root, and the rounding of
+the inputs can make disc a little negative. Case 4 keeps that focal point.
+A bound relative to the coefficients does not work: a₁ and a₂ come from
+differences of near-equal normals (q and w), so a small error in a normal
+is a large relative error in a₁ and a₂. B propagates the errors of the
+inputs instead:
+
+1. Each input (each component of a position or a normal, float32) is
+   known to `U_IN` = 2⁻²³ of its value: one float32 ulp. Rounding to
+   float32 gives 2⁻²⁴. The factor 2 holds the error of the value before it
+   was written, and the float64 rounding of the sums, which is less than
+   2⁻⁴⁷ of each term.
+2. The edge p has the error e_p = `U_IN` (|x_b| + |x_a|) on each axis, and
+   the same for q, r and w. For each cross product, with
+   ac(u, v)_i = u_j v_k + u_k v_j ((i, j, k) cyclic),
+
+       |(p + dp) × (r + dr) − p × r| ≤ ac(e_p, |r|) + ac(|p|, e_r) + ac(e_p, e_r)
+
+   on each axis, for |dp| ≤ e_p and |dr| ≤ e_r.
+3. With C_i the sum of the face terms of a_i and E_i the sum of their
+   bounds: e_i = (|n₀| · E_i + `U_IN` |n₀| · |C_i| + `U_IN` |n₀| · E_i) / 6.
+4. B = 2 |a₁| e₁ + e₁² + 4 (|a₀| e₂ + |a₂| e₀ + e₀ e₂). This is the bound
+   of |(a₁ + d₁)² − 4 (a₀ + d₀)(a₂ + d₂) − disc| for |d_i| ≤ e_i.
+
+On a near-flat column with errors above the float32 level, disc < −B, and
+nothing is a focal point. A near-umbilic focal point whose normals have
+errors above the float32 level is case 5 too: then V rises again past it.
+
+### The volume and the mark
+
+V(s) is the integral of A from the inward cap to s, between the focal
+points:
+
+    V(s) = ∫ A(t) dt from t = lo to t = min(max(s, lo), r_hi),  lo = max(−`CAP_IN`, r_lo)
+
+The sampler computes it in closed form (a cubic) in float64. So:
+
+1. V(−`CAP_IN`) = 0 for every call. V at each s is the same for every
+   extent and every step. Only differences of V enter the depth (plan,
+   §4c, step 2).
+2. V does not fall. It is constant at s ≤ r_lo and at s ≥ r_hi.
+3. If A(0) ≤ 0, V = 0 at every sample.
+
+The mark `past_focus` is true at a sample with s ≤ r_lo or s ≥ r_hi. If
+A(0) ≤ 0, it is true at every sample.
+
+At each sample, A(s_k) and V(s_k) use the float64 s_k = k × step, and are
+rounded to float32.
 
 ## The label classes
 
@@ -246,24 +361,23 @@ as neighbours of the owned columns.
 | `interval_label` | int32 | (Q,) | The label of each interval, −1 off the grid |
 | `interval_class` | uint8 | (Q,) | The class of each interval (code) |
 | `derived_class` | uint8 | (n,) | The derived class of each column (code) |
+| `area_coef` | float64 | (n, 3) | a₀, a₁, a₂ of A(s) of each column. (0, 3) for `normal` |
+| `focus` | float64 | (n, 2) | r_lo and r_hi of each column, mm (−∞ or ∞ if none). (0, 2) for `normal` |
+| `area` | float32 | (N,) | A(s_k) of each sample, mm². (0,) for `normal` |
+| `volume` | float32 | (N,) | V(s_k) of each sample, mm³. (0,) for `normal` |
+| `past_focus` | bool | (N,) | True at a sample at or past a focal point. (0,) for `normal` |
 
 The float64 interval boundaries are rounded to float32. The first interval
 of a column starts at −`CAP_IN` and the last ends at `CAP_OUT`.
 
-### Not in version 1
-
-These are names for phase 2.1. Version 1 does not give them:
-
-- the method `equivolume`;
-- A(s), the cross-section of the column at each sample, mm²;
-- V(s), the volume of the column from its inward end, mm³, with V(−e_in) = 0;
-- the mark on each sample where A(s) ≤ 0.
-
 ## Determinism
 
 1. A column depends only on its root (x₀, n, \|n̄\|, edge key), the affine,
-   the labels, and the call's method, step and the column's extents. It does
-   not depend on the superblock, the level, the halo or the other columns.
+   the labels, and the call's method, step and the column's extents. For
+   `equivolume` it also depends on the root's 1-ring (the positions and
+   normals of its vertices, and the order of its faces in the file). It
+   does not depend on the superblock, the level, the halo or the other
+   columns.
 2. So the same column is the same, bit for bit, whichever superblock
    computes it: as an owned column of one superblock, or as a halo column of
    another.
@@ -278,3 +392,7 @@ A call reads the labels of the halo box widened by `CAP_OUT` + 1 voxel on
 each side (a ray can point in any direction, and `CAP_OUT` is larger than
 `CAP_IN`). It reads them one time for each call, through the chunk cache.
 Calls on superblocks in Morton order read each chunk about one time.
+
+For `equivolume`, a call also reads the faces of the blocks that meet the
+halo box widened by `FACE_MARGIN` voxels, and the positions and normals of
+their vertices (see "The 1-ring").
