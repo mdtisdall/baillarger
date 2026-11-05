@@ -9,7 +9,8 @@ and run.json (the input set, the times, the peak memory). In FIG:
 - hist_<map>.png: the histogram of each map, with its median and its 99th and
   99.9th percentiles, and the share beyond a few round values (for
   description, not pass or fail); stats.json holds the same numbers.
-- overview_<map>.png: the map on the overview, lateral and medial. Each
+- overview_<map>.png: the map on the overview, from both sides along the
+  axis of its smallest extent (about medial-lateral). Each
   overview face shows the largest value of its corners and of the true
   vertices that it carries.
 - ranked_<map>.tsv: the ranked list (normal_maps.ranked_table): 200 sites,
@@ -18,7 +19,7 @@ and run.json (the input set, the times, the peak memory). In FIG:
 - density_nbrmax_normlen.png, density_renorm_normlen.png.
 
 usage:
-    normal_maps.py SURF OUT FIG
+    normal_maps.py SURF OUT FIG [--reuse] [--no-figures]
 """
 
 import argparse
@@ -35,6 +36,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from matplotlib.collections import PolyCollection  # noqa: E402
 from matplotlib.colors import LogNorm  # noqa: E402
+from nibabel.gifti.gifti import GiftiImage  # noqa: E402
 
 from baillarger import normal_maps as NM  # noqa: E402
 from baillarger.bids import file_sha256, sidecar_path  # noqa: E402
@@ -85,12 +87,12 @@ def render(
     f: np.ndarray,
     val: np.ndarray,
     view: np.ndarray,
+    up: np.ndarray,
     lo: float,
     hi: float,
 ) -> None:
-    """The faces seen from +view (up: +z), painter's order, flat Lambert shade
+    """The faces seen from +view (up: up), painter's order, flat Lambert shade
     times viridis of (val - lo) / (hi - lo); grey where val is NaN."""
-    up = np.array([0.0, 0.0, 1.0])
     right = np.cross(up, view)
     right /= np.linalg.norm(right)
     up2 = np.cross(view, right)
@@ -105,7 +107,10 @@ def render(
     col[~np.isfinite(x)] = (0.6, 0.6, 0.6, 1)
     col[:, :3] *= (0.4 + 0.6 * np.abs(nrm[front][o] @ view))[:, None]
     xy = np.stack([t @ right, t @ up2], -1)
-    ax.add_collection(PolyCollection(xy, facecolors=col, edgecolors="none"))
+    # edges in the face colour: no light seams between faces
+    ax.add_collection(
+        PolyCollection(xy, facecolors=col, edgecolors=col, linewidths=0.3)
+    )
     ax.set_xlim(xy[..., 0].min(), xy[..., 0].max())
     ax.set_ylim(xy[..., 1].min(), xy[..., 1].max())
     ax.set_aspect("equal")
@@ -168,9 +173,12 @@ def overview_figure(
     vmm: np.ndarray,
     a: np.ndarray,
     st: dict[str, Any],
-    hemi: str,
     label: str,
 ) -> None:
+    """Two views along the axis of the smallest extent of the overview (for a
+    hemisphere, about medial-lateral), with the axis of the largest extent
+    across the image. The grid's axes are not named anatomically (ex vivo),
+    so the views are named by the axis, not as lateral and medial."""
     val = face_max(ov, a)
     if name.startswith("mis"):
         lo, hi = 0.0, 3.0
@@ -178,11 +186,14 @@ def overview_figure(
         lo, hi = float(np.nanpercentile(a, 0.1)), 1.0
     else:
         lo, hi = 0.0, st["p999"]
-    lat = np.array([1.0, 0, 0]) if hemi == "R" else np.array([-1.0, 0, 0])
-    f, ax = plt.subplots(1, 2, figsize=(12, 5), dpi=80)
-    for k, (view, t) in enumerate(((lat, "lateral"), (-lat, "medial"))):
-        render(ax[k], vmm, ov.f, val, view, lo, hi)
-        ax[k].set_title(t, fontsize=9)
+    ext = np.ptp(vmm, axis=0)
+    thin, long = int(np.argmin(ext)), int(np.argmax(ext))
+    up = np.eye(3)[3 - thin - long]
+    f, ax = plt.subplots(2, 1, figsize=(10, 9), dpi=80)
+    for k, sign in enumerate((1, -1)):
+        view = sign * np.eye(3)[thin]
+        render(ax[k], vmm, ov.f, val, view, up, lo, hi)
+        ax[k].set_title(f"seen from {'+-'[k]}{'xyz'[thin]} (scanner mm)", fontsize=9)
     sm = plt.cm.ScalarMappable(cmap="viridis", norm=plt.Normalize(lo, hi))
     unit = f" ({st['unit']})" if st["unit"] else ""
     f.colorbar(sm, ax=ax, shrink=0.6, label=name + unit)
@@ -208,10 +219,25 @@ def density(fig: Path, mp: dict[str, np.ndarray], x: str, y: str, label: str) ->
     f.colorbar(h[3], ax=ax, label="vertices")
     ax.set_xlabel(f"{x} ({NM.UNITS[x]})")
     ax.set_ylabel(y)
-    ax.set_title(f"{x} against {y}, {label}", fontsize=9)
+    ax.set_title(f"{x} against {y}\n{label}", fontsize=8)
     f.tight_layout()
     f.savefig(fig / f"density_{x}_{y}.png")
     plt.close(f)
+
+
+def write_maps(gii: Path, mp: dict[str, np.ndarray], surf: str, sha: str) -> None:
+    write_external(
+        gii,
+        [
+            DataArray(mp[k], "NIFTI_INTENT_NONE", dict(Name=k, Unit=NM.UNITS[k]))
+            for k in NM.MAPS
+        ],
+        dict(
+            Surface=surf,
+            SurfaceSidecarSHA256=sha,
+            Producer="prototypes/scripts/normal_maps.py (baillarger.normal_maps)",
+        ),
+    )
 
 
 def write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -235,6 +261,12 @@ def main() -> None:
     ap.add_argument("out", type=Path, help="the directory of the maps file")
     ap.add_argument("fig", type=Path, help="the directory of the figures")
     ap.add_argument("--no-figures", action="store_true", help="the maps file only")
+    ap.add_argument(
+        "--reuse",
+        action="store_true",
+        help="read the maps from OUT/normal_maps.func.gii (made from this surface) "
+        "instead of computing them: the figures only",
+    )
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     a.fig.mkdir(parents=True, exist_ok=True)
@@ -251,23 +283,19 @@ def main() -> None:
     sha = file_sha256(sidecar_path(a.surf))
     label = f"{a.surf.name.removesuffix('_white.surf.gii')} (sidecar {sha[:16]})"
     lap("load")
-    mp = NM.normal_maps(
-        W.v, pts, W.f, W.normals, W.normlen, int(side["NormalSmoothingSteps"]), lap
-    )
     gii = a.out / "normal_maps.func.gii"
-    write_external(
-        gii,
-        [
-            DataArray(mp[k], "NIFTI_INTENT_NONE", dict(Name=k, Unit=NM.UNITS[k]))
-            for k in NM.MAPS
-        ],
-        dict(
-            Surface=a.surf.name,
-            SurfaceSidecarSHA256=sha,
-            Producer="prototypes/scripts/normal_maps.py (baillarger.normal_maps)",
-        ),
-    )
-    lap("write the maps")
+    if a.reuse:
+        g = GiftiImage.from_filename(str(gii))
+        if g.meta.get("SurfaceSidecarSHA256") != sha:
+            raise SystemExit(f"{gii} was not made from {a.surf.name}")
+        mp = {d.meta["Name"]: np.asarray(d.data, np.float32) for d in g.darrays}
+        lap("read the maps")
+    else:
+        mp = NM.normal_maps(
+            W.v, pts, W.f, W.normals, W.normlen, int(side["NormalSmoothingSteps"]), lap
+        )
+        write_maps(gii, mp, a.surf.name, sha)
+        lap("write the maps")
     run: dict[str, Any] = dict(
         surface=str(a.surf),
         sidecar_sha256=sha,
@@ -285,7 +313,7 @@ def main() -> None:
         ov.check(W)
         vmm = ov.v @ ov.affine[:3, :3].T + ov.affine[:3, 3]
         for k in NM.MAPS:
-            overview_figure(a.fig, k, ov, vmm, mp[k], st[k], side["Hemisphere"], label)
+            overview_figure(a.fig, k, ov, vmm, mp[k], st[k], label)
         lap("overview figures")
         keys = W.vertex_key
         for k in NM.MAPS:
@@ -298,7 +326,8 @@ def main() -> None:
         density(a.fig, mp, "renorm", "normlen", label)
         lap("density plots")
     run.update(times=times, peak_gb=round(peak_gb(), 2))
-    (a.out / "run.json").write_text(json.dumps(run, indent=1))
+    name = "run_figures.json" if a.reuse else "run.json"
+    (a.out / name).write_text(json.dumps(run, indent=1))
     print(json.dumps(run, indent=1))
 
 
