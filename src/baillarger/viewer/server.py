@@ -44,6 +44,9 @@ Requests:
   gzip when the page accepts it).
 - Named volumes (baillarger.viewer.volumes; with --white: echo, labels, fixes):
   /volume/list, /volume/<name>/meta, /volume/<name>/bricks?level=&b=.
+- The stream 1 review (baillarger.viewer.review; with --white, --sites and --edits):
+  GET /review/queue, /review/next, /review/preview?job=; POST /review/session,
+  /review/skip, /review/preview, /review/answer, /review/scribble.
 - Surface outlines (baillarger.viewer.outlines; with --white):
   /outline?axis=&mm=&box= (float32 segment ends, world mm).
 - The columns pane, with --white (baillarger.viewer.columns.route): /columns/meta,
@@ -74,6 +77,7 @@ from baillarger.data import echo_path
 from baillarger.viewer import columns as VC
 from baillarger.viewer import filters as VF
 from baillarger.viewer import outlines as VO
+from baillarger.viewer import review as VR
 from baillarger.viewer import streamlines as SV
 from baillarger.viewer import volumes as VV
 from baillarger.viewer.bricks import ArrayPyramid, LazyVolume
@@ -155,6 +159,7 @@ class Handler(BaseHTTPRequestHandler):
     volumes: VV.Volumes | None = None  # named volumes (baillarger.viewer.volumes)
     outlines: VO.Outlines | None = None  # surface outlines (baillarger.viewer.outlines)
     columns: VC.Columns | None = None
+    wmreview: VR.Review | None = None  # the stream 1 review (baillarger.viewer.review)
     lock = threading.Lock()  # one site computation at a time
     groups: dict[tuple[int, float], dict[str, list[int]]] = {}
     axes: dict[int, dict[str, list[list[float]]]] = {}
@@ -310,6 +315,8 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/columns" or u.path.startswith("/columns/"):
             VC.route(self, u.path, q)
             return
+        if VR.route(self, "GET", u.path, q, {}):
+            return
         if self.white is not None:  # a white surface alone
             w = self.white
             if u.path == "/meta":
@@ -449,6 +456,8 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         req = json.loads(self.rfile.read(n)) if n else {}
         sender = str(req.get("from", ""))
+        if VR.route(self, "POST", self.path, {}, req):
+            return
         if self.path == "/labels/decide":
             self.json(
                 lambda: self.label_change(
@@ -500,6 +509,7 @@ def serve(
     volumes: VV.Volumes | None = None,
     outlines: VO.Outlines | None = None,
     columns: VC.Columns | None = None,
+    wmreview: VR.Review | None = None,
 ) -> ThreadingHTTPServer:
     """The server; without a site, labels (labels only) or white (a white surface
     alone) is needed. volume: the bricks of the volume pane (baillarger.viewer.bricks),
@@ -512,6 +522,7 @@ def serve(
     Handler.volumes = volumes
     Handler.outlines = outlines
     Handler.columns = columns
+    Handler.wmreview = wmreview
     Handler.shared = Shared()
     Handler.groups = {}
     Handler.axes = {}
@@ -560,6 +571,7 @@ def main(argv: list[str] | None = None) -> None:
         help="with --white: the directory of echoes 1-3 (.nii, else .nii.gz) for the "
         "columns pane's profiles (default: data)",
     )
+    VR.add_arguments(ap)
     ap.add_argument("--port", type=int, default=8790)
     a = ap.parse_args(argv)
     t0 = time.time()
@@ -618,7 +630,25 @@ def main(argv: list[str] | None = None) -> None:
             white.surf, white.W.sidecar["Sources"], volume, dt, a.dseg, a.fixes
         )
         outlines = VO.Outlines.from_white_view(white)
-    srv = serve(site, a.port, review, white, volume, volumes, outlines, columns)
+    wmreview: VR.Review | None = None
+    if white is not None and volumes is not None:
+        lab = volumes.items["labels"]
+        try:
+            wmreview = VR.for_white(
+                a,
+                white.surf,
+                VV.white_paths(white.surf, white.W.sidecar["Sources"], a.dseg, a.fixes)[
+                    0
+                ],
+                lambda: lab.volume.source().arrays[0],  # type: ignore[attr-defined]
+                white.W.affine,
+                [e_] if volume is not None else [],
+            )
+        except ValueError as exc:
+            ap.error(str(exc))
+    elif a.sites is not None or a.edits is not None:
+        ap.error("--sites and --edits need --white")
+    srv = serve(site, a.port, review, white, volume, volumes, outlines, columns, wmreview)
     print(
         f"serving on http://127.0.0.1:{a.port}/ ({time.time() - t0:.0f} s)", flush=True
     )

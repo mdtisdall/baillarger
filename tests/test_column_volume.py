@@ -112,6 +112,11 @@ def make_rays(
         interval_label=np.asarray([x[2] for x in flat], np.int32),
         interval_class=np.asarray([cls.get(x[2], R.WM) for x in flat], np.uint8),
         derived_class=np.full(n, R.NEITHER, np.uint8),
+        area_coef=np.zeros((0, 3), np.float64),
+        focus=np.zeros((0, 2), np.float64),
+        area=np.zeros(0, np.float32),
+        volume=np.zeros(0, np.float32),
+        past_focus=np.zeros(0, np.bool_),
     )
 
 

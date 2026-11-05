@@ -6,7 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from baillarger import bids, excisions, white_dseg, white_overview, white_surf, wm_edits
+from baillarger import (
+    bids,
+    excisions,
+    white_dseg,
+    white_overview,
+    white_surf,
+    wm_edits,
+    wm_paint,
+    wm_sites,
+)
 from baillarger.bids import Key, SidecarSpec
 
 DOCS = Path(__file__).resolve().parents[1] / "docs" / "formats"
@@ -98,6 +107,8 @@ def doc_keys(doc: Path, version: str) -> set[tuple[str, str, bool]]:
         ("white-overview.md", white_overview.OVERVIEW_SPEC),
         ("wm-edits.md", wm_edits.EDITS_SPEC),
         ("wm-excisions.md", excisions.EXCISIONS_SPEC),
+        ("wm-paint.md", wm_paint.PAINT_SPEC),
+        ("wm-sites.md", wm_sites.SITES_SPEC),
     ],
 )
 def test_spec_documents_list_the_code_keys(doc: str, spec: SidecarSpec) -> None:
