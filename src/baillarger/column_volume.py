@@ -79,6 +79,11 @@ def take_columns(rays: Rays, lo: int, hi: int) -> Rays:
         interval_label=rays.interval_label[q0:q1],
         interval_class=rays.interval_class[q0:q1],
         derived_class=rays.derived_class[c],
+        area_coef=rays.area_coef[c] if len(rays.area_coef) else rays.area_coef,
+        focus=rays.focus[c] if len(rays.focus) else rays.focus,
+        area=rays.area[a:b],
+        volume=rays.volume[a:b],
+        past_focus=rays.past_focus[a:b],
     )
 
 
