@@ -349,9 +349,7 @@ def test_the_white_mode_serves_every_route(
         lo, hi = "-9,-9,-9", "9,9,9"
         routes = [
             "/",
-            "/static/columns.js",
-            "/static/overlays.js",
-            "/static/overlay.js",
+            *(f"/static/{f.name}" for f in sorted(VS.STATIC.iterdir())),
             "/state",
             "/mesh?level=0&faces=1",
             "/vertex?v=0",

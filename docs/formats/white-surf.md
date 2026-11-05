@@ -16,10 +16,10 @@ and `ses`, hemisphere `<h>` (`R` or `L`):
 |---|---|
 | `sub-<sub>_ses-<ses>_hemi-<h>_white.surf.gii` | GIfTI XML: the vertices and the triangles, as external binary data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_white.dat` | Their data: the vertices, then the triangles |
-| `sub-<sub>_ses-<ses>_hemi-<h>_desc-normals_white.func.gii` | GIfTI XML: the normals, as external binary data |
-| `sub-<sub>_ses-<ses>_hemi-<h>_desc-normals_white.dat` | Their data |
-| `sub-<sub>_ses-<ses>_hemi-<h>_desc-normlen_white.func.gii` | GIfTI XML: the normal length \|n̄\| (the normals smoothed with no normalisation), as external binary data |
-| `sub-<sub>_ses-<ses>_hemi-<h>_desc-normlen_white.dat` | Their data |
+| `sub-<sub>_ses-<ses>_hemi-<h>_desc-smoothnormals_white.func.gii` | GIfTI XML: the normals smoothed along the mesh, as external binary data |
+| `sub-<sub>_ses-<ses>_hemi-<h>_desc-smoothnormals_white.dat` | Their data |
+| `sub-<sub>_ses-<ses>_hemi-<h>_desc-smoothnormlen_white.func.gii` | GIfTI XML: the normal length \|n̄\| (the normals smoothed with no normalisation), as external binary data |
+| `sub-<sub>_ses-<ses>_hemi-<h>_desc-smoothnormlen_white.dat` | Their data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-edgekeys_white.func.gii` | GIfTI XML: each vertex's grid-edge key, as external binary data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-edgekeys_white.dat` | Their data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-blocks_white.tsv` | The block index |
@@ -58,12 +58,21 @@ round the boundary (Lempitsky, CVPR 2010; Whitaker, 2000). So:
   voxels next to the boundary; vertices within about 1e-3 voxel of the fully
   converged field).
 
-Triangles are oriented so their normals point out of the WM. The normals are
-the area-weighted vertex normals smoothed along the mesh (10 steps,
-`baillarger.mesh_smoothing.smooth_normals`), out of the WM.
+Triangles are oriented so their normals point out of the WM. The published
+normals are not the normals of the triangles: they are the area-weighted
+vertex normals smoothed along the mesh (`NormalSmoothingSteps` steps, 10;
+`baillarger.mesh_smoothing.smooth_normals`), out of the WM. The names
+`desc-smoothnormals` and `desc-smoothnormlen` say so. Code that needs the
+unsmoothed normals computes them from the surface
+(`baillarger.decimate.normals`).
 
 Each step of the smoothing sets n to 0.5 n + 0.5 × (the mean of n over the
-vertex's neighbours) and then divides n by its norm.
+vertex's neighbours) and then divides n by its norm. The division makes the
+smoothing nonlinear: the steps do not compose into one kernel, because each
+step gives each vertex its own scale before the next. Where the normals
+nearby agree, each step's norm is near 1 and the effect is small. Where they
+cancel (low \|n̄\|), the division gives those vertices full weight again at
+each step.
 
 The normal length \|n̄\| is the norm of m, where m starts as the same unit
 area-weighted normals and takes the same 10 steps with no division
@@ -96,8 +105,8 @@ name alone (relative to the `.gii`), with its `ExternalFileOffset` in bytes.
 |---|---|---|---|---|
 | `_white.surf.gii` | 1: vertices, scanner RAS mm | float32 | n × 3 | `NIFTI_INTENT_POINTSET` |
 | `_white.surf.gii` | 2: triangles, indices into the vertices | int32 | m × 3 | `NIFTI_INTENT_TRIANGLE` |
-| `_desc-normals_white.func.gii` | 1: unit normals, scanner RAS | float32 | n × 3 | `NIFTI_INTENT_VECTOR` |
-| `_desc-normlen_white.func.gii` | 1: the normal length \|n̄\|, in [0, 1] | float32 | n (1-D, `Dimensionality="1"`) | `NIFTI_INTENT_NONE` |
+| `_desc-smoothnormals_white.func.gii` | 1: unit smoothed normals, scanner RAS | float32 | n × 3 | `NIFTI_INTENT_VECTOR` |
+| `_desc-smoothnormlen_white.func.gii` | 1: the normal length \|n̄\|, in [0, 1] | float32 | n (1-D, `Dimensionality="1"`) | `NIFTI_INTENT_NONE` |
 | `_desc-edgekeys_white.func.gii` | 1: edge keys, each an int64 stored as its (low, high) int32 words (GIfTI has no 64-bit integers): read the array as little-endian int64 | int32 | n × 2 | `NIFTI_INTENT_NONE` |
 
 The point set's `CoordinateSystemTransformMatrix` is the identity from
@@ -178,10 +187,11 @@ so that the file layout stays inside it.
 | `Faces` | integer | yes | m |
 | `Blocks` | integer | yes | Rows of the block index |
 | `Pieces` | array of objects | yes | Per connected piece, largest first: `V`, `F`, `boundary_loops`, `chi`, `genus`, `area_mm2` |
-| `NormalsFile` | string | yes | Name of the normals' `.func.gii` |
+| `NormalsFile` | string | yes | Name of the smoothed normals' `.func.gii` |
 | `BlocksFile` | string | yes | Name of the block index |
 | `EdgeKeysFile` | string | yes | Name of the edge keys' `.func.gii` |
 | `NormLenFile` | string | yes | Name of the normal length's `.func.gii` |
+| `NormalSmoothingSteps` | integer | yes | Steps of smoothing along the mesh for the normals and \|n̄\| (each step of the normals renormalises; see above) |
 | `GridShape` | array of integers | yes | The segmentation's grid (voxels), which defines the edge keys |
 | `DataSHA256` | object | yes | SHA-256 of each `.dat`, by name |
 | `Antialias` | object | yes | How the field was solved: `Method` (`thin-plate`), `Band`, `Eps`, `Tolerance`, `Iterations`, `Restarts`, `LastChange`, `Converged` |
