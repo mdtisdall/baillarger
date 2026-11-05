@@ -7,27 +7,59 @@
 # With --changed-since, the lint, format, and type checks still run on the
 # whole project, and only the tests that the change can affect run
 # (scripts/affected-tests). Pull requests use it; main runs all the tests
-# after each merge.
+# after each merge. The tests run in parallel (pytest-xdist, -n auto).
+#
+# CI splits the work across runners:
+#
+#   scripts/check --lint-only                 # lint, format, and types only
+#   scripts/check --group 2/4 [--changed-since <ref>]
+#                                             # tests only: group 2 of 4
+#
+# pytest-split forms the groups from the times in .test_durations. To
+# refresh the file: uv run pytest -n auto --store-durations
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-base=""
-case "${1:-}" in
-  --changed-since)
-    [ $# -eq 2 ] || { echo "usage: scripts/check [--changed-since <ref>]" >&2; exit 64; }
-    base="$2"
-    ;;
-  '') ;;
-  *) echo "usage: scripts/check [--changed-since <ref>]" >&2; exit 64 ;;
-esac
+usage() {
+  echo "usage: scripts/check [--changed-since <ref>] [--lint-only | --group <i>/<n>]" >&2
+  exit 64
+}
+
+base="" lint=1 tests=1 split=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --changed-since)
+      [ $# -ge 2 ] || usage
+      base="$2"
+      shift 2
+      ;;
+    --lint-only)
+      tests=0
+      shift
+      ;;
+    --group)
+      [ $# -ge 2 ] && [[ $2 =~ ^([0-9]+)/([0-9]+)$ ]] || usage
+      ((BASH_REMATCH[1] >= 1 && BASH_REMATCH[1] <= BASH_REMATCH[2])) || usage
+      lint=0
+      split=(--splits "${BASH_REMATCH[2]}" --group "${BASH_REMATCH[1]}")
+      shift 2
+      ;;
+    *) usage ;;
+  esac
+done
+((lint || tests)) || usage
 [ -z "$base" ] || echo "scripts/check: only the tests that the changes since $base can affect"
 
 uv sync --frozen
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy src tests
+if ((lint)); then
+  uv run ruff check .
+  uv run ruff format --check .
+  uv run mypy src tests
+fi
+((tests)) || exit 0
+pytest=(uv run pytest -q -n auto ${split[@]+"${split[@]}"})
 if [ -n "$base" ]; then
-  python3 scripts/affected-tests --base "$base" --run -- uv run pytest -q
+  python3 scripts/affected-tests --base "$base" --run -- "${pytest[@]}"
 else
-  uv run pytest -q
+  "${pytest[@]}"
 fi
