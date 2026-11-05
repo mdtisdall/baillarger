@@ -1,20 +1,13 @@
-"""Tests of baillarger.viewer.filters, and of filters in the viewer's site and server,
-with exact answers."""
+"""Tests of baillarger.viewer.filters, with exact answers."""
 
-import json
-import threading
-import urllib.request
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 import pytest
-from test_viewer_data import get, write_site
 
-from baillarger.viewer import data as VD
 from baillarger.viewer import filters as VF
-from baillarger.viewer import server as VS
 
 type Float = npt.NDArray[np.float64]
 
@@ -145,109 +138,3 @@ def test_result_round_trip(tmp_path: Path) -> None:
     assert np.allclose(q.prof, r.prof, equal_nan=True)
     assert q.z is not None and r.z is not None and np.allclose(q.z, r.z, atol=1e-5)
     assert set(q.layers) == set(r.layers) and "stack weight" in q.layers
-
-
-def test_jobs_compute_once_then_load_from_the_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cv, _ = write_site(tmp_path)
-    jobs = VF.FilterJobs(cv, tmp_path / "cache", "synth", "mesh", log=quiet)
-    out = jobs.run(dict(smooth_mm=0.08), wait=True)
-    assert out["status"] == "done" and jobs.status()["status"] == "done"
-    assert [c["key"] for c in jobs.cached()] == [out["key"]]
-
-    def fail(*a: Any, **k: Any) -> Any:
-        raise AssertionError("recomputed")
-
-    monkeypatch.setattr(VF, "compute", fail)
-    again = VF.FilterJobs(cv, tmp_path / "cache", "synth", "mesh", log=quiet)
-    assert again.run(dict(smooth_mm=0.08))["status"] == "done"
-    assert again.get(out["key"]).params.smooth_mm == 0.08
-    # another mesh key: not this cache's result
-    other = VF.FilterJobs(cv, tmp_path / "cache", "synth", "other", log=quiet)
-    assert other.cached() == []
-
-
-def test_one_job_at_a_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    cv, _ = write_site(tmp_path)
-    gate = threading.Event()
-    real = VF.compute
-
-    def slow(*a: Any, **k: Any) -> VF.Result:
-        gate.wait(5)
-        return real(*a, **k)
-
-    monkeypatch.setattr(VF, "compute", slow)
-    jobs = VF.FilterJobs(cv, tmp_path / "cache", "synth", "mesh", log=quiet)
-    assert jobs.run(dict(smooth_mm=0.08))["status"] == "running"
-    with pytest.raises(RuntimeError, match="one at a time"):
-        jobs.run(dict(smooth_mm=0.16))
-    gate.set()
-    assert jobs.thread is not None
-    jobs.thread.join(10)
-    assert jobs.status()["status"] == "done"
-
-
-@pytest.fixture
-def site(tmp_path: Path) -> VD.Site:
-    cv, ep = write_site(tmp_path)
-    return VD.Site(cv, tmp_path / "cache", echo=ep, log=quiet)
-
-
-def test_site_shows_a_filter_in_its_frame(site: VD.Site) -> None:
-    raw = site.section_at(40)
-    assert raw["u"]["frame"] == "depth" and site.filter_meta()["key"] is None
-    out = site.jobs.run(dict(flatten="lk"), wait=True)
-    meta = site.use_filter(out["key"])
-    assert meta["frame"] == "tau" and meta["shown"] == site.n
-    assert {VF.PREFIX + "residual rms (mm)", VF.PREFIX + "fold fraction"} <= set(
-        meta["layers"]
-    )
-    sec = site.section_at(40)
-    # every echo is constant: no shift has weight, the warp is the identity, so the
-    # user's point keeps its depth and every profile keeps its samples
-    assert sec["u"]["frame"] == "tau"
-    pts = {(p["point"], p["depth"]) for p in sec["u"]["points"]}
-    assert pts == {(p["point"], p["depth"]) for p in raw["u"]["points"]}
-    assert sec["u"]["ns"] == raw["u"]["ns"]
-    site.use_filter(None)
-    assert site.section_at(40)["u"]["frame"] == "depth"
-    assert not any(k.startswith(VF.PREFIX) for k in site.layers())
-
-
-def post(url: str, body: dict[str, Any]) -> Any:
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=10) as r:
-        return json.loads(r.read())
-
-
-def test_server_runs_and_shares_a_filter(site: VD.Site) -> None:
-    srv = VS.serve(site, 0)
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
-    th.start()
-    base = f"http://127.0.0.1:{srv.server_address[1]}"
-    try:
-        f = json.loads(get(base + "/filters"))
-        assert f["active"]["key"] is None and f["choices"]["flatten"] == list(
-            VF.FLATTEN
-        )
-        out = post(base + "/filters/run", {"from": "A", "params": {"smooth_mm": 0.08}})
-        assert site.jobs.thread is not None
-        site.jobs.thread.join(10)
-        assert json.loads(get(base + "/filters"))["status"]["status"] == "done"
-        used = post(base + "/filters/use", {"from": "A", "key": out["key"]})
-        assert used["key"] == out["key"]
-        assert json.loads(get(base + "/state"))["state"]["filter"] == out["key"]
-        bad = urllib.request.Request(
-            base + "/filters/run",
-            data=json.dumps({"from": "A", "params": {"echo": "9"}}).encode(),
-        )
-        with pytest.raises(urllib.error.HTTPError):
-            urllib.request.urlopen(bad, timeout=5)
-    finally:
-        srv.shutdown()
-        srv.server_close()

@@ -36,8 +36,13 @@ from typing import Any
 import numpy as np
 
 from baillarger.labels import LUT_NAMES
-from baillarger.viewer.bricks import WIRE_NAMES, ArrayPyramid, BrickSource, LazyVolume
-from baillarger.viewer.data import nifti
+from baillarger.viewer.bricks import (
+    WIRE_NAMES,
+    ArrayPyramid,
+    BrickSource,
+    LazyVolume,
+    nifti,
+)
 
 #: FreeSurferColorLUT colours (R, G, B) of the labels of label-set/1 (LUT_NAMES)
 LABEL_RGB: dict[int, tuple[int, int, int]] = {

@@ -24,15 +24,14 @@ misfit over levels, the fraction of its levels that fold (dz/dtau <= 0) and the
 fraction of its weighted shift samples at the bound; with stacking, the sum of its
 neighbours' weights.
 
-Jobs (FilterJobs, on the job pattern of baillarger.viewer.jobs) run one at a time
-in a thread, since a flattening of a whole box takes minutes and several GB. Each
-result is saved in the cache directory, keyed by the parameters and the column
-volume's mesh, so asking again loads it.
+The filters take their inputs (Inputs) from the caller; this module reads no data
+files. Its job runner and the page code that read a column volume's .npz went with the
+site mode (phase 4.3); flattening as a filter of the viewer is phase 4.4's (it reads
+the published flattening), and runs on the job pattern of baillarger.viewer.jobs.
 """
 
 import hashlib
 import json
-import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -45,7 +44,6 @@ from scipy.spatial import cKDTree
 
 from baillarger import flatten as FL
 from baillarger.streamlines import STEP_MM
-from baillarger.viewer.jobs import Jobs
 
 type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.int64]
@@ -111,28 +109,13 @@ class Params:
 
 @dataclass
 class Inputs:
-    """What the filters read from a column volume."""
+    """What the filters read: the profiles along the traces and their roots."""
 
     fv: Arr  # (2, N, n): echoes 2 and 3 along every trace, nan past its end
     ns: Int  # (N,) samples per trace
     keep: Int  # traces filtered: rooted, not near a box face, more than one sample
     root_mm: Float  # (len(keep), 3) box mm
     nrm: Float  # (len(keep), 3) white-mesh normal at the root
-
-    @classmethod
-    def load(cls, column_volume: Path) -> "Inputs":
-        with np.load(column_volume) as Z:
-            tv, ns, vox = Z["tv"], Z["ns"].astype(np.int64), Z["vox"].astype(float)
-            near = Z["near_face"] if "near_face" in Z.files else np.zeros(len(tv), bool)
-            keep = np.flatnonzero((tv >= 0) & ~near & (ns > 1))
-            v = Z["v"].astype(float)
-            return cls(
-                fv=Z["fv"][:, keep].astype(np.float64),
-                ns=ns[keep],
-                keep=keep,
-                root_mm=v[tv[keep]] * vox,
-                nrm=Z["nrm"][tv[keep]].astype(float),
-            )
 
 
 @dataclass
@@ -327,77 +310,3 @@ def compute(inp: Inputs, p: Params, key: str, log: Callable[[str], object]) -> R
     summary["seconds"] = round(time.time() - t0, 1)
     log(f"filter done: {p.label()} ({summary['seconds']} s)")
     return Result(p, key, inp.keep, G, frame, tau, z, layers, summary)
-
-
-class FilterJobs:
-    """Filter results of one column volume: computed one at a time in a thread, kept
-    in the cache directory, the last few kept in memory (baillarger.viewer.jobs)."""
-
-    def __init__(
-        self,
-        column_volume: Path,
-        cache: Path,
-        name: str,
-        data_key: str,
-        log: Callable[[str], object] = print,
-        keep_in_memory: int = 3,
-    ) -> None:
-        self.column_volume = Path(column_volume)
-        self.cache = Path(cache)
-        self.name, self.data_key = name, data_key
-        self.jobs: Jobs[Result] = Jobs(
-            self.cache,
-            f"filter_{name}",
-            ".npz",
-            save=Result.save,
-            load=Result.load,
-            log=log,
-            keep_in_memory=keep_in_memory,
-        )
-        self._inputs: Inputs | None = None
-
-    @property
-    def thread(self) -> threading.Thread | None:
-        return self.jobs.thread
-
-    def path(self, key: str) -> Path:
-        return self.cache / f"filter_{self.name}_{key}.npz"
-
-    def cached(self) -> list[dict[str, Any]]:
-        out = []
-        for f in self.jobs.files():
-            try:
-                with np.load(f, allow_pickle=False) as Q:
-                    meta = json.loads(str(Q["meta"]))
-            except (OSError, ValueError, KeyError):
-                continue
-            prm = Params.parse(meta["params"])
-            if meta["key"] == prm.key(self.data_key):
-                out.append(dict(key=meta["key"], label=prm.label(), params=asdict(prm)))
-        return out
-
-    def log(self, msg: str) -> None:
-        self.jobs.log(msg)
-
-    def status(self) -> dict[str, Any]:
-        return self.jobs.status()
-
-    def get(self, key: str) -> Result:
-        """A finished result, from memory or the cache."""
-        try:
-            return self.jobs.get(key)
-        except KeyError:
-            raise KeyError(f"no filter result {key}") from None
-
-    def run(self, params: dict[str, Any], wait: bool = False) -> dict[str, Any]:
-        """Start the filter (or find it done). Returns {key, label, status}; status
-        "done" when the result is ready now."""
-        p = Params.parse(params)
-        key = p.key(self.data_key)
-        return self.jobs.run(key, p.label(), lambda log: self._work(p, key, log), wait)
-
-    def _work(self, p: Params, key: str, log: Callable[[str], object]) -> Result:
-        if self._inputs is None:
-            log(f"reading {self.column_volume.name}")
-            self._inputs = Inputs.load(self.column_volume)
-        return compute(self._inputs, p, key, log)
