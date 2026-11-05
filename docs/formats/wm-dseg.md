@@ -1,7 +1,7 @@
 # wm-dseg: the segmentation with a topologically correct WM mask
 
 SpecVersion `wm-dseg/1` (the corrected segmentation) and `wm-dseg-fixes/1`
-(the diagnostic image of the changes). Written by
+(the changes: an image, a fix table and a fix diff). Written by
 `python -m baillarger.white_dseg ASEG [--edits EDITS] --out DERIV`
 (`baillarger.white_dseg.write_wm_topo`); the keys are enforced by
 `baillarger.white_dseg.DSEG_SPEC` and `FIXES_SPEC`, and `tests/test_bids.py` checks
@@ -17,13 +17,25 @@ In the BIDS derivatives root `DERIV`, for an input with entities `sub` and
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.nii.gz` | The corrected segmentation: the input's grid, affine, header and data type |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.tsv` | `index` and `name` (FreeSurfer LUT) of every label in it |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_dseg.json` | Sidecar, `wm-dseg/1` |
-| `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.nii.gz` | uint8, the changed voxels: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit, 5 small piece; 0 elsewhere. A voxel that two steps change shows the value of the later step (the order: 4, then 1 to 3, then 5) |
+| `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.nii.gz` | uint8, the changed voxels: 1 handle cut, 2 handle fill, 3 cavity fill, 4 manual edit, 5 small piece; 0 elsewhere. Each voxel shows the kind of the fix that changed it last (see The fixes). A voxel that a manual edit changes and no fix then changes shows 4 |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.tsv` | `index` and `name` of those values |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_dseg.json` | Sidecar, `wm-dseg-fixes/1` |
+| `sub-<sub>_ses-<ses>_desc-wmtopofixes_fixes.tsv` | The fix table: one row per fix |
+| `sub-<sub>_ses-<ses>_desc-wmtopofixes_fixes.json` | Sidecar, `wm-dseg-fixes/1` (the same content) |
+| `sub-<sub>_ses-<ses>_desc-wmtopofixes_diff.npy` | The fix diff: one record per changed voxel |
+| `sub-<sub>_ses-<ses>_desc-wmtopofixes_diff.json` | Sidecar, `wm-dseg-fixes/1` (the same content) |
+
+In `sub-<sub>/ses-<ses>/wmtopofixes-history/` (next to `anat/`):
+
+| File | Content |
+|---|---|
+| `<DiffSHA256>.npy`, `<DiffSHA256>.tsv`, `<DiffSHA256>.json` | A copy of the diff, the table and the sidecar of every run, by the diff's SHA-256 |
 
 `DERIV/dataset_description.json` (`DatasetType` `derivative`) is written if
 it is not there. BIDS's `desc` entity and `dseg` suffix are standard; the
-`desc` values are ours.
+`desc` values and the `fixes` and `diff` suffixes are ours. The history
+directory is not BIDS: it keeps old runs, which BIDS has no place for. It is
+not in `anat/`, so that readers of `anat/` see only the current run.
 
 ## The correction
 
@@ -66,6 +78,83 @@ of the mask is made handle- and cavity-free by construction, with the other
 pieces as background; a fill of one piece can touch another and make a
 handle or a cavity of the union, so the command checks the Betti numbers and
 writes nothing if b1 or b2 is not 0.
+
+## The fixes
+
+The change from the labels that `dseg` reads (the input with the manual
+edits made: the "old" labels) to the labels that it writes (the "new"
+labels) is split into fixes. Each fix has an integer id, from 1, in this
+order:
+
+1. each manual answer with rows, in the order of the answers;
+2. each handle move, in the order that `remove_handles` makes them (kind
+   `handle_cut` for a cut or stranded voxels, `handle_fill` for a fill);
+3. each cavity (a connected piece of the cavity fill, Kuhn adjacency), in
+   the order of `scipy.ndimage.label`;
+4. each small piece, in the order of `scipy.ndimage.label`.
+
+The same input gives the same ids. The steps run in another order: the
+manual edits, the cavity fill, the handle moves, the small pieces. A voxel
+belongs to the fix that changed it last in that order. A voxel whose new
+label is its old label is in no fix (for example a cavity voxel that a
+handle cut then gives back its old label).
+
+### The fix table
+
+`_desc-wmtopofixes_fixes.tsv`: tab-separated, a header row, one row per
+fix, in id order. `n/a` marks a value that the fix does not have.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | integer | The fix's id |
+| `kind` | string | `manual_edit`, `handle_cut`, `handle_fill`, `cavity_fill` or `small_piece` (the names of the image's values) |
+| `voxels` | integer | The voxels that the fix changed last. For a fix other than `manual_edit`, its rows in the diff. For `manual_edit`, the answer's voxels that no fix then changes |
+| `i`, `j`, `k` | integer | The voxel of the fix that is nearest its centroid (0-based, on the grid; ties: the lowest linear index); `n/a` with no voxel |
+| `x`, `y`, `z` | number | The centroid of the voxel centres, in mm (the input's affine) |
+| `x_min` ... `z_max` | number | The bounding box of the voxel centres, in mm, per axis of mm |
+| `wall` | integer | For a handle move: the voxels of its wall that the other front claimed (the move's voxels); `n/a` for the other kinds |
+| `overrides` | integer | The `Id` of the answer whose verified voxel the fix changes; `n/a` if none |
+
+The sum of `voxels` over the fixes of each kind is the count of that kind's
+value in the image.
+
+### The fix diff
+
+`_desc-wmtopofixes_diff.npy`: a NumPy `.npy` file (version 1, no pickle) of
+one-dimensional structured records, 16 bytes each:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `index` | `<i8` | The voxel's linear index on the grid (C order) |
+| `fix` | `<i4` | The id of the fix that changed it last |
+| `old` | `<i2` | Its old label (the input with the manual edits made) |
+| `new` | `<i2` | Its label in `desc-wmtopo` (not `old`) |
+
+The records are in Morton order of the 64³ block grid
+(`baillarger.blocks.morton` of the voxel's block), and in C order of the
+linear index within a block, so a reader of one block reads one run of
+records. Why `.npy`: NumPy and other tools read it with no code of ours, it
+can be memory-mapped, its header holds the record type, and 16 bytes a
+voxel is the plan's limit (12 to 16). A `.tsv.gz` would need parsing and
+could not be read by block.
+
+`baillarger.white_dseg.replay_dseg(aseg, diff, edits)` rebuilds
+`desc-wmtopo` exactly from the input, the edits and the diff, with no
+correction. `baillarger.fix_diff.revert_fix(dseg, diff, id)` gives
+`desc-wmtopo` with one fix undone, for inspection: only that fix's voxels
+change, and the result can have a handle or a cavity.
+
+### Every run's diff is kept
+
+Each run copies its diff, its table and its sidecar to
+`sub-<sub>/ses-<ses>/wmtopofixes-history/` (`white_dseg.history_dir`), named by the SHA-256 of the diff file.
+`DiffInputs` in the sidecar gives the SHA-256 of the input labels
+(`Labels`), of the edits (`Edits`, if any) and of P (`Probability`, from
+phase 8), and the code (`Code`: the baillarger version and commit). Before
+it writes, `dseg` reads the kept sidecars. If one has the same `DiffInputs`,
+with no uncommitted change in either run (`Provenance` `Dirty` false), and
+another `DiffSHA256`, `dseg` stops with an error and writes nothing: the
+correction did not reproduce its diff.
 
 ## Manual edits
 
@@ -111,3 +200,9 @@ whole by the command, so an edit costs a `dseg` run.
 | `Sources` | array of strings | yes | As in `wm-dseg/1` |
 | `SourcesSHA256` | object | yes | SHA-256 of each source, by path |
 | `Provenance` | object | yes | As in `wm-dseg/1` |
+| `FixTable` | string | yes | The file name of the fix table |
+| `FixDiff` | string | yes | The file name of the fix diff |
+| `DiffSHA256` | string | yes | The SHA-256 of the fix diff file |
+| `DiffVoxels` | integer | yes | The records of the fix diff |
+| `DiffInputs` | object | yes | `Labels`, `Edits` (if any), `Probability` (if any): SHA-256 of each input; `Code`: the baillarger version and commit |
+| `Fixes` | object | yes | The number of fixes, by kind |
