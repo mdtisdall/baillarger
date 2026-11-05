@@ -49,6 +49,8 @@ Requests:
   /review/skip, /review/preview, /review/answer, /review/scribble.
 - Surface outlines (baillarger.viewer.outlines; with --white):
   /outline?axis=&mm=&box= (float32 segment ends, world mm).
+- The columns pane, with --white (baillarger.viewer.columns.route): /columns/meta,
+  /columns?v=&radius=..., /columns/profiles?..., /columns/<key>.tck.
 - POST /state {from, patch}: merge patch into the state; every page gets
   {from, seq, patch}.
 - POST /filters/run {from, params}: start a filter (one at a time, in a thread) or
@@ -72,6 +74,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 from baillarger.data import echo_path
+from baillarger.viewer import columns as VC
 from baillarger.viewer import filters as VF
 from baillarger.viewer import outlines as VO
 from baillarger.viewer import review as VR
@@ -155,6 +158,7 @@ class Handler(BaseHTTPRequestHandler):
     volume: LazyVolume | None = None
     volumes: VV.Volumes | None = None  # named volumes (baillarger.viewer.volumes)
     outlines: VO.Outlines | None = None  # surface outlines (baillarger.viewer.outlines)
+    columns: VC.Columns | None = None
     wmreview: VR.Review | None = None  # the stream 1 review (baillarger.viewer.review)
     lock = threading.Lock()  # one site computation at a time
     groups: dict[tuple[int, float], dict[str, list[int]]] = {}
@@ -307,6 +311,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if u.path == "/outline":
             self.outline(q)
+            return
+        if u.path == "/columns" or u.path.startswith("/columns/"):
+            VC.route(self, u.path, q)
             return
         if VR.route(self, "GET", u.path, q, {}):
             return
@@ -501,6 +508,7 @@ def serve(
     volume: LazyVolume | None = None,
     volumes: VV.Volumes | None = None,
     outlines: VO.Outlines | None = None,
+    columns: VC.Columns | None = None,
     wmreview: VR.Review | None = None,
 ) -> ThreadingHTTPServer:
     """The server; without a site, labels (labels only) or white (a white surface
@@ -513,6 +521,7 @@ def serve(
     Handler.volume = volume
     Handler.volumes = volumes
     Handler.outlines = outlines
+    Handler.columns = columns
     Handler.wmreview = wmreview
     Handler.shared = Shared()
     Handler.groups = {}
@@ -556,6 +565,12 @@ def main(argv: list[str] | None = None) -> None:
         "its overview from baillarger.white_overview, alone",
     )
     VV.add_arguments(ap)
+    ap.add_argument(
+        "--echo-dir",
+        type=Path,
+        help="with --white: the directory of echoes 1-3 (.nii, else .nii.gz) for the "
+        "columns pane's profiles (default: data)",
+    )
     VR.add_arguments(ap)
     ap.add_argument("--port", type=int, default=8790)
     a = ap.parse_args(argv)
@@ -563,12 +578,21 @@ def main(argv: list[str] | None = None) -> None:
     site: Site | None = None
     review: LabelReview | None = None
     white: WhiteView | None = None
+    columns: VC.Columns | None = None
     if a.white is not None:
         if a.column_volume is not None or a.labels is not None:
             ap.error("--white is viewed alone: no column volume or --labels")
         if a.cache is None:
             ap.error("--cache is needed with --white")
         white = WhiteView(a.white, a.cache, log=print)
+        columns = VC.Columns(
+            a.white,
+            a.dseg or VC.dseg_for(a.white, white.W.sidecar),
+            white.W.v,
+            white.W.f,
+            VC.echo_files(a.echo_dir or echo_path(1).parent),
+            log=print,
+        )
     elif a.column_volume is None:
         if a.labels is None:
             ap.error("give a column volume, or --labels to review the labels alone")
@@ -624,7 +648,9 @@ def main(argv: list[str] | None = None) -> None:
             ap.error(str(exc))
     elif a.sites is not None or a.edits is not None:
         ap.error("--sites and --edits need --white")
-    srv = serve(site, a.port, review, white, volume, volumes, outlines, wmreview)
+    srv = serve(
+        site, a.port, review, white, volume, volumes, outlines, columns, wmreview
+    )
     print(
         f"serving on http://127.0.0.1:{a.port}/ ({time.time() - t0:.0f} s)", flush=True
     )

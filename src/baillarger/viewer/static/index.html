@@ -153,6 +153,7 @@
       </div>
     </div>
   </div>
+  <div class="pane" id="p-columns"></div>
 </div>
 <div id="info">Two points: the crosshair (the slices) and the WM selection (on the white surface: the sections and streamlines). In each pane a click moves that pane's own point and a shift-click moves the other one.</div>
 <div id="log"></div>
@@ -181,7 +182,7 @@ const has = p => PANES.includes(p);
 
 // ---------------------------------------------------------------- layout
 function layout() {
-  for (const p of ["volume", "surface", "map", "sections", "labels"]) $("p-" + p).style.display = has(p) ? "" : "none";
+  for (const p of ["volume", "surface", "map", "sections", "labels", "columns"]) $("p-" + p).style.display = has(p) ? "" : "none";
   const n = PANES.length, m = $("main");
   m.style.setProperty("--cols", n >= 3 ? 2 : n);
   m.style.gridTemplateRows = n >= 3 ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(0, 1fr)";
@@ -205,6 +206,7 @@ async function apply(st) {
     else if ("rotation" in st && CUR !== null) await showTrace(CUR);
     if ("labels_seq" in st && LAB.on && st.labels_seq !== LAB.seq) await loadLabels();
     if ("filter" in st && !META.labels_only && !META.surface_only && st.filter !== FIL.key) await refreshFilters(true);
+    vHook("state", st);
   } finally { applying = false; }
 }
 function connect() {
@@ -225,6 +227,7 @@ async function setSelection(sel, frame) {
   if (sel && sel.trace !== null) await showTrace(sel.trace);
   else { CUR = null; SEC = null; clearSections(); drawMap(); draw3d();
     if (sel && !META.surface_only) log(`no shown trace within 1 mm of vertex ${sel.vertex}: no sections there`); }
+  vHook("selection", sel, frame);
 }
 async function selectHere(sel, frame) { await setSelection(sel, frame); share({ selection: sel, frame }); }
 function crossHere(mm) { CROSS = mm; moveVolumeCrosshair(mm); share({ crosshair: mm }); }
@@ -460,6 +463,7 @@ function draw3d() {
     if (SEC.facing) points(g, M, rootPos(SEC.facing.u.traces.concat(SEC.facing.v.traces)), [1, 0.55, 0.26], 3); }
   if (CUR !== null) points(g, M, rootPos([CUR]), [1, 1, 1], 7);
   if (SELN) { const v = SELN.vertex; points(g, M, new Float32Array([GL.pos[3*v], GL.pos[3*v+1], GL.pos[3*v+2]]), [0.2, 1, 1], 11); }
+  vHook("draw3d", g, M);
 }
 function pick3d(px, py) {
   const c = $("gl"), W = c.clientWidth, H = c.clientHeight, P = projMat(W, H), R = GL.R, t = GL.target, p = GL.pos;
@@ -1084,8 +1088,18 @@ document.addEventListener("keydown", e => {
   if (k) { e.preventDefault(); k(); }
 });
 
+// ---------------------------------------------------------------- hooks for panes in their own files (static/columns.js)
+// VIEWER.hooks: selection(sel, frame) after each WM selection; state(st) after each shared-state change; draw3d(g, mvp) at
+// the end of each 3D frame (box mm, the true surface at level 0); resize(). VIEWER.ready resolves when the page has started.
+let viewerReady;
+const VIEWER = window.VIEWER = { $, get, log, share, GL, NV, mvp, program, draw3d: () => draw3d(), has,
+  selectVertex: v => selectVertex(v, null), get selection() { return SELN; }, get frame() { return FRAME; },
+  get meta() { return META; }, hooks: { selection: [], state: [], draw3d: [], resize: [] },
+  ready: new Promise(r => { viewerReady = r; }) };
+function vHook(name, ...a) { for (const h of VIEWER.hooks[name]) try { h(...a); } catch (e) { log(`${name}: ${e.message}`); } }
+
 // ---------------------------------------------------------------- start
-window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections")) drawSections(); });
+window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections")) drawSections(); vHook("resize"); });
 (async () => {
   layout();
   META = await get("/meta");
@@ -1099,6 +1113,9 @@ window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections
   } else if (META.surface_only) {   // a white surface alone: its overview, and the volume pane: NiiVue on a box, or ours on the whole volume (?vol=bricks)
     PANES = ["volume", "surface"]; layout();
     if (q.get("vol") === "bricks" && !(await fetch("/volume")).ok) { PANES = ["surface"]; layout(); }   // no volume for ours: the overview alone
+    if (q.get("columns") !== "0" && (await fetch("/columns/meta")).ok) {   // static/columns.js; ?panes= picks among the three
+      const want = (q.get("panes") || "").split(",").filter(p => ["volume", "surface", "columns"].includes(p));
+      PANES = want.length ? want : PANES.concat(["columns"]); layout(); }
     for (const id of ["layer", "half", "dmax", "radius", "panesel", "vgm", "vfrom", "vto", "vover", "vpts", "vaxes", "brush", "bradius"])
       $(id).closest("label").style.display = "none";
     if (q.get("vol") !== "bricks") {
@@ -1133,7 +1150,9 @@ window.addEventListener("resize", () => { drawMap(); draw3d(); if (has("sections
   else if (has("labels")) $("ltable").textContent = "no label changes: start the viewer with --labels pial_labels_<name>.npz";
   connect();
   log(`loaded ${META.n} traces; tracer ${META.tracer}; WM label ${META.wm_label}`);
+  viewerReady();
 })();
 </script>
+<script type="module" src="/static/columns.js"></script>
 </body>
 </html>

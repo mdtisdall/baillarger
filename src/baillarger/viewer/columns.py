@@ -1,0 +1,599 @@
+"""The columns pane's server side: the columns near a vertex of the white
+surface, from the published samplers (ray-sampler/1, column-volume/1), for
+what is on screen, anywhere on the hemisphere.
+
+A request names a true vertex v of the white surface and a radius r (mm). The
+columns of the request are the columns whose roots lie within r of v along the
+surface (the graph of baillarger.mesh_graph: the mesh edges and the edges
+across neighbouring triangles, in mm), in the order that the ray sampler gives
+them (its owned columns, then its halo columns, each in vertex order), every
+n-th of them.
+
+How a request is computed (nothing scales with the whole mesh or volume):
+
+1. The superblock S of v at LEVEL (the superblock of the block that owns v).
+2. The local graph of S with a halo of MAX_RADIUS (mesh_graph.local_graph):
+   only the faces of the blocks near S. Its distances from a root of S are
+   exact up to the halo, so a Dijkstra from v, limited to r, gives the roots.
+   The graph is kept for the last GRAPHS superblocks. On the hemisphere it
+   takes 2.5-4 s to build (about 1.4 M faces of 27 blocks; a halo of 2 mm
+   meets the same blocks), so the first request on a superblock runs as a
+   job; the next ones take 0.05-0.5 s.
+3. One call of the ray sampler on S with a halo of r: every root within r of
+   v is in its halo box (v lies in the cells of S, and a root within r along
+   the surface is within r in space). The call samples each selected column
+   between the requested extents and every other column with extents 0 (one
+   sample), so that the samples cost only what the response holds. The
+   extents of a column do not change its samples, intervals or class
+   (ray-sampler/1, "Samples"), so each column is the sampler's own, bit for
+   bit.
+4. For the profiles, the column-volume sampler on the selected columns only.
+
+A request that is not in the cache runs as a job (baillarger.viewer.jobs, one
+at a time, in a thread). The server waits WAIT_S for it, then answers
+"running" and the page asks again. The last CACHE results are kept in memory,
+keyed by the request and the sources' SHA-256.
+
+The binary answers (encode): a uint32 header length, a JSON header padded to
+8 bytes, then the arrays, each padded to 8 bytes. The header lists each
+array's name, dtype, shape and offset (from the start of the body).
+"""
+
+import hashlib
+import json
+import threading
+import time
+from collections import OrderedDict
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import numpy.typing as npt
+from scipy.sparse.csgraph import dijkstra
+
+from baillarger import rays as R
+from baillarger.bids import file_sha256
+from baillarger.blocks import Source, open_volume
+from baillarger.column_volume import ColumnVolume, ColumnVolumeSampler
+from baillarger.mesh_graph import BlockIndex, LocalGraph, local_graph
+from baillarger.viewer.jobs import Jobs
+from baillarger.viewer.tck import tck
+
+type Float = npt.NDArray[np.float64]
+type I64 = npt.NDArray[np.int64]
+type Arr = npt.NDArray[Any]
+
+#: the superblock level of a request: one block (64 cells, about 10 mm at 160 µm)
+LEVEL = 0
+#: the largest radius of a request, mm: the halo of the local graphs
+MAX_RADIUS = 5.0
+#: the most columns in one request. At the full caps and the default step a
+#: column has 251 samples of 16 bytes (s and position) and 3 echoes of 4 bytes,
+#: so 4000 columns make about 28 MB: the most that a page loads and draws
+#: without a pause. Use `every` for a larger radius.
+MAX_COLUMNS = 4000
+#: how long a request waits for its job before it answers "running", s
+WAIT_S = 2.0
+#: the results kept in memory, and the local graphs
+CACHE = 8
+GRAPHS = 4
+
+
+@dataclass(frozen=True)
+class Request:
+    """One request of the columns pane (see the module docstring)."""
+
+    vertex: int
+    radius: float
+    method: str = "normal"
+    every: int = 1
+    e_in: float = R.CAP_IN
+    e_out: float = R.CAP_OUT
+    step: float = R.STEP
+
+    @classmethod
+    def parse(cls, q: dict[str, str]) -> "Request":
+        """A request from the query of a URL: v, radius, and optionally
+        method, every, e_in, e_out, step."""
+        r = cls(
+            vertex=int(q["v"]),
+            radius=float(q.get("radius", 2.0)),
+            method=str(q.get("method", "normal")),
+            every=int(q.get("every", 1)),
+            e_in=float(q.get("e_in", R.CAP_IN)),
+            e_out=float(q.get("e_out", R.CAP_OUT)),
+            step=float(q.get("step", R.STEP)),
+        )
+        r.check()
+        return r
+
+    def check(self) -> None:
+        if not 0 <= self.radius <= MAX_RADIUS:
+            raise ValueError(f"radius {self.radius}: not in [0, {MAX_RADIUS}] mm")
+        if self.method not in R.METHODS:
+            raise ValueError(f"method {self.method!r}: not one of {R.METHODS}")
+        if self.every < 1:
+            raise ValueError(f"every {self.every}: not >= 1")
+        if not 0 <= self.e_in <= R.CAP_IN or not 0 <= self.e_out <= R.CAP_OUT:
+            raise ValueError("e_in, e_out: outside the caps")
+        if not self.step > 0:
+            raise ValueError(f"step {self.step}: not > 0")
+
+    def key(self, sources: str) -> str:
+        """The cache key: the request and the sources' SHA-256."""
+        text = json.dumps([sources, *self.__dict__.values()], default=float)
+        return hashlib.sha1(text.encode()).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class Result:
+    """The columns of one request, and when asked for, their echoes."""
+
+    request: Request
+    key: str
+    rays: R.Rays
+    #: the superblock and level of the sampler's call
+    superblock: tuple[int, int, int]
+    level: int
+    #: the distance of each column's root from the vertex along the surface, mm
+    distance: npt.NDArray[np.float32]
+    #: the time of each step, s
+    seconds: dict[str, float]
+
+
+def select_columns(rays: R.Rays, idx: npt.ArrayLike) -> R.Rays:
+    """The columns idx of rays (any order and subset), as a Rays of their own:
+    each column with its own samples and intervals, unchanged."""
+    c = np.asarray(idx, np.int64)
+    r = rays.roots
+    roots = replace(
+        r,
+        edge_key=r.edge_key[c],
+        vertex=r.vertex[c],
+        owned=r.owned[c],
+        root=r.root[c],
+        normal=r.normal[c],
+        normal_length=r.normal_length[c],
+    )
+
+    def rows(start: I64) -> tuple[I64, I64]:
+        n = start[c + 1] - start[c]
+        out = np.zeros(len(c) + 1, np.int64)
+        out[1:] = np.cumsum(n)
+        take = (
+            np.concatenate([np.arange(start[k], start[k + 1]) for k in c])
+            if len(c)
+            else np.zeros(0, np.int64)
+        )
+        return out, take.astype(np.int64)
+
+    ss, si = rows(rays.sample_start)
+    qs, qi = rows(rays.interval_start)
+    return replace(
+        rays,
+        roots=roots,
+        k_in=rays.k_in[c],
+        k_out=rays.k_out[c],
+        sample_start=ss,
+        s=rays.s[si],
+        position=rays.position[si],
+        interval_start=qs,
+        interval_s0=rays.interval_s0[qi],
+        interval_s1=rays.interval_s1[qi],
+        interval_label=rays.interval_label[qi],
+        interval_class=rays.interval_class[qi],
+        derived_class=rays.derived_class[c],
+    )
+
+
+#: the arrays of a /columns answer, in order: (name, the Rays or Roots field)
+RAY_ARRAYS = (
+    "edge_key",
+    "vertex",
+    "owned",
+    "root",
+    "normal",
+    "normal_length",
+    "k_in",
+    "k_out",
+    "sample_start",
+    "s",
+    "position",
+    "interval_start",
+    "interval_s0",
+    "interval_s1",
+    "interval_label",
+    "interval_class",
+    "derived_class",
+)
+
+
+def ray_arrays(rays: R.Rays) -> dict[str, Arr]:
+    """The arrays of rays by the names of RAY_ARRAYS."""
+    return {
+        k: np.asarray(
+            getattr(rays.roots, k) if hasattr(rays.roots, k) else getattr(rays, k)
+        )
+        for k in RAY_ARRAYS
+    }
+
+
+def encode(header: dict[str, Any], arrays: dict[str, Arr]) -> bytes:
+    """The binary answer: see the module docstring. Bools go as uint8."""
+    parts: list[bytes] = []
+    table = []
+    off = 0
+    for name, a in arrays.items():
+        a = np.ascontiguousarray(a)
+        if a.dtype == np.bool_:
+            a = a.astype(np.uint8)
+        a = a.astype(a.dtype.newbyteorder("<"))
+        b = a.tobytes()
+        table.append(
+            dict(name=name, dtype=a.dtype.name, shape=list(a.shape), offset=off)
+        )
+        pad = -len(b) % 8
+        parts.append(b + b"\0" * pad)
+        off += len(b) + pad
+    h = json.dumps(dict(header, arrays=table), default=float).encode()
+    h += b" " * (-(len(h) + 4) % 8)
+    return np.uint32(len(h)).tobytes() + h + b"".join(parts)
+
+
+def decode(body: bytes) -> tuple[dict[str, Any], dict[str, Arr]]:
+    """The header and the arrays of an answer of encode."""
+    n = int(np.frombuffer(body[:4], "<u4")[0])
+    head: dict[str, Any] = json.loads(body[4 : 4 + n])
+    base = 4 + n
+    out: dict[str, Arr] = {}
+    for t in head["arrays"]:
+        dt = np.dtype(t["dtype"]).newbyteorder("<")
+        count = int(np.prod(t["shape"], dtype=np.int64))
+        a = np.frombuffer(body, dt, count, base + t["offset"])
+        out[t["name"]] = a.reshape(t["shape"])
+    return head, out
+
+
+class Columns:
+    """The columns pane's data on one white surface: its ray sampler, its
+    column-volume sampler (with echoes), and the mesh for the radius along
+    the surface. v (voxel coordinates) and f are the whole white surface (as
+    baillarger.white_surf.WhiteSurface holds them); a request reads only the
+    rows near its vertex."""
+
+    def __init__(
+        self,
+        surf: Path,
+        dseg: Path,
+        v: Float,
+        f: npt.NDArray[np.integer[Any]],
+        echoes: Sequence[Path] = (),
+        log: Callable[[str], object] = print,
+    ) -> None:
+        self.rays = R.RaySampler(surf, dseg)
+        self.v, self.f = v, f
+        rs = self.rays
+        bt = np.loadtxt(
+            rs.surf.with_name(rs.sidecar["BlocksFile"]), skiprows=1, ndmin=2
+        ).reshape(-1, 13)
+        self.blocks = BlockIndex(
+            bt[:, :3].astype(np.int64),
+            bt[:, 3].astype(np.int64),
+            bt[:, 4].astype(np.int64),
+            bt[:, 5].astype(np.int64),
+            bt[:, 6].astype(np.int64),
+            bt[:, 7:10],
+            bt[:, 10:13],
+        )
+        self.order = np.argsort(self.blocks.vertex_start)
+        self.echo_paths = tuple(Path(p) for p in echoes)
+        self.volume: ColumnVolumeSampler | None = None
+        if self.echo_paths:
+            srcs: list[Source] = []
+            affs = []
+            for p in self.echo_paths:
+                src = open_volume(p)
+                srcs.append(src)
+                affs.append(src.affine)
+            self.volume = ColumnVolumeSampler(srcs, rs.affine, affs, rs.shape)  # type: ignore[arg-type]
+        side = rs.sidecar
+        self.sources = hashlib.sha1(
+            json.dumps(
+                [side["SourcesSHA256"], side.get("DataSHA256"), file_sha256(dseg)]
+                + [_echo_sha(p) for p in self.echo_paths],
+                sort_keys=True,
+                default=str,
+            ).encode()
+        ).hexdigest()[:16]
+        self.vox = rs.voxel_mm
+        # scanner mm to the 3D pane's frame (voxel coordinates times voxel size)
+        self.to_view = np.diag([*self.vox, 1.0]) @ rs.inverse
+        self.jobs: Jobs[Result] = Jobs(log=log, keep_in_memory=CACHE)
+        self.profiles: OrderedDict[str, ColumnVolume] = OrderedDict()
+        self.graphs: OrderedDict[tuple[int, int, int], LocalGraph] = OrderedDict()
+        self.lock = threading.Lock()  # one sampler call at a time
+
+    # ---------------------------------------------------------------- the columns
+    def superblock(self, vertex: int) -> tuple[int, int, int]:
+        """The superblock at LEVEL of the block that owns a vertex."""
+        b = self.blocks
+        k = int(np.searchsorted(b.vertex_start[self.order], vertex, side="right")) - 1
+        if k < 0:
+            raise ValueError(f"vertex {vertex}: not on the surface")
+        row = self.order[k]
+        if not b.vertex_start[row] <= vertex < b.vertex_stop[row]:
+            raise ValueError(f"vertex {vertex}: owned by no block")
+        ijk = b.ijk[row] >> LEVEL
+        return int(ijk[0]), int(ijk[1]), int(ijk[2])
+
+    def graph(self, sb: tuple[int, int, int]) -> LocalGraph:
+        """The local graph of sb with a halo of MAX_RADIUS."""
+        if sb in self.graphs:
+            self.graphs.move_to_end(sb)
+            return self.graphs[sb]
+        g = local_graph(
+            self.v,
+            self.f,
+            self.blocks,
+            sb,
+            LEVEL,
+            self.rays.cells,
+            MAX_RADIUS,
+            self.vox,
+        )
+        self.graphs[sb] = g
+        while len(self.graphs) > GRAPHS:
+            self.graphs.popitem(last=False)
+        return g
+
+    def near(self, vertex: int, radius: float) -> tuple[I64, Float]:
+        """The vertices within radius of vertex along the surface, ascending,
+        and their distances (mm)."""
+        sb = self.superblock(vertex)
+        g = self.graph(sb)
+        i = int(np.searchsorted(g.vertex, vertex))
+        if i >= len(g.vertex) or g.vertex[i] != vertex:
+            return np.array([vertex], np.int64), np.zeros(1)
+        d = dijkstra(g.graph, indices=i, limit=radius)
+        hit = np.flatnonzero(np.isfinite(d))
+        return g.vertex[hit], d[hit]
+
+    def compute(self, req: Request, log: Callable[[str], object] = print) -> Result:
+        """The columns of a request (see the module docstring)."""
+        t0 = time.perf_counter()
+        sb = self.superblock(req.vertex)
+        verts, dist = self.near(req.vertex, req.radius)
+        t1 = time.perf_counter()
+        with self.lock:
+            roots = self.rays.roots(sb, LEVEL, req.radius)
+            pos = np.searchsorted(verts, roots.vertex)
+            pos = np.minimum(pos, len(verts) - 1)
+            hit = verts[pos] == roots.vertex
+            if hit.sum() != len(verts):
+                raise RuntimeError(
+                    f"vertex {req.vertex}: {len(verts) - int(hit.sum())} roots "
+                    "within the radius are not in the sampler's halo"
+                )
+            chosen = np.flatnonzero(hit)[:: req.every]
+            if len(chosen) > MAX_COLUMNS:
+                raise ValueError(
+                    f"{len(chosen)} columns: more than {MAX_COLUMNS}; "
+                    "use a smaller radius or a larger `every`"
+                )
+            e_in = np.zeros(len(roots.vertex))
+            e_out = np.zeros(len(roots.vertex))
+            e_in[chosen], e_out[chosen] = req.e_in, req.e_out
+            rays = self.rays.sample(
+                sb,
+                LEVEL,
+                method=req.method,
+                e_in=e_in,
+                e_out=e_out,
+                step=req.step,
+                halo_mm=req.radius,
+            )
+        t2 = time.perf_counter()
+        out = select_columns(rays, chosen)
+        d = dist[pos[chosen]].astype(np.float32)
+        secs = dict(
+            graph=round(t1 - t0, 3),
+            sample=round(t2 - t1, 3),
+            calls=len(roots.vertex),
+        )
+        log(
+            f"columns at vertex {req.vertex}: {len(chosen)} of "
+            f"{len(roots.vertex)} in superblock {sb} ({secs})"
+        )
+        return Result(req, req.key(self.sources), out, sb, LEVEL, d, secs)
+
+    def get(self, req: Request) -> dict[str, Any]:
+        """Start the request as a job, or find it done; wait up to WAIT_S.
+        Returns {key, status} ("done", "running" or "busy": another job runs)."""
+        key = req.key(self.sources)
+        try:
+            out = self.jobs.run(
+                key,
+                f"columns at vertex {req.vertex}",
+                lambda log: self.compute(req, log),
+            )
+        except RuntimeError:
+            return dict(key=key, status="busy", job=self.jobs.status())
+        if out["status"] != "done" and self.jobs.thread is not None:
+            self.jobs.thread.join(WAIT_S)
+        st = self.jobs.status()
+        if self.jobs.has(key):
+            return dict(key=key, status="done")
+        if st["key"] == key and st["status"] == "error":
+            raise RuntimeError(st.get("error", "the job failed"))
+        return dict(key=key, status="running", job=st)
+
+    def result(self, key: str) -> Result:
+        return self.jobs.get(key)
+
+    def columns_bytes(self, key: str) -> bytes:
+        """The binary answer of /columns for a finished request."""
+        r = self.result(key)
+        rays = r.rays
+        arrays = ray_arrays(rays)
+        arrays["distance"] = r.distance
+        head = dict(
+            key=key,
+            spec=R.VERSION,
+            request=r.request.__dict__,
+            n=len(rays.roots.vertex),
+            samples=len(rays.s),
+            intervals=len(rays.interval_s0),
+            method=rays.method,
+            step=rays.step,
+            superblock=list(r.superblock),
+            level=r.level,
+            seconds=r.seconds,
+            to_view=self.to_view.tolist(),
+            classes=dict(
+                interval=dict(
+                    OUTSIDE=R.OUTSIDE,
+                    WM=R.WM,
+                    CORTEX=R.CORTEX,
+                    OTHER=R.OTHER,
+                    OFF_GRID=R.OFF_GRID,
+                ),
+                derived=dict(OPEN=R.OPEN, IN_WM=R.IN_WM, NEITHER=R.NEITHER),
+            ),
+        )
+        return encode(head, arrays)
+
+    def profile(self, key: str) -> ColumnVolume:
+        """The column volume of a finished request (computed once, kept for
+        the last CACHE requests)."""
+        if self.volume is None:
+            raise ValueError("no echoes: start the viewer with --echo-dir")
+        with self.lock:
+            if key in self.profiles:
+                self.profiles.move_to_end(key)
+                return self.profiles[key]
+        r = self.result(key)
+        t = time.perf_counter()
+        cv = self.volume.sample(r.rays, "numpy")
+        r.seconds["profiles"] = round(time.perf_counter() - t, 3)
+        with self.lock:
+            self.profiles[key] = cv
+            while len(self.profiles) > CACHE:
+                self.profiles.popitem(last=False)
+        return cv
+
+    def profiles_bytes(self, key: str) -> bytes:
+        """The binary answer of /columns/profiles: each sample's echoes (N, E)
+        and validity, in the order of the samples of /columns."""
+        cv = self.profile(key)
+        head = dict(
+            key=key,
+            echoes=[p.name for p in self.echo_paths],
+            seconds=self.result(key).seconds,
+        )
+        return encode(head, dict(echo=cv.echo, valid=cv.valid))
+
+    def tck_bytes(self, key: str) -> bytes:
+        """The columns of a finished request as .tck (scanner mm)."""
+        rays = self.result(key).rays
+        st = rays.sample_start
+        return tck(
+            [
+                rays.position[st[c] : st[c + 1]].astype(np.float64)
+                for c in range(len(st) - 1)
+            ]
+        )
+
+
+def _echo_sha(p: Path) -> str:
+    """The SHA-256 of an echo: from the record of its decompressed copy
+    (baillarger.blocks.decompress) if there is one, else its file name and
+    size (a file of 600 MB is not hashed at each start)."""
+    side = p.with_name(p.name + ".source.json")
+    if side.exists():
+        return str(json.loads(side.read_text()).get("SourceSHA256"))
+    return f"{p.name}:{p.stat().st_size}"
+
+
+# ---------------------------------------------------------------- the routes
+
+
+def meta(c: Columns) -> dict[str, Any]:
+    """GET /columns/meta: the limits and the choices of the pane."""
+    return dict(
+        spec=R.VERSION,
+        methods=list(R.METHODS),
+        cap_in=R.CAP_IN,
+        cap_out=R.CAP_OUT,
+        step=R.STEP,
+        max_radius=MAX_RADIUS,
+        max_columns=MAX_COLUMNS,
+        wait_s=WAIT_S,
+        level=LEVEL,
+        echoes=[p.name for p in c.echo_paths],
+        to_view=c.to_view.tolist(),
+    )
+
+
+def route(h: Any, path: str, q: dict[str, str]) -> None:
+    """The /columns routes, for the server's handler h (its send method):
+
+    - GET /columns/meta: meta.
+    - GET /columns?v=&radius=[&method=&every=&e_in=&e_out=&step=]: the columns
+      (columns_bytes) when they are ready within WAIT_S; else 202 and JSON
+      {key, status: "running" or "busy", job}: ask again.
+    - GET /columns/profiles?(the same): their echoes (profiles_bytes), or 202
+      as above.
+    - GET /columns/<key>.tck: the columns of a finished request, as .tck.
+    Errors: 400 with JSON {error}; 404 without columns (no --white)."""
+    c: Columns | None = getattr(h, "columns", None)
+    if c is None:
+        h.send_error(404)
+        return
+
+    def js(obj: Any, code: int = 200) -> None:
+        h.send(json.dumps(obj, default=float).encode(), "application/json", code)
+
+    try:
+        if path == "/columns/meta":
+            js(meta(c))
+        elif path in ("/columns", "/columns/profiles"):
+            req = Request.parse(q)
+            st = c.get(req)
+            if st["status"] != "done":
+                js(st, 202)
+            elif path == "/columns":
+                h.send(c.columns_bytes(st["key"]), "application/octet-stream")
+            else:
+                h.send(c.profiles_bytes(st["key"]), "application/octet-stream")
+        elif path.startswith("/columns/") and path.endswith(".tck"):
+            key = path.removeprefix("/columns/").removesuffix(".tck")
+            h.send(c.tck_bytes(key), "application/octet-stream")
+        else:
+            h.send_error(404)
+    except (KeyError, ValueError, RuntimeError) as exc:
+        js(dict(error=f"{type(exc).__name__}: {exc}"), 400)
+
+
+def dseg_for(surf: Path, sidecar: dict[str, Any]) -> Path:
+    """The surface's segmentation: the _desc-wmtopo_dseg.nii.gz next to the
+    surface (with the surface's subject and session), if there is one; else the
+    first of the sidecar's Sources. The ray sampler checks its SHA-256."""
+    stem = surf.name.split("_hemi-")[0]
+    here = surf.with_name(f"{stem}_desc-wmtopo_dseg.nii.gz")
+    return here if here.exists() else Path(sidecar["Sources"][0])
+
+
+def echo_files(directory: Path) -> list[Path]:
+    """Echoes 1 to 3 in a directory: the decompressed .nii if it is there,
+    else the .nii.gz (baillarger.data.echo_path names). None if one is
+    missing: then the pane has no profiles."""
+    from baillarger.data import echo_path
+
+    out = []
+    for k in (1, 2, 3):
+        gz = echo_path(k, directory)
+        nii = gz.with_suffix("")
+        out.append(nii if nii.exists() else gz)
+    return out if all(p.exists() for p in out) else []
