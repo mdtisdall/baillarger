@@ -648,7 +648,9 @@ def main(argv: list[str] | None = None) -> None:
             ap.error(str(exc))
     elif a.sites is not None or a.edits is not None:
         ap.error("--sites and --edits need --white")
-    srv = serve(site, a.port, review, white, volume, volumes, outlines, columns, wmreview)
+    srv = serve(
+        site, a.port, review, white, volume, volumes, outlines, columns, wmreview
+    )
     print(
         f"serving on http://127.0.0.1:{a.port}/ ({time.time() - t0:.0f} s)", flush=True
     )
