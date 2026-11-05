@@ -35,14 +35,14 @@ This document states current knowledge only. How the project got here is in git,
 - FS is `reports/Fused sulci and thickness priors.md`.
 - PL is `PLAN_LAYER_REFINE.md`.
 
-Open PRs the plan builds on (all open as of 2026-11-03):
+Open PRs the plan builds on (all open as of 2026-11-04):
 
 | PR | What the plan takes from it |
 |---|---|
 | #55 | A fix for closed mesh pieces in the flat map (§6c, Flat map) |
 | #56 | The layer-maps diagnostics (stream 3, phase 4) |
-| #80 | The review plan for tight folds (§3c, step 6) |
-| #81 | The site finder and `wm-sites/1` |
+| #80 | The review plan for tight folds (§3c, step 6). Its rules are ported into #132 |
+| #81 | The site finder and `wm-sites/1`. Ported into #121 |
 | #83 | `dseg` options that vary the handle fixes (stream 1, phase 4) |
 | #85 | The fold repair and the initial white surface for normals |
 
@@ -54,7 +54,8 @@ Phase 4.0 brought in the geodesic-patch flat map (#69), the `--white` volume pan
 - The voxel is 0.16028 × 0.16 × 0.16028 mm, which is not isotropic.
 - The aseg comes from purple-mri at native resolution.
 - Most stream 2 and 3 results come from **boxes**: 141³-voxel crops (about 22.6 mm on a side) cut from the hemisphere volume round a test site (V1V2, M1S1, PCC_SPL). The site centres in hemisphere voxels: V1V2_banks (268, 128, 135), M1S1 (455, 250, 496), PCC_SPL (514, 180, 422) (from the box crops' affines, #124). A **box face** is one of a box's six bounding planes, where the data is cut off. The results were checked against the user's marked points: M1/S1 23, V1V2 35, PCC pieces 22 and 37.
-- On the whole hemisphere: stream 1's pipeline, stream 2's ray sampler (27 s), stream 3's column-volume check and the viewer's check. Stream 3's analysis beyond the column volume has run only on boxes.
+- On the whole hemisphere: stream 1's pipeline with the small pieces removed (#123), `orient` and its noise covariance (#130, #135), the review formats and a replayed answer log (#129, #133), stream 2's ray sampler (27 s) and its equivolume cross-section (#125), stream 3's column-volume check and the viewer's check. Flattening has run only on one M1S1 superblock (#131), and stream 3's analysis beyond it only on boxes.
+- The wave 2 results come from the input set in `scratch/v2/derivatives/` (phase 1.0's surface, 22 pieces), except #123's outputs, which are in `scratch/v2/derivatives-1.0.5/`.
 
 ## 1. Goals, constraints and working rules
 
@@ -104,6 +105,11 @@ These bind every stream from its first version. A first version may be rough, bu
   - its memory traffic: bytes moved per element, the working set per block, and whether it is bound by bandwidth or by compute.
 
   Evaluate both at whole-brain 50 µm on the target hardware. Laptop timings are supporting context only. A step that is quick on a 160 µm hemisphere can still be the wrong design if its cost grows badly, and a slow one can be right.
+- **Evaluate a component's inputs before the component.** Review the raw columns before flattening, and evaluate flattening only when the columns are good enough. Later, flattening's results can update the mesh, and so the columns (§5c, step 6). An error in an input shows up in every component downstream of it.
+- **Understand one unit before the joins.** Measure and explain the error of one solve (one superblock, one region) against a known truth before the error of stitching solves together. A stitching tolerance comes from that error budget, not from a fixed number.
+- **A working version is a base for evaluation.** A provisional component (a σ, an estimator, a halo, a tie rule) can support the evaluation of other components, on two conditions:
+  - its limits are provisionally understood and written down. Each PR has a "Known limits (provisional)" list, and work with the version adds to it;
+  - an evaluation names the working versions it uses, and does not blame their errors on the component under evaluation. An error that no listed limit explains stays unattributed until its source is found.
 - **Heavy runs go under `scripts/memguard`,** one at a time, with the cap at about 1.5× the run's peak. The peak is that of the whole process tree, workers included: the overview's main process peaks at 8.3 GB, but its tree with 4 workers at 13.3 GB (#123).
 
 ### Data for training, and for judging success
@@ -711,6 +717,13 @@ Rays that follow a field fitted to the image (T), and fronts grown from the surf
 - Normal rays stay straight (user, #47).
 - No step uses the fixes image to decide where to search, or re-finds a boundary as the depth origin.
 - **No step labels banks, and no column is paired with another.** A column belongs to its root, and nothing more. A fold and a contact differ only along a continuum (step 1, Theory), and where banks meet at an angle, no point where two columns or fronts meet marks the contact (step 3). So stream 2 records no meetings; stream 3 reads each column on its own bank (§5c, step 3).
+- **What a correct column looks like.** Cortex is a continuous sheet with no faults, its folding and thickness change at the mm scale, and the columns are about 0.16 mm apart. So correct columns give raw samples that vary smoothly between neighbours on the mesh, and a sharp jump in depth between neighbours points to an error in the white surface or in the ray. The review (§9, wave 2.5) reads the raw samples with these limits:
+  - A shift of the layers in depth is an error sign. A change in the profile's content (the stria ends at V1/V2) is a facies change, not an error.
+  - Jitter of about one voxel is expected, because the mesh comes from voxels and the roots are not the true GM/WM edge. A major jump is well above 1–2 voxels, or a step that persists along a border between groups of columns.
+  - The samples are anchored at the WM. A jump near the root is the strongest sign. Near the outer end, a real thickness change can be fast (M1 against S1 near the fundus of the central sulcus).
+  - The test holds inside the cortex only. Past the pial edge or a contact, samples can change sharply where the far bank's geometry changes. Across a thin WM blade, close roots face opposite ways and are not neighbours on the mesh.
+  - Vessels, tears, bubbles and excisions change the intensity locally, but they do not shift the layers.
+  - Smooth does not prove correct: rays tilted the same way over a region give smooth samples, stretched by 1/cos θ. The data normal (§3c, step 3) is the independent check.
 - **Excisions need no special treatment here.** They are outside in the labels; a ray crosses into them as into any outside. Where an excision exposes WM, the root has no cortex interval at all. Whether stream 3's profiles tell a cut top from the pia is tested there (§5c, Open).
 
 ### 4c. Implementation design
@@ -1143,7 +1156,7 @@ Where each layer lies along every column, read from the image's own contrast and
 - **Cut tops from profiles alone.** An excision through cortex is outside in the labels, so its column looks like one reaching the pia. Do the profiles flag it (a thickness that drops against its neighbours, or a layer sequence that ends early), and how large are the errors where they do not? Tested in phase 5 (§5d), against the bootstrap detector's excision map (§3c, step 2). If not, stream 1 adds cut seeds (its phase 11; §3c, Open).
 - **Conflict: the equal-volume closed form from white-surface curvature.** PL (#23) adopted it with curvature smoothed at 1 mm (no stria trend); SF F10 lists it as failed with curvature at 0.32–0.80 mm (over-corrects on open V1, ρ −0.69, because the pia is flatter than a parallel shell). The tests differ in curvature scale, columns and measure, so the dependence on scale is unresolved. Normal rays (#47) used it at 0.5 mm, unvalidated; stream 2's sampler now measures A(s) and V(s) along each ray, which phase 3.5 can test it against.
 - **Tops at M1/S1, where no dip shows.** The old estimators disagreed by path and score (the field prior alone 0.07–0.12 mm on crossing paths, 0.26–0.33 mm in other scores; the profile split 0.5–0.8 mm off on tensor paths, 0.17 mm on normal rays), and all assumed face-to-face banks. Measure how own-bank evidence and carry place the top there, and how long the carry-only stretch is, on one shared set of columns with one score.
-- **The flattening solve** (step 2). The options: (A') the two-level solve with a halo of 5–6 mm, which meets the criterion for the linear problem only (read factor 24 at 50 µm, level 1). (B') Overlapping Schwarz with the coarse gauge and a better preconditioner or a coarse space for the local slow modes. (C) A weak per-column prior r_v(τ) → 0, a model change that makes the gauge local and can select one minimum. The halo (`HALO_MM` = 2.0 mm) is provisional until then.
+- **The flattening solve** (step 2). It waits for two evaluations, in this order (§1, working rules): the review of the raw columns (wave 2.5, §9), then the error of one solve against a known truth (phantoms on the hemisphere's own columns and pairs, a known warp, the measured noise; one cause at a time; several start points, to find where the several minima are). The stitching design comes after them. The options known now: (A') the two-level solve with a halo of 5–6 mm, which meets the criterion for the linear problem only (read factor 24 at 50 µm, level 1). (B') Overlapping Schwarz with the coarse gauge and a better preconditioner or a coarse space for the local slow modes. (C) A weak per-column prior r_v(τ) → 0, a model change that makes the gauge local and can select one minimum. The halo (`HALO_MM` = 2.0 mm) is provisional until then.
 - Whether flattening weights the echoes by a noise model, as `orient` does.
 - How far carry can reach before a person should look: read off the review answers (step 7) as a ranking, not set as a threshold.
 - An honest likelihood: measure the residual correlation, or use Student-t.
@@ -1443,7 +1456,8 @@ flowchart TB
 
   classDef done fill:#9e9e9e,stroke:#424242,color:#000
   classDef partial fill:#e0e0e0,stroke:#616161,color:#000
-  class S1P0,S1P5,S2P0,S3P0,S3P2,S4P0 done
+  class S1P0,S1P05,S1P1,S1P2,S1P3,S1P5,S2P0,S2P1,S3P0,S3P2,S4P0,S4P05,S4P2,S4P3 done
+  class S3P1 partial
 ```
 
 Shading: dark grey, done; light grey, partly done; no shading, not started. The table gives each phase's PRs.
@@ -1453,10 +1467,10 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | Phase | Wave | Status | Needs | Notes |
 |---|---|---|---|---|
 | 1.0 | 1 | **Done** (#91, #98, #106) | — | gates every stream |
-| 1.0.5 | 2 |  | 1.0 | `dseg` removes filled-mask pieces below 1 mm³ (b0 22 → 1 on the hemisphere); streams 2 and 3 and the flat map read the result |
-| 1.1 | 2 |  | 1.0 | shared code (§7); `orient`'s sign builds on it |
-| 1.2 | 2 |  | 1.1 | `orient`: the local cortex level, the data normal and its coherence |
-| 1.3 | 2 |  | 1.0 | the formats and code the review pane (4.2) is built on; no viewer needed |
+| 1.0.5 | 2 | **Done** (#123) | 1.0 | `dseg` removes filled-mask pieces below 1 mm³ (b0 22 → 1 on the hemisphere); streams 2 and 3 and the flat map read the result |
+| 1.1 | 2 | **Done** (#124) | 1.0 | shared code (§7); `orient`'s sign builds on it |
+| 1.2 | 2 | **Done** (#130, #135) | 1.1 | `orient`: the local cortex level, the data normal and its coherence |
+| 1.3 | 2 | **Done** (#121, #127, #129, #132) | 1.0 | the formats and code the review pane (4.2) is built on; no viewer needed |
 | 1.4 | 3 |  | 1.2 | judged with 1.2's data normal; compares the #83 variants first |
 | 1.5 | 1 | **Done** (#89, #95, #117) | 1.0 | writes the label-set spec |
 | 1.6 | later |  | 1.0 | written with 1.8, once the meaning of P is settled; code and phantom tests, then 1.8 runs it on the hemisphere |
@@ -1467,11 +1481,11 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 1.11 | later |  | each item when its own diagnostic asks: 1.9, 1.10; 2.2 for the antialiasing term; 3.5 for cut seeds; 3.6 for the antialiasing term towards laminar normals | only if their diagnostics ask |
 | Scaling track | later |  | 1.0 | alongside 1.1–1.11; done before the first whole brain |
 | 2.0 | 1 | **Done** (#94, #100, #101, #102, #108, #113) | 1.0 | writes the ray-sampler spec first; 1.0's hemisphere outputs only for its hemisphere run |
-| 2.1 | 2 |  | 2.0 | |
+| 2.1 | 2 | **Done** (#125) | 2.0 | |
 | 2.2 | 3 |  | 2.1; 1.2 (data normal) | the hippocampus roots wait on 1.8; its diagnostic decides between steering the rays here and stream 1's antialiasing term |
 | 2.3 | later |  | 2.2 | only if 2.2 shows something was missed |
 | 3.0 | 1 | **Done** (#103, #104, #109) | 2.0 | starts once 2.0's spec exists; 2.0's code and 1.0's hemisphere outputs only for its hemisphere run |
-| 3.1 | 2 |  | 3.0 | |
+| 3.1 | 2 | **Partly done** (#131): a working version, not evaluated | 3.0 | |
 | 3.2 | 1 | **Done** (#96, #105) | — | the QPBO solver; can start at once, off the critical path |
 | 3.3 | 3 |  | 3.1, 3.2 | gains from 3.4 (bands as levels); reads 3.7's answers as anchors once 4.5 writes them |
 | 3.4 | 3 |  | 3.1 | alongside 3.3 |
@@ -1480,18 +1494,33 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 | 3.7 | later |  | 3.3 | writes `laminar-sites/1` and `laminar-edits/1` first |
 | Stream 3 scaling track | later |  | 3.3, 3.5 | done before the first whole brain |
 | 4.0 | 1 | **Done** (#92, #97, #99, #114, #115, #116) | 1.0 | porting and merging need only 1.0's formats and split; the hemisphere outputs only for its hemisphere check |
-| 4.0.5 | 2 |  | 4.0 | split from 4.2 in round 1 |
+| 4.0.5 | 2 | **Done** (#126) | 4.0 | split from 4.2 in round 1 |
 | 4.1 | later |  | 4.0.5 | the painting mode; out of the plan unless the de novo measure, when decided, needs dense labels |
-| 4.2 | 2 |  | 4.0.5, 1.3 | the review pane, on 1.3's formats and choice code |
-| 4.3 | 2 |  | 2.0, 4.0 | |
+| 4.2 | 2 | **Done** (#133) | 4.0.5, 1.3 | the review pane, on 1.3's formats and choice code |
+| 4.3 | 2 | **Done** (#122, #128, #134) | 2.0, 4.0 | |
 | 4.4 | later |  | 3.3, 3.4, 4.0 | 3.5 adds panes when it publishes |
 | 4.5 | later |  | 3.7, 4.0.5 | the stream 3 review pane |
 
 **Waves.** The phases are done in waves; each wave holds the phases whose needs the earlier waves meet, and the plan's findings are settled for a wave's phases before it starts.
 
 - **Wave 1** (round 1): 1.0, 1.5, 2.0, 3.0, 3.2 and 4.0, all done.
-- **Wave 2:** 1.0.5, 1.1, 1.2, 1.3, 2.1, 3.1, 4.0.5, 4.2 and 4.3. It ends with the first review session on the hemisphere: 1.3's formats and code, the overlays and the review pane, with real answers in the edit log. Review comes before fold repair (1.4), so some of the sites reviewed may be ones fold repair would fix; the answers still stand on their own and train the first generation.
-- **Wave 3:** 1.4, 1.7, 2.2, 3.3 and 3.4.
+- **Wave 2:** 1.0.5, 1.1, 1.2, 1.3, 2.1, 3.1, 4.0.5, 4.2 and 4.3, done. It built the infrastructure that the evaluation of the algorithms needs. Its results (σ, the 1-ring cross-section, the flattening solve) are the first steps of that evaluation, not settings. Each PR lists its known limits.
+- **Wave 2.5: review of the wave 2 outputs.** It adds only the tools that a disciplined review needs, then the user reviews. No new algorithm, estimator or stitching work.
+  1. **The input set.** After #123 is on `main`, `dseg`, the white surface and the overview are made again from `main`, one heavy run at a time. The old set keeps its own name. Each evaluation names its input set, and vertex-indexed results are not compared across sets without a vertex map.
+  2. **Signals per column**, as batch runs on that set, each with the provisional limits of the working version it comes from:
+     - the angle between the data normal (1.2) and the surface normal, and the coherence;
+     - misfacing (`wm-sites/1`);
+     - the distance to the first focal point (2.1);
+     - the length of the first cortex run;
+     - the neighbour shifts: for each mesh edge, the depth shift between the two columns' raw profiles, and for each mesh triangle, the sum of the shifts round it. This uses the pair-shift step of 3.1, not the warp solve.
+  3. **Viewer tools** (stream 4):
+     - the signals as an overlay on the overview, with a ranked list that opens the column;
+     - the signals of the selected column in the columns pane, with the data normal drawn next to the surface normal;
+     - a notes log: for each note, the site, what the user saw, the cause the user blames (surface, casting, a working version, or unattributed), and the view (root vertex, section axis u, half width, echo, input set), so that the view opens again exactly after a fix;
+     - fixes for the known viewer bugs (#126).
+  4. **The review.** The user reviews the raw columns first, in the profile section of the columns pane (§4b, *What a correct column looks like*). The stream 1 review session (1.3, 4.2) can run in the same wave. Review comes before fold repair (1.4), so some of the sites reviewed may be ones fold repair would fix; the answers still stand on their own and train the first generation.
+  5. **The plan revision** from the wave 2 findings and the review notes. It writes wave 3.
+- **Wave 3:** to be written from the wave 2.5 review. Its candidates now: 1.4, 1.7, 2.2, 3.3 and 3.4. 3.3 builds on flattening, so it waits until the columns are good enough and one flattening solve is evaluated (§1, working rules).
 - **Later:** the first generation and what follows it (1.6, 1.8–1.11), 2.3, 3.5–3.7, 4.1, 4.4, 4.5 and the scaling tracks; the outcome measures are settled with 1.9 (§1).
 
 **Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.4, 1.8, each review's answers and each generation in 1.9, and 1.11 when it moves the surface; a new version of a sampler), the stored outputs that read it rerun on it: stream 1's own, and stream 3's z(τ), bands and thickness. Samplers need no rerun: they compute from whatever is published on the next call. Nothing waits for a new version: each phase works on whatever is published.
