@@ -271,10 +271,19 @@ exact test.
    - The curve is the cut of the same plane with the white mesh, only the
      piece that goes through the selected root. It runs in both directions
      from the root, to the column radius along the curve.
-   - The section takes the columns whose roots lie within the half width of
-     the curve, along the surface.
+   - The section shows one column for each step along the curve: the
+     column whose root is nearest to the curve at that step. The step is
+     the mean spacing of the roots near the selection.
    - It sorts them by their arc length along the curve, from the root
      (negative on one side).
+   - A strip of columns on each side of the curve is not interleaved into
+     the section. On flat, regular cortex (true vertex 12218203), the
+     current strip of ±0.25 mm (3 voxels) put columns
+     from different lines across the strip next to each other. Columns close
+     across the strip were alike; columns 0.16–0.5 mm apart differed 24
+     times more in their mean level. The profile showed alternating bands.
+   - The half-width menu goes. A "mean across" option shows, at each step,
+     the mean of the columns within one voxel of the curve.
    - Where the surface turns around a thin edge, the curve goes around the
      turn, and the profile shows the turn at one place.
    The section does not label the sides of the WM, and it does not use the
@@ -312,9 +321,11 @@ exact test.
     cylinder): the order has the columns of the root's sheet, then the
     columns of the turn, then the columns of the other sheet. No column of
     one sheet comes between two columns of the other.
-  - A second sheet within the half width of the plane, but not joined to
-    the root's sheet within the column radius: none of its columns is in
-    the section.
+  - A second sheet near the plane, but not joined to the root's sheet
+    within the column radius: none of its columns is in the section.
+  - A flat sheet whose image changes across the curve and not along it:
+    the section's columns change smoothly with arc length, with no
+    alternation (the correlation at lag 1 is not less than at lag 2).
 
 ## The hemisphere check
 
