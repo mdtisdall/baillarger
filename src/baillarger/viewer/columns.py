@@ -52,12 +52,14 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 from scipy.sparse.csgraph import dijkstra
+from scipy.spatial import cKDTree
 
 from baillarger import rays as R
 from baillarger.bids import file_sha256
 from baillarger.blocks import Source, open_volume
 from baillarger.column_volume import ColumnVolume, ColumnVolumeSampler
 from baillarger.mesh_graph import BlockIndex, LocalGraph, local_graph
+from baillarger.viewer import section as VSec
 from baillarger.viewer.jobs import Jobs
 from baillarger.viewer.tck import tck
 
@@ -125,6 +127,17 @@ class Request:
         """The cache key: the request and the sources' SHA-256."""
         text = json.dumps([sources, *self.__dict__.values()], default=float)
         return hashlib.sha1(text.encode()).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class LocalMesh:
+    """The faces of a superblock's local graph, for the section: the faces
+    (into the graph's vertices), the vertices in scanner mm, and their
+    KD-tree."""
+
+    faces: npt.NDArray[np.int32]
+    pts: Float
+    tree: cKDTree
 
 
 @dataclass(frozen=True)
@@ -313,6 +326,8 @@ class Columns:
         self.jobs: Jobs[Result] = Jobs(log=log, keep_in_memory=CACHE)
         self.profiles: OrderedDict[str, ColumnVolume] = OrderedDict()
         self.graphs: OrderedDict[tuple[int, int, int], LocalGraph] = OrderedDict()
+        self.meshes: OrderedDict[tuple[int, int, int], LocalMesh] = OrderedDict()
+        self.mesh_lock = threading.Lock()
         self.lock = threading.Lock()  # one sampler call at a time
 
     # ---------------------------------------------------------------- the columns
@@ -347,6 +362,109 @@ class Columns:
         while len(self.graphs) > GRAPHS:
             self.graphs.popitem(last=False)
         return g
+
+    def mesh(self, sb: tuple[int, int, int]) -> LocalMesh:
+        """The faces of the local graph of sb (the faces of the blocks whose
+        boxes meet its halo box, as mesh_graph.local_graph reads them), kept
+        for the last GRAPHS superblocks."""
+        with self.mesh_lock:
+            if sb in self.meshes:
+                self.meshes.move_to_end(sb)
+                return self.meshes[sb]
+            g = self.graph(sb)
+            b = self.blocks
+            span = 1 << LEVEL
+            cells = self.rays.cells
+            lo = np.asarray(sb, np.int64) * span * cells
+            hi = lo + span * cells
+            h = MAX_RADIUS / self.vox
+            near = np.all((b.box_max >= lo - h) & (b.box_min <= hi + h), axis=1)
+            rows = [
+                np.asarray(self.f[a:z], np.int64)
+                for a, z in zip(b.face_start[near], b.face_stop[near], strict=True)
+                if z > a
+            ]
+            fl = np.concatenate(rows) if rows else np.zeros((0, 3), np.int64)
+            if not np.array_equal(np.unique(fl), g.vertex):
+                raise RuntimeError(f"superblock {sb}: faces and graph disagree")
+            vx = np.asarray(self.v[g.vertex], np.float64)
+            pts = vx @ self.rays.affine[:3, :3].T + self.rays.affine[:3, 3]
+            m = LocalMesh(
+                np.searchsorted(g.vertex, fl).astype(np.int32), pts, cKDTree(pts)
+            )
+            self.meshes[sb] = m
+            while len(self.meshes) > GRAPHS:
+                self.meshes.popitem(last=False)
+            return m
+
+    def section(
+        self, key: str, u: Sequence[float], mode: str, at: int | None = None
+    ) -> dict[str, Any]:
+        """The profile section of a finished request (baillarger.viewer.section):
+        the curve through the root of column `at` (a true vertex; default: the
+        request's vertex, else the column nearest it along the surface), one
+        step for each mean spacing of the request's roots, and the columns at
+        each step, as indices into the /columns answer."""
+        t0 = time.perf_counter()
+        r = self.result(key)
+        req = r.request
+        roots = r.rays.roots
+        if not len(roots.vertex):
+            raise ValueError("the request has no columns")
+        want = req.vertex if at is None else int(at)
+        hit = np.flatnonzero(roots.vertex == want)
+        if len(hit):
+            c0 = int(hit[0])
+        elif at is None:
+            c0 = int(np.argmin(r.distance))
+        else:
+            raise ValueError(f"vertex {at}: not a column of the request")
+        sb = self.superblock(req.vertex)
+        g = self.graph(sb)
+        m = self.mesh(sb)
+        v0 = int(roots.vertex[c0])
+        i0 = int(np.searchsorted(g.vertex, v0))
+        if i0 >= len(g.vertex) or g.vertex[i0] != v0:
+            raise RuntimeError(f"vertex {v0}: not in the local graph")
+        curve = VSec.plane_cut(
+            m.pts, m.faces, m.pts[i0], roots.normal[c0], u, req.radius
+        )
+        step = VSec.mean_spacing(np.asarray(roots.root, np.float64))
+        arc, pts, faces = VSec.steps(curve, step)
+        pos = np.searchsorted(g.vertex, roots.vertex)
+        pos = np.minimum(pos, len(g.vertex) - 1)
+        column_of = -np.ones(len(g.vertex), np.int64)
+        ok = g.vertex[pos] == roots.vertex
+        column_of[pos[ok]] = np.flatnonzero(ok)
+        voxel = float(np.max(self.vox))
+        cols, dist = VSec.step_columns(
+            pts,
+            faces,
+            m.pts,
+            m.faces,
+            g.graph,
+            m.tree,
+            column_of,
+            mode,
+            voxel,
+            req.radius,
+        )
+        return dict(
+            key=key,
+            mode=mode,
+            column=c0,
+            vertex=v0,
+            step=step,
+            voxel=voxel,
+            u=curve.u.tolist(),
+            w=curve.w.tolist(),
+            arc=arc.tolist(),
+            point=pts.round(4).tolist(),
+            columns=cols,
+            distance=[None if np.isnan(x) else float(x) for x in dist],
+            curve_length=[float(-curve.arc[0]), float(curve.arc[-1])],
+            seconds=round(time.perf_counter() - t0, 3),
+        )
 
     def near(self, vertex: int, radius: float) -> tuple[I64, Float]:
         """The vertices within radius of vertex along the surface, ascending,
@@ -545,6 +663,9 @@ def route(h: Any, path: str, q: dict[str, str]) -> None:
       {key, status: "running" or "busy", job}: ask again.
     - GET /columns/profiles?(the same): their echoes (profiles_bytes), or 202
       as above.
+    - GET /columns/section?(the same)&u=x,y,z[&mode=nearest|mean&at=]: the
+      profile section that follows the surface (Columns.section; u in scanner
+      mm), or 202 as above.
     - GET /columns/<key>.tck: the columns of a finished request, as .tck.
     Errors: 400 with JSON {error}; 404 without columns (no --white)."""
     c: Columns | None = getattr(h, "columns", None)
@@ -558,11 +679,21 @@ def route(h: Any, path: str, q: dict[str, str]) -> None:
     try:
         if path == "/columns/meta":
             js(meta(c))
-        elif path in ("/columns", "/columns/profiles"):
+        elif path in ("/columns", "/columns/profiles", "/columns/section"):
             req = Request.parse(q)
+            if path == "/columns/section":
+                u = [float(x) for x in q["u"].split(",")]
+                if len(u) != 3:
+                    raise ValueError("u: give three numbers x,y,z")
+                mode = str(q.get("mode", "nearest"))
+                if mode not in VSec.MODES:
+                    raise ValueError(f"mode {mode!r}: not one of {VSec.MODES}")
+                at = int(q["at"]) if q.get("at") else None
             st = c.get(req)
             if st["status"] != "done":
                 js(st, 202)
+            elif path == "/columns/section":
+                js(c.section(st["key"], u, mode, at))
             elif path == "/columns":
                 h.send(c.columns_bytes(st["key"]), "application/octet-stream")
             else:

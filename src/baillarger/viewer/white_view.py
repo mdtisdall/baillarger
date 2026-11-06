@@ -110,6 +110,24 @@ class WhiteView:
             root_mm=None,
         )
 
+    def true_vertex(self, t: int) -> dict[str, Any]:
+        """The WM selection at true vertex t (GET /vertex/true): its world point,
+        the voxel nearest it (as baillarger.viewer.overlay.Overlays.voxels), and
+        the overview vertex that snap gives for that point."""
+        t = int(t)
+        if not 0 <= t < len(self.W.v):
+            raise ValueError(f"true vertex {t}: not in [0, {len(self.W.v)})")
+        p = np.asarray(self.pts[t], np.float64)
+        h = np.linalg.inv(self.ov.affine) @ np.r_[p, 1.0]
+        return dict(
+            vertex=int(self.S.nearest(p)),
+            true_vertex=t,
+            world_mm=[round(float(x), 3) for x in p],
+            voxel=[int(x) for x in np.round(h[:3])],
+            trace=None,
+            root_mm=None,
+        )
+
     def voxel(self, true_vertex: int) -> list[int]:
         """The voxel of the grid nearest a true vertex."""
         return [int(x) for x in np.round(np.asarray(self.W.v[true_vertex], float))]

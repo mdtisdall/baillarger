@@ -36,6 +36,8 @@
 <div id="bar">
   <b id="title">Column viewer</b>
   <button id="newwin" title="open another window with these panes">new window</button>
+  <label title="a true vertex of the white surface: Enter makes it the WM selection and turns the 3D view to it (also ?v= in the address)">go to vertex
+    <input id="goto" type="text" inputmode="numeric" size="10" placeholder="true vertex"></label>
   <span id="sync">connecting…</span>
 </div>
 <div id="main">
@@ -100,9 +102,10 @@ async function apply(st) {
     vHook("state", st);
   } finally { applying = false; }
 }
+let helloDone; const HELLO = new Promise(r => { helloDone = r; });   // the first state from the server is applied
 function connect() {
   const es = new EventSource("/events");
-  es.addEventListener("hello", e => { $("sync").textContent = "in step with the other windows"; apply(JSON.parse(e.data).state); });
+  es.addEventListener("hello", async e => { $("sync").textContent = "in step with the other windows"; await apply(JSON.parse(e.data).state); helloDone(); });
   es.onmessage = e => { const m = JSON.parse(e.data); if (m.sender !== ME) apply(m.patch); };
   es.onerror = () => { $("sync").textContent = "not connected: retrying"; };
 }
@@ -123,6 +126,17 @@ async function selectHere(sel, frame) { await setSelection(sel, frame); share({ 
 function crossHere(mm) { CROSS = mm; moveVolumeCrosshair(mm); share({ crosshair: mm }); }
 const selectVertex = async (v, frame) => selectHere(await get(`/vertex?v=${v}`), frame);
 const crossVertex = async v => crossHere((await get(`/vertex?v=${v}`)).world_mm);
+// go to a true vertex (the box in the bar, ?v=): the WM selection there, the 3D view turned to it. A number that is not a
+// true vertex: an error in the log, and the selection does not change.
+async function goTo(text) {
+  const t = String(text).trim();
+  if (!/^\d+$/.test(t)) { log(`go to vertex: ${JSON.stringify(t)} is not a true vertex number`); return; }
+  let sel; try { sel = await get(`/vertex/true?v=${t}`); } catch (e) { return; }   // get() logs the error
+  turnTo(sel.vertex);
+  await selectHere(sel, screenFrame());
+  log(`go to vertex: true vertex ${sel.true_vertex} (overview vertex ${sel.vertex})`);
+}
+$("goto").addEventListener("keydown", e => { if (e.key === "Enter") goTo($("goto").value); });
 
 // ---------------------------------------------------------------- white surface (WebGL2, box mm)
 const GL = { g: null, nv: 0, nf: 0, pos: null, vtrace: null, R: [1,0,0, 0,1,0, 0,0,1], target: [0,0,0], dist: 50, radius: 25, level: 0 };
@@ -234,6 +248,21 @@ function pick3d(px, py) {
     if (Math.abs(sx - px) < 6 && Math.abs(sy - py) < 6 && z > bz) { bz = z; best = v; }
   }
   return best;
+}
+// the 3D view: the target at overview vertex v, the camera along its normal, the up direction kept as far as it can be
+function turnTo(v) {
+  if (!GL.pos || !GL.nrm || v < 0 || v >= GL.nv) return;
+  const n = [GL.nrm[3 * v], GL.nrm[3 * v + 1], GL.nrm[3 * v + 2]], nl = Math.hypot(...n); if (!(nl > 0)) return;
+  for (let k = 0; k < 3; k++) n[k] /= nl;
+  let up = [GL.R[3], GL.R[4], GL.R[5]], d = up[0] * n[0] + up[1] * n[1] + up[2] * n[2];
+  up = up.map((x, k) => x - d * n[k]); let ul = Math.hypot(...up);
+  if (ul < 1e-3) { up = Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [0, 1, 0]; d = up[0] * n[0] + up[1] * n[1] + up[2] * n[2]; up = up.map((x, k) => x - d * n[k]); ul = Math.hypot(...up); }
+  up = up.map(x => x / ul);
+  const right = [up[1] * n[2] - up[2] * n[1], up[2] * n[0] - up[0] * n[2], up[0] * n[1] - up[1] * n[0]];   // up × back
+  GL.R = [...right, ...up, ...n];
+  GL.target = [GL.pos[3 * v], GL.pos[3 * v + 1], GL.pos[3 * v + 2]];
+  GL.dist = Math.min(GL.dist, 0.6 * GL.radius);
+  draw3d();
 }
 const screenFrame = () => { const R = GL.R; return { right: [R[0], R[1], R[2]], up: [R[3], R[4], R[5]], level: GL.level }; };
 function initGL() {
@@ -612,11 +641,11 @@ $("vengine").onchange = () => { q.set("vol", $("vengine").value); location.searc
 // VIEWER.hooks: selection(sel, frame) after each WM selection; state(st) after each shared-state change; draw3d(g, mvp) at
 // the end of each 3D frame (box mm, the true surface at level 0); resize(); colour(nv) gives the overview's RGB colours or
 // null (colour3d). VIEWER.recolour() applies the colour hooks again. VIEWER.select(sel, frame) makes sel (a /vertex answer,
-// or one like it) the WM selection; VIEWER.screenFrame() is the 3D view's frame. VIEWER.ready resolves when the page has
+// or one like it) the WM selection; VIEWER.screenFrame() is the 3D view's frame; VIEWER.turnTo(v) turns it to overview vertex v. VIEWER.ready resolves when the page has
 // started.
 let viewerReady;
 const VIEWER = window.VIEWER = { $, get, log, share, GL, NV, mvp, program, draw3d: () => draw3d(), has,
-  selectVertex: v => selectVertex(v, null), select: (sel, frame) => selectHere(sel, frame), screenFrame: () => screenFrame(),
+  selectVertex: v => selectVertex(v, null), select: (sel, frame) => selectHere(sel, frame), screenFrame: () => screenFrame(), turnTo,
   recolour: () => { colour3d(); draw3d(); }, get selection() { return SELN; }, get frame() { return FRAME; },
   get meta() { return META; }, hooks: { selection: [], state: [], draw3d: [], resize: [], colour: [] },
   ready: new Promise(r => { viewerReady = r; }) };
@@ -652,6 +681,7 @@ window.addEventListener("resize", () => { draw3d(); vHook("resize"); });
   connect();
   log(`loaded the white surface ${META.site}`);
   viewerReady();
+  if (q.get("v") !== null) { await HELLO; $("goto").value = q.get("v"); await goTo(q.get("v")); }   // ?v=<true vertex>
 })();
 </script>
 <script type="module" src="/static/columns.js"></script>

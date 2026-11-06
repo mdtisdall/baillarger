@@ -367,3 +367,37 @@ def test_the_routes(white: WhiteView, files: dict[str, Path]) -> None:
         srv.server_close()
         VS.Handler.white = None
         VS.Handler.overlays = None
+
+
+def test_go_to_a_true_vertex(white: WhiteView, ovl: VOL.Overlays) -> None:
+    """GET /vertex/true?v=t: the true vertex's own position, the voxel that
+    Overlays.voxels gives, and the overview vertex that /snap gives for that
+    position; a number that is not a true vertex is an error."""
+    srv = VS.serve(None, 0, white=white)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    n = len(white.W.v)
+    try:
+        for t in sorted({0, 1, n // 3, n // 2, n - 1}):
+            code, body = get(f"{base}/vertex/true?v={t}")
+            assert code == 200
+            sel = json.loads(body)
+            p = np.asarray(white.pts[t], np.float64)
+            assert sel["true_vertex"] == t
+            assert sel["world_mm"] == [round(float(x), 3) for x in p]
+            assert sel["voxel"] == [int(x) for x in ovl.voxels(np.array([t]))[0]]
+            mm = ",".join(repr(float(x)) for x in p)
+            snap = json.loads(get(f"{base}/snap?mm={mm}")[1])
+            assert sel["vertex"] == snap["vertex"]
+            # the overview vertex is a vertex of the overview: its own true vertex
+            # is t when t is one of the overview's vertices
+            if t in set(white.ov.vertex_ids.tolist()):
+                assert white.ov.vertex_ids[sel["vertex"]] == t
+        for bad in (str(n), "-1", "x"):
+            code, body = get(f"{base}/vertex/true?v={bad}")
+            assert code == 400 and "error" in json.loads(body), bad
+        assert get(f"{base}/vertex/true")[0] == 400
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        VS.Handler.white = None

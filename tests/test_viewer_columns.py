@@ -16,6 +16,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 from scipy.sparse.csgraph import dijkstra
+from scipy.spatial import cKDTree
 
 from baillarger import rays as R
 from baillarger import white_dseg, white_overview, white_surf
@@ -24,6 +25,7 @@ from baillarger.column_volume import ColumnVolumeSampler
 from baillarger.data import echo_path
 from baillarger.mesh_graph import edge_graph
 from baillarger.viewer import columns as VC
+from baillarger.viewer import section as VSec
 from baillarger.viewer import server as VS
 from baillarger.viewer.tck import read_tck
 from baillarger.viewer.white_view import WhiteView
@@ -315,8 +317,9 @@ def test_the_white_mode_serves_every_route(
 ) -> None:
     """After the removal of the site mode: main() starts the server in --white
     mode, and the server answers each route of phases 4.0 (the white surface and
-    its box), 4.0.5 (the bricks, the named volumes, the outlines) and 4.3 (the
-    columns)."""
+    its box), 4.0.5 (the bricks, the named volumes, the outlines), 4.3 (the
+    columns) and the viewer requests of wave 2.1 (go to a true vertex, the
+    section that follows the surface)."""
     ed = tmp_path / "data"
     ed.mkdir()
     for k in (1, 2, 3):  # echo k as .nii.gz in data: the defaults of main()
@@ -368,6 +371,9 @@ def test_the_white_mode_serves_every_route(
             "/columns/meta",
             "/columns?v=0&radius=0.5",
             "/columns/profiles?v=0&radius=0.5",
+            "/columns/section?v=0&radius=0.5&u=1,0,0",
+            "/columns/section?v=0&radius=0.5&u=1,0,0&mode=mean",
+            "/vertex/true?v=0",
         ]
         for r in routes:
             assert get(base + r)[0] == 200, r
@@ -393,3 +399,90 @@ def test_the_white_mode_serves_every_route(
         VS.Handler.outlines = None
         VS.Handler.columns = None
         VS.Handler.overlays = None
+
+
+def test_the_section_route(cols: VC.Columns) -> None:
+    """GET /columns/section on the hemisphere phantom: the steps every mean
+    spacing of the request's roots, in order of arc length from 0 at the
+    selected root; each column an index into the /columns answer, the nearest
+    along the surface (checked on the whole graph); the errors."""
+    srv = VS.serve(None, 0, white=WhiteView.__new__(WhiteView), columns=cols)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        v, radius = corner_vertex(cols), 1.0
+        q = f"v={v}&radius={radius}"
+        code, body = get(f"{base}/columns?{q}")
+        assert code == 200
+        head, arr = VC.decode(body)
+        code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2")
+        assert code == 200
+        sec = json.loads(body)
+        assert sec["key"] == head["key"] and sec["vertex"] == v
+        assert int(arr["vertex"][sec["column"]]) == v
+        arc = np.asarray(sec["arc"])
+        assert np.diff(arc) == pytest.approx(sec["step"])
+        assert 0.0 in arc.round(9)
+        assert -radius - 1e-9 <= arc[0] and arc[-1] <= radius + 1e-9
+        roots = arr["root"].astype(np.float64)
+        d, _ = cKDTree(roots).query(roots, k=2)
+        assert sec["step"] == pytest.approx(float(d[:, 1].mean()))
+        assert all(len(c) == 1 and 0 <= c[0] < head["n"] for c in sec["columns"])
+        # the step at arc 0 is the selected root itself
+        k0 = int(np.flatnonzero(arc.round(9) == 0)[0])
+        assert sec["columns"][k0] == [sec["column"]] and sec["distance"][k0] == 0
+        # the same section on the whole mesh and the whole graph (the route
+        # reads only the local faces of the superblock)
+        A = cols.rays.affine
+        pts = np.asarray(cols.v, np.float64) @ A[:3, :3].T + A[:3, 3]
+        g = edge_graph(cols.v, cols.f, cols.vox)
+        colv = arr["vertex"].astype(np.int64)
+        column_of = -np.ones(len(pts), np.int64)
+        column_of[colv] = np.arange(len(colv))
+        curve = VSec.plane_cut(
+            pts, cols.f, pts[v], arr["normal"][sec["column"]], [0.3, 1, 0.2], radius
+        )
+        s_arc, s_pts, s_face = VSec.steps(curve, sec["step"])
+        assert s_arc == pytest.approx(arc, abs=1e-9)
+        assert np.abs(s_pts - np.asarray(sec["point"])).max() < 1e-4
+        for mode in VSec.MODES:
+            want, wd = VSec.step_columns(
+                s_pts,
+                s_face,
+                pts,
+                cols.f,
+                g,
+                cKDTree(pts),
+                column_of,
+                mode,
+                float(max(cols.vox)),
+                radius,
+            )
+            if mode == "nearest":
+                assert sec["columns"] == want
+                assert sec["distance"] == pytest.approx(wd.tolist(), abs=1e-9)
+            else:
+                mean_want = want
+        # mean across: the columns within one voxel along the surface
+        code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2&mode=mean")
+        assert code == 200
+        mean = json.loads(body)
+        assert mean["arc"] == sec["arc"] and mean["voxel"] == float(max(cols.vox))
+        assert mean["columns"] == mean_want
+        # through another column of the request (a click on the section)
+        other = int(arr["vertex"][sec["columns"][-1][0]])
+        code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2&at={other}")
+        assert code == 200 and json.loads(body)["vertex"] == other
+        for bad in (
+            "u=1,0",
+            "u=0.3,1,0.2&mode=median",
+            "u=0.3,1,0.2&at=-5",
+            "",
+        ):
+            code, body = get(f"{base}/columns/section?{q}&{bad}")
+            assert code == 400 and "error" in json.loads(body), bad
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        VS.Handler.white = None
+        VS.Handler.columns = None

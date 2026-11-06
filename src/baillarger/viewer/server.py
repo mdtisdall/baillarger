@@ -18,6 +18,7 @@ Requests:
 - GET / (the page), /static/<file>; /state; /events.
 - The white surface (baillarger.viewer.white_view): /meta; /mesh?level=k[&faces=1]
   (the overview for the 3D pane); /vertex?v=k (the WM selection at overview vertex k);
+  /vertex/true?v=t (the WM selection at true vertex t; 400 if t is not one);
   /snap?mm=x,y,z (the WM selection at the overview vertex nearest a world point);
   /white.gii; /white/echo<k>.nii.gz, /white/surface.gii and
   /white/overlay.nii.gz?c=i,j,k (NiiVue's box round voxel (i, j, k)).
@@ -278,6 +279,8 @@ class Handler(BaseHTTPRequestHandler):
             self.binary(lambda: w.mesh_payload(lv, fc))
         elif u.path == "/vertex":
             self.json(lambda: w.vertex(int(q["v"])))
+        elif u.path == "/vertex/true":
+            self.send_json(lambda: w.true_vertex(int(q["v"])))
         elif u.path == "/snap":
             mm_ = floats(q["mm"])
             self.json(lambda: w.snap(mm_ or []))
