@@ -20,6 +20,7 @@ fix.
    that the user blames, and the view, so that the view opens again
    exactly.
 4. Fixes for the known viewer bugs.
+5. The user's feature requests (Part D).
 
 No new section view. The profile section of the columns pane (#128) is the
 view for the review.
@@ -250,6 +251,18 @@ All references are to `main` at 1f67376.
    the last recheck result), "new note" with the fields of item 1, "open",
    and "recheck".
 
+### Part D: the user's requests (PR 4)
+
+The user adds requests here during wave 2.1's review. Each request gets an
+exact test.
+
+1. **Go to a vertex.** A box in the header takes a true vertex number and
+   makes it the WM selection, as a click on that vertex does. The address
+   parameter `?v=<true vertex>` does the same when the page opens. A new
+   route gives the selection for a true vertex: its position in mm, its
+   voxel, and the nearest overview vertex. A number out of range gives an
+   error in the log, and the selection does not change.
+
 ## Exact tests
 
 - `/signals/<name>/overview` on a phantom surface and overview equals the
@@ -273,6 +286,10 @@ All references are to `main` at 1f67376.
   order, the same edge keys) gives `edge-key` and the right vertex. A
   missing edge key gives `nearest` within one voxel, else `none`.
 
+- Go to a vertex: the route gives the true vertex's position, the voxel
+  that `Overlays.voxels` (#144) gives, and the overview vertex that `/snap`
+  gives for that position. A vertex out of range gives an error.
+
 ## The hemisphere check
 
 1. Start the viewer on the new input set with the echoes, the signals and a
@@ -294,6 +311,7 @@ All references are to `main` at 1f67376.
 | 3 | Part B: `static/signals.js`, the `colour` hook, the columns-pane additions | Phase session (Opus) | after 2 |
 | 4 | Part C: the spec and `viewer/notes.py`, with its tests | Sonnet sub-agent, the phase session reviews | 3 |
 | 5 | Part C: the notes panel, the stored u, open and recheck on the page | Phase session | after 3, 4 |
+| 5b | Part D: the user's requests, with their tests | Phase session | 1, 2 |
 | 6 | The hemisphere check | Phase session | after 5 and S's PR 1 |
 
 ## PRs
@@ -302,6 +320,7 @@ All references are to `main` at 1f67376.
 2. `feature/viewer-signals`: Part B. Branch from `origin/main`.
 3. `feature/viewer-notes`: Part C. Stacked on PR 2, because both change
    `columns.js`.
+4. `feature/viewer-requests`: Part D. Branch from `origin/main`.
 
 Tell the coordinator when each PR opens.
 
