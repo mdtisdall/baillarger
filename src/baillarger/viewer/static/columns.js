@@ -7,9 +7,12 @@
 // - The 3D surface view (VIEWER.hooks.draw3d): each column as a line, coloured by its derived class or by the class of the
 //   label interval under each sample. Only on the true surface (level 0): an inflated level has another geometry.
 // - The brick tiles (a plug-in of window.BVP, draw2d on #bvo): a dot where a column crosses the tile's plane.
-// - The profile section: the columns whose roots lie within a half width of the plane through the selected root that holds
-//   its normal and the section axis u, side by side in order of u, the echo along s (s = 0, the root, at the dashed line;
-//   outward is down), with a tick at each label-interval boundary in the colour of the interval that starts there.
+// - The profile section that follows the surface: GET /columns/section (baillarger.viewer.section) cuts the true white
+//   mesh with the plane through the picked column's root that holds its normal and the section axis u, and gives one step
+//   for each mean spacing of the roots along that curve, in order of arc length, with the column nearest along the surface
+//   ("nearest") or the columns within one voxel along the surface ("mean across": their mean echo). Side by side, the
+//   echo along s (s = 0, the root, at the dashed line; outward is down); in "nearest", a tick at each label-interval
+//   boundary in the colour of the interval that starts there.
 // - One column's details: its label intervals, |n̄|, its derived class. A click on the section picks the column.
 // - The selection drives everything: the WM selection of the shared state, and the pane's settings and picked column
 //   (state key "columns"), so every window shows the same columns.
@@ -20,7 +23,7 @@ const ICOL = [[150, 150, 150], [235, 235, 235], [214, 60, 50], [60, 130, 230], [
 const INAME = ["outside", "WM", "cortex", "other", "off grid"];
 const DCOL = { 1: [60, 200, 120], 2: [245, 140, 40], 3: [170, 110, 230] };
 const DNAME = { 1: "open", 2: "in WM", 3: "neither" };
-const C = { meta: null, data: null, prof: null, key: null, req: null, pick: -1, order: [], seq: 0, gl: null, nvMesh: null };
+const C = { meta: null, data: null, prof: null, key: null, req: null, pick: -1, sec: null, sseq: 0, seq: 0, gl: null, nvMesh: null };
 
 // ------------------------------------------------------------------ the pane's DOM
 function build() {
@@ -38,7 +41,8 @@ function build() {
     <a id="ctck" href="#" download style="color:var(--mute)">.tck</a>
   </div>
   <div class="pbar">
-    <label>section: half width <select id="chalf"><option>0.1</option><option selected>0.25</option><option>0.5</option><option value="1e9">all</option></select> mm</label>
+    <label title="nearest: at each step the column nearest along the surface; mean across: the mean of the columns within one voxel along the surface (it hides their own variation)">section
+      <select id="cmode"><option value="nearest">nearest</option><option value="mean">mean across</option></select></label>
     <label>echo <select id="cecho"><option value="0">1</option><option value="1" selected>2</option><option value="2">3</option></select></label>
     <label>show <select id="cshow"><option value="echo">echo</option><option value="class">label class</option></select></label>
     <span id="ckey" style="font-size:11px"></span>
@@ -48,10 +52,13 @@ function build() {
   $("ckey").innerHTML = ICOL.map((c, k) => `<span class="sw" style="background:rgb(${c})"></span>${INAME[k]}`).join(" ");
   for (const id of ["crad", "cevery", "cein", "ceout"]) $(id).onchange = () => { shareSettings(); load(); };
   for (const id of ["ccol", "c3d", "ctile"]) $(id).onchange = () => { redraw(); };
-  for (const id of ["chalf", "cecho", "cshow"]) $(id).onchange = () => { section(); drawSection(); };
+  $("cmode").onchange = () => section();
+  for (const id of ["cecho", "cshow"]) $(id).onchange = () => drawSection();
   $("csec").addEventListener("click", e => {
-    const k = Math.floor(e.offsetX / ($("csec").clientWidth / Math.max(1, C.order.length)));
-    if (k >= 0 && k < C.order.length) { setPick(C.order[k]); V.share({ columns: { ...settings(), column: vertexOf(C.pick) } }); }
+    const S = C.sec; if (!S) return;
+    const k = Math.floor(e.offsetX / ($("csec").clientWidth / Math.max(1, S.arc.length)));
+    const c = k >= 0 && k < S.arc.length ? stepColumn(k) : -1;
+    if (c >= 0) { setPick(c); V.share({ columns: { ...settings(), column: vertexOf(C.pick) } }); }
   });
 }
 const settings = () => ({ radius: +$("crad").value, every: +$("cevery").value, e_in: +$("cein").value, e_out: +$("ceout").value });
@@ -104,7 +111,7 @@ async function load() {
     const st = `${head.n} columns, ${head.samples.toLocaleString()} samples · ${(a.ms / 1000).toFixed(2)} s ` +
       `(server: graph ${head.seconds.graph} s, sampler ${head.seconds.sample} s on ${head.seconds.calls.toLocaleString()} roots of superblock ${head.superblock.join(",")})`;
     $("cstat").textContent = st;
-    section(); redraw(); details(); loadTck();
+    C.sec = null; section(); redraw(); details(); loadTck();
     const p = await fetchBinary(`/columns/profiles?${q}`, seq); if (!p) return;
     C.prof = decode(p.buf)[1];
     $("cstat").textContent = st + ` · profiles ${(p.ms / 1000).toFixed(2)} s`;
@@ -201,9 +208,9 @@ async function loadTck() {
 
 // ------------------------------------------------------------------ the profile section
 // the section axis u: the 3D view's screen right at the time of the selection, in the plane normal to the picked column
-function section() {
-  C.order = []; if (!C.data || C.pick < 0) return;
-  const d = C.data, p = C.pick, n0 = [0, 1, 2].map(k => d.normal[3*p+k]), r0 = [0, 1, 2].map(k => d.root[3*p+k]);
+// (world mm); the server makes the curve and picks the columns (GET /columns/section)
+function axisU() {
+  const d = C.data, p = C.pick, n0 = [0, 1, 2].map(k => d.normal[3*p+k]);
   const fr = V.frame, M = C.head.to_view;
   let u = [1, 0, 0];
   // a direction of the 3D frame in world mm: to_view's 3 x 3 part is diag(vox) A^-1 = R^T for A = R diag(vox), a rotation
@@ -211,49 +218,80 @@ function section() {
   const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
   let k = dot(u, n0); u = u.map((x, i) => x - k * n0[i]);
   if (Math.hypot(...u) < 1e-3) { u = Math.abs(n0[2]) < 0.9 ? [-n0[1], n0[0], 0] : [0, -n0[2], n0[1]]; k = dot(u, n0); u = u.map((x, i) => x - k * n0[i]); }
-  const L = Math.hypot(...u); u = u.map(x => x / L);
-  const w = [n0[1] * u[2] - n0[2] * u[1], n0[2] * u[0] - n0[0] * u[2], n0[0] * u[1] - n0[1] * u[0]], half = +$("chalf").value;
-  const rows = [];
-  for (let c = 0; c < C.head.n; c++) {
-    const q = [0, 1, 2].map(i => d.root[3*c+i] - r0[i]);
-    if (Math.abs(dot(q, w)) <= half) rows.push([dot(q, u), c]);
-  }
-  rows.sort((a, b) => a[0] - b[0]); C.order = rows.map(r => r[1]); C.u = rows.map(r => r[0]);
+  const L = Math.hypot(...u); return u.map(x => x / L);
+}
+async function section() {
+  const seq = ++C.sseq; C.sec = null; drawSection();
+  if (!C.data || C.pick < 0) return;
+  const sel = V.selection, s = settings(), u = axisU();
+  const q = `v=${sel.true_vertex}&radius=${s.radius}&every=${s.every}&e_in=${s.e_in}&e_out=${s.e_out}` +
+    `&u=${u.map(x => x.toFixed(6)).join(",")}&mode=${$("cmode").value}&at=${vertexOf(C.pick)}`;
+  try {
+    for (;;) {
+      const r = await fetch(`/columns/section?${q}`), j = await r.json();
+      if (seq !== C.sseq) return;
+      if (r.status === 200) { if (j.key !== C.key) return; C.sec = j; break; }
+      if (r.status !== 202) throw new Error(j.error || `HTTP ${r.status}`);
+      await sleep(400);
+    }
+  } catch (e) { if (seq === C.sseq) V.log("section: " + e.message); return; }
+  V.log(`section: ${C.sec.arc.length} steps of ${C.sec.step.toFixed(3)} mm (${C.sec.mode}), the curve ${C.sec.curve_length.map(x => x.toFixed(2)).join(" + ")} mm, ${C.sec.seconds} s`);
+  drawSection();
+}
+// the column a step stands for: its own (nearest), or the one whose root is nearest the step's point (mean across)
+function stepColumn(k) {
+  const cs = C.sec.columns[k], p = C.sec.point[k], d = C.data; if (!cs.length) return -1;
+  let best = cs[0], bd = Infinity;
+  for (const c of cs) { const r = Math.hypot(d.root[3*c] - p[0], d.root[3*c+1] - p[1], d.root[3*c+2] - p[2]); if (r < bd) { bd = r; best = c; } }
+  return best;
 }
 function drawSection() {
   const cv = $("csec"), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
   const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.fillStyle = "#000"; g.fillRect(0, 0, W, H);
-  if (!C.data || !C.order.length) return;
+  const S = C.sec; if (!C.data || !S || !S.arc.length) return;
   const d = C.data, s = settings(), top = 14, bot = H - 16, ys = v => top + (v + s.e_in) / (s.e_in + s.e_out) * (bot - top);
-  const nc = C.order.length, cw = W / nc, e = +$("cecho").value, show = $("cshow").value, prof = C.prof;
+  const nc = S.arc.length, cw = W / nc, e = +$("cecho").value, show = $("cshow").value, prof = C.prof, step = C.head.step;
+  const all = [...new Set(S.columns.flat())];
   let lo = 0, hi = 1;
-  if (prof && show === "echo") {   // the window: the 1st and 99th percentiles of the shown samples
-    const v = []; for (const c of C.order) for (let i = Number(d.sample_start[c]); i < Number(d.sample_start[c + 1]); i++) if (prof.valid[i]) v.push(prof.echo[3*i+e]);
+  if (prof && show === "echo") {   // the window: the 1st and 99th percentiles of the samples of the section's columns
+    const v = []; for (const c of all) for (let i = Number(d.sample_start[c]); i < Number(d.sample_start[c + 1]); i++) if (prof.valid[i]) v.push(prof.echo[3*i+e]);
     v.sort((a, b) => a - b); if (v.length) { lo = v[Math.floor(0.01 * (v.length - 1))]; hi = v[Math.floor(0.99 * (v.length - 1))]; }
   }
-  const dy = (bot - top) / ((s.e_in + s.e_out) / C.head.step);
-  C.order.forEach((c, x) => {
-    for (let i = Number(d.sample_start[c]); i < Number(d.sample_start[c + 1]); i++) {
-      let rgb;
-      if (show === "class") rgb = ICOL[d.cls[i]];
-      else if (!prof) continue;
-      else if (!prof.valid[i]) rgb = [40, 0, 0];
-      else { const t = Math.round(255 * Math.min(1, Math.max(0, (prof.echo[3*i+e] - lo) / (hi - lo || 1)))); rgb = [t, t, t]; }
-      g.fillStyle = `rgb(${rgb})`; g.fillRect(x * cw, ys(d.s[i]) - dy / 2, Math.ceil(cw), Math.ceil(dy));
+  const dy = (bot - top) / ((s.e_in + s.e_out) / step);
+  const grey = x => { const t = Math.round(255 * Math.min(1, Math.max(0, (x - lo) / (hi - lo || 1)))); return [t, t, t]; };
+  S.columns.forEach((cs, x) => {
+    if (!cs.length) return;
+    // per sample k (s = k step): the mean of the valid echoes of the step's columns, and their classes
+    const acc = new Map();
+    for (const c of cs) for (let i = Number(d.sample_start[c]); i < Number(d.sample_start[c + 1]); i++) {
+      const k = Math.round(d.s[i] / step); let a = acc.get(k); if (!a) acc.set(k, a = { sum: 0, n: 0, m: 0, cls: d.cls[i], mixed: false });
+      a.m++; if (d.cls[i] !== a.cls) a.mixed = true;
+      if (prof && prof.valid[i]) { a.sum += prof.echo[3*i+e]; a.n++; }
     }
+    for (const [k, a] of acc) {
+      let rgb;
+      if (show === "class") rgb = a.mixed ? [90, 90, 90] : ICOL[a.cls];
+      else if (!prof) continue;
+      else if (!a.n) rgb = [40, 0, 0];
+      else rgb = grey(a.sum / a.n);
+      g.fillStyle = `rgb(${rgb})`; g.fillRect(x * cw, ys(k * step) - dy / 2, Math.ceil(cw), Math.ceil(dy));
+    }
+    if (cs.length !== 1) return;
     // the label-interval boundaries: a tick in the colour of the interval that starts there
+    const c = cs[0];
     for (let q = Number(d.interval_start[c]) + 1; q < Number(d.interval_start[c + 1]); q++) {
       const v = d.interval_s0[q]; if (v < -s.e_in || v > s.e_out) continue;
       g.fillStyle = `rgb(${ICOL[d.interval_class[q]]})`; g.fillRect(x * cw, ys(v) - 1, Math.max(1, cw), 2);
     }
   });
   g.strokeStyle = "#ff2bd6"; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(0, ys(0)); g.lineTo(W, ys(0)); g.stroke(); g.setLineDash([]);
-  const k = C.order.indexOf(C.pick);
-  if (k >= 0) { g.strokeStyle = "#fff"; g.strokeRect(k * cw - 0.5, top - 2, cw + 1, bot - top + 4); }
+  const k0 = S.arc.findIndex(a => Math.abs(a) < 1e-9);   // the step at the picked root
+  if (k0 >= 0) { g.strokeStyle = "#fff"; g.strokeRect(k0 * cw - 0.5, top - 2, cw + 1, bot - top + 4); }
   g.fillStyle = "#9aa0a8"; g.font = "11px system-ui"; g.textBaseline = "top";
   g.fillText(`s = −${s.e_in} mm (inward)`, 4, 1); g.textBaseline = "bottom";
-  g.fillText(`s = ${s.e_out} mm · ${nc} columns, u from ${C.u[0].toFixed(2)} to ${C.u[nc - 1].toFixed(2)} mm` +
+  g.fillText(`s = ${s.e_out} mm · ${nc} steps of ${S.step.toFixed(3)} mm along the surface, arc ${S.arc[0].toFixed(2)} to ${S.arc[nc - 1].toFixed(2)} mm, ` +
+    `${all.length} columns (${S.mode === "mean" ? "mean within one voxel" : "nearest"})` +
     (show === "echo" ? ` · echo ${e + 1}, window ${lo.toFixed(0)}–${hi.toFixed(0)}` + (prof ? "" : " (loading)") : ""), 4, H - 1);
 }
 
@@ -270,7 +308,7 @@ function details() {
       `<td style="text-align:right;padding:0 8px">${d.interval_label[q]}</td><td style="color:rgb(${ICOL[d.interval_class[q]]})">${INAME[d.interval_class[q]]}</td></tr>`;
   el.innerHTML = t + "</table>";
 }
-function setPick(c) { C.pick = c; section(); drawSection(); details(); redraw(); }
+function setPick(c) { C.pick = c; section(); details(); redraw(); }
 function redraw() { if (C.data) upload3d(); V.draw3d(); redrawTiles(); }
 
 // ------------------------------------------------------------------ the shared state
