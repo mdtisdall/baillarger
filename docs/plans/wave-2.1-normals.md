@@ -325,12 +325,54 @@ finds no new type. Then every known type is a claim that can be checked.
 The current state of the catalogue. Input set: `scratch/v2/derivatives-main/`
 (white-surface sidecar SHA-256 1d53bc66182c3760…), with the maps of #146.
 
+#### The first sample: the thin-WM signal
+
+The thin-WM signal flags the vertices where the WM half-thickness (the
+largest EDT within 1 mm inward along the normal) is ≤ 0.25 mm and `normlen`
+is < 0.9. Merged at 2 mm, it gives 219 regions. The user reviewed 17 of them
+(seed 20261106):
+
+- 5 random regions from each size class: < 0.5 mm² (143 regions), 0.5–5 mm²
+  (61), and ≥ 5 mm² (13, without the two largest);
+- the two largest regions (about 93 mm² each);
+- not the region of vertex 10909480, which the user had reviewed by hand.
+
+| Verdict | Sites | Stage |
+|---|---|---|
+| The label is right | 4 | none: a false positive |
+| A. The WM label stops short | 4 | input segmentation |
+| C. An excision edge | 4 | input segmentation |
+| D. Fluid with a WM label | 2 | input segmentation |
+| E. A handle fill through fluid | 1 | `white_dseg` |
+| F. Damaged tissue | 2 | the specimen |
+| Mixed errors | 1 | input segmentation |
+
+The sites and their true vertices: S01 925537, S02 7046703, S03 8227722, S04 7151008, S05 10262810, S06 7537635, S07 11669881, S08 10103876, S09 9460421, S10 800401, S11 3447423, S12 2610251, S13 2086606, S14 2779166, S15 3391078, S16 6162995, S17 4361234.
+
+One site has both A and D. By size class, type A is 2 of 5 (< 0.5 mm²),
+0 of 5 (0.5–5 mm²) and 2 of 5 (≥ 5 mm²). Every site of 5 mm² or more has an
+error. Five sites in a class give a rough share only: 0 of 5 is consistent
+with a share of up to about 45 %.
+
+The thin-WM signal finds where the surface is wrong, but not the type of
+error. So each type needs its own detector and count. The sites of each type
+are the first test of its detector.
+
+#### The catalogue
+
 | Type | Stage | Effect | Signal and candidates | Sample | Decision |
 |---|---|---|---|---|---|
-| **A. The WM label stops short.** The label ends at a flat, grid-aligned face, and the WM in the echoes goes on past it. Where the face meets the other side of the WM, the label is one voxel thick, and the surface folds back on itself. | input segmentation (it is in the excised `dseg`, before `white_dseg`) | the smoothing mixes the opposite normals of the two sides; the columns fan out | WM half-thickness (the largest EDT within 1 mm inward along the normal) ≤ 1 voxel and `normlen` < 0.9, merged at 2 mm: 165 regions, 45 of 0.5 mm² or more. At ≤ 1.5 voxels: 219 regions, 76 of 0.5 mm² or more. It cannot tell missed WM from WM that is really thin. It cannot find a stop where the surface does not fold. | 1 site (vertex 10909480: missed WM that the user judges repairable by hand) | open |
+| **A. The WM label stops short.** The label ends short of WM that the echoes show. Often the WM is thin, and the label misses part of it. At a flat, grid-aligned stop, the label is one voxel thick, and the surface folds back on itself. | input segmentation (the excised `dseg` equals `wmtopo` at the reviewed sites) | the smoothing mixes the opposite normals of the two sides; the columns fan out; the profile section shows alternating bands | the thin-WM signal finds it, with the other types. No detector of its own yet | 4 of 17 thin-WM sites, plus vertex 10909480. Sites: S02, S07, S09, S12 | open |
 | **B. Sliver triangles.** Where the level set passes within a few µm of a grid node, the crossings on that node's edges fall almost on top of each other. Edges of 2–12 µm, against a typical 0.1 mm. | the meshing (marching tetrahedra, no remesh) | noisy raw normals and `nbrmaxpermm`; a small effect on the smoothed normals | `nbrmaxpermm` > 1000: 2.4 % of the vertices; 80 % of them are within 0.05 voxel of a grid node | the mechanism is confirmed | open. A candidate repair: before the marching, set each node value with \|φ\| < ε to ±ε. Each vertex stays on its own grid edge, so the edge keys and the guarantee of no self-intersection hold. |
-| The largest thin regions (about 90 mm² each, near (11, −46, −25) and (−6, −41, −50) mm) | not known | not known | the 2–5 largest regions of type A's signal | none | not a type yet |
+| **C. An excision edge.** The surface follows the edge of an excision: a hole where tissue was taken out, labelled 0 in the input. At a corner of the excision, or at the GM/WM boundary next to it, the WM is thin. | input segmentation (the excision map) | the surface and the columns follow the cut, not the anatomy | not counted yet. Candidate detector: the white-surface vertices within a distance of the excision map | 4 of 17 (S03, S05, S06, S14). At S05, the topology fix also removed 211 WM voxels near the excision | open |
+| **D. Fluid with a WM label.** Fluid has a label in the WM mask: 192 (`Corpus_Callosum`, a filled label) at S08, 41 at S09. | input segmentation | the surface wraps the fluid as WM | not counted yet. Candidate detector: the voxels of each filled label whose echo intensity is like fluid | 2 of 17 (S08, S09). At S08, 11,089 voxels of label 192 within 15 voxels have an echo-2 median of 63; fluid is about 50, WM about 450 | open |
+| **E. A handle fill through fluid.** The topology fix closes a handle by filling WM through fluid. | `white_dseg` (handle fill) | the surface wraps the fluid as WM, as in D | not counted yet. Candidate detector: the handle-fill voxels (`wmtopofixes` = 2) whose echo intensity is like fluid | 1 of 17 (S11: 652 ventricle voxels, echo-2 median 48, in a stripe of about 4 × 3 × 5 mm) | open. A repair changes our code, so it gets its own plan |
+| **F. Damaged tissue.** Degenerated tissue with many holes, or a hole that may run from the WM out to the pial surface. | the specimen | the surface cannot follow the anatomy here; a label repair does not fix it | not counted yet | 2 of 17 (S15, next to the ventricle; S17) | open. A candidate decision: defer, and exclude the region |
+| Mixed errors (S16): fluid with a WM label, and tissue labelled 0, next to the ventricle and the hippocampus | input segmentation | not known | not a type: its parts go to D, and to the other types when they are known | 1 of 17 | none |
 | Misfacing faces (question 3) | not known | not known | `misfacingsmooth` ≥ 1 at 0.032 % of the vertices, `misfacingraw` ≥ 1 at 0.013 % | none | not a type yet |
+
+The two largest regions of the thin-WM signal were an open item. They are
+S11 (type E) and S15 (type F).
 
 The frame of the published normals (voxel axes, see "Facts from the current
 code") is a gap in the spec, not an error type. It goes to its own PR.
