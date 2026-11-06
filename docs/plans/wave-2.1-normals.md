@@ -32,7 +32,12 @@ until wave 2.1 is done.
    echoes, no rays, no `orient`.
 3. A generic overlay in the viewer: any per-vertex GIFTI map on the
    overview, with a colour bar and a ranked list that opens the vertex.
-4. The user reviews the maps, and the findings decide what wave 2.5 does.
+4. The user reviews the maps and the sites they rank. The review finds the
+   types of error in the surface and its normals, and the prevalence of
+   each type.
+5. Each error type gets a decision: repair now, or defer with a recorded
+   provisional limit. Wave 2.5 starts only when every known type has a
+   decision.
 
 These maps test whether the normals agree with themselves and with the
 mesh. They do not test whether the normals are correct. Normals can be
@@ -47,8 +52,11 @@ independent check, later.
 | 2 | Make `white_surf` and `white_overview` again on `scratch/v2/derivatives-main/`, one at a time under `scripts/memguard` | the coordinator |
 | 3 | The normal maps (Part A) | session N |
 | 4 | The generic overlay (Part B) | session N |
-| 5 | The review | the user |
-| 6 | The findings, and the changes to the wave 2.5 plans | the coordinator, with the user |
+| 5 | The review: the error types and their prevalence (see "The error types") | the user, with the coordinator |
+| 6 | A decision for each type: repair now, or defer. A repair that changes code or a method gets its own plan and PR (see "Repairs"). After each repair, the input set is made again, and the counts are measured again | the user decides; the coordinator writes the repair plans |
+| 7 | The changes to the wave 2.5 plans (#141) | the coordinator, with the user |
+
+Steps 5 and 6 repeat, one type at a time, until the stop rule holds.
 
 Step 3 starts after step 2. Step 4 can start at once: it tests on phantom
 files.
@@ -69,7 +77,11 @@ files.
 All references are to `main` at 1f67376, with #142.
 
 - The published normals: `desc-smoothnormals_white.func.gii`, (n, 3) f32,
-  unit, scanner RAS. The area-weighted vertex normals take
+  unit, in the voxel axes of the `dseg`, not scanner RAS: `white_surf`
+  smooths them on the vertices in voxel coordinates and writes them with no
+  transform. For the current input set the affine is diagonal and positive
+  (0.16028, 0.16, 0.16028 mm), so the difference is at most about 0.1°.
+  `docs/formats/white-surf.md` does not name the frame yet. The area-weighted vertex normals take
   `NormalSmoothingSteps` (10) steps. Each step sets n to 0.5 n + 0.5 × (the
   mean of n over the neighbours), then divides n by its norm
   (`mesh_smoothing.smooth_normals_and_length`, `mesh_smoothing.py:139`).
@@ -246,8 +258,13 @@ Tell the coordinator when each PR opens.
 
 ## The review (step 5)
 
-The user reviews the maps in the overlay and the figures. The questions for
-the review:
+The goal of the review is a catalogue of the error types and the prevalence
+of each. The repair plan comes after the catalogue, from the scale and the
+scope of each type. Do not build repair tools before a type is in the
+catalogue.
+
+The user reviews the maps in the overlay, the figures, and the sites that
+the ranked lists open. The questions that lead the review:
 
 1. Do the smoothed normals change at the voxel scale between neighbours, and
    where: over the whole surface, or in some kinds of places (thin blades,
@@ -257,8 +274,77 @@ the review:
    places as against the raw normals?
 4. Does the renormalisation change the normal much anywhere?
 
-Each finding names the input set and the map. The findings go into the
-wave 2.5 plans (#141) before they are taken out of draft.
+### The loop for one error type
+
+1. **Identify.** The user finds a site, and the coordinator finds its cause
+   with views of that site. Record the type: its definition, the stage that
+   makes it (input segmentation, `white_dseg`, the meshing, the normals, the
+   columns), its effect on the columns, and one or two example sites.
+2. **Count.** Find the candidates of the type with the simplest signal that
+   catches it. The count of candidates is an upper bound. Record what the
+   signal cannot find, so that a low count does not hide the type.
+3. **Sample.** The user reviews a random sample of the candidates (about 10
+   to 20), spread over their sizes. The share that are errors (the
+   precision) times the count gives the prevalence, as a count of sites and
+   as an area.
+4. **Decide.** Repair now, or defer. A deferral records the type as a
+   provisional limit (plan §1, working rules), so that later results do not
+   blame its errors on another component. A repair of tens of sites can go
+   through the review queue as `dseg` manual edits. A repair of thousands of
+   sites needs a change to the method, with its own plan (see "Repairs").
+5. **Measure again.** After a repair, make the input set again and measure
+   the counts of every type again.
+
+Repair in the order of the pipeline: the input segmentation first, then
+`white_dseg`, the meshing, and the normals. A repair upstream changes the
+counts downstream. For example, a repair of the WM label at type A sites
+removes some type B slivers and some column fans.
+
+### Repairs
+
+Wave 2.1 decides which types to repair. It does not hold the repair work.
+
+- A repair that changes code or a method gets its own plan in
+  `docs/plans/`, on its own branch, with its own PR. The plan gives the
+  design, the tests, and the counts to measure again. The user approves the
+  plan before the work starts.
+- A repair by `dseg` manual edits at tens of sites goes through the review
+  queue. It needs no plan of its own.
+- The catalogue's "Decision" column links to the repair plan or PR.
+
+Wave 2.5 waits until each repair is merged and measured again.
+
+### The stop rule
+
+The search for new types stops when the user reviews a random sample of
+sites over the whole surface, not only the top of the ranked lists, and
+finds no new type. Then every known type is a claim that can be checked.
+
+### The error types
+
+The current state of the catalogue. Input set: `scratch/v2/derivatives-main/`
+(white-surface sidecar SHA-256 1d53bc66182c3760…), with the maps of #146.
+
+| Type | Stage | Effect | Signal and candidates | Sample | Decision |
+|---|---|---|---|---|---|
+| **A. The WM label stops short.** The label ends at a flat, grid-aligned face, and the WM in the echoes goes on past it. Where the face meets the other side of the WM, the label is one voxel thick, and the surface folds back on itself. | input segmentation (it is in the excised `dseg`, before `white_dseg`) | the smoothing mixes the opposite normals of the two sides; the columns fan out | WM half-thickness (the largest EDT within 1 mm inward along the normal) ≤ 1 voxel and `normlen` < 0.9, merged at 2 mm: 165 regions, 45 of 0.5 mm² or more. At ≤ 1.5 voxels: 219 regions, 76 of 0.5 mm² or more. It cannot tell missed WM from WM that is really thin. It cannot find a stop where the surface does not fold. | 1 site (vertex 10909480: missed WM that the user judges repairable by hand) | open |
+| **B. Sliver triangles.** Where the level set passes within a few µm of a grid node, the crossings on that node's edges fall almost on top of each other. Edges of 2–12 µm, against a typical 0.1 mm. | the meshing (marching tetrahedra, no remesh) | noisy raw normals and `nbrmaxpermm`; a small effect on the smoothed normals | `nbrmaxpermm` > 1000: 2.4 % of the vertices; 80 % of them are within 0.05 voxel of a grid node | the mechanism is confirmed | open. A candidate repair: before the marching, set each node value with \|φ\| < ε to ±ε. Each vertex stays on its own grid edge, so the edge keys and the guarantee of no self-intersection hold. |
+| The largest thin regions (about 90 mm² each, near (11, −46, −25) and (−6, −41, −50) mm) | not known | not known | the 2–5 largest regions of type A's signal | none | not a type yet |
+| Misfacing faces (question 3) | not known | not known | `misfacingsmooth` ≥ 1 at 0.032 % of the vertices, `misfacingraw` ≥ 1 at 0.013 % | none | not a type yet |
+
+The frame of the published normals (voxel axes, see "Facts from the current
+code") is a gap in the spec, not an error type. It goes to its own PR.
+
+### When wave 2.1 is done
+
+1. The stop rule holds.
+2. Every type in the catalogue has a decision. Each repair, with its own
+   plan and PR where it changes code or a method, is merged and measured
+   again.
+3. The changes to the wave 2.5 plans (#141) are written. Then #141 can be
+   taken out of draft.
+
+Each finding names the input set and the map.
 
 ## Decisions for review (made by the coordinator)
 
