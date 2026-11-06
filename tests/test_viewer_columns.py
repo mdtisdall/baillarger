@@ -478,14 +478,107 @@ def test_the_section_route(cols: VC.Columns) -> None:
         other = int(arr["vertex"][sec["columns"][-1][0]])
         code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2&at={other}")
         assert code == 200 and json.loads(body)["vertex"] == other
+        # a picked column that is not in the request (a stale one from another
+        # selection): the section falls back to the request's vertex, no error
+        for stale in (
+            -5,
+            other + 10**9,
+            int(np.setdiff1d(np.arange(len(cols.v)), colv)[0]),
+        ):
+            code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2&at={stale}")
+            assert code == 200
+            fb = json.loads(body)
+            assert fb["vertex"] == v and fb["column"] == sec["column"]
+            assert fb["fallback"] == f"vertex {stale}: not a column of the request"
+            assert fb["columns"] == sec["columns"] and fb["arc"] == sec["arc"]
+        assert sec["fallback"] is None
+        assert sec["step_vertices"] == [
+            [int(colv[c]) for c in cs] for cs in sec["columns"]
+        ]
         for bad in (
             "u=1,0",
             "u=0.3,1,0.2&mode=median",
-            "u=0.3,1,0.2&at=-5",
             "",
         ):
             code, body = get(f"{base}/columns/section?{q}&{bad}")
             assert code == 400 and "error" in json.loads(body), bad
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        VS.Handler.white = None
+        VS.Handler.columns = None
+
+
+def test_the_section_over_the_cap(
+    cols: VC.Columns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request over MAX_COLUMNS: /columns refuses, but /columns/section still
+    answers, with the same columns as without the cap; /columns and
+    /columns/profiles with cols= (the section's roots) give those columns, each
+    the whole request's own column byte for byte, and their echoes."""
+    srv = VS.serve(None, 0, white=WhiteView.__new__(WhiteView), columns=cols)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        v, radius = corner_vertex(cols), 1.3  # a radius no other test asks for
+        q = f"v={v}&radius={radius}"
+        sq = f"{q}&u=0.3,1,0.2"
+        free = {}
+        for mode in VSec.MODES:
+            code, body = get(f"{base}/columns/section?{sq}&mode={mode}")
+            assert code == 200
+            free[mode] = json.loads(body)
+            assert not free[mode]["capped"]
+        n = free["nearest"]["n"]
+        monkeypatch.setattr(VC, "MAX_COLUMNS", n - 1)
+        code, body = get(f"{base}/columns?{q}")
+        assert code == 400 and "more than" in json.loads(body)["error"]
+        parts = {}
+        for mode in VSec.MODES:
+            code, body = get(f"{base}/columns/section?{sq}&mode={mode}")
+            assert code == 200
+            capped = json.loads(body)
+            assert capped["capped"] and capped["n"] == n
+            assert capped["max_columns"] == n - 1
+            for k in ("columns", "step_vertices", "roots", "arc", "distance"):
+                assert capped[k] == free[mode][k], k
+            # the section's columns alone, under the cap
+            roots = capped["roots"]
+            assert 0 < len(roots) < n
+            cq = f"{q}&cols={','.join(map(str, roots))}"
+            code, body = get(f"{base}/columns?{cq}")
+            assert code == 200
+            h2, part = VC.decode(body)
+            # in the whole answer's order (owned, then halo): checked below
+            assert sorted(part["vertex"].tolist()) == roots
+            code, body = get(f"{base}/columns/profiles?{cq}")
+            assert code == 200
+            parts[mode] = (h2["key"], part["vertex"].tolist(), VC.decode(body)[1])
+        # the whole request, without the cap: the same columns, the same echoes
+        monkeypatch.undo()
+        code, body = get(f"{base}/columns?{q}")
+        assert code == 200
+        head, full = VC.decode(body)
+        assert head["n"] == n
+        code, body = get(f"{base}/columns/profiles?{q}")
+        assert code == 200
+        full_prof = VC.decode(body)[1]
+        fr = cols.result(head["key"]).rays
+        at = {int(x): i for i, x in enumerate(full["vertex"])}
+        for key, pv, prof in parts.values():
+            pr = cols.result(key).rays
+            assert [at[x] for x in pv] == sorted(at[x] for x in pv)
+            for i, x in enumerate(pv):
+                assert as_column(pr, i) == as_column(fr, at[x])
+                a, b = pr.sample_start[i], pr.sample_start[i + 1]
+                fa, fb = fr.sample_start[at[x]], fr.sample_start[at[x] + 1]
+                assert np.array_equal(
+                    prof["echo"][a:b], full_prof["echo"][fa:fb], equal_nan=True
+                )
+                assert np.array_equal(prof["valid"][a:b], full_prof["valid"][fa:fb])
+        out = np.setdiff1d(np.arange(len(cols.v)), full["vertex"])
+        code, body = get(f"{base}/columns?{q}&cols={int(out[0])}")
+        assert code == 400 and "not a column" in json.loads(body)["error"]
     finally:
         srv.shutdown()
         srv.server_close()

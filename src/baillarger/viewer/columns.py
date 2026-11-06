@@ -94,11 +94,14 @@ class Request:
     e_in: float = R.CAP_IN
     e_out: float = R.CAP_OUT
     step: float = R.STEP
+    #: only these columns (true vertices, comma-separated; "" for all): the
+    #: columns of a profile section, when the whole request is over the cap
+    cols: str = ""
 
     @classmethod
     def parse(cls, q: dict[str, str]) -> "Request":
         """A request from the query of a URL: v, radius, and optionally
-        method, every, e_in, e_out, step."""
+        method, every, e_in, e_out, step, cols."""
         r = cls(
             vertex=int(q["v"]),
             radius=float(q.get("radius", 2.0)),
@@ -107,6 +110,7 @@ class Request:
             e_in=float(q.get("e_in", R.CAP_IN)),
             e_out=float(q.get("e_out", R.CAP_OUT)),
             step=float(q.get("step", R.STEP)),
+            cols=",".join(str(int(x)) for x in q.get("cols", "").split(",") if x),
         )
         r.check()
         return r
@@ -122,6 +126,12 @@ class Request:
             raise ValueError("e_in, e_out: outside the caps")
         if not self.step > 0:
             raise ValueError(f"step {self.step}: not > 0")
+
+    def only(self) -> I64 | None:
+        """The vertices of cols, ascending; None for all."""
+        if not self.cols:
+            return None
+        return np.unique(np.array(self.cols.split(","), np.int64))
 
     def key(self, sources: str) -> str:
         """The cache key: the request and the sources' SHA-256."""
@@ -398,46 +408,49 @@ class Columns:
             return m
 
     def section(
-        self, key: str, u: Sequence[float], mode: str, at: int | None = None
+        self,
+        req: Request,
+        u: Sequence[float],
+        mode: str,
+        at: int | None = None,
     ) -> dict[str, Any]:
-        """The profile section of a finished request (baillarger.viewer.section):
-        the curve through the root of column `at` (a true vertex; default: the
-        request's vertex, else the column nearest it along the surface), one
-        step for each mean spacing of the request's roots, and the columns at
-        each step, as indices into the /columns answer."""
+        """The profile section of a request (baillarger.viewer.section), without
+        sampling its columns, so the cap MAX_COLUMNS does not apply: the curve
+        through the root of column `at` (a true vertex), one step for each mean
+        spacing of the request's roots, and the columns at each step, as
+        indices into the /columns answer of the whole request and as true
+        vertices. The centre: `at` if it is a column of the request, else the
+        request's vertex if it is one, else the column nearest it along the
+        surface; `fallback` says when `at` was not a column."""
         t0 = time.perf_counter()
-        r = self.result(key)
-        req = r.request
-        roots = r.rays.roots
-        if not len(roots.vertex):
+        whole = replace(req, cols="")
+        sb, roots, chosen, dist = self.candidates(whole)
+        if not len(chosen):
             raise ValueError("the request has no columns")
-        want = req.vertex if at is None else int(at)
-        hit = np.flatnonzero(roots.vertex == want)
-        if len(hit):
-            c0 = int(hit[0])
-        elif at is None:
-            c0 = int(np.argmin(r.distance))
-        else:
-            raise ValueError(f"vertex {at}: not a column of the request")
-        sb = self.superblock(req.vertex)
+        vertex = roots.vertex[chosen]
+        fallback = None
+        hit = np.flatnonzero(vertex == (req.vertex if at is None else int(at)))
+        if not len(hit) and at is not None:
+            fallback = f"vertex {at}: not a column of the request"
+            hit = np.flatnonzero(vertex == req.vertex)
+        c0 = int(hit[0]) if len(hit) else int(np.argmin(dist))
         g = self.graph(sb)
         m = self.mesh(sb)
-        v0 = int(roots.vertex[c0])
+        v0 = int(vertex[c0])
         i0 = int(np.searchsorted(g.vertex, v0))
         if i0 >= len(g.vertex) or g.vertex[i0] != v0:
             raise RuntimeError(f"vertex {v0}: not in the local graph")
-        curve = VSec.plane_cut(
-            m.pts, m.faces, m.pts[i0], roots.normal[c0], u, req.radius
-        )
-        step = VSec.mean_spacing(np.asarray(roots.root, np.float64))
+        normal = roots.normal[chosen[c0]]
+        curve = VSec.plane_cut(m.pts, m.faces, m.pts[i0], normal, u, req.radius)
+        step = VSec.mean_spacing(np.asarray(roots.root[chosen], np.float64))
         arc, pts, faces = VSec.steps(curve, step)
-        pos = np.searchsorted(g.vertex, roots.vertex)
+        pos = np.searchsorted(g.vertex, vertex)
         pos = np.minimum(pos, len(g.vertex) - 1)
         column_of = -np.ones(len(g.vertex), np.int64)
-        ok = g.vertex[pos] == roots.vertex
+        ok = g.vertex[pos] == vertex
         column_of[pos[ok]] = np.flatnonzero(ok)
         voxel = float(np.max(self.vox))
-        cols, dist = VSec.step_columns(
+        cols, d = VSec.step_columns(
             pts,
             faces,
             m.pts,
@@ -450,10 +463,14 @@ class Columns:
             req.radius,
         )
         return dict(
-            key=key,
+            key=whole.key(self.sources),
             mode=mode,
+            n=len(chosen),
+            capped=len(chosen) > MAX_COLUMNS,
+            max_columns=MAX_COLUMNS,
             column=c0,
             vertex=v0,
+            fallback=fallback,
             step=step,
             voxel=voxel,
             u=curve.u.tolist(),
@@ -461,12 +478,44 @@ class Columns:
             arc=arc.tolist(),
             point=pts.round(4).tolist(),
             columns=cols,
+            step_vertices=[[int(vertex[c]) for c in cs] for cs in cols],
             # the true vertices of the roots of the section's columns, ascending
-            roots=sorted({int(roots.vertex[c]) for cs in cols for c in cs}),
-            distance=[None if np.isnan(x) else float(x) for x in dist],
+            roots=sorted({int(vertex[c]) for cs in cols for c in cs}),
+            distance=[None if np.isnan(x) else float(x) for x in d],
             curve_length=[float(-curve.arc[0]), float(curve.arc[-1])],
             seconds=round(time.perf_counter() - t0, 3),
         )
+
+    def candidates(
+        self, req: Request
+    ) -> tuple[tuple[int, int, int], R.Roots, I64, Float]:
+        """The columns of a request without their rays: the superblock, the
+        sampler's roots of the call, the chosen roots (indices into them, in
+        the order of the /columns answer: within the radius, every n-th, and
+        only cols if given), and their distances along the surface."""
+        sb = self.superblock(req.vertex)
+        verts, dist = self.near(req.vertex, req.radius)
+        with self.lock:
+            roots = self.rays.roots(sb, LEVEL, req.radius)
+        pos = np.searchsorted(verts, roots.vertex)
+        pos = np.minimum(pos, len(verts) - 1)
+        hit = verts[pos] == roots.vertex
+        if hit.sum() != len(verts):
+            raise RuntimeError(
+                f"vertex {req.vertex}: {len(verts) - int(hit.sum())} roots "
+                "within the radius are not in the sampler's halo"
+            )
+        chosen = np.flatnonzero(hit)[:: req.every]
+        only = req.only()
+        if only is not None:
+            keep = np.isin(roots.vertex[chosen], only)
+            missing = np.setdiff1d(only, roots.vertex[chosen[keep]])
+            if len(missing):
+                raise ValueError(
+                    f"cols: vertex {int(missing[0])} is not a column of the request"
+                )
+            chosen = chosen[keep]
+        return sb, roots, chosen, dist[pos[chosen]]
 
     def near(self, vertex: int, radius: float) -> tuple[I64, Float]:
         """The vertices within radius of vertex along the surface, ascending,
@@ -483,25 +532,14 @@ class Columns:
     def compute(self, req: Request, log: Callable[[str], object] = print) -> Result:
         """The columns of a request (see the module docstring)."""
         t0 = time.perf_counter()
-        sb = self.superblock(req.vertex)
-        verts, dist = self.near(req.vertex, req.radius)
+        sb, roots, chosen, d = self.candidates(req)
         t1 = time.perf_counter()
+        if len(chosen) > MAX_COLUMNS:
+            raise ValueError(
+                f"{len(chosen)} columns: more than {MAX_COLUMNS}; "
+                "use a smaller radius or a larger `every`"
+            )
         with self.lock:
-            roots = self.rays.roots(sb, LEVEL, req.radius)
-            pos = np.searchsorted(verts, roots.vertex)
-            pos = np.minimum(pos, len(verts) - 1)
-            hit = verts[pos] == roots.vertex
-            if hit.sum() != len(verts):
-                raise RuntimeError(
-                    f"vertex {req.vertex}: {len(verts) - int(hit.sum())} roots "
-                    "within the radius are not in the sampler's halo"
-                )
-            chosen = np.flatnonzero(hit)[:: req.every]
-            if len(chosen) > MAX_COLUMNS:
-                raise ValueError(
-                    f"{len(chosen)} columns: more than {MAX_COLUMNS}; "
-                    "use a smaller radius or a larger `every`"
-                )
             e_in = np.zeros(len(roots.vertex))
             e_out = np.zeros(len(roots.vertex))
             e_in[chosen], e_out[chosen] = req.e_in, req.e_out
@@ -516,7 +554,6 @@ class Columns:
             )
         t2 = time.perf_counter()
         out = select_columns(rays, chosen)
-        d = dist[pos[chosen]].astype(np.float32)
         secs = dict(
             graph=round(t1 - t0, 3),
             sample=round(t2 - t1, 3),
@@ -526,7 +563,9 @@ class Columns:
             f"columns at vertex {req.vertex}: {len(chosen)} of "
             f"{len(roots.vertex)} in superblock {sb} ({secs})"
         )
-        return Result(req, req.key(self.sources), out, sb, LEVEL, d, secs)
+        return Result(
+            req, req.key(self.sources), out, sb, LEVEL, d.astype(np.float32), secs
+        )
 
     def get(self, req: Request) -> dict[str, Any]:
         """Start the request as a job, or find it done; wait up to WAIT_S.
@@ -667,7 +706,9 @@ def route(h: Any, path: str, q: dict[str, str]) -> None:
       as above.
     - GET /columns/section?(the same)&u=x,y,z[&mode=nearest|mean&at=]: the
       profile section that follows the surface (Columns.section; u in scanner
-      mm), or 202 as above.
+      mm). It samples no column, so it answers over the cap too; then the
+      page asks /columns and /columns/profiles with cols= (the section's
+      columns).
     - GET /columns/<key>.tck: the columns of a finished request, as .tck.
     Errors: 400 with JSON {error}; 404 without columns (no --white)."""
     c: Columns | None = getattr(h, "columns", None)
@@ -691,11 +732,12 @@ def route(h: Any, path: str, q: dict[str, str]) -> None:
                 if mode not in VSec.MODES:
                     raise ValueError(f"mode {mode!r}: not one of {VSec.MODES}")
                 at = int(q["at"]) if q.get("at") else None
+            if path == "/columns/section":
+                js(c.section(req, u, mode, at))
+                return
             st = c.get(req)
             if st["status"] != "done":
                 js(st, 202)
-            elif path == "/columns/section":
-                js(c.section(st["key"], u, mode, at))
             elif path == "/columns":
                 h.send(c.columns_bytes(st["key"]), "application/octet-stream")
             else:

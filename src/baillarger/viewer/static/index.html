@@ -86,6 +86,9 @@ function layout() {
   const n = PANES.length, m = $("main");
   m.style.setProperty("--cols", n >= 3 ? 2 : n);
   m.style.gridTemplateRows = n >= 3 ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(0, 1fr)";
+  // three panes on two columns: the last one spans the bottom row, so no quarter stays empty
+  for (const p of ["volume", "surface", "columns"]) $("p-" + p).style.gridColumn = "";
+  if (n === 3) $("p-" + PANES[2]).style.gridColumn = "1 / -1";
 }
 $("newwin").onclick = () => window.open(location.pathname + "?" + q.toString(), "_blank", "width=1100,height=800");
 
