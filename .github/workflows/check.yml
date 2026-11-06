@@ -88,8 +88,19 @@ jobs:
         if: matrix.part == 'lint'
         run: nix develop --command scripts/check --lint-only
       # memguard reports the peak memory of the group (the runner has 16 GB).
+      # pytest-xdist starts one worker for each of the runner's 4 vCPUs, so
+      # each worker uses one thread: without this, the numba parallel=True
+      # kernels (and OpenMP, BLAS, torch) start 4 threads in each worker, and
+      # the 16 threads compete for the 4 vCPUs. --durations lists the
+      # slowest tests of the group in the log.
       - name: scripts/check (test group ${{ matrix.part }}/${{ env.GROUPS }})
         if: matrix.part != 'lint'
+        env:
+          NUMBA_NUM_THREADS: 1
+          OMP_NUM_THREADS: 1
+          OPENBLAS_NUM_THREADS: 1
+          MKL_NUM_THREADS: 1
+          PYTEST_ADDOPTS: --durations=15
         run: >-
           nix develop --command scripts/memguard 15 scripts/check
           --group "${{ matrix.part }}/$GROUPS"
