@@ -13,6 +13,10 @@
 //   ("nearest") or the columns within one voxel along the surface ("mean across": their mean echo). Side by side, the
 //   echo along s (s = 0, the root, at the dashed line; outward is down); in "nearest", a tick at each label-interval
 //   boundary in the colour of the interval that starts there.
+// - The section's roots in the 3D view (VIEWER.points): the roots of the columns that the section shows (nearest: one a
+//   step; mean across: every column of a step's mean) in amber, the picked column's root in white. On the true surface
+//   (level 0) at the roots themselves; on an inflated level at the overview vertex of each root (GET /vertex/overview,
+//   as the WM selection marker).
 // - One column's details: its label intervals, |n̄|, its derived class. A click on the section picks the column.
 // - The selection drives everything: the WM selection of the shared state, and the pane's settings and picked column
 //   (state key "columns"), so every window shows the same columns.
@@ -23,7 +27,8 @@ const ICOL = [[150, 150, 150], [235, 235, 235], [214, 60, 50], [60, 130, 230], [
 const INAME = ["outside", "WM", "cortex", "other", "off grid"];
 const DCOL = { 1: [60, 200, 120], 2: [245, 140, 40], 3: [170, 110, 230] };
 const DNAME = { 1: "open", 2: "in WM", 3: "neither" };
-const C = { meta: null, data: null, prof: null, key: null, req: null, pick: -1, sec: null, sseq: 0, seq: 0, gl: null, nvMesh: null };
+const C = { meta: null, data: null, prof: null, key: null, req: null, pick: -1, sec: null, sseq: 0, seq: 0, gl: null, nvMesh: null,
+  hl: null };   // the section's roots for the 3D view: { sec, xyz (level 0), ov: overview vertices or null, pickOv }
 
 // ------------------------------------------------------------------ the pane's DOM
 function build() {
@@ -38,6 +43,8 @@ function build() {
     <label>colour <select id="ccol"><option value="interval">label of each interval</option><option value="derived">derived class</option></select></label>
     <label><input type="checkbox" id="c3d" checked> 3D</label>
     <label><input type="checkbox" id="ctile" checked> tiles</label>
+    <label title="the roots of the columns that the profile section shows, in the 3D view (amber; the picked column's root white)"><input type="checkbox" id="chl" checked> section roots</label>
+    <span id="chlnote" style="font-size:11px;color:var(--mute)"></span>
     <a id="ctck" href="#" download style="color:var(--mute)">.tck</a>
   </div>
   <div class="pbar">
@@ -51,7 +58,7 @@ function build() {
   <div id="cdet" style="flex:none;max-height:40%;overflow-y:auto;font-size:12px;padding:2px 8px"></div>`;
   $("ckey").innerHTML = ICOL.map((c, k) => `<span class="sw" style="background:rgb(${c})"></span>${INAME[k]}`).join(" ");
   for (const id of ["crad", "cevery", "cein", "ceout"]) $(id).onchange = () => { shareSettings(); load(); };
-  for (const id of ["ccol", "c3d", "ctile"]) $(id).onchange = () => { redraw(); };
+  for (const id of ["ccol", "c3d", "ctile", "chl"]) $(id).onchange = () => { redraw(); };
   $("cmode").onchange = () => section();
   for (const id of ["cecho", "cshow"]) $(id).onchange = () => drawSection();
   $("csec").addEventListener("click", e => {
@@ -162,6 +169,20 @@ function upload3d() {
   g.bindBuffer(g.ARRAY_BUFFER, C.gl.bc); g.bufferData(g.ARRAY_BUFFER, L.col, g.DYNAMIC_DRAW);
   C.gl.m = L.m;
 }
+V.hooks.draw3d.push((g, M) => {   // the section's roots
+  if (!C.meta) return;
+  const hl = C.hl, on = hl && $("chl").checked, G = V.GL;
+  const note = !on ? "" : G.level === 0 ? `${hl.xyz.length / 3} roots` :
+    `${hl.sec.roots.length} roots, shown at their overview vertices (inflated surface)`;
+  if ($("chlnote").textContent !== note) $("chlnote").textContent = note;
+  if (!on) return;
+  // the picked root first: at equal depth the later disc fails the depth test
+  if (G.level === 0) { V.points(g, M, hl.pick, [1, 1, 1], 8); V.points(g, M, hl.xyz, [1, 0.75, 0.1], 6); return; }
+  if (!hl.ov) { if (!hl.asked) highlightOverview(hl); return; }
+  const at = v => [G.pos[3*v], G.pos[3*v+1], G.pos[3*v+2]];
+  const ov = [...new Set(hl.ov)], xyz = new Float32Array(3 * ov.length); ov.forEach((v, i) => xyz.set(at(v), 3 * i));
+  V.points(g, M, new Float32Array(at(hl.pickOv)), [1, 1, 1], 8); V.points(g, M, xyz, [1, 0.75, 0.1], 6);
+});
 V.hooks.draw3d.push((g, M) => {
   if (!C.gl || !C.gl.m || !$("c3d").checked || V.GL.level !== 0) return;
   g.useProgram(C.gl.p); g.bindVertexArray(C.gl.vao); g.uniformMatrix4fv(g.getUniformLocation(C.gl.p, "mvp"), false, M);
@@ -221,7 +242,7 @@ function axisU() {
   const L = Math.hypot(...u); return u.map(x => x / L);
 }
 async function section() {
-  const seq = ++C.sseq; C.sec = null; drawSection();
+  const seq = ++C.sseq; C.sec = null; C.hl = null; drawSection();
   if (!C.data || C.pick < 0) return;
   const sel = V.selection, s = settings(), u = axisU();
   const q = `v=${sel.true_vertex}&radius=${s.radius}&every=${s.every}&e_in=${s.e_in}&e_out=${s.e_out}` +
@@ -236,7 +257,24 @@ async function section() {
     }
   } catch (e) { if (seq === C.sseq) V.log("section: " + e.message); return; }
   V.log(`section: ${C.sec.arc.length} steps of ${C.sec.step.toFixed(3)} mm (${C.sec.mode}), the curve ${C.sec.curve_length.map(x => x.toFixed(2)).join(" + ")} mm, ${C.sec.seconds} s`);
-  drawSection();
+  drawSection(); highlight();
+}
+// the section's roots for the 3D view: their positions on the true surface (box mm); the overview vertices on demand
+function highlight() {
+  const S = C.sec, d = C.data; C.hl = null; if (!S || !d) { V.draw3d(); return; }
+  const cols = [...new Set(S.columns.flat())], M = C.head.to_view, xyz = new Float32Array(3 * cols.length);
+  const view = c => [0, 1, 2].map(k => M[k][0] * d.root[3*c] + M[k][1] * d.root[3*c+1] + M[k][2] * d.root[3*c+2] + M[k][3]);
+  cols.forEach((c, i) => xyz.set(view(c), 3 * i));
+  C.hl = { sec: S, xyz, pick: new Float32Array(view(S.column)), ov: null, pickOv: -1, asked: false };
+  V.draw3d();
+}
+async function highlightOverview(hl) {   // the overview vertex of each root and of the picked root (inflated levels)
+  hl.asked = true;
+  try {
+    const j = await V.get(`/vertex/overview?v=${[...hl.sec.roots, hl.sec.vertex].join(",")}`);
+    if (C.hl !== hl) return;
+    hl.ov = j.vertex.slice(0, -1); hl.pickOv = j.vertex[j.vertex.length - 1]; V.draw3d();
+  } catch (e) { V.log("section roots: " + e.message); }
 }
 // the column a step stands for: its own (nearest), or the one whose root is nearest the step's point (mean across)
 function stepColumn(k) {

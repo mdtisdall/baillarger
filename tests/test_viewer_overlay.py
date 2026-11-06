@@ -397,6 +397,18 @@ def test_go_to_a_true_vertex(white: WhiteView, ovl: VOL.Overlays) -> None:
             code, body = get(f"{base}/vertex/true?v={bad}")
             assert code == 400 and "error" in json.loads(body), bad
         assert get(f"{base}/vertex/true")[0] == 400
+        # the overview vertex of many true vertices at once: as /vertex/true
+        ts = [n - 1, 0, n // 3, 0, n // 2]
+        code, body = get(f"{base}/vertex/overview?v={','.join(map(str, ts))}")
+        assert code == 200
+        ans = json.loads(body)
+        assert ans["v"] == ts
+        assert ans["vertex"] == [
+            json.loads(get(f"{base}/vertex/true?v={t}")[1])["vertex"] for t in ts
+        ]
+        for bad in (str(n), "0,-1", "a"):
+            code, body = get(f"{base}/vertex/overview?v={bad}")
+            assert code == 400 and "error" in json.loads(body), bad
     finally:
         srv.shutdown()
         srv.server_close()

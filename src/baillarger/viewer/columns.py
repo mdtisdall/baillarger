@@ -461,6 +461,8 @@ class Columns:
             arc=arc.tolist(),
             point=pts.round(4).tolist(),
             columns=cols,
+            # the true vertices of the roots of the section's columns, ascending
+            roots=sorted({int(roots.vertex[c]) for cs in cols for c in cs}),
             distance=[None if np.isnan(x) else float(x) for x in dist],
             curve_length=[float(-curve.arc[0]), float(curve.arc[-1])],
             seconds=round(time.perf_counter() - t0, 3),

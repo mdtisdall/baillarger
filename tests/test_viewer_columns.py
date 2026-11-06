@@ -374,6 +374,7 @@ def test_the_white_mode_serves_every_route(
             "/columns/section?v=0&radius=0.5&u=1,0,0",
             "/columns/section?v=0&radius=0.5&u=1,0,0&mode=mean",
             "/vertex/true?v=0",
+            "/vertex/overview?v=0,1,2",
         ]
         for r in routes:
             assert get(base + r)[0] == 200, r
@@ -469,6 +470,10 @@ def test_the_section_route(cols: VC.Columns) -> None:
         mean = json.loads(body)
         assert mean["arc"] == sec["arc"] and mean["voxel"] == float(max(cols.vox))
         assert mean["columns"] == mean_want
+        # the roots that the page highlights: the roots of the section's columns
+        for a_sec in (sec, mean):
+            want_roots = {int(colv[c]) for cs in a_sec["columns"] for c in cs}
+            assert a_sec["roots"] == sorted(want_roots)
         # through another column of the request (a click on the section)
         other = int(arr["vertex"][sec["columns"][-1][0]])
         code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2&at={other}")
