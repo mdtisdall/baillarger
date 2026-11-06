@@ -15,6 +15,12 @@ makes no bands:
    ends. Where the surface turns round a thin edge, the curve goes round the
    turn. Arc length is 0 at that nearest point and positive on the side where
    the curve first goes in the direction of +u.
+   A slice plane instead (slice_axes, section_curve): the plane through the
+   origin with a given normal (a slice of a volume view). The curve is its cut
+   with the mesh, as above; +u is u made to lie in the plane. If the plane's
+   cut does not go through the origin, or ends less than one step from it on
+   either side (the slice is near the surface's tangent plane at the origin),
+   the plane of n and u is used, and the reason is returned.
 2. The steps (steps). Points on the curve every `step` mm of arc length, from
    0 both ways, and the face that holds each point.
 3. The columns (step_columns). At each step, the distances from the curve
@@ -83,6 +89,31 @@ def axes(normal: npt.ArrayLike, u: npt.ArrayLike) -> tuple[Float, Float]:
     return a, w / np.linalg.norm(w)
 
 
+def slice_axes(
+    normal: npt.ArrayLike, u: npt.ArrayLike, plane: npt.ArrayLike
+) -> tuple[Float, Float]:
+    """For a slice plane with normal `plane`: the unit section axis (u made to
+    lie in the plane; if u is normal to it, the direction of plane x normal)
+    and the plane's unit normal, signed so that (normal x axis) . w >= 0 (so a
+    plane that holds the normal and u gives the axes of `axes`)."""
+    n = np.asarray(normal, np.float64)
+    n = n / np.linalg.norm(n)
+    w = np.asarray(plane, np.float64)
+    if not np.linalg.norm(w) > 1e-9:
+        raise ValueError("plane: the normal is zero")
+    w = w / np.linalg.norm(w)
+    a = np.asarray(u, np.float64)
+    a = a - (a @ w) * w
+    if not np.linalg.norm(a) > 1e-9:
+        a = np.cross(w, n)
+    if not np.linalg.norm(a) > 1e-9:  # the plane is normal to n: any axis in it
+        a = np.cross(w, [1.0, 0.0, 0.0] if abs(w[0]) < 0.9 else [0.0, 1.0, 0.0])
+    a = a / np.linalg.norm(a)
+    if np.cross(n, a) @ w < 0:
+        w = -w
+    return a, w
+
+
 def plane_cut(
     pts: Float,
     faces: npt.NDArray[np.integer[Any]],
@@ -90,11 +121,13 @@ def plane_cut(
     normal: npt.ArrayLike,
     u: npt.ArrayLike,
     half_length: float,
+    plane: npt.ArrayLike | None = None,
 ) -> Curve:
-    """The piece of the cut through the origin (see the module docstring).
+    """The piece of the cut through the origin (see the module docstring), of
+    the plane of the normal and u, or of the slice plane with normal `plane`.
     pts: (n, 3) the vertices, mm; faces: (m, 3) into pts."""
     o = np.asarray(origin, np.float64)
-    ua, w = axes(normal, u)
+    ua, w = axes(normal, u) if plane is None else slice_axes(normal, u, plane)
     f = np.asarray(faces, np.int64)
     d = (np.asarray(pts, np.float64) - o) @ w
     side = d >= 0
@@ -189,6 +222,41 @@ def plane_cut(
     arc -= arc[len(pa)]
     face = np.array([*fa[::-1], *fb], np.int64)
     return Curve(point, arc, face, ua, w)
+
+
+def section_curve(
+    pts: Float,
+    faces: npt.NDArray[np.integer[Any]],
+    origin: npt.ArrayLike,
+    normal: npt.ArrayLike,
+    u: npt.ArrayLike,
+    half_length: float,
+    step: float,
+    plane: npt.ArrayLike | None,
+) -> tuple[Curve, str | None]:
+    """The section's curve: the slice plane's cut if `plane` is given and its
+    cut goes through the origin and reaches one step on both sides, else the
+    cut of the plane of the normal and u (see the module docstring); and the
+    reason when a given slice plane was not used."""
+    if plane is None:
+        return plane_cut(pts, faces, origin, normal, u, half_length), None
+    o = np.asarray(origin, np.float64)
+    why = None
+    try:
+        c = plane_cut(pts, faces, origin, normal, u, half_length, plane)
+    except ValueError:
+        why = "the slice does not cut the surface near the root"
+    else:
+        q0 = c.point[int(np.argmin(np.abs(c.arc)))]
+        reach = min(step, half_length)
+        # through the origin: the origin lies on a crossing edge (float error)
+        if np.linalg.norm(q0 - o) > 1e-9 * (1.0 + np.linalg.norm(o)):
+            why = "the slice's cut does not go through the root"
+        elif -c.arc[0] < reach or c.arc[-1] < reach:
+            why = "the slice's cut through the root ends within one step"
+        else:
+            return c, None
+    return plane_cut(pts, faces, origin, normal, u, half_length), why
 
 
 def steps(curve: Curve, step: float) -> tuple[Float, Float, I64]:

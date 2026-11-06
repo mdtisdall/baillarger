@@ -335,3 +335,132 @@ def test_bad_input() -> None:
         )
     with pytest.raises(ValueError, match="cut"):
         VSec.plane_cut(pts, f, [0, 0, 5.0], [0, 0, 1], [1, 0, 0], 1.0)
+
+
+# ---------------------------------------------------------------- a slice plane
+
+
+def dome(radius: float = 1.0, half: float = 1.0) -> tuple[Float, I64]:
+    """A cap z = -(x^2 + y^2) / (2 radius), x, y in [-half, half], spacing H:
+    its top (the origin) has the normal +z, and every other vertex is below."""
+    pts, f = sheet(half)
+    pts[:, 2] = -(pts[:, 0] ** 2 + pts[:, 1] ** 2) / (2 * radius)
+    return pts, f
+
+
+def slice_section(
+    pts: Float,
+    f: I64,
+    origin: int,
+    normal: list[float],
+    u: list[float],
+    radius: float,
+    plane: list[float] | None,
+    mode: str = "nearest",
+) -> tuple[VSec.Curve, str | None, Float, list[list[int]]]:
+    """The section as Columns.section makes it, with a slice plane."""
+    g = edge_graph(pts, f, [1.0, 1.0, 1.0])
+    step = VSec.mean_spacing(pts)
+    curve, why = VSec.section_curve(pts, f, pts[origin], normal, u, radius, step, plane)
+    arc, p, fi = VSec.steps(curve, step)
+    cols = np.arange(len(pts))
+    out, _ = VSec.step_columns(
+        p, fi, pts, f, g, cKDTree(pts), cols, mode, VOXEL, radius
+    )
+    return curve, why, arc, out
+
+
+@pytest.mark.parametrize("mode", VSec.MODES)
+@pytest.mark.parametrize("plane", [[0.0, 1.0, 0.0], [0.0, -3.0, 0.0]])
+def test_a_slice_that_holds_the_normal_is_the_plane_of_n_and_u(
+    plane: list[float], mode: str
+) -> None:
+    """On the fold, from sheet A: the slice y = 0 holds the normal (+z) and u
+    (+x); its section is the section of the plane of n and u, round the turn."""
+    pts, f = fold()
+    o = vertex_at(pts, [-1.0, 0.0, 0.0])
+    want = slice_section(pts, f, o, [0, 0, 1], [1, 0, 0], 3.0, None, mode)
+    got = slice_section(pts, f, o, [0, 0, 1], [1, 0, 0], 3.0, plane, mode)
+    assert got[1] is None
+    np.testing.assert_array_equal(got[0].point, want[0].point)
+    np.testing.assert_array_equal(got[0].arc, want[0].arc)
+    np.testing.assert_array_equal(got[0].face, want[0].face)
+    np.testing.assert_array_equal(got[2], want[2])
+    assert got[3] == want[3]
+    assert got[0].point[:, 2].max() == pytest.approx(GAP)  # round the turn
+
+
+def test_a_slanted_slice_holds_the_normal_and_u_at_any_u() -> None:
+    """On the dome, u at 30 degrees: the slice n x u gives the same curve."""
+    pts, f = dome()
+    o = vertex_at(pts, [0.0, 0.0, 0.0])
+    u = [np.cos(np.radians(30)), np.sin(np.radians(30)), 0.0]
+    w = np.cross([0.0, 0.0, 1.0], u)
+    want, _, arc_w, cols_w = slice_section(pts, f, o, [0, 0, 1], u, 0.8, None)
+    got, why, arc_g, cols_g = slice_section(pts, f, o, [0, 0, 1], u, 0.8, list(w))
+    assert why is None
+    np.testing.assert_allclose(got.point, want.point, atol=1e-12)
+    np.testing.assert_array_equal(got.face, want.face)
+    np.testing.assert_allclose(arc_g, arc_w, atol=1e-12)
+    assert cols_g == cols_w
+
+
+@pytest.mark.parametrize("mode", VSec.MODES)
+def test_a_slanted_slice_gives_a_curve_in_the_slice(mode: str) -> None:
+    """On the dome, a slice that does not hold the normal: every point of the
+    curve lies in the slice plane through the root, the curve goes through the
+    root, and each step's columns are the nearest along the surface."""
+    pts, f = dome()
+    o = vertex_at(pts, [0.0, 0.0, 0.0])
+    plane = [0.2, 1.0, 0.6]
+    curve, why, arc, out = slice_section(
+        pts, f, o, [0, 0, 1], [1, 0, 0], 0.8, plane, mode
+    )
+    assert why is None
+    w = np.asarray(plane) / np.linalg.norm(plane)
+    assert np.abs((curve.point - pts[o]) @ w).max() < 1e-12
+    assert curve.point[np.argmin(np.abs(curve.arc))] == pytest.approx(pts[o])
+    assert -curve.arc[0] == pytest.approx(0.8) and curve.arc[-1] == pytest.approx(0.8)
+    # +u: u made to lie in the slice
+    k = int(np.argmin(np.abs(curve.arc - 0.05)))
+    assert (curve.point[k] - pts[o]) @ [1, 0, 0] > 0
+    g = edge_graph(pts, f, [1.0, 1.0, 1.0])
+    step = VSec.mean_spacing(pts)
+    _, p, fi = VSec.steps(curve, step)
+    _, dist = VSec.step_columns(
+        p, fi, pts, f, g, cKDTree(pts), np.arange(len(pts)), mode, VOXEL, 0.8
+    )
+    check_against_brute(pts, f, p, fi, out, dist, g, np.arange(len(pts)), mode, 0.8)
+
+
+@pytest.mark.parametrize(
+    ("phantom", "reason"),
+    [(sheet, "does not cut"), (dome, "ends within one step")],
+)
+def test_a_slice_parallel_to_the_surface_falls_back(
+    phantom: object, reason: str
+) -> None:
+    """The slice z = 0 at the root: on the flat sheet it does not cut the
+    surface; on the dome it only touches it at the root. Both give the plane
+    of n and u, and say why."""
+    pts, f = phantom()  # type: ignore[operator]
+    o = vertex_at(pts, [0.0, 0.0, 0.0])
+    want, _, arc_w, cols_w = slice_section(pts, f, o, [0, 0, 1], [1, 0, 0], 0.8, None)
+    got, why, arc_g, cols_g = slice_section(
+        pts, f, o, [0, 0, 1], [1, 0, 0], 0.8, [0.0, 0.0, 2.0]
+    )
+    assert why is not None and reason in why
+    np.testing.assert_array_equal(got.point, want.point)
+    np.testing.assert_array_equal(arc_g, arc_w)
+    assert cols_g == cols_w
+
+
+def test_slice_axes() -> None:
+    with pytest.raises(ValueError, match="zero"):
+        VSec.slice_axes([0, 0, 1], [1, 0, 0], [0, 0, 0])
+    # u normal to the slice: the axis is plane x normal
+    a, w = VSec.slice_axes([0, 0, 1], [0, 1, 0], [0, 1, 0])
+    np.testing.assert_allclose(np.abs(a), [1, 0, 0])
+    # the slice normal to n: an axis in the slice
+    a, w = VSec.slice_axes([0, 0, 1], [0, 0, 1], [0, 0, 1])
+    assert abs(a @ w) < 1e-12 and np.linalg.norm(a) == pytest.approx(1)

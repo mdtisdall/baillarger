@@ -495,9 +495,37 @@ def test_the_section_route(cols: VC.Columns) -> None:
         assert sec["step_vertices"] == [
             [int(colv[c]) for c in cs] for cs in sec["columns"]
         ]
+        # a slice plane (a shift-click in a slice view): the curve is the
+        # slice's cut (VSec.section_curve) on the whole mesh, or the fallback
+        # where the slice is near the tangent plane (the plane normal to n)
+        nrm = np.asarray(arr["normal"][sec["column"]], np.float64)
+        for plane in ([0.2, 1.0, 0.6], nrm.tolist()):
+            pq = ",".join(repr(float(x)) for x in plane)
+            code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2&plane={pq}")
+            assert code == 200
+            sl = json.loads(body)
+            curve, why = VSec.section_curve(
+                pts, cols.f, pts[v], nrm, [0.3, 1, 0.2], radius, sl["step"], plane
+            )
+            s_arc, s_pts, _ = VSec.steps(curve, sl["step"])
+            assert s_arc == pytest.approx(sl["arc"], abs=1e-9)
+            assert np.abs(s_pts - np.asarray(sl["point"])).max() < 1e-4
+            pn = np.asarray(plane) / np.linalg.norm(plane)
+            assert sl["slice"]["used"] == (why is None)
+            assert sl["slice"]["fallback"] == why
+            assert sl["slice"]["plane"] == pytest.approx(pn.tolist())
+            angle = np.degrees(np.arcsin(abs(pn @ nrm) / np.linalg.norm(nrm)))
+            assert sl["slice"]["angle"] == pytest.approx(angle)
+            if plane[1] == 1.0:  # the slanted slice cuts through the root
+                assert why is None
+                assert np.abs((np.asarray(sl["point"]) - pts[v]) @ pn).max() < 1e-3
+        assert sl["slice"]["angle"] == pytest.approx(90.0)
+        assert sec["slice"] is None
         for bad in (
             "u=1,0",
             "u=0.3,1,0.2&mode=median",
+            "u=0.3,1,0.2&plane=0,0,0",
+            "u=0.3,1,0.2&plane=1,2",
             "",
         ):
             code, body = get(f"{base}/columns/section?{q}&{bad}")

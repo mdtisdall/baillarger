@@ -413,6 +413,7 @@ class Columns:
         u: Sequence[float],
         mode: str,
         at: int | None = None,
+        plane: Sequence[float] | None = None,
     ) -> dict[str, Any]:
         """The profile section of a request (baillarger.viewer.section), without
         sampling its columns, so the cap MAX_COLUMNS does not apply: the curve
@@ -421,7 +422,11 @@ class Columns:
         indices into the /columns answer of the whole request and as true
         vertices. The centre: `at` if it is a column of the request, else the
         request's vertex if it is one, else the column nearest it along the
-        surface; `fallback` says when `at` was not a column."""
+        surface; `fallback` says when `at` was not a column. `plane`: the
+        normal of a slice plane through the centre's root (scanner mm); the
+        curve is that plane's cut unless it is degenerate there
+        (VSec.section_curve); `slice` says which, and gives the angle between
+        the root's normal and the plane."""
         t0 = time.perf_counter()
         whole = replace(req, cols="")
         sb, roots, chosen, dist = self.candidates(whole)
@@ -441,8 +446,24 @@ class Columns:
         if i0 >= len(g.vertex) or g.vertex[i0] != v0:
             raise RuntimeError(f"vertex {v0}: not in the local graph")
         normal = roots.normal[chosen[c0]]
-        curve = VSec.plane_cut(m.pts, m.faces, m.pts[i0], normal, u, req.radius)
         step = VSec.mean_spacing(np.asarray(roots.root[chosen], np.float64))
+        curve, why = VSec.section_curve(
+            m.pts, m.faces, m.pts[i0], normal, u, req.radius, step, plane
+        )
+        cut = None
+        if plane is not None:
+            pn = np.asarray(plane, np.float64)
+            pn = pn / np.linalg.norm(pn)
+            nn = np.asarray(normal, np.float64)
+            nn = nn / np.linalg.norm(nn)
+            sin = min(1.0, abs(float(pn @ nn)))
+            cut = dict(
+                plane=pn.tolist(),
+                used=why is None,
+                fallback=why,
+                # the angle between the root's normal and the slice plane, deg
+                angle=float(np.degrees(np.arcsin(sin))),
+            )
         arc, pts, faces = VSec.steps(curve, step)
         pos = np.searchsorted(g.vertex, vertex)
         pos = np.minimum(pos, len(g.vertex) - 1)
@@ -471,6 +492,7 @@ class Columns:
             column=c0,
             vertex=v0,
             fallback=fallback,
+            slice=cut,
             step=step,
             voxel=voxel,
             u=curve.u.tolist(),
@@ -704,11 +726,11 @@ def route(h: Any, path: str, q: dict[str, str]) -> None:
       {key, status: "running" or "busy", job}: ask again.
     - GET /columns/profiles?(the same): their echoes (profiles_bytes), or 202
       as above.
-    - GET /columns/section?(the same)&u=x,y,z[&mode=nearest|mean&at=]: the
-      profile section that follows the surface (Columns.section; u in scanner
-      mm). It samples no column, so it answers over the cap too; then the
-      page asks /columns and /columns/profiles with cols= (the section's
-      columns).
+    - GET /columns/section?(the same)&u=x,y,z[&mode=nearest|mean&at=
+      &plane=x,y,z]: the profile section that follows the surface
+      (Columns.section; u and the slice plane's normal in scanner mm). It
+      samples no column, so it answers over the cap too; then the page asks
+      /columns and /columns/profiles with cols= (the section's columns).
     - GET /columns/<key>.tck: the columns of a finished request, as .tck.
     Errors: 400 with JSON {error}; 404 without columns (no --white)."""
     c: Columns | None = getattr(h, "columns", None)
@@ -732,8 +754,13 @@ def route(h: Any, path: str, q: dict[str, str]) -> None:
                 if mode not in VSec.MODES:
                     raise ValueError(f"mode {mode!r}: not one of {VSec.MODES}")
                 at = int(q["at"]) if q.get("at") else None
+                plane = None
+                if q.get("plane"):
+                    plane = [float(x) for x in q["plane"].split(",")]
+                    if len(plane) != 3 or not np.linalg.norm(plane) > 0:
+                        raise ValueError("plane: give three numbers x,y,z, not all 0")
             if path == "/columns/section":
-                js(c.section(req, u, mode, at))
+                js(c.section(req, u, mode, at, plane))
                 return
             st = c.get(req)
             if st["status"] != "done":

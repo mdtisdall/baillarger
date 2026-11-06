@@ -33,6 +33,7 @@ const INAME = ["outside", "WM", "cortex", "other", "off grid"];
 const DCOL = { 1: [60, 200, 120], 2: [245, 140, 40], 3: [170, 110, 230] };
 const DNAME = { 1: "open", 2: "in WM", 3: "neither" };
 const C = { meta: null, data: null, prof: null, key: null, req: null, pick: -1, sec: null, sseq: 0, seq: 0, gl: null, nvMesh: null,
+  slice: null,   // { v: the selection's true vertex, n: the slice's normal } after a shift-click in a slice view
   pickV: null,   // the picked column's true vertex (the section's centre)
   vidx: new Map(),   // true vertex -> index in C.data
   secIdx: [],   // the section's columns at each step, as indices in C.data
@@ -65,6 +66,7 @@ function build() {
     <label>show <select id="cshow"><option value="echo">echo</option><option value="class">label class</option></select></label>
     <span id="ckey" style="font-size:11px"></span>
   </div>
+  <div class="pbar" id="cplane" style="font-size:12px;color:var(--mute)"></div>
   <div class="fill" style="min-height:160px"><canvas id="csec"></canvas></div>
   <div id="cdet" style="flex:none;max-height:40%;overflow-y:auto;font-size:12px;padding:2px 8px"></div>`;
   $("ckey").innerHTML = ICOL.map((c, k) => `<span class="sw" style="background:rgb(${c})"></span>${INAME[k]}`).join(" ");
@@ -279,7 +281,9 @@ async function section() {
   const q = query(sel), u = axisU();
   let j;
   try {
-    const r = await fetch(`/columns/section?${q}&u=${u.map(x => x.toFixed(6)).join(",")}&mode=${$("cmode").value}&at=${C.pickV}`);
+    // a shift-click in a slice view: the slice through the selection's root, while the section is centred there
+    const sl = C.slice && C.slice.v === sel.true_vertex && C.pickV === sel.true_vertex ? `&plane=${C.slice.n.join(",")}` : "";
+    const r = await fetch(`/columns/section?${q}&u=${u.map(x => x.toFixed(6)).join(",")}&mode=${$("cmode").value}&at=${C.pickV}${sl}`);
     j = await r.json(); if (seq !== C.sseq || lseq !== C.seq) return;
     if (r.status !== 200) throw new Error(j.error || `HTTP ${r.status}`);
     if (j.fallback) V.log(`section: ${j.fallback}; centred on the selection's column`);
@@ -294,6 +298,10 @@ async function section() {
       $("cstat").textContent = `radius ${settings().radius} mm: over the cap · the section's ${head.n} columns in ${((a.ms + p.ms) / 1000).toFixed(2)} s`;
     }
   } catch (e) { if (seq === C.sseq) { V.log("section: " + e.message); $("cstat").textContent = "section: " + e.message; } return; }
+  const S = j.slice, ax = S ? ["sagittal", "coronal", "axial"][S.plane.findIndex(x => Math.abs(x) > 0.5)] ?? "slice" : "";
+  $("cplane").textContent = !S ? "section plane: the root's normal and the 3D view's screen right" :
+    S.used ? `section plane: the ${ax} slice through the root · the root's normal is ${S.angle.toFixed(1)}° out of the slice` :
+    `section plane: not the ${ax} slice (${S.fallback}); the root's normal and the screen right instead · the normal is ${S.angle.toFixed(1)}° out of the slice`;
   C.sec = j; C.secIdx = j.step_vertices.map(vs => vs.map(v => C.vidx.get(v)));
   C.pick = C.vidx.get(j.vertex) ?? -1;
   V.log(`section: ${j.arc.length} steps of ${j.step.toFixed(3)} mm (${j.mode}), the curve ${j.curve_length.map(x => x.toFixed(2)).join(" + ")} mm, ` +
@@ -392,7 +400,11 @@ function redraw() { if (C.data) upload3d(); else if (C.gl) C.gl.m = 0; V.draw3d(
 
 // ------------------------------------------------------------------ the shared state
 // a new WM selection (a click, the box, ?v=, another window): the picked column is the selection's
-V.hooks.selection.push(sel => { C.pickV = sel ? sel.true_vertex : null; if (C.meta) load(); });
+V.hooks.selection.push((sel, frame, how) => {
+  C.pickV = sel ? sel.true_vertex : null;
+  C.slice = sel && how && how.slice ? { v: sel.true_vertex, n: how.slice } : null;   // any other selection: the usual plane
+  if (C.meta) load();
+});
 V.hooks.state.push(st => {
   if (!("columns" in st) || !st.columns || !C.meta) return;
   const s = st.columns, old = settings(), sel = V.selection;
