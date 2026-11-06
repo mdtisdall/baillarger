@@ -53,7 +53,7 @@ independent check, later.
 | 3 | The normal maps (Part A) | session N |
 | 4 | The generic overlay (Part B) | session N |
 | 5 | The review: the error types and their prevalence (see "The error types") | the user, with the coordinator |
-| 6 | A decision for each type: repair now, or defer. A repair makes the input set again, and the counts are measured again | the user decides; the coordinator plans the work |
+| 6 | A decision for each type: repair now, or defer. A repair that changes code or a method gets its own plan and PR (see "Repairs"). After each repair, the input set is made again, and the counts are measured again | the user decides; the coordinator writes the repair plans |
 | 7 | The changes to the wave 2.5 plans (#141) | the coordinator, with the user |
 
 Steps 5 and 6 repeat, one type at a time, until the stop rule holds.
@@ -291,7 +291,7 @@ the ranked lists open. The questions that lead the review:
    provisional limit (plan §1, working rules), so that later results do not
    blame its errors on another component. A repair of tens of sites can go
    through the review queue as `dseg` manual edits. A repair of thousands of
-   sites needs a change to the method.
+   sites needs a change to the method, with its own plan (see "Repairs").
 5. **Measure again.** After a repair, make the input set again and measure
    the counts of every type again.
 
@@ -299,6 +299,20 @@ Repair in the order of the pipeline: the input segmentation first, then
 `white_dseg`, the meshing, and the normals. A repair upstream changes the
 counts downstream. For example, a repair of the WM label at type A sites
 removes some type B slivers and some column fans.
+
+### Repairs
+
+Wave 2.1 decides which types to repair. It does not hold the repair work.
+
+- A repair that changes code or a method gets its own plan in
+  `docs/plans/`, on its own branch, with its own PR. The plan gives the
+  design, the tests, and the counts to measure again. The user approves the
+  plan before the work starts.
+- A repair by `dseg` manual edits at tens of sites goes through the review
+  queue. It needs no plan of its own.
+- The catalogue's "Decision" column links to the repair plan or PR.
+
+Wave 2.5 waits until each repair is merged and measured again.
 
 ### The stop rule
 
@@ -324,8 +338,9 @@ code") is a gap in the spec, not an error type. It goes to its own PR.
 ### When wave 2.1 is done
 
 1. The stop rule holds.
-2. Every type in the catalogue has a decision, and each repair is made and
-   measured again.
+2. Every type in the catalogue has a decision. Each repair, with its own
+   plan and PR where it changes code or a method, is merged and measured
+   again.
 3. The changes to the wave 2.5 plans (#141) are written. Then #141 can be
    taken out of draft.
 
