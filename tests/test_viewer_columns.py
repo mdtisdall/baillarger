@@ -375,6 +375,13 @@ def test_the_white_mode_serves_every_route(
             assert get(f"{base}/volume/{name['name']}/meta")[0] == 200, name
         key = VC.decode(get(f"{base}/columns?v=0&radius=0.5")[1])[0]["key"]
         assert get(f"{base}/columns/{key}.tck")[0] == 200
+        for r in [
+            "/overlay/meta",
+            "/overlay/a/b",
+            "/overlay/a/b/sites",
+            "/overlay/at?v=0",
+        ]:
+            assert get(base + r)[0] == 404, r  # without --overlay
         for gone in ["/filters", "/section?i=0", "/layer?name=x", "/labels/list"]:
             assert get(base + gone)[0] == 404, gone
     finally:
@@ -385,3 +392,4 @@ def test_the_white_mode_serves_every_route(
         VS.Handler.volumes = None
         VS.Handler.outlines = None
         VS.Handler.columns = None
+        VS.Handler.overlays = None
