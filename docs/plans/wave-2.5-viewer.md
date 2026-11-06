@@ -20,7 +20,10 @@ fix.
    that the user blames, and the view, so that the view opens again
    exactly.
 4. Fixes for the known viewer bugs.
-5. The user's feature requests (Part D).
+
+The user's feature requests from the wave 2.1 review (go to a vertex, a
+section that follows the surface) are built now, in
+`docs/plans/viewer-requests.md`. This plan builds on them.
 
 No new section view. The profile section of the columns pane (#128) is the
 view for the review.
@@ -251,44 +254,6 @@ All references are to `main` at 1f67376.
    the last recheck result), "new note" with the fields of item 1, "open",
    and "recheck".
 
-### Part D: the user's requests (PR 4)
-
-The user adds requests here during wave 2.1's review. Each request gets an
-exact test.
-
-1. **Go to a vertex.** A box in the header takes a true vertex number and
-   makes it the WM selection, as a click on that vertex does. The address
-   parameter `?v=<true vertex>` does the same when the page opens. A new
-   route gives the selection for a true vertex: its position in mm, its
-   voxel, and the nearest overview vertex. A number out of range gives an
-   error in the log, and the selection does not change.
-2. **The profile section follows the surface.** Now the section takes the
-   columns whose roots lie within the half width of a plane through the
-   selected root, and sorts them by u. Where the WM is one voxel thick, the
-   plane cuts the surface two times, close together, and the sort
-   interleaves the two cuts. The profile then shows alternating bands (seen
-   at true vertex 10909480). The new section is a line along the surface:
-   - The curve is the cut of the same plane with the white mesh, only the
-     piece that goes through the selected root. It runs in both directions
-     from the root, to the column radius along the curve.
-   - The section shows one column for each step along the curve: the
-     column whose root is nearest to the curve at that step. The step is
-     the mean spacing of the roots near the selection.
-   - It sorts them by their arc length along the curve, from the root
-     (negative on one side).
-   - A strip of columns on each side of the curve is not interleaved into
-     the section. On flat, regular cortex (true vertex 12218203), the
-     current strip of ±0.25 mm (3 voxels) put columns
-     from different lines across the strip next to each other. Columns close
-     across the strip were alike; columns 0.16–0.5 mm apart differed 24
-     times more in their mean level. The profile showed alternating bands.
-   - The half-width menu goes. A "mean across" option shows, at each step,
-     the mean of the columns within one voxel of the curve.
-   - Where the surface turns around a thin edge, the curve goes around the
-     turn, and the profile shows the turn at one place.
-   The section does not label the sides of the WM, and it does not use the
-   sign of the normals.
-
 ## Exact tests
 
 - `/signals/<name>/overview` on a phantom surface and overview equals the
@@ -312,21 +277,6 @@ exact test.
   order, the same edge keys) gives `edge-key` and the right vertex. A
   missing edge key gives `nearest` within one voxel, else `none`.
 
-- Go to a vertex: the route gives the true vertex's position, the voxel
-  that `Overlays.voxels` (#144) gives, and the overview vertex that `/snap`
-  gives for that position. A vertex out of range gives an error.
-- The section along the surface, on phantom meshes:
-  - A flat sheet: the order is the same as the order by u.
-  - A thin fold (two parallel sheets 0.16 mm apart, joined by a half
-    cylinder): the order has the columns of the root's sheet, then the
-    columns of the turn, then the columns of the other sheet. No column of
-    one sheet comes between two columns of the other.
-  - A second sheet near the plane, but not joined to the root's sheet
-    within the column radius: none of its columns is in the section.
-  - A flat sheet whose image changes across the curve and not along it:
-    the section's columns change smoothly with arc length, with no
-    alternation (the correlation at lag 1 is not less than at lag 2).
-
 ## The hemisphere check
 
 1. Start the viewer on the new input set with the echoes, the signals and a
@@ -348,7 +298,6 @@ exact test.
 | 3 | Part B: `static/signals.js`, the `colour` hook, the columns-pane additions | Phase session (Opus) | after 2 |
 | 4 | Part C: the spec and `viewer/notes.py`, with its tests | Sonnet sub-agent, the phase session reviews | 3 |
 | 5 | Part C: the notes panel, the stored u, open and recheck on the page | Phase session | after 3, 4 |
-| 5b | Part D: the user's requests, with their tests | Phase session | 1, 2 |
 | 6 | The hemisphere check | Phase session | after 5 and S's PR 1 |
 
 ## PRs
@@ -357,7 +306,6 @@ exact test.
 2. `feature/viewer-signals`: Part B. Branch from `origin/main`.
 3. `feature/viewer-notes`: Part C. Stacked on PR 2, because both change
    `columns.js`.
-4. `feature/viewer-requests`: Part D. Branch from `origin/main`.
 
 Tell the coordinator when each PR opens.
 
