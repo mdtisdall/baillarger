@@ -7,17 +7,25 @@
 // - The 3D surface view (VIEWER.hooks.draw3d): each column as a line, coloured by its derived class or by the class of the
 //   label interval under each sample. Only on the true surface (level 0): an inflated level has another geometry.
 // - The brick tiles (a plug-in of window.BVP, draw2d on #bvo): a dot where a column crosses the tile's plane.
+// - Which columns the 3D view and the tiles show: a menu in the surface pane's bar and one in the volume pane's bar,
+//   "columns: off | section | all". section (the default): the columns of the section (one a step; mean across, the
+//   columns of each step's mean); all: every column in the radius (the cap applies). The volume pane's menu acts on the
+//   bricks viewer only (NiiVue keeps its .tck), so it is disabled with NiiVue.
 // - The profile section that follows the surface: GET /columns/section (baillarger.viewer.section) cuts the true white
 //   mesh with the plane through the picked column's root that holds its normal and the section axis u, and gives one step
 //   for each mean spacing of the roots along that curve, in order of arc length, with the column nearest along the surface
 //   ("nearest") or the columns within one voxel along the surface ("mean across": their mean echo). Side by side, the
 //   echo along s (s = 0, the root, at the dashed line; outward is down); in "nearest", a tick at each label-interval
 //   boundary in the colour of the interval that starts there.
-// - The section's roots in the 3D view (VIEWER.points): the roots of the columns that the section shows (nearest: one a
-//   step; mean across: every column of a step's mean) in amber, the picked column's root in white. On the true surface
-//   (level 0) at the roots themselves; on an inflated level at the overview vertex of each root (GET /vertex/overview,
-//   as the WM selection marker).
-// - One column's details: its label intervals, |n̄|, its derived class. A click on the section picks the column.
+// - The section's roots (a "section roots" checkbox in the surface pane's bar and one in the volume pane's bar, each
+//   apart from the columns menu): the roots of the columns that the section shows (nearest: one a step; mean across: every
+//   column of a step's mean), coloured by their step's place along the section (ARC, plasma from the left end of the
+//   section to the right end; the same colours in a bar along the top of the section), with a dark rim; the picked
+//   column's root in white. 3D view (VIEWER.points): on the true surface (level 0) at the roots themselves; on an inflated
+//   level at the overview vertex of each root (GET /vertex/overview, as the WM selection marker). Bricks: the roots
+//   within half a voxel of a tile's slice, as discs on that slice.
+// - One column's details in a tooltip over the section (its true vertex, arc length, distance from the selection, |n̄|,
+//   derived class, label intervals). A click on the section picks the column; one line under the section names it.
 // - Over the cap (more than MAX_COLUMNS columns in the radius): /columns refuses, but the section does not depend on it.
 //   The pane asks /columns/section, then /columns and /columns/profiles with cols= (the section's columns only), and says
 //   so in red above the section: the 3D lines, the tiles and the .tck then show only the section's columns.
@@ -32,14 +40,29 @@ const ICOL = [[150, 150, 150], [235, 235, 235], [214, 60, 50], [60, 130, 230], [
 const INAME = ["outside", "WM", "cortex", "other", "off grid"];
 const DCOL = { 1: [60, 200, 120], 2: [245, 140, 40], 3: [170, 110, 230] };
 const DNAME = { 1: "open", 2: "in WM", 3: "neither" };
+// the colours of the section's roots along the section: plasma (matplotlib's, CC0) at 9 points, from ARC[0] to ARC[1] of
+// it (not its darkest end, which the dark slices would hide); sequential, readable with colour-blindness, neither white
+// (the picked root) nor cyan (the WM selection)
+const PLASMA = ["0d0887", "4c02a1", "7e03a8", "a92395", "cc4778", "e56b5d", "f89540", "fdc527", "f0f921"]
+  .map(h => [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16) / 255));
+const ARC = [0.12, 0.95];
+function plasma(t) {
+  const x = (ARC[0] + Math.min(1, Math.max(0, t)) * (ARC[1] - ARC[0])) * (PLASMA.length - 1);
+  const k = Math.min(PLASMA.length - 2, Math.floor(x)), f = x - k, a = PLASMA[k], b = PLASMA[k + 1];
+  return [0, 1, 2].map(i => a[i] + f * (b[i] - a[i]));
+}
+const css = c => `rgb(${c.map(x => Math.round(255 * x)).join(",")})`;
+const esc = x => String(x).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const C = { meta: null, data: null, prof: null, key: null, req: null, pick: -1, sec: null, sseq: 0, seq: 0, gl: null, nvMesh: null,
   slice: null,   // { v: the selection's true vertex, n: the slice's normal } after a shift-click in a slice view
   pickV: null,   // the picked column's true vertex (the section's centre)
   vidx: new Map(),   // true vertex -> index in C.data
   secIdx: [],   // the section's columns at each step, as indices in C.data
+  secSet: new Set(),   // the section's columns (indices in C.data)
+  stepRGB: [],   // the colour of each step (plasma along the arc)
   capped: null,   // the server's refusal when the whole request is over the cap
   loading: false,
-  hl: null };   // the section's roots for the 3D view: { sec, xyz (level 0), ov: overview vertices or null, pickOv }
+  hl: null };   // the section's roots: { sec, cols, xyz (level 0), rgb, rootRGB (true vertex -> rgb), ov: overview vertices or null, pickOv }
 
 // ------------------------------------------------------------------ the pane's DOM
 function build() {
@@ -52,10 +75,6 @@ function build() {
     <label>inward <select id="cein"><option>0.5</option><option selected>1</option><option>2</option></select> mm</label>
     <label>outward <select id="ceout"><option>2</option><option selected>4</option><option>6</option><option>8</option></select> mm</label>
     <label>colour <select id="ccol"><option value="interval">label of each interval</option><option value="derived">derived class</option></select></label>
-    <label><input type="checkbox" id="c3d" checked> 3D</label>
-    <label><input type="checkbox" id="ctile" checked> tiles</label>
-    <label title="the roots of the columns that the profile section shows, in the 3D view (amber; the picked column's root white)"><input type="checkbox" id="chl" checked> section roots</label>
-    <span id="chlnote" style="font-size:11px;color:var(--mute)"></span>
     <a id="ctck" href="#" download style="color:var(--mute)">.tck</a>
   </div>
   <div class="pbar" id="ccap" style="display:none;color:#ff6b5b;font-size:12px"></div>
@@ -67,12 +86,29 @@ function build() {
     <span id="ckey" style="font-size:11px"></span>
   </div>
   <div class="pbar" id="cplane" style="font-size:12px;color:var(--mute)"></div>
-  <div class="fill" style="min-height:160px"><canvas id="csec"></canvas></div>
-  <div id="cdet" style="flex:none;max-height:40%;overflow-y:auto;font-size:12px;padding:2px 8px"></div>`;
+  <div class="fill" style="min-height:160px"><canvas id="csec"></canvas>
+    <div id="ctip" style="display:none;position:fixed;z-index:50;pointer-events:none;background:#0d0f12f0;border:1px solid var(--line);
+      border-radius:4px;padding:4px 7px;font-size:12px;white-space:nowrap"></div></div>
+  <div id="cdet" style="flex:none;font-size:12px;padding:2px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>`;
+  // the surface pane's bar and the volume pane's bar: which columns, and the section's roots
+  const menu = (id, what) => `<label title="the columns ${what}: section, the columns of the profile section (one a step; mean across, the columns of each step's mean); all, every column within the radius (at most the cap); off, none">columns
+    <select id="${id}"><option value="off">off</option><option value="section" selected>section</option><option value="all">all</option></select></label>`;
+  const sb = document.createElement("span"); sb.style.display = "contents";
+  sb.innerHTML = menu("c3d", "in the 3D view (the true surface only)") +
+    `<label title="the roots of the profile section's columns, coloured by their place along the section (the bar at the top of the section, left to right); the picked column's root white"><input type="checkbox" id="chl" checked> section roots</label>
+    <span id="chlnote" style="font-size:11px;color:var(--mute)"></span>`;
+  $("sbar").appendChild(sb);
+  const vb = document.createElement("span"); vb.style.display = "contents";
+  vb.innerHTML = menu("ctile", "where they cross the slices") +
+    `<label title="the roots of the profile section's columns within half a voxel of each slice, coloured by their place along the section; the picked column's root white"><input type="checkbox" id="chlv" checked> section roots</label>`;
+  $("vwhite").closest(".pbar").appendChild(vb);
+  if (!V.bricks) for (const id of ["ctile", "chlv"]) { const el = $(id); el.disabled = true;
+    el.closest("label").title = "these act on the bricks viewer (viewer: bricks (ours)); NiiVue shows the columns as a .tck"; el.closest("label").style.opacity = 0.5; }
   $("ckey").innerHTML = ICOL.map((c, k) => `<span class="sw" style="background:rgb(${c})"></span>${INAME[k]}`).join(" ");
   for (const id of ["crad", "cevery", "cein", "ceout"]) $(id).onchange = () => { shareSettings(); load(); };
-  for (const id of ["ccol", "c3d", "ctile", "chl"]) $(id).onchange = () => { redraw(); };
-  $("cmode").onchange = () => section();
+  $("ccol").onchange = () => { redraw(); };
+  for (const id of ["c3d", "ctile", "chl", "chlv"]) $(id).onchange = () => { shareSettings(); redraw(); };
+  $("cmode").onchange = () => { shareSettings(); section(); };
   for (const id of ["cecho", "cshow"]) $(id).onchange = () => drawSection();
   $("csec").addEventListener("click", e => {
     const S = C.sec; if (!S) return;
@@ -80,10 +116,15 @@ function build() {
     const c = k >= 0 && k < S.arc.length ? stepColumn(k) : -1;
     if (c >= 0) { setPick(c); shareSettings(); }
   });
+  $("csec").addEventListener("mousemove", e => tooltip(e));
+  $("csec").addEventListener("mouseleave", () => { $("ctip").style.display = "none"; });
 }
+// the display settings that every window shares (the columns menus, the roots checkboxes, the section's mode)
+const display = () => ({ show3d: $("c3d").value, showTiles: $("ctile").value, roots3d: $("chl").checked, rootsVol: $("chlv").checked,
+  mode: $("cmode").value });
 const settings = () => ({ radius: +$("crad").value, every: +$("cevery").value, e_in: +$("cein").value, e_out: +$("ceout").value });
 function shareSettings() {
-  const sel = V.selection; V.share({ columns: { ...settings(), column: C.pickV, at: sel ? sel.true_vertex : null } });
+  const sel = V.selection; V.share({ columns: { ...settings(), ...display(), column: C.pickV, at: sel ? sel.true_vertex : null } });
 }
 
 // ------------------------------------------------------------------ the binary answers (baillarger.viewer.columns.encode)
@@ -125,7 +166,7 @@ async function load() {
   const sel = V.selection;
   if (!sel || sel.true_vertex === undefined || sel.true_vertex === null) return;
   const s = settings(), seq = ++C.seq, q = query(sel);
-  C.loading = true; C.data = null; C.prof = null; C.sec = null; C.hl = null; C.capped = null; C.pick = -1; C.vidx = new Map();
+  C.loading = true; C.data = null; C.prof = null; C.sec = null; C.hl = null; C.capped = null; C.pick = -1; C.vidx = new Map(); C.secSet = new Set();
   $("ccap").style.display = "none"; $("cstat").textContent = "loading…"; drawSection(); details(); redraw();
   try {
     let a;
@@ -153,7 +194,7 @@ async function load() {
     $("cstat").textContent = st + ` · profiles ${(p.ms / 1000).toFixed(2)} s`;
     V.log(`columns at vertex ${sel.true_vertex}: ${C.head.n} columns in ${(a.ms / 1000).toFixed(2)} s, profiles in ${(p.ms / 1000).toFixed(2)} s`);
     drawSection();
-  } catch (e) { if (seq === C.seq) { $("cstat").textContent = e.message; V.log("columns: " + e.message); } }
+  } catch (e) { if (seq === C.seq) { $("cstat").textContent = e.message; V.log("columns: " + e.message, true); } }
   finally { if (seq === C.seq) C.loading = false; }
 }
 // per sample: its column, and the class of the label interval that holds it; the roots in the 3D pane's frame (box mm)
@@ -176,11 +217,17 @@ const LVS = `#version 300 es
 in vec3 pos; in vec3 col; uniform mat4 mvp; out vec3 vcol; void main() { gl_Position = mvp * vec4(pos, 1.0); vcol = col; }`;
 const LFS = `#version 300 es
 precision mediump float; in vec3 vcol; uniform float alpha; out vec4 o; void main() { o = vec4(vcol, alpha); }`;
+// the columns that a menu ("off", "section", "all") asks for: a list of indices in C.data
+function shown(mode) {
+  if (!C.data || mode === "off") return [];
+  if (mode === "section") return [...C.secSet];
+  return Array.from({ length: C.head.n }, (_, c) => c);
+}
 function lines3d() {   // the segments between consecutive samples of each column, with the colour of the first
-  const d = C.data, n = C.head.n; let m = 0;
-  for (let c = 0; c < n; c++) m += Number(d.sample_start[c + 1]) - Number(d.sample_start[c]) - 1;
+  const d = C.data, cols = shown($("c3d").value); let m = 0;
+  for (const c of cols) m += Number(d.sample_start[c + 1]) - Number(d.sample_start[c]) - 1;
   const pos = new Float32Array(6 * m), col = new Float32Array(6 * m); let o = 0;
-  for (let c = 0; c < n; c++) for (let i = Number(d.sample_start[c]); i < Number(d.sample_start[c + 1]) - 1; i++) {
+  for (const c of cols) for (let i = Number(d.sample_start[c]); i < Number(d.sample_start[c + 1]) - 1; i++) {
     const rgb = colourOf(i), w = c === C.pick ? 1 : 0.85;
     for (let e = 0; e < 2; e++) for (let k = 0; k < 3; k++) { pos[6*o+3*e+k] = d.view[3*(i+e)+k]; col[6*o+3*e+k] = w * rgb[k] / 255; }
     o++;
@@ -201,20 +248,23 @@ function upload3d() {
 }
 V.hooks.draw3d.push((g, M) => {   // the section's roots
   if (!C.meta) return;
-  const hl = C.hl, on = hl && $("chl").checked, G = V.GL;
+  const hl = C.hl, on = hl && $("chl").checked, G = V.GL, rim = [0.04, 0.04, 0.05];
   const note = !on ? "" : G.level === 0 ? `${hl.xyz.length / 3} roots` :
     `${hl.sec.roots.length} roots, shown at their overview vertices (inflated surface)`;
   if ($("chlnote").textContent !== note) $("chlnote").textContent = note;
   if (!on) return;
-  // the picked root first: at equal depth the later disc fails the depth test
-  if (G.level === 0) { V.points(g, M, hl.pick, [1, 1, 1], 8); V.points(g, M, hl.xyz, [1, 0.75, 0.1], 6); return; }
+  // the picked root first, then the coloured discs, then their dark rims: at equal depth a later disc fails the depth test
+  if (G.level === 0) { V.points(g, M, hl.pick, [1, 1, 1], 9); V.points(g, M, hl.xyz, hl.rgb, 6); V.points(g, M, hl.xyz, rim, 8, 6); return; }
   if (!hl.ov) { if (!hl.asked) highlightOverview(hl); return; }
   const at = v => [G.pos[3*v], G.pos[3*v+1], G.pos[3*v+2]];
-  const ov = [...new Set(hl.ov)], xyz = new Float32Array(3 * ov.length); ov.forEach((v, i) => xyz.set(at(v), 3 * i));
-  V.points(g, M, new Float32Array(at(hl.pickOv)), [1, 1, 1], 8); V.points(g, M, xyz, [1, 0.75, 0.1], 6);
+  // an overview vertex with several roots takes the colour of the first along the section
+  const first = new Map(); hl.cols.forEach((c, i) => { const v = hl.ovOf.get(vertexOf(c)); if (v !== undefined && !first.has(v)) first.set(v, i); });
+  const xyz = new Float32Array(3 * first.size), rgb = new Float32Array(3 * first.size); let i = 0;
+  for (const [v, k] of first) { xyz.set(at(v), 3 * i); rgb.set(hl.rgb.subarray(3 * k, 3 * k + 3), 3 * i); i++; }
+  V.points(g, M, new Float32Array(at(hl.pickOv)), [1, 1, 1], 9); V.points(g, M, xyz, rgb, 6); V.points(g, M, xyz, rim, 8, 6);
 });
 V.hooks.draw3d.push((g, M) => {
-  if (!C.gl || !C.gl.m || !$("c3d").checked || V.GL.level !== 0) return;
+  if (!C.gl || !C.gl.m || V.GL.level !== 0) return;
   g.useProgram(C.gl.p); g.bindVertexArray(C.gl.vao); g.uniformMatrix4fv(g.getUniformLocation(C.gl.p, "mvp"), false, M);
   g.uniform1f(g.getUniformLocation(C.gl.p, "alpha"), 1); g.drawArrays(g.LINES, 0, 2 * C.gl.m);
   // the parts behind the surface, faded, as the points of the selection
@@ -229,9 +279,9 @@ let BVAPI = null;
 BVP.push({
   init(api) { BVAPI = api; },
   draw2d(g, t) {
-    if (!C.data || !$("ctile").checked || !BVAPI) return;
+    if (!C.data || !BVAPI) return;
     const d = C.data, n = t.n, c0 = BVAPI.cross[n], P = d.position;
-    for (let c = 0; c < C.head.n; c++) {
+    for (const c of shown($("ctile").value)) {
       const a = Number(d.sample_start[c]), b = Number(d.sample_start[c + 1]);
       for (let i = a; i < b - 1; i++) {
         const u = P[3*i+n] - c0, v = P[3*(i+1)+n] - c0;
@@ -242,8 +292,22 @@ BVP.push({
         if (c === C.pick) { g.strokeStyle = "#fff"; g.lineWidth = 1; g.stroke(); }
       }
     }
+    // the section's roots within half a voxel of the slice; the picked root last, in white
+    const hl = C.hl; t.nroots = 0; if (!hl || !$("chlv").checked) return;
+    const half = BVAPI.BV.step[n] / 2, R = d.root;
+    g.lineWidth = 1.5; g.strokeStyle = "rgba(10, 10, 12, 0.95)";
+    const disc = (c, fill, r) => {
+      if (Math.abs(R[3*c+n] - c0) > half) return false;
+      const [x, y] = BVAPI.w2px(t, [R[3*c], R[3*c+1], R[3*c+2]]);
+      g.fillStyle = fill; g.beginPath(); g.arc(x, y, r, 0, 2 * Math.PI); g.fill(); g.stroke(); return true;
+    };
+    hl.cols.forEach((c, i) => { if (c !== C.pick && disc(c, css(hl.rgb.subarray(3 * i, 3 * i + 3)), 4)) t.nroots++; });
+    if (C.pick >= 0 && disc(C.pick, "#fff", 4.5)) t.nroots++;
   },
-  text() { return C.data && $("ctile").checked ? ` · ${C.head.n} columns` : ""; },
+  text(t) {
+    const n = C.data ? shown($("ctile").value).length : 0;
+    return (n ? ` · ${n} columns` : "") + (C.hl && $("chlv").checked ? ` · ${t.nroots || 0} section roots in this slice` : "");
+  },
 });
 function redrawTiles() { if (BVAPI) BVAPI.draw(); }
 
@@ -276,7 +340,7 @@ function axisU() {
 // loaded with cols=
 async function section() {
   const sel = V.selection; if (!sel || C.loading || !C.meta) return;
-  const seq = ++C.sseq, lseq = C.seq; C.sec = null; C.hl = null; drawSection();
+  const seq = ++C.sseq, lseq = C.seq; C.sec = null; C.hl = null; drawSection(); $("ctip").style.display = "none";
   if (C.pickV === null || C.pickV === undefined) C.pickV = sel.true_vertex;
   const q = query(sel), u = axisU();
   let j;
@@ -297,24 +361,30 @@ async function section() {
       C.prof = decode(p.buf)[1];
       $("cstat").textContent = `radius ${settings().radius} mm: over the cap · the section's ${head.n} columns in ${((a.ms + p.ms) / 1000).toFixed(2)} s`;
     }
-  } catch (e) { if (seq === C.sseq) { V.log("section: " + e.message); $("cstat").textContent = "section: " + e.message; } return; }
+  } catch (e) { if (seq === C.sseq) { V.log("section: " + e.message, true); $("cstat").textContent = "section: " + e.message; } return; }
   const S = j.slice, ax = S ? ["sagittal", "coronal", "axial"][S.plane.findIndex(x => Math.abs(x) > 0.5)] ?? "slice" : "";
   $("cplane").textContent = !S ? "section plane: the root's normal and the 3D view's screen right" :
     S.used ? `section plane: the ${ax} slice through the root · the root's normal is ${S.angle.toFixed(1)}° out of the slice` :
     `section plane: not the ${ax} slice (${S.fallback}); the root's normal and the screen right instead · the normal is ${S.angle.toFixed(1)}° out of the slice`;
   C.sec = j; C.secIdx = j.step_vertices.map(vs => vs.map(v => C.vidx.get(v)));
+  C.secSet = new Set(C.secIdx.flat().filter(c => c !== undefined));
+  const a0 = j.arc[0], a1 = j.arc[j.arc.length - 1];
+  C.stepRGB = j.arc.map(a => plasma(a1 > a0 ? (a - a0) / (a1 - a0) : 0.5));
   C.pick = C.vidx.get(j.vertex) ?? -1;
   V.log(`section: ${j.arc.length} steps of ${j.step.toFixed(3)} mm (${j.mode}), the curve ${j.curve_length.map(x => x.toFixed(2)).join(" + ")} mm, ` +
     `${j.n.toLocaleString()} columns in the radius${j.capped ? " (over the cap)" : ""}, ${j.seconds} s`);
   drawSection(); highlight(); details(); redraw();
 }
-// the section's roots for the 3D view: their positions on the true surface (box mm); the overview vertices on demand
+// the section's roots: in the order of the steps, each with the colour of the first step that holds it; their positions
+// on the true surface (box mm); the overview vertices on demand
 function highlight() {
   const S = C.sec, d = C.data; C.hl = null; if (!S || !d) { V.draw3d(); return; }
-  const cols = [...new Set(C.secIdx.flat())], M = C.head.to_view, xyz = new Float32Array(3 * cols.length);
+  const cols = [], ks = [], seen = new Set();
+  C.secIdx.forEach((cs, k) => { for (const c of cs) if (c !== undefined && !seen.has(c)) { seen.add(c); cols.push(c); ks.push(k); } });
+  const M = C.head.to_view, xyz = new Float32Array(3 * cols.length), rgb = new Float32Array(3 * cols.length);
   const view = c => [0, 1, 2].map(k => M[k][0] * d.root[3*c] + M[k][1] * d.root[3*c+1] + M[k][2] * d.root[3*c+2] + M[k][3]);
-  cols.forEach((c, i) => xyz.set(view(c), 3 * i));
-  C.hl = { sec: S, xyz, pick: new Float32Array(C.pick >= 0 ? view(C.pick) : []), ov: null, pickOv: -1, asked: false };
+  cols.forEach((c, i) => { xyz.set(view(c), 3 * i); rgb.set(C.stepRGB[ks[i]], 3 * i); });
+  C.hl = { sec: S, cols, xyz, rgb, pick: new Float32Array(C.pick >= 0 ? view(C.pick) : []), ov: null, ovOf: null, pickOv: -1, asked: false };
   V.draw3d();
 }
 async function highlightOverview(hl) {   // the overview vertex of each root and of the picked root (inflated levels)
@@ -322,8 +392,9 @@ async function highlightOverview(hl) {   // the overview vertex of each root and
   try {
     const j = await V.get(`/vertex/overview?v=${[...hl.sec.roots, hl.sec.vertex].join(",")}`);
     if (C.hl !== hl) return;
-    hl.ov = j.vertex.slice(0, -1); hl.pickOv = j.vertex[j.vertex.length - 1]; V.draw3d();
-  } catch (e) { V.log("section roots: " + e.message); }
+    hl.ov = j.vertex.slice(0, -1); hl.pickOv = j.vertex[j.vertex.length - 1];
+    hl.ovOf = new Map(hl.sec.roots.map((v, i) => [v, hl.ov[i]])); V.draw3d();
+  } catch (e) { V.log("section roots: " + e.message, true); }
 }
 // the column a step stands for: its own (nearest), or the one whose root is nearest the step's point (mean across)
 function stepColumn(k) {
@@ -337,7 +408,7 @@ function drawSection() {
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
   const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.fillStyle = "#000"; g.fillRect(0, 0, W, H);
   const S = C.sec; if (!C.data || !S || !S.arc.length) return;
-  const d = C.data, s = settings(), top = 14, bot = H - 16, ys = v => top + (v + s.e_in) / (s.e_in + s.e_out) * (bot - top);
+  const d = C.data, s = settings(), top = 21, bot = H - 16, ys = v => top + (v + s.e_in) / (s.e_in + s.e_out) * (bot - top);
   const nc = S.arc.length, cw = W / nc, e = +$("cecho").value, show = $("cshow").value, prof = C.prof, step = C.head.step;
   const all = [...new Set(C.secIdx.flat())];
   let lo = 0, hi = 1;
@@ -375,25 +446,41 @@ function drawSection() {
   g.strokeStyle = "#ff2bd6"; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(0, ys(0)); g.lineTo(W, ys(0)); g.stroke(); g.setLineDash([]);
   const k0 = S.arc.findIndex(a => Math.abs(a) < 1e-9);   // the step at the picked root
   if (k0 >= 0) { g.strokeStyle = "#fff"; g.strokeRect(k0 * cw - 0.5, top - 2, cw + 1, bot - top + 4); }
+  // the colours of the section's roots in the other panes, step by step, left end to right end
+  C.stepRGB.forEach((c, x) => { g.fillStyle = css(c); g.fillRect(x * cw, 0, Math.ceil(cw), 5); });
   g.fillStyle = "#9aa0a8"; g.font = "11px system-ui"; g.textBaseline = "top";
-  g.fillText(`s = −${s.e_in} mm (inward)`, 4, 1); g.textBaseline = "bottom";
+  g.fillText(`s = −${s.e_in} mm (inward)`, 4, 7); g.textBaseline = "bottom";
   g.fillText(`s = ${s.e_out} mm · ${nc} steps of ${S.step.toFixed(3)} mm along the surface, arc ${S.arc[0].toFixed(2)} to ${S.arc[nc - 1].toFixed(2)} mm, ` +
     `${all.length} columns (${S.mode === "mean" ? "mean within one voxel" : "nearest"})` +
     (show === "echo" ? ` · echo ${e + 1}, window ${lo.toFixed(0)}–${hi.toFixed(0)}` + (prof ? "" : " (loading)") : ""), 4, H - 1);
 }
 
-// ------------------------------------------------------------------ one column's details
-function details() {
+// ------------------------------------------------------------------ one column's details: a tooltip over the section
+function details() {   // one line under the section: the picked column
   const el = $("cdet"); if (!C.data || C.pick < 0) { el.textContent = ""; return; }
   const d = C.data, c = C.pick;
-  let t = `<b>column of vertex ${vertexOf(c)}</b> · edge key ${d.edge_key[c]} · ${d.owned[c] ? "owned" : "halo"} column of superblock ` +
-    `${C.head.superblock.join(",")} · ${d.distance[c].toFixed(3)} mm from the selection · |n̄| ${d.normal_length[c].toFixed(3)} · ` +
-    `derived class <span style="color:rgb(${DCOL[d.derived_class[c]]})">${DNAME[d.derived_class[c]]}</span>` +
-    `<table style="border-collapse:collapse;margin-top:3px"><tr style="color:var(--mute)"><th>s from (mm)</th><th>s to</th><th>label</th><th>class</th></tr>`;
+  el.innerHTML = `picked: the column of true vertex <b>${vertexOf(c)}</b> (its root white in the other panes), ` +
+    `${d.distance[c].toFixed(3)} mm from the selection · the mouse over the section shows each column's details`;
+}
+function tooltip(e) {
+  const tip = $("ctip"), S = C.sec, cv = $("csec");
+  if (!S || !C.data || !S.arc.length) { tip.style.display = "none"; return; }
+  const k = Math.floor(e.offsetX / (cv.clientWidth / S.arc.length)), c = k >= 0 && k < S.arc.length ? stepColumn(k) : -1;
+  if (c < 0) { tip.style.display = "none"; return; }
+  const d = C.data, n = C.secIdx[k].length;
+  let t = `<span class="sw" style="background:${css(C.stepRGB[k])};width:10px;height:10px"></span><b>true vertex ${vertexOf(c)}</b>` +
+    (c === C.pick ? " (picked)" : "") + `<br>arc ${S.arc[k].toFixed(3)} mm · ${d.distance[c].toFixed(3)} mm from the selection` +
+    `<br>|n̄| ${d.normal_length[c].toFixed(3)} · derived class <span style="color:rgb(${DCOL[d.derived_class[c]]})">${esc(DNAME[d.derived_class[c]])}</span>` +
+    (n > 1 ? `<br><span style="color:var(--mute)">the step is the mean of ${n} columns; this one's root is nearest the step's point</span>` : "") +
+    `<table style="border-collapse:collapse;margin-top:2px"><tr style="color:var(--mute)"><th style="text-align:left">label</th><th>s from</th><th>s to (mm)</th></tr>`;
   for (let q = Number(d.interval_start[c]); q < Number(d.interval_start[c + 1]); q++)
-    t += `<tr><td style="text-align:right;padding:0 8px">${d.interval_s0[q].toFixed(3)}</td><td style="text-align:right;padding:0 8px">${d.interval_s1[q].toFixed(3)}</td>` +
-      `<td style="text-align:right;padding:0 8px">${d.interval_label[q]}</td><td style="color:rgb(${ICOL[d.interval_class[q]]})">${INAME[d.interval_class[q]]}</td></tr>`;
-  el.innerHTML = t + "</table>";
+    t += `<tr><td style="color:rgb(${ICOL[d.interval_class[q]]});padding-right:8px">${d.interval_label[q]} ${esc(INAME[d.interval_class[q]])}</td>` +
+      `<td style="text-align:right;padding:0 6px">${d.interval_s0[q].toFixed(3)}</td><td style="text-align:right;padding:0 6px">${d.interval_s1[q].toFixed(3)}</td></tr>`;
+  tip.innerHTML = t + "</table>"; tip.style.display = "";
+  // next to the cursor, inside the window (the section may be lower than the tooltip)
+  const W = window.innerWidth, H = window.innerHeight, w = tip.offsetWidth, h = tip.offsetHeight;
+  const x = e.clientX + 14 + w > W ? e.clientX - 14 - w : e.clientX + 14, y = Math.min(Math.max(0, H - h), e.clientY + 14);
+  tip.style.left = `${Math.max(0, x)}px`; tip.style.top = `${Math.max(0, y)}px`;
 }
 function setPick(c) { C.pick = c; C.pickV = vertexOf(c); section(); details(); redraw(); }
 function redraw() { if (C.data) upload3d(); else if (C.gl) C.gl.m = 0; V.draw3d(); redrawTiles(); }
@@ -405,16 +492,24 @@ V.hooks.selection.push((sel, frame, how) => {
   C.slice = sel && how && how.slice ? { v: sel.true_vertex, n: how.slice } : null;   // any other selection: the usual plane
   if (C.meta) load();
 });
+// the controls from the shared state's "columns"
+function setControls(s) {
+  for (const [id, k] of [["crad", "radius"], ["cevery", "every"], ["cein", "e_in"], ["ceout", "e_out"], ["c3d", "show3d"],
+    ["ctile", "showTiles"], ["cmode", "mode"]]) if (k in s && s[k] !== null && s[k] !== undefined) $(id).value = String(s[k]);
+  for (const [id, k] of [["chl", "roots3d"], ["chlv", "rootsVol"]]) if (typeof s[k] === "boolean") $(id).checked = s[k];
+}
 V.hooks.state.push(st => {
   if (!("columns" in st) || !st.columns || !C.meta) return;
-  const s = st.columns, old = settings(), sel = V.selection;
-  for (const [id, k] of [["crad", "radius"], ["cevery", "every"], ["cein", "e_in"], ["ceout", "e_out"]]) if (k in s) $(id).value = String(s[k]);
+  const s = st.columns, old = settings(), sel = V.selection, oldMode = $("cmode").value, oldDisp = JSON.stringify(display());
+  setControls(s);
+  const modeChanged = $("cmode").value !== oldMode, dispChanged = JSON.stringify(display()) !== oldDisp;
   const same = Object.keys(old).every(k => old[k] === settings()[k]);
   // a picked column counts only for the selection it was picked in (an older one is stale)
   const col = sel && s.at === sel.true_vertex && s.column !== null && s.column !== undefined ? s.column : null;
   if (!same) { if (col !== null) C.pickV = col; load(); return; }
-  if (col === null || col === C.pickV) return;
-  C.pickV = col; if (C.sec) section();
+  if (col !== null && col !== C.pickV) { C.pickV = col; if (C.sec) section(); return; }
+  if (modeChanged) { if (C.sec) section(); return; }
+  if (dispChanged) redraw();
 });
 V.hooks.resize.push(() => drawSection());
 (async () => {
@@ -424,6 +519,8 @@ V.hooks.resize.push(() => drawSection());
   build();
   C.meta = await V.get("/columns/meta");
   const r = $("crad"); for (const o of [...r.options]) if (+o.value > C.meta.max_radius) o.remove();
+  // a new window: the settings of the others (the first state came before the pane was built)
+  try { const st = (await V.get("/state")).state; if (st.columns) setControls(st.columns); } catch (e) { /* get() logs it */ }
   V.log(`columns pane: ${C.meta.spec}, radius up to ${C.meta.max_radius} mm, at most ${C.meta.max_columns} columns a request, ` +
     (C.meta.echoes.length ? `${C.meta.echoes.length} echoes` : "no echoes (no profiles: start with --echo-dir)"));
   drawSection();

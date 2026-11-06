@@ -25,7 +25,7 @@
   .fill canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   .help { position: absolute; right: 6px; bottom: 4px; font-size: 11px; color: var(--mute); background: #000a; padding: 1px 6px;
           border-radius: 4px; pointer-events: none; }
-  #info { font-size: 12px; white-space: pre-wrap; padding: 4px 8px; height: 6.2em; overflow-y: auto; flex: none;
+  #info { font-size: 12px; white-space: pre-wrap; padding: 4px 8px; max-height: 6.2em; overflow-y: auto; flex: none;
           border-top: 1px solid var(--line); }
   #log { font-size: 11px; color: var(--mute); white-space: pre-wrap; padding: 2px 8px 4px; max-height: 4.5em; overflow-y: auto; flex: none; }
   .key span { display: inline-block; margin-right: 10px; font-size: 11px; }
@@ -39,6 +39,7 @@
   <label title="a true vertex of the white surface: Enter makes it the WM selection and turns the 3D view to it (also ?v= in the address)">go to vertex
     <input id="goto" type="text" inputmode="numeric" size="10" placeholder="true vertex"></label>
   <span id="sync">connecting…</span>
+  <button id="logbtn" title="show or hide the log at the bottom (this window only); a red dot: an error since the log was last shown">log<span id="logdot" style="display:none;color:#ff4b3b;margin-left:3px">●</span></button>
 </div>
 <div id="main">
   <div class="pane" id="p-volume">
@@ -58,7 +59,7 @@
       <div class="help" id="vhelp">click a slice: move the crosshair · shift-click: WM selection to the nearest white-surface point · right-drag: contrast</div></div>
   </div>
   <div class="pane" id="p-surface">
-    <h2><span>White surface</span><label>surface <select id="level"></select></label></h2>
+    <div class="pbar" id="sbar" style="padding-top:4px"><label>surface <select id="level"></select></label></div>
     <div class="fill"><canvas id="gl"></canvas>
       <div class="help">click: WM selection · shift-click: crosshair to that point · drag: rotate · shift-drag: pan · wheel: zoom</div></div>
   </div>
@@ -76,8 +77,21 @@ let META = null, FRAME = null, SELN = null, CROSS = null;
 const q = new URLSearchParams(location.search);
 let OVTXT = "";   // what the info line says with no selection
 let PANES = ["volume", "surface"];
-async function get(u) { const r = await fetch(u); const j = await r.json(); if (j.error) { log("error: " + j.error); throw new Error(j.error); } return j; }
-function log(m) { const el = $("log"); el.textContent = new Date().toLocaleTimeString() + "  " + m + "\n" + el.textContent; }
+async function get(u) { const r = await fetch(u); const j = await r.json(); if (j.error) { log("error: " + j.error, true); throw new Error(j.error); } return j; }
+// the log: shown or hidden per window (localStorage, not the shared state); while it is hidden, an error marks the toggle
+const LOGKEY = "baillarger.viewer.log";
+function logShown() { try { return localStorage.getItem(LOGKEY) !== "hidden"; } catch (e) { return true; } }
+function showLog(on) {
+  $("log").style.display = on ? "" : "none"; $("logbtn").style.opacity = on ? "1" : "0.6";
+  if (on) $("logdot").style.display = "none";
+  try { localStorage.setItem(LOGKEY, on ? "shown" : "hidden"); } catch (e) { /* no storage: this page only */ }
+}
+// the panes take the freed height (the bricks pane follows its own size)
+$("logbtn").onclick = () => { showLog($("log").style.display === "none"); draw3d(); vHook("resize"); };
+function log(m, err = false) {
+  const el = $("log"); el.textContent = new Date().toLocaleTimeString() + "  " + m + "\n" + el.textContent;
+  if ((err || /^error\b/i.test(m)) && el.style.display === "none") $("logdot").style.display = "";
+}
 const has = p => PANES.includes(p);
 
 // ---------------------------------------------------------------- layout
@@ -176,11 +190,11 @@ void main() { float s = 1.0 - sulcw * clamp(-vsulc / 2.0, 0.0, 1.0) * 0.45; o = 
 // up to 45 degrees from the screen. rho is about one mesh edge at the default zoom, so a fold more
 // than one disc radius in front hides the point. The hidden part is drawn again, faded (see points).
 const PVS = `#version 300 es
-in vec3 pos; uniform mat4 mvp; uniform vec3 eye; uniform float prad; uniform float psize;
-void main() { gl_Position = mvp * vec4(pos + (eye - pos) * prad, 1.0); gl_PointSize = psize; }`;
+in vec3 pos; in vec3 pcol; uniform mat4 mvp; uniform vec3 eye; uniform float prad; uniform float psize; out vec3 vpcol;
+void main() { gl_Position = mvp * vec4(pos + (eye - pos) * prad, 1.0); gl_PointSize = psize; vpcol = pcol; }`;
 const PFS = `#version 300 es
-precision mediump float; uniform vec3 pcol; uniform float palpha; out vec4 o;
-void main() { vec2 d = gl_PointCoord - 0.5; if (dot(d, d) > 0.25) discard; o = vec4(pcol, palpha); }`;
+precision mediump float; in vec3 vpcol; uniform float palpha; out vec4 o;
+void main() { vec2 d = gl_PointCoord - 0.5; if (dot(d, d) > 0.25) discard; o = vec4(vpcol, palpha); }`;
 async function loadMesh(level, faces) {
   const buf = await (await fetch(`/mesh?level=${level}${faces ? "&faces=1" : ""}`)).arrayBuffer();
   const hl = new Uint32Array(buf, 0, 1)[0], hdr = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hl)));
@@ -210,24 +224,32 @@ async function loadMesh(level, faces) {
 function colour3d() {
   if (!GL.nv) return;
   let col = null;
-  for (const h of VIEWER.hooks.colour) try { col = h(GL.nv) || col; } catch (e) { log(`colour: ${e.message}`); }
+  for (const h of VIEWER.hooks.colour) try { col = h(GL.nv) || col; } catch (e) { log(`colour: ${e.message}`, true); }
   if (!col || col.length !== 3 * GL.nv) col = new Float32Array(3 * GL.nv).fill(110 / 255);
   GL.g.bindBuffer(GL.g.ARRAY_BUFFER, GL.bcol); GL.g.bufferData(GL.g.ARRAY_BUFFER, col, GL.g.DYNAMIC_DRAW);
 }
-function points(g, M, arr, col, size) {
+// col: one RGB for every point (an Array), or a Float32Array of an RGB for each point (as long as arr); lift: the size
+// whose radius lifts the disc toward the eye (default: size), so that a larger disc drawn after one of size lift, at the
+// same points, shows only as a rim round it
+function points(g, M, arr, col, size, lift = size) {
   if (!arr.length) return; g.useProgram(GL.pprog); g.bindVertexArray(GL.pvao);
   g.bindBuffer(g.ARRAY_BUFFER, GL.pbuf); g.bufferData(g.ARRAY_BUFFER, arr, g.DYNAMIC_DRAW);
+  const cl = g.getAttribLocation(GL.pprog, "pcol");
+  if (col instanceof Float32Array) {
+    g.bindBuffer(g.ARRAY_BUFFER, GL.pcbuf); g.bufferData(g.ARRAY_BUFFER, col, g.DYNAMIC_DRAW);
+    g.enableVertexAttribArray(cl); g.vertexAttribPointer(cl, 3, g.FLOAT, false, 0, 0);
+  } else { g.disableVertexAttribArray(cl); g.vertexAttrib3f(cl, col[0], col[1], col[2]); }
   g.uniformMatrix4fv(g.getUniformLocation(GL.pprog, "mvp"), false, M);
   const R = GL.R, t = GL.target, u = n => g.getUniformLocation(GL.pprog, n);
   g.uniform3fv(u("eye"), [t[0] + GL.dist * R[6], t[1] + GL.dist * R[7], t[2] + GL.dist * R[8]]);
   // the disc's radius in world units for each unit of distance from the eye
-  g.uniform1f(u("prad"), size * Math.tan(0.35) / $("gl").clientHeight);
-  g.uniform3fv(u("pcol"), col); g.uniform1f(u("psize"), size * (window.devicePixelRatio || 1));
+  g.uniform1f(u("prad"), lift * Math.tan(0.35) / $("gl").clientHeight);
+  g.uniform1f(u("psize"), size * (window.devicePixelRatio || 1));
   // the visible part, depth tested; then the part behind the surface, faded as if seen through it
   g.uniform1f(u("palpha"), 1); g.drawArrays(g.POINTS, 0, arr.length / 3);
   g.depthFunc(g.GREATER); g.depthMask(false); g.enable(g.BLEND); g.blendFunc(g.SRC_ALPHA, g.ONE_MINUS_SRC_ALPHA);
   g.uniform1f(u("palpha"), 0.3); g.drawArrays(g.POINTS, 0, arr.length / 3);
-  g.depthFunc(g.LESS); g.depthMask(true); g.disable(g.BLEND);
+  g.depthFunc(g.LESS); g.depthMask(true); g.disable(g.BLEND); g.bindVertexArray(null);
 }
 function draw3d() {
   const c = $("gl"), g = GL.g; if (!g || !GL.nf) return; const dpr = window.devicePixelRatio || 1;
@@ -274,7 +296,8 @@ function initGL() {
   const c = $("gl"), g = c.getContext("webgl2", { antialias: true }); if (!g) { log("no WebGL2"); return; }
   GL.g = g; GL.prog = program(g, VS, FS); GL.pprog = program(g, PVS, PFS);
   GL.pvao = g.createVertexArray(); g.bindVertexArray(GL.pvao); GL.pbuf = g.createBuffer(); g.bindBuffer(g.ARRAY_BUFFER, GL.pbuf);
-  const loc = g.getAttribLocation(GL.pprog, "pos"); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 3, g.FLOAT, false, 0, 0); g.bindVertexArray(null);
+  const loc = g.getAttribLocation(GL.pprog, "pos"); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, 3, g.FLOAT, false, 0, 0);
+  GL.pcbuf = g.createBuffer(); g.bindVertexArray(null);
   let d = null;
   c.addEventListener("mousedown", e => { d = { x: e.offsetX, y: e.offsetY, moved: false, shift: e.shiftKey }; });
   c.addEventListener("mousemove", e => {
@@ -397,7 +420,7 @@ let BRICKS = false;
 // plug-ins of the brick pane (static/overlays.js, ...): objects in window.BVP with hooks init(api), update(), render(g, geoms, dpr),
 // draw2d(g2d, tile), text(tile) -> string, pointer(type, event, hit) -> true to take the event; api: window.BVAPI
 const BVP = window.BVP = window.BVP || [];
-const bvHook = (name, ...a) => { for (const p of BVP) if (p[name]) try { p[name](...a); } catch (e) { log(`${name}: ${e.message}`); } };
+const bvHook = (name, ...a) => { for (const p of BVP) if (p[name]) try { p[name](...a); } catch (e) { log(`${name}: ${e.message}`, true); } };
 const bvTook = (type, e, h) => BVP.some(p => p.pointer && p.pointer(type, e, h));
 function affInv(A) {   // the inverse of a 4x4 affine (rows)
   const [a, b, c] = A[0], [d, e, f] = A[1], [g, h, i] = A[2];
@@ -543,7 +566,7 @@ async function bvLoad(L, bs, keys) {
   let buf;
   try { const r = await fetch(`/volume/bricks?level=${L}&b=${bs.map(b => b.join(",")).join(";")}`);
         if (!r.ok) throw new Error(`${r.status} ${await r.text()}`); buf = await r.arrayBuffer(); }
-  catch (e) { log("bricks: " + e.message); return; }
+  catch (e) { log("bricks: " + e.message, true); return; }
   const g = BV.g, B = BV.M.brick, sh = BV.M.levels[L].shape, T = BV.f32 ? Float32Array : Int16Array; let o = 0;
   g.bindTexture(g.TEXTURE_3D, BV.atlas);
   bs.forEach((b, m) => {
@@ -665,19 +688,22 @@ $("vengine").onchange = () => { q.set("vol", $("vengine").value); location.searc
 // the end of each 3D frame (box mm, the true surface at level 0); resize(); colour(nv) gives the overview's RGB colours or
 // null (colour3d). VIEWER.recolour() applies the colour hooks again. VIEWER.select(sel, frame) makes sel (a /vertex answer,
 // or one like it) the WM selection; VIEWER.screenFrame() is the 3D view's frame; VIEWER.turnTo(v) turns it to overview vertex v;
-// VIEWER.points(g, mvp, xyz, rgb, size) draws discs at the points xyz (Float32Array, box mm) in a draw3d hook. VIEWER.ready resolves when the page has
+// VIEWER.points(g, mvp, xyz, rgb, size, lift) draws discs at the points xyz (Float32Array, box mm) in a draw3d hook (rgb: one
+// colour as an Array, or a Float32Array of one for each point). VIEWER.log(m, err) adds a line to the log (err: an error,
+// which marks the log toggle while the log is hidden). VIEWER.bricks: the volume pane is ours (?vol=bricks). VIEWER.ready resolves when the page has
 // started.
 let viewerReady;
-const VIEWER = window.VIEWER = { $, get, log, share, GL, NV, mvp, program, points, draw3d: () => draw3d(), has,
+const VIEWER = window.VIEWER = { $, get, log, share, GL, NV, mvp, program, points, draw3d: () => draw3d(), has, bricks: q.get("vol") === "bricks",
   selectVertex: v => selectVertex(v, null), select: (sel, frame) => selectHere(sel, frame), screenFrame: () => screenFrame(), turnTo,
   recolour: () => { colour3d(); draw3d(); }, get selection() { return SELN; }, get frame() { return FRAME; },
   get meta() { return META; }, hooks: { selection: [], state: [], draw3d: [], resize: [], colour: [] },
   ready: new Promise(r => { viewerReady = r; }) };
-function vHook(name, ...a) { for (const h of VIEWER.hooks[name]) try { h(...a); } catch (e) { log(`${name}: ${e.message}`); } }
+function vHook(name, ...a) { for (const h of VIEWER.hooks[name]) try { h(...a); } catch (e) { log(`${name}: ${e.message}`, true); } }
 
 // ---------------------------------------------------------------- start
 window.addEventListener("resize", () => { draw3d(); vHook("resize"); });
 (async () => {
+  showLog(logShown());
   layout();
   META = await get("/meta");
   // the white surface: its overview, and the volume pane: NiiVue on a box, or ours on the whole volume (?vol=bricks)

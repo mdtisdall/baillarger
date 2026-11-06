@@ -38,7 +38,7 @@ function build() {
     <button id="ovreset" title="the 1st to the 99th percentile">1–99 %</button>
     <canvas id="ovbarc" width="160" height="12" style="width:160px;height:12px;vertical-align:middle"></canvas>
     <span id="ovstat" style="color:var(--mute);font-size:11px"></span></span>`;
-  const h2 = $("p-surface").querySelector("h2"); h2.after(bar);
+  $("sbar").after(bar);
   const panel = document.createElement("div"); panel.id = "ovpanel";
   panel.style.cssText = "flex:none;max-height:32%;display:none;gap:10px;padding:2px 8px 4px;font-size:12px;min-height:0";
   panel.innerHTML = `

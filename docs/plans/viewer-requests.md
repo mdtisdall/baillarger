@@ -84,6 +84,26 @@ the column indices of the `/columns` answer. The page sends u (the 3D
 view's screen right at the time of the selection, as now) and draws the
 answer.
 
+## Request 3: the layout of the panes (after the user's test of #151)
+
+1. The surface pane has no "White surface" heading; its bar keeps the level menu.
+2. "columns: off | section | all" in the surface pane's bar (the 3D lines) and in the volume pane's bar (the bricks
+   tiles). section, the default: the columns of the section (one a step; mean across, the columns of each step's
+   mean). all: every column in the radius (the cap applies). The volume pane's controls act on the bricks viewer only
+   and are disabled with NiiVue (NiiVue goes under its own plan).
+3. A "section roots" checkbox in each of those bars, apart from the menu: the 3D view as before; bricks, the roots
+   within half a voxel of a tile's slice. The picked root stays white.
+4. A "log" toggle in the header, per window (localStorage). While the log is hidden, an error puts a red dot on the
+   toggle until the log is shown. The information line stays.
+5. The section's roots are coloured by their step's place along the section (plasma, 0.12 to 0.95 of it, with a dark
+   rim), and the same colours run in a thin bar along the top of the section. Mean across: every root of a step has
+   that step's colour.
+6. A tooltip over the section gives a column's details (true vertex, arc, distance, |n̄|, derived class, label
+   intervals); one line under the section names the picked column. The details list goes.
+
+Every setting except the log toggle goes through the shared state. No route changes: the roots of "section" are the
+`roots` of `/columns/section`, which the route test already checks.
+
 ## Exact tests
 
 - Go to a vertex: the route gives the true vertex's position, the voxel
