@@ -262,6 +262,23 @@ exact test.
    route gives the selection for a true vertex: its position in mm, its
    voxel, and the nearest overview vertex. A number out of range gives an
    error in the log, and the selection does not change.
+2. **The profile section follows the surface.** Now the section takes the
+   columns whose roots lie within the half width of a plane through the
+   selected root, and sorts them by u. Where the WM is one voxel thick, the
+   plane cuts the surface two times, close together, and the sort
+   interleaves the two cuts. The profile then shows alternating bands (seen
+   at true vertex 10909480). The new section is a line along the surface:
+   - The curve is the cut of the same plane with the white mesh, only the
+     piece that goes through the selected root. It runs in both directions
+     from the root, to the column radius along the curve.
+   - The section takes the columns whose roots lie within the half width of
+     the curve, along the surface.
+   - It sorts them by their arc length along the curve, from the root
+     (negative on one side).
+   - Where the surface turns around a thin edge, the curve goes around the
+     turn, and the profile shows the turn at one place.
+   The section does not label the sides of the WM, and it does not use the
+   sign of the normals.
 
 ## Exact tests
 
@@ -289,6 +306,15 @@ exact test.
 - Go to a vertex: the route gives the true vertex's position, the voxel
   that `Overlays.voxels` (#144) gives, and the overview vertex that `/snap`
   gives for that position. A vertex out of range gives an error.
+- The section along the surface, on phantom meshes:
+  - A flat sheet: the order is the same as the order by u.
+  - A thin fold (two parallel sheets 0.16 mm apart, joined by a half
+    cylinder): the order has the columns of the root's sheet, then the
+    columns of the turn, then the columns of the other sheet. No column of
+    one sheet comes between two columns of the other.
+  - A second sheet within the half width of the plane, but not joined to
+    the root's sheet within the column radius: none of its columns is in
+    the section.
 
 ## The hemisphere check
 
