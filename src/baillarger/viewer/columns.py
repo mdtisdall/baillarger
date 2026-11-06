@@ -426,9 +426,12 @@ class Columns:
         normal of a slice plane through the centre's root (scanner mm); the
         curve is that plane's cut unless it is degenerate there
         (VSec.section_curve); `slice` says which, and gives the angle between
-        the root's normal and the plane."""
+        the root's normal and the plane. The section chooses from every root
+        within the radius: `every` thins only the displayed columns, so it
+        changes neither the section nor its key; the indices are into the
+        /columns answer with every=1."""
         t0 = time.perf_counter()
-        whole = replace(req, cols="")
+        whole = replace(req, cols="", every=1)
         sb, roots, chosen, dist = self.candidates(whole)
         if not len(chosen):
             raise ValueError("the request has no columns")
@@ -730,7 +733,8 @@ def route(h: Any, path: str, q: dict[str, str]) -> None:
       &plane=x,y,z]: the profile section that follows the surface
       (Columns.section; u and the slice plane's normal in scanner mm). It
       samples no column, so it answers over the cap too; then the page asks
-      /columns and /columns/profiles with cols= (the section's columns).
+      /columns and /columns/profiles with cols= (the section's columns) and
+      every=1. It ignores `every`: the section chooses from every root.
     - GET /columns/<key>.tck: the columns of a finished request, as .tck.
     Errors: 400 with JSON {error}; 404 without columns (no --white)."""
     c: Columns | None = getattr(h, "columns", None)

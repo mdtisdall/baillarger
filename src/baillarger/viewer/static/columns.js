@@ -26,6 +26,9 @@
 //   within half a voxel of a tile's slice, as discs on that slice.
 // - One column's details in a tooltip over the section (its true vertex, arc length, distance from the selection, |n̄|,
 //   derived class, label intervals). A click on the section picks the column; one line under the section names it.
+// - "every" thins only the displayed columns ("columns: all"): the section chooses from every root within the radius (the
+//   server ignores every), so with every > 1 the pane asks /columns twice: with every for the display (C.all), and with
+//   every=1 and cols= for the section's columns (C.data).
 // - Over the cap (more than MAX_COLUMNS columns in the radius): /columns refuses, but the section does not depend on it.
 //   The pane asks /columns/section, then /columns and /columns/profiles with cols= (the section's columns only), and says
 //   so in red above the section: the 3D lines, the tiles and the .tck then show only the section's columns.
@@ -61,6 +64,8 @@ const C = { meta: null, data: null, prof: null, key: null, req: null, pick: -1, 
   secSet: new Set(),   // the section's columns (indices in C.data)
   stepRGB: [],   // the colour of each step (plasma along the arc)
   capped: null,   // the server's refusal when the whole request is over the cap
+  all: null,   // with every > 1: the displayed columns ({ head, data }; "columns: all"); C.data then holds the section's
+               // columns only, with every = 1 (cols=). null: C.data is the whole request (every = 1) or over the cap
   loading: false,
   hl: null };   // the section's roots: { sec, cols, xyz (level 0), rgb, rootRGB (true vertex -> rgb), ov: overview vertices or null, pickOv }
 
@@ -71,7 +76,7 @@ function build() {
   <h2><span>Columns (ray sampler, column volume)</span><span id="cstat"></span></h2>
   <div class="pbar">
     <label>radius <select id="crad"><option>0.5</option><option>1</option><option selected>2</option><option>3</option><option>4</option><option>5</option></select> mm</label>
-    <label>every <select id="cevery"><option>1</option><option>2</option><option>4</option><option>8</option></select></label>
+    <label title="every n-th root: thins the displayed columns (columns: all, in the 3D view and the slices); the section always chooses from every root within the radius">every <select id="cevery"><option>1</option><option>2</option><option>4</option><option>8</option></select></label>
     <label>inward <select id="cein"><option>0.5</option><option selected>1</option><option>2</option></select> mm</label>
     <label>outward <select id="ceout"><option>2</option><option selected>4</option><option>6</option><option>8</option></select> mm</label>
     <label>colour <select id="ccol"><option value="interval">label of each interval</option><option value="derived">derived class</option></select></label>
@@ -155,18 +160,21 @@ async function fetchBinary(u, seq) {
 
 // ------------------------------------------------------------------ loading
 const vertexOf = c => Number(C.data.vertex[c]);
-const query = sel => { const s = settings(); return `v=${sel.true_vertex}&radius=${s.radius}&every=${s.every}&e_in=${s.e_in}&e_out=${s.e_out}`; };
-// a /columns answer as the pane's data
+// every: the request's "every" (default: the menu's)
+const query = (sel, every) => { const s = settings(); return `v=${sel.true_vertex}&radius=${s.radius}&every=${every ?? s.every}&e_in=${s.e_in}&e_out=${s.e_out}`; };
+// a /columns answer as the pane's (section's) data
 function setData(head, d) {
-  C.head = head; C.data = d; C.key = head.key; C.prof = null; prepare();
+  C.head = head; C.data = d; C.prof = null; prepare(head, d);
   C.vidx = new Map(); for (let c = 0; c < head.n; c++) C.vidx.set(Number(d.vertex[c]), c);
-  $("ctck").href = `/columns/${head.key}.tck`; $("ctck").setAttribute("download", `columns_${head.request.vertex}.tck`);
+}
+function setTck(head) {   // the .tck of the displayed columns
+  C.key = head.key; $("ctck").href = `/columns/${head.key}.tck`; $("ctck").setAttribute("download", `columns_${head.request.vertex}.tck`);
 }
 async function load() {
   const sel = V.selection;
   if (!sel || sel.true_vertex === undefined || sel.true_vertex === null) return;
   const s = settings(), seq = ++C.seq, q = query(sel);
-  C.loading = true; C.data = null; C.prof = null; C.sec = null; C.hl = null; C.capped = null; C.pick = -1; C.vidx = new Map(); C.secSet = new Set();
+  C.loading = true; C.data = null; C.all = null; C.prof = null; C.sec = null; C.hl = null; C.capped = null; C.pick = -1; C.vidx = new Map(); C.secSet = new Set();
   $("ccap").style.display = "none"; $("cstat").textContent = "loading…"; drawSection(); details(); redraw();
   try {
     let a;
@@ -180,7 +188,9 @@ async function load() {
         `and the .tck show only the section's columns.`;
       $("ccap").style.display = "";
     } else {
-      const [head, d] = decode(a.buf); setData(head, d);
+      const [head, d] = decode(a.buf);
+      if (s.every === 1) setData(head, d); else { prepare(head, d); C.all = { head, data: d }; }
+      setTck(head);
       st = `${head.n} columns, ${head.samples.toLocaleString()} samples · ${(a.ms / 1000).toFixed(2)} s ` +
         `(server: graph ${head.seconds.graph} s, sampler ${head.seconds.sample} s on ${head.seconds.calls.toLocaleString()} roots of superblock ${head.superblock.join(",")})`;
       loadTck();
@@ -188,7 +198,7 @@ async function load() {
     $("cstat").textContent = st;
     C.loading = false;
     await section();
-    if (C.capped || seq !== C.seq) return;
+    if (C.capped || C.all || seq !== C.seq) return;   // else the section's columns came with their profiles
     const p = await fetchBinary(`/columns/profiles?${q}`, seq); if (!p) return;
     C.prof = decode(p.buf)[1];
     $("cstat").textContent = st + ` · profiles ${(p.ms / 1000).toFixed(2)} s`;
@@ -198,8 +208,8 @@ async function load() {
   finally { if (seq === C.seq) C.loading = false; }
 }
 // per sample: its column, and the class of the label interval that holds it; the roots in the 3D pane's frame (box mm)
-function prepare() {
-  const d = C.data, n = C.head.n, N = C.head.samples, M = C.head.to_view;
+function prepare(head, d) {
+  const n = head.n, N = head.samples, M = head.to_view;
   d.col = new Int32Array(N); d.cls = new Uint8Array(N);
   for (let c = 0; c < n; c++) {
     const a = Number(d.sample_start[c]), b = Number(d.sample_start[c + 1]), q0 = Number(d.interval_start[c]), q1 = Number(d.interval_start[c + 1]);
@@ -210,32 +220,35 @@ function prepare() {
   for (let i = 0; i < N; i++) { const x = d.position[3*i], y = d.position[3*i+1], z = d.position[3*i+2];
     for (let k = 0; k < 3; k++) d.view[3*i+k] = M[k][0] * x + M[k][1] * y + M[k][2] * z + M[k][3]; }
 }
-const colourOf = i => $("ccol").value === "derived" ? DCOL[C.data.derived_class[C.data.col[i]]] : ICOL[C.data.cls[i]];
+const colourOf = (d, i) => $("ccol").value === "derived" ? DCOL[d.derived_class[d.col[i]]] : ICOL[d.cls[i]];
 
 // ------------------------------------------------------------------ 3D: the columns as lines
 const LVS = `#version 300 es
 in vec3 pos; in vec3 col; uniform mat4 mvp; out vec3 vcol; void main() { gl_Position = mvp * vec4(pos, 1.0); vcol = col; }`;
 const LFS = `#version 300 es
 precision mediump float; in vec3 vcol; uniform float alpha; out vec4 o; void main() { o = vec4(vcol, alpha); }`;
-// the columns that a menu ("off", "section", "all") asks for: a list of indices in C.data
+// the columns that a menu ("off", "section", "all") asks for: { d: their data, cols: indices into it }. all: the displayed
+// columns (every n-th; over the cap, the section's)
 function shown(mode) {
-  if (!C.data || mode === "off") return [];
-  if (mode === "section") return [...C.secSet];
-  return Array.from({ length: C.head.n }, (_, c) => c);
+  if (mode === "all" && C.all) return { d: C.all.data, cols: Array.from({ length: C.all.head.n }, (_, c) => c) };
+  if (!C.data || mode === "off") return { d: C.data, cols: [] };
+  if (mode === "section") return { d: C.data, cols: [...C.secSet] };
+  return { d: C.data, cols: Array.from({ length: C.head.n }, (_, c) => c) };
 }
+const isPick = (d, c) => Number(d.vertex[c]) === C.pickV;
 function lines3d() {   // the segments between consecutive samples of each column, with the colour of the first
-  const d = C.data, cols = shown($("c3d").value); let m = 0;
+  const { d, cols } = shown($("c3d").value); let m = 0;
   for (const c of cols) m += Number(d.sample_start[c + 1]) - Number(d.sample_start[c]) - 1;
   const pos = new Float32Array(6 * m), col = new Float32Array(6 * m); let o = 0;
   for (const c of cols) for (let i = Number(d.sample_start[c]); i < Number(d.sample_start[c + 1]) - 1; i++) {
-    const rgb = colourOf(i), w = c === C.pick ? 1 : 0.85;
+    const rgb = colourOf(d, i), w = isPick(d, c) ? 1 : 0.85;
     for (let e = 0; e < 2; e++) for (let k = 0; k < 3; k++) { pos[6*o+3*e+k] = d.view[3*(i+e)+k]; col[6*o+3*e+k] = w * rgb[k] / 255; }
     o++;
   }
   return { pos, col, m };
 }
 function upload3d() {
-  const g = V.GL.g; if (!g || !C.data) return;
+  const g = V.GL.g; if (!g || !(C.data || C.all)) return;
   if (!C.gl) { const p = V.program(g, LVS, LFS); C.gl = { p, vao: g.createVertexArray(), bp: g.createBuffer(), bc: g.createBuffer(), m: 0 };
     g.bindVertexArray(C.gl.vao);
     for (const [b, name] of [[C.gl.bp, "pos"], [C.gl.bc, "col"]]) { const loc = g.getAttribLocation(p, name); g.bindBuffer(g.ARRAY_BUFFER, b);
@@ -279,22 +292,23 @@ let BVAPI = null;
 BVP.push({
   init(api) { BVAPI = api; },
   draw2d(g, t) {
-    if (!C.data || !BVAPI) return;
-    const d = C.data, n = t.n, c0 = BVAPI.cross[n], P = d.position;
-    for (const c of shown($("ctile").value)) {
+    if (!(C.data || C.all) || !BVAPI) return;
+    const { d, cols } = shown($("ctile").value), n = t.n, c0 = BVAPI.cross[n];
+    for (const c of cols) {
+      const P = d.position;
       const a = Number(d.sample_start[c]), b = Number(d.sample_start[c + 1]);
       for (let i = a; i < b - 1; i++) {
         const u = P[3*i+n] - c0, v = P[3*(i+1)+n] - c0;
         if ((u > 0) === (v > 0) && u !== 0) continue;
         const f = u === v ? 0 : u / (u - v), w = [0, 1, 2].map(k => P[3*i+k] + f * (P[3*(i+1)+k] - P[3*i+k]));
-        const [x, y] = BVAPI.w2px(t, w), rgb = colourOf(i), r = c === C.pick ? 3.5 : 2;
+        const [x, y] = BVAPI.w2px(t, w), rgb = colourOf(d, i), pk = isPick(d, c), r = pk ? 3.5 : 2;
         g.fillStyle = `rgb(${rgb})`; g.beginPath(); g.arc(x, y, r, 0, 2 * Math.PI); g.fill();
-        if (c === C.pick) { g.strokeStyle = "#fff"; g.lineWidth = 1; g.stroke(); }
+        if (pk) { g.strokeStyle = "#fff"; g.lineWidth = 1; g.stroke(); }
       }
     }
     // the section's roots within half a voxel of the slice; the picked root last, in white
-    const hl = C.hl; t.nroots = 0; if (!hl || !$("chlv").checked) return;
-    const half = BVAPI.BV.step[n] / 2, R = d.root;
+    const hl = C.hl; t.nroots = 0; if (!hl || !C.data || !$("chlv").checked) return;
+    const half = BVAPI.BV.step[n] / 2, R = C.data.root;
     g.lineWidth = 1.5; g.strokeStyle = "rgba(10, 10, 12, 0.95)";
     const disc = (c, fill, r) => {
       if (Math.abs(R[3*c+n] - c0) > half) return false;
@@ -305,7 +319,7 @@ BVP.push({
     if (C.pick >= 0 && disc(C.pick, "#fff", 4.5)) t.nroots++;
   },
   text(t) {
-    const n = C.data ? shown($("ctile").value).length : 0;
+    const n = shown($("ctile").value).cols.length;
     return (n ? ` · ${n} columns` : "") + (C.hl && $("chlv").checked ? ` · ${t.nroots || 0} section roots in this slice` : "");
   },
 });
@@ -353,13 +367,14 @@ async function section() {
     if (j.fallback) V.log(`section: ${j.fallback}; centred on the selection's column`);
     C.pickV = j.vertex;
     const need = [...new Set([...j.roots, j.vertex])];
-    if (C.capped && need.some(v => !C.vidx.has(v))) {   // the section's columns alone
-      const cq = `${q}&cols=${need.join(",")}`;
+    if ((C.capped || C.all) && need.some(v => !C.vidx.has(v))) {   // the section's columns alone, from every root
+      const cq = `${query(sel, 1)}&cols=${need.join(",")}`;
       const a = await fetchBinary(`/columns?${cq}`, lseq); if (!a || seq !== C.sseq) return;
-      const [head, d] = decode(a.buf); setData(head, d); loadTck();
+      const [head, d] = decode(a.buf); setData(head, d); if (C.capped) { setTck(head); loadTck(); }
       const p = await fetchBinary(`/columns/profiles?${cq}`, lseq); if (!p || seq !== C.sseq) return;
       C.prof = decode(p.buf)[1];
-      $("cstat").textContent = `radius ${settings().radius} mm: over the cap · the section's ${head.n} columns in ${((a.ms + p.ms) / 1000).toFixed(2)} s`;
+      const what = C.capped ? `radius ${settings().radius} mm: over the cap` : `${C.all.head.n} columns shown (every ${settings().every})`;
+      $("cstat").textContent = `${what} · the section's ${head.n} columns in ${((a.ms + p.ms) / 1000).toFixed(2)} s`;
     }
   } catch (e) { if (seq === C.sseq) { V.log("section: " + e.message, true); $("cstat").textContent = "section: " + e.message; } return; }
   const S = j.slice, ax = S ? ["sagittal", "coronal", "axial"][S.plane.findIndex(x => Math.abs(x) > 0.5)] ?? "slice" : "";
@@ -404,7 +419,8 @@ function stepColumn(k) {
   return best;
 }
 function drawSection() {
-  const cv = $("csec"), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  const cv = $("csec"); if (!cv) return;   // a resize before the pane is built
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
   const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.fillStyle = "#000"; g.fillRect(0, 0, W, H);
   const S = C.sec; if (!C.data || !S || !S.arc.length) return;
@@ -483,7 +499,7 @@ function tooltip(e) {
   tip.style.left = `${Math.max(0, x)}px`; tip.style.top = `${Math.max(0, y)}px`;
 }
 function setPick(c) { C.pick = c; C.pickV = vertexOf(c); section(); details(); redraw(); }
-function redraw() { if (C.data) upload3d(); else if (C.gl) C.gl.m = 0; V.draw3d(); redrawTiles(); }
+function redraw() { if (C.data || C.all) upload3d(); else if (C.gl) C.gl.m = 0; V.draw3d(); redrawTiles(); }
 
 // ------------------------------------------------------------------ the shared state
 // a new WM selection (a click, the box, ?v=, another window): the picked column is the selection's

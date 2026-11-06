@@ -537,6 +537,27 @@ def test_the_section_route(cols: VC.Columns) -> None:
         VS.Handler.columns = None
 
 
+@pytest.mark.parametrize("plane", [None, (0.0, 1.0, 0.0)])
+@pytest.mark.parametrize("mode", VSec.MODES)
+def test_every_does_not_change_the_section(
+    cols: VC.Columns, mode: str, plane: tuple[float, ...] | None
+) -> None:
+    """The section chooses from every root within the radius: with every=4 it
+    is the section of every=1 (its columns, steps, roots, arc, distances and
+    key), also with a slice plane. every=4 alone would leave out some of the
+    section's roots, so the test can fail."""
+    v, radius, u = corner_vertex(cols), 1.0, (0.3, 1.0, 0.2)
+    one = cols.section(VC.Request(vertex=v, radius=radius), u, mode, plane=plane)
+    four = cols.section(
+        VC.Request(vertex=v, radius=radius, every=4), u, mode, plane=plane
+    )
+    for k in ("columns", "step_vertices", "roots", "arc", "distance", "key", "n"):
+        assert four[k] == one[k], k
+    thin = cols.candidates(VC.Request(vertex=v, radius=radius, every=4))
+    shown = set(thin[1].vertex[thin[2]].tolist())
+    assert not set(one["roots"]) <= shown
+
+
 def test_the_section_over_the_cap(
     cols: VC.Columns, monkeypatch: pytest.MonkeyPatch
 ) -> None:
