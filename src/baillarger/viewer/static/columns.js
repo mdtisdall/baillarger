@@ -7,12 +7,24 @@
 // - The 3D surface view (VIEWER.hooks.draw3d): each column as a line, coloured by its derived class or by the class of the
 //   label interval under each sample. Only on the true surface (level 0): an inflated level has another geometry.
 // - The brick tiles (a plug-in of window.BVP, draw2d on #bvo): a dot where a column crosses the tile's plane.
-// - The profile section: the columns whose roots lie within a half width of the plane through the selected root that holds
-//   its normal and the section axis u, side by side in order of u, the echo along s (s = 0, the root, at the dashed line;
-//   outward is down), with a tick at each label-interval boundary in the colour of the interval that starts there.
+// - The profile section that follows the surface: GET /columns/section (baillarger.viewer.section) cuts the true white
+//   mesh with the plane through the picked column's root that holds its normal and the section axis u, and gives one step
+//   for each mean spacing of the roots along that curve, in order of arc length, with the column nearest along the surface
+//   ("nearest") or the columns within one voxel along the surface ("mean across": their mean echo). Side by side, the
+//   echo along s (s = 0, the root, at the dashed line; outward is down); in "nearest", a tick at each label-interval
+//   boundary in the colour of the interval that starts there.
+// - The section's roots in the 3D view (VIEWER.points): the roots of the columns that the section shows (nearest: one a
+//   step; mean across: every column of a step's mean) in amber, the picked column's root in white. On the true surface
+//   (level 0) at the roots themselves; on an inflated level at the overview vertex of each root (GET /vertex/overview,
+//   as the WM selection marker).
 // - One column's details: its label intervals, |n̄|, its derived class. A click on the section picks the column.
+// - Over the cap (more than MAX_COLUMNS columns in the radius): /columns refuses, but the section does not depend on it.
+//   The pane asks /columns/section, then /columns and /columns/profiles with cols= (the section's columns only), and says
+//   so in red above the section: the 3D lines, the tiles and the .tck then show only the section's columns.
 // - The selection drives everything: the WM selection of the shared state, and the pane's settings and picked column
-//   (state key "columns"), so every window shows the same columns.
+//   (state key "columns": the picked column's true vertex and the selection it belongs to, `at`), so every window shows
+//   the same columns. A new WM selection resets the picked column to the selection's; a picked column of another
+//   selection is ignored, and one that is not in the request falls back to the selection's (the server's `fallback`).
 const V = window.VIEWER;
 const $ = V.$;
 // the colours of the interval classes (OUTSIDE, WM, CORTEX, OTHER, OFF_GRID) and the derived classes (OPEN, IN_WM, NEITHER)
@@ -20,7 +32,14 @@ const ICOL = [[150, 150, 150], [235, 235, 235], [214, 60, 50], [60, 130, 230], [
 const INAME = ["outside", "WM", "cortex", "other", "off grid"];
 const DCOL = { 1: [60, 200, 120], 2: [245, 140, 40], 3: [170, 110, 230] };
 const DNAME = { 1: "open", 2: "in WM", 3: "neither" };
-const C = { meta: null, data: null, prof: null, key: null, req: null, pick: -1, order: [], seq: 0, gl: null, nvMesh: null };
+const C = { meta: null, data: null, prof: null, key: null, req: null, pick: -1, sec: null, sseq: 0, seq: 0, gl: null, nvMesh: null,
+  slice: null,   // { v: the selection's true vertex, n: the slice's normal } after a shift-click in a slice view
+  pickV: null,   // the picked column's true vertex (the section's centre)
+  vidx: new Map(),   // true vertex -> index in C.data
+  secIdx: [],   // the section's columns at each step, as indices in C.data
+  capped: null,   // the server's refusal when the whole request is over the cap
+  loading: false,
+  hl: null };   // the section's roots for the 3D view: { sec, xyz (level 0), ov: overview vertices or null, pickOv }
 
 // ------------------------------------------------------------------ the pane's DOM
 function build() {
@@ -35,27 +54,37 @@ function build() {
     <label>colour <select id="ccol"><option value="interval">label of each interval</option><option value="derived">derived class</option></select></label>
     <label><input type="checkbox" id="c3d" checked> 3D</label>
     <label><input type="checkbox" id="ctile" checked> tiles</label>
+    <label title="the roots of the columns that the profile section shows, in the 3D view (amber; the picked column's root white)"><input type="checkbox" id="chl" checked> section roots</label>
+    <span id="chlnote" style="font-size:11px;color:var(--mute)"></span>
     <a id="ctck" href="#" download style="color:var(--mute)">.tck</a>
   </div>
+  <div class="pbar" id="ccap" style="display:none;color:#ff6b5b;font-size:12px"></div>
   <div class="pbar">
-    <label>section: half width <select id="chalf"><option>0.1</option><option selected>0.25</option><option>0.5</option><option value="1e9">all</option></select> mm</label>
+    <label title="nearest: at each step the column nearest along the surface; mean across: the mean of the columns within one voxel along the surface (it hides their own variation)">section
+      <select id="cmode"><option value="nearest">nearest</option><option value="mean">mean across</option></select></label>
     <label>echo <select id="cecho"><option value="0">1</option><option value="1" selected>2</option><option value="2">3</option></select></label>
     <label>show <select id="cshow"><option value="echo">echo</option><option value="class">label class</option></select></label>
     <span id="ckey" style="font-size:11px"></span>
   </div>
+  <div class="pbar" id="cplane" style="font-size:12px;color:var(--mute)"></div>
   <div class="fill" style="min-height:160px"><canvas id="csec"></canvas></div>
   <div id="cdet" style="flex:none;max-height:40%;overflow-y:auto;font-size:12px;padding:2px 8px"></div>`;
   $("ckey").innerHTML = ICOL.map((c, k) => `<span class="sw" style="background:rgb(${c})"></span>${INAME[k]}`).join(" ");
   for (const id of ["crad", "cevery", "cein", "ceout"]) $(id).onchange = () => { shareSettings(); load(); };
-  for (const id of ["ccol", "c3d", "ctile"]) $(id).onchange = () => { redraw(); };
-  for (const id of ["chalf", "cecho", "cshow"]) $(id).onchange = () => { section(); drawSection(); };
+  for (const id of ["ccol", "c3d", "ctile", "chl"]) $(id).onchange = () => { redraw(); };
+  $("cmode").onchange = () => section();
+  for (const id of ["cecho", "cshow"]) $(id).onchange = () => drawSection();
   $("csec").addEventListener("click", e => {
-    const k = Math.floor(e.offsetX / ($("csec").clientWidth / Math.max(1, C.order.length)));
-    if (k >= 0 && k < C.order.length) { setPick(C.order[k]); V.share({ columns: { ...settings(), column: vertexOf(C.pick) } }); }
+    const S = C.sec; if (!S) return;
+    const k = Math.floor(e.offsetX / ($("csec").clientWidth / Math.max(1, S.arc.length)));
+    const c = k >= 0 && k < S.arc.length ? stepColumn(k) : -1;
+    if (c >= 0) { setPick(c); shareSettings(); }
   });
 }
 const settings = () => ({ radius: +$("crad").value, every: +$("cevery").value, e_in: +$("cein").value, e_out: +$("ceout").value });
-function shareSettings() { V.share({ columns: { ...settings(), column: C.pick >= 0 ? vertexOf(C.pick) : null } }); }
+function shareSettings() {
+  const sel = V.selection; V.share({ columns: { ...settings(), column: C.pickV, at: sel ? sel.true_vertex : null } });
+}
 
 // ------------------------------------------------------------------ the binary answers (baillarger.viewer.columns.encode)
 const TYPES = { int64: BigInt64Array, int32: Int32Array, uint8: Uint8Array, float32: Float32Array, float64: Float64Array };
@@ -85,32 +114,47 @@ async function fetchBinary(u, seq) {
 
 // ------------------------------------------------------------------ loading
 const vertexOf = c => Number(C.data.vertex[c]);
+const query = sel => { const s = settings(); return `v=${sel.true_vertex}&radius=${s.radius}&every=${s.every}&e_in=${s.e_in}&e_out=${s.e_out}`; };
+// a /columns answer as the pane's data
+function setData(head, d) {
+  C.head = head; C.data = d; C.key = head.key; C.prof = null; prepare();
+  C.vidx = new Map(); for (let c = 0; c < head.n; c++) C.vidx.set(Number(d.vertex[c]), c);
+  $("ctck").href = `/columns/${head.key}.tck`; $("ctck").setAttribute("download", `columns_${head.request.vertex}.tck`);
+}
 async function load() {
   const sel = V.selection;
   if (!sel || sel.true_vertex === undefined || sel.true_vertex === null) return;
-  const s = settings(), seq = ++C.seq;
-  const q = `v=${sel.true_vertex}&radius=${s.radius}&every=${s.every}&e_in=${s.e_in}&e_out=${s.e_out}`;
-  $("cstat").textContent = "loading…";
+  const s = settings(), seq = ++C.seq, q = query(sel);
+  C.loading = true; C.data = null; C.prof = null; C.sec = null; C.hl = null; C.capped = null; C.pick = -1; C.vidx = new Map();
+  $("ccap").style.display = "none"; $("cstat").textContent = "loading…"; drawSection(); details(); redraw();
   try {
-    const a = await fetchBinary(`/columns?${q}`, seq); if (!a) return;
-    const [head, d] = decode(a.buf);
-    C.head = head; C.data = d; C.key = head.key; C.prof = null;
-    prepare();
-    const want = C.wantVertex ?? sel.true_vertex; C.wantVertex = null;
-    let pick = -1; for (let c = 0; c < head.n; c++) if (Number(d.vertex[c]) === want) pick = c;
-    if (pick < 0) for (let c = 0; c < head.n; c++) if (pick < 0 || d.distance[c] < d.distance[pick]) pick = c;
-    C.pick = pick;
-    $("ctck").href = `/columns/${head.key}.tck`; $("ctck").setAttribute("download", `columns_${sel.true_vertex}.tck`);
-    const st = `${head.n} columns, ${head.samples.toLocaleString()} samples · ${(a.ms / 1000).toFixed(2)} s ` +
-      `(server: graph ${head.seconds.graph} s, sampler ${head.seconds.sample} s on ${head.seconds.calls.toLocaleString()} roots of superblock ${head.superblock.join(",")})`;
+    let a;
+    try { a = await fetchBinary(`/columns?${q}`, seq); }
+    catch (e) { if (!/more than \d+/.test(e.message)) throw e; a = "capped"; C.capped = e.message.replace(/^(\w+Error: )+/, ""); }
+    if (!a || seq !== C.seq) return;
+    let st;
+    if (a === "capped") {
+      st = `radius ${s.radius} mm: over the cap`;
+      $("ccap").textContent = `Radius ${s.radius} mm: ${C.capped}. The section still follows the surface; the 3D lines, the tiles ` +
+        `and the .tck show only the section's columns.`;
+      $("ccap").style.display = "";
+    } else {
+      const [head, d] = decode(a.buf); setData(head, d);
+      st = `${head.n} columns, ${head.samples.toLocaleString()} samples · ${(a.ms / 1000).toFixed(2)} s ` +
+        `(server: graph ${head.seconds.graph} s, sampler ${head.seconds.sample} s on ${head.seconds.calls.toLocaleString()} roots of superblock ${head.superblock.join(",")})`;
+      loadTck();
+    }
     $("cstat").textContent = st;
-    section(); redraw(); details(); loadTck();
+    C.loading = false;
+    await section();
+    if (C.capped || seq !== C.seq) return;
     const p = await fetchBinary(`/columns/profiles?${q}`, seq); if (!p) return;
     C.prof = decode(p.buf)[1];
     $("cstat").textContent = st + ` · profiles ${(p.ms / 1000).toFixed(2)} s`;
-    V.log(`columns at vertex ${sel.true_vertex}: ${head.n} columns in ${(a.ms / 1000).toFixed(2)} s, profiles in ${(p.ms / 1000).toFixed(2)} s`);
+    V.log(`columns at vertex ${sel.true_vertex}: ${C.head.n} columns in ${(a.ms / 1000).toFixed(2)} s, profiles in ${(p.ms / 1000).toFixed(2)} s`);
     drawSection();
   } catch (e) { if (seq === C.seq) { $("cstat").textContent = e.message; V.log("columns: " + e.message); } }
+  finally { if (seq === C.seq) C.loading = false; }
 }
 // per sample: its column, and the class of the label interval that holds it; the roots in the 3D pane's frame (box mm)
 function prepare() {
@@ -155,6 +199,20 @@ function upload3d() {
   g.bindBuffer(g.ARRAY_BUFFER, C.gl.bc); g.bufferData(g.ARRAY_BUFFER, L.col, g.DYNAMIC_DRAW);
   C.gl.m = L.m;
 }
+V.hooks.draw3d.push((g, M) => {   // the section's roots
+  if (!C.meta) return;
+  const hl = C.hl, on = hl && $("chl").checked, G = V.GL;
+  const note = !on ? "" : G.level === 0 ? `${hl.xyz.length / 3} roots` :
+    `${hl.sec.roots.length} roots, shown at their overview vertices (inflated surface)`;
+  if ($("chlnote").textContent !== note) $("chlnote").textContent = note;
+  if (!on) return;
+  // the picked root first: at equal depth the later disc fails the depth test
+  if (G.level === 0) { V.points(g, M, hl.pick, [1, 1, 1], 8); V.points(g, M, hl.xyz, [1, 0.75, 0.1], 6); return; }
+  if (!hl.ov) { if (!hl.asked) highlightOverview(hl); return; }
+  const at = v => [G.pos[3*v], G.pos[3*v+1], G.pos[3*v+2]];
+  const ov = [...new Set(hl.ov)], xyz = new Float32Array(3 * ov.length); ov.forEach((v, i) => xyz.set(at(v), 3 * i));
+  V.points(g, M, new Float32Array(at(hl.pickOv)), [1, 1, 1], 8); V.points(g, M, xyz, [1, 0.75, 0.1], 6);
+});
 V.hooks.draw3d.push((g, M) => {
   if (!C.gl || !C.gl.m || !$("c3d").checked || V.GL.level !== 0) return;
   g.useProgram(C.gl.p); g.bindVertexArray(C.gl.vao); g.uniformMatrix4fv(g.getUniformLocation(C.gl.p, "mvp"), false, M);
@@ -201,59 +259,126 @@ async function loadTck() {
 
 // ------------------------------------------------------------------ the profile section
 // the section axis u: the 3D view's screen right at the time of the selection, in the plane normal to the picked column
-function section() {
-  C.order = []; if (!C.data || C.pick < 0) return;
-  const d = C.data, p = C.pick, n0 = [0, 1, 2].map(k => d.normal[3*p+k]), r0 = [0, 1, 2].map(k => d.root[3*p+k]);
-  const fr = V.frame, M = C.head.to_view;
+// (world mm); the server makes the curve and picks the columns (GET /columns/section)
+function axisU() {
+  const fr = V.frame, M = C.meta.to_view;
   let u = [1, 0, 0];
   // a direction of the 3D frame in world mm: to_view's 3 x 3 part is diag(vox) A^-1 = R^T for A = R diag(vox), a rotation
   if (fr && fr.right) { const R = fr.right; u = [0, 1, 2].map(j => M[0][j] * R[0] + M[1][j] * R[1] + M[2][j] * R[2]); }
+  const c = C.vidx.get(C.pickV); if (!C.data || c === undefined) return u;   // the server makes u normal to n
+  const d = C.data, n0 = [0, 1, 2].map(k => d.normal[3*c+k]);
   const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
   let k = dot(u, n0); u = u.map((x, i) => x - k * n0[i]);
   if (Math.hypot(...u) < 1e-3) { u = Math.abs(n0[2]) < 0.9 ? [-n0[1], n0[0], 0] : [0, -n0[2], n0[1]]; k = dot(u, n0); u = u.map((x, i) => x - k * n0[i]); }
-  const L = Math.hypot(...u); u = u.map(x => x / L);
-  const w = [n0[1] * u[2] - n0[2] * u[1], n0[2] * u[0] - n0[0] * u[2], n0[0] * u[1] - n0[1] * u[0]], half = +$("chalf").value;
-  const rows = [];
-  for (let c = 0; c < C.head.n; c++) {
-    const q = [0, 1, 2].map(i => d.root[3*c+i] - r0[i]);
-    if (Math.abs(dot(q, w)) <= half) rows.push([dot(q, u), c]);
-  }
-  rows.sort((a, b) => a[0] - b[0]); C.order = rows.map(r => r[1]); C.u = rows.map(r => r[0]);
+  const L = Math.hypot(...u); return u.map(x => x / L);
+}
+// the section through the picked column (C.pickV; the selection's when none); over the cap, the section's columns are
+// loaded with cols=
+async function section() {
+  const sel = V.selection; if (!sel || C.loading || !C.meta) return;
+  const seq = ++C.sseq, lseq = C.seq; C.sec = null; C.hl = null; drawSection();
+  if (C.pickV === null || C.pickV === undefined) C.pickV = sel.true_vertex;
+  const q = query(sel), u = axisU();
+  let j;
+  try {
+    // a shift-click in a slice view: the slice through the selection's root, while the section is centred there
+    const sl = C.slice && C.slice.v === sel.true_vertex && C.pickV === sel.true_vertex ? `&plane=${C.slice.n.join(",")}` : "";
+    const r = await fetch(`/columns/section?${q}&u=${u.map(x => x.toFixed(6)).join(",")}&mode=${$("cmode").value}&at=${C.pickV}${sl}`);
+    j = await r.json(); if (seq !== C.sseq || lseq !== C.seq) return;
+    if (r.status !== 200) throw new Error(j.error || `HTTP ${r.status}`);
+    if (j.fallback) V.log(`section: ${j.fallback}; centred on the selection's column`);
+    C.pickV = j.vertex;
+    const need = [...new Set([...j.roots, j.vertex])];
+    if (C.capped && need.some(v => !C.vidx.has(v))) {   // the section's columns alone
+      const cq = `${q}&cols=${need.join(",")}`;
+      const a = await fetchBinary(`/columns?${cq}`, lseq); if (!a || seq !== C.sseq) return;
+      const [head, d] = decode(a.buf); setData(head, d); loadTck();
+      const p = await fetchBinary(`/columns/profiles?${cq}`, lseq); if (!p || seq !== C.sseq) return;
+      C.prof = decode(p.buf)[1];
+      $("cstat").textContent = `radius ${settings().radius} mm: over the cap · the section's ${head.n} columns in ${((a.ms + p.ms) / 1000).toFixed(2)} s`;
+    }
+  } catch (e) { if (seq === C.sseq) { V.log("section: " + e.message); $("cstat").textContent = "section: " + e.message; } return; }
+  const S = j.slice, ax = S ? ["sagittal", "coronal", "axial"][S.plane.findIndex(x => Math.abs(x) > 0.5)] ?? "slice" : "";
+  $("cplane").textContent = !S ? "section plane: the root's normal and the 3D view's screen right" :
+    S.used ? `section plane: the ${ax} slice through the root · the root's normal is ${S.angle.toFixed(1)}° out of the slice` :
+    `section plane: not the ${ax} slice (${S.fallback}); the root's normal and the screen right instead · the normal is ${S.angle.toFixed(1)}° out of the slice`;
+  C.sec = j; C.secIdx = j.step_vertices.map(vs => vs.map(v => C.vidx.get(v)));
+  C.pick = C.vidx.get(j.vertex) ?? -1;
+  V.log(`section: ${j.arc.length} steps of ${j.step.toFixed(3)} mm (${j.mode}), the curve ${j.curve_length.map(x => x.toFixed(2)).join(" + ")} mm, ` +
+    `${j.n.toLocaleString()} columns in the radius${j.capped ? " (over the cap)" : ""}, ${j.seconds} s`);
+  drawSection(); highlight(); details(); redraw();
+}
+// the section's roots for the 3D view: their positions on the true surface (box mm); the overview vertices on demand
+function highlight() {
+  const S = C.sec, d = C.data; C.hl = null; if (!S || !d) { V.draw3d(); return; }
+  const cols = [...new Set(C.secIdx.flat())], M = C.head.to_view, xyz = new Float32Array(3 * cols.length);
+  const view = c => [0, 1, 2].map(k => M[k][0] * d.root[3*c] + M[k][1] * d.root[3*c+1] + M[k][2] * d.root[3*c+2] + M[k][3]);
+  cols.forEach((c, i) => xyz.set(view(c), 3 * i));
+  C.hl = { sec: S, xyz, pick: new Float32Array(C.pick >= 0 ? view(C.pick) : []), ov: null, pickOv: -1, asked: false };
+  V.draw3d();
+}
+async function highlightOverview(hl) {   // the overview vertex of each root and of the picked root (inflated levels)
+  hl.asked = true;
+  try {
+    const j = await V.get(`/vertex/overview?v=${[...hl.sec.roots, hl.sec.vertex].join(",")}`);
+    if (C.hl !== hl) return;
+    hl.ov = j.vertex.slice(0, -1); hl.pickOv = j.vertex[j.vertex.length - 1]; V.draw3d();
+  } catch (e) { V.log("section roots: " + e.message); }
+}
+// the column a step stands for: its own (nearest), or the one whose root is nearest the step's point (mean across)
+function stepColumn(k) {
+  const cs = C.secIdx[k], p = C.sec.point[k], d = C.data; if (!cs.length) return -1;
+  let best = cs[0], bd = Infinity;
+  for (const c of cs) { const r = Math.hypot(d.root[3*c] - p[0], d.root[3*c+1] - p[1], d.root[3*c+2] - p[2]); if (r < bd) { bd = r; best = c; } }
+  return best;
 }
 function drawSection() {
   const cv = $("csec"), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
   const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.fillStyle = "#000"; g.fillRect(0, 0, W, H);
-  if (!C.data || !C.order.length) return;
+  const S = C.sec; if (!C.data || !S || !S.arc.length) return;
   const d = C.data, s = settings(), top = 14, bot = H - 16, ys = v => top + (v + s.e_in) / (s.e_in + s.e_out) * (bot - top);
-  const nc = C.order.length, cw = W / nc, e = +$("cecho").value, show = $("cshow").value, prof = C.prof;
+  const nc = S.arc.length, cw = W / nc, e = +$("cecho").value, show = $("cshow").value, prof = C.prof, step = C.head.step;
+  const all = [...new Set(C.secIdx.flat())];
   let lo = 0, hi = 1;
-  if (prof && show === "echo") {   // the window: the 1st and 99th percentiles of the shown samples
-    const v = []; for (const c of C.order) for (let i = Number(d.sample_start[c]); i < Number(d.sample_start[c + 1]); i++) if (prof.valid[i]) v.push(prof.echo[3*i+e]);
+  if (prof && show === "echo") {   // the window: the 1st and 99th percentiles of the samples of the section's columns
+    const v = []; for (const c of all) for (let i = Number(d.sample_start[c]); i < Number(d.sample_start[c + 1]); i++) if (prof.valid[i]) v.push(prof.echo[3*i+e]);
     v.sort((a, b) => a - b); if (v.length) { lo = v[Math.floor(0.01 * (v.length - 1))]; hi = v[Math.floor(0.99 * (v.length - 1))]; }
   }
-  const dy = (bot - top) / ((s.e_in + s.e_out) / C.head.step);
-  C.order.forEach((c, x) => {
-    for (let i = Number(d.sample_start[c]); i < Number(d.sample_start[c + 1]); i++) {
-      let rgb;
-      if (show === "class") rgb = ICOL[d.cls[i]];
-      else if (!prof) continue;
-      else if (!prof.valid[i]) rgb = [40, 0, 0];
-      else { const t = Math.round(255 * Math.min(1, Math.max(0, (prof.echo[3*i+e] - lo) / (hi - lo || 1)))); rgb = [t, t, t]; }
-      g.fillStyle = `rgb(${rgb})`; g.fillRect(x * cw, ys(d.s[i]) - dy / 2, Math.ceil(cw), Math.ceil(dy));
+  const dy = (bot - top) / ((s.e_in + s.e_out) / step);
+  const grey = x => { const t = Math.round(255 * Math.min(1, Math.max(0, (x - lo) / (hi - lo || 1)))); return [t, t, t]; };
+  C.secIdx.forEach((cs, x) => {
+    if (!cs.length) return;
+    // per sample k (s = k step): the mean of the valid echoes of the step's columns, and their classes
+    const acc = new Map();
+    for (const c of cs) for (let i = Number(d.sample_start[c]); i < Number(d.sample_start[c + 1]); i++) {
+      const k = Math.round(d.s[i] / step); let a = acc.get(k); if (!a) acc.set(k, a = { sum: 0, n: 0, m: 0, cls: d.cls[i], mixed: false });
+      a.m++; if (d.cls[i] !== a.cls) a.mixed = true;
+      if (prof && prof.valid[i]) { a.sum += prof.echo[3*i+e]; a.n++; }
     }
+    for (const [k, a] of acc) {
+      let rgb;
+      if (show === "class") rgb = a.mixed ? [90, 90, 90] : ICOL[a.cls];
+      else if (!prof) continue;
+      else if (!a.n) rgb = [40, 0, 0];
+      else rgb = grey(a.sum / a.n);
+      g.fillStyle = `rgb(${rgb})`; g.fillRect(x * cw, ys(k * step) - dy / 2, Math.ceil(cw), Math.ceil(dy));
+    }
+    if (cs.length !== 1) return;
     // the label-interval boundaries: a tick in the colour of the interval that starts there
+    const c = cs[0];
     for (let q = Number(d.interval_start[c]) + 1; q < Number(d.interval_start[c + 1]); q++) {
       const v = d.interval_s0[q]; if (v < -s.e_in || v > s.e_out) continue;
       g.fillStyle = `rgb(${ICOL[d.interval_class[q]]})`; g.fillRect(x * cw, ys(v) - 1, Math.max(1, cw), 2);
     }
   });
   g.strokeStyle = "#ff2bd6"; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(0, ys(0)); g.lineTo(W, ys(0)); g.stroke(); g.setLineDash([]);
-  const k = C.order.indexOf(C.pick);
-  if (k >= 0) { g.strokeStyle = "#fff"; g.strokeRect(k * cw - 0.5, top - 2, cw + 1, bot - top + 4); }
+  const k0 = S.arc.findIndex(a => Math.abs(a) < 1e-9);   // the step at the picked root
+  if (k0 >= 0) { g.strokeStyle = "#fff"; g.strokeRect(k0 * cw - 0.5, top - 2, cw + 1, bot - top + 4); }
   g.fillStyle = "#9aa0a8"; g.font = "11px system-ui"; g.textBaseline = "top";
   g.fillText(`s = −${s.e_in} mm (inward)`, 4, 1); g.textBaseline = "bottom";
-  g.fillText(`s = ${s.e_out} mm · ${nc} columns, u from ${C.u[0].toFixed(2)} to ${C.u[nc - 1].toFixed(2)} mm` +
+  g.fillText(`s = ${s.e_out} mm · ${nc} steps of ${S.step.toFixed(3)} mm along the surface, arc ${S.arc[0].toFixed(2)} to ${S.arc[nc - 1].toFixed(2)} mm, ` +
+    `${all.length} columns (${S.mode === "mean" ? "mean within one voxel" : "nearest"})` +
     (show === "echo" ? ` · echo ${e + 1}, window ${lo.toFixed(0)}–${hi.toFixed(0)}` + (prof ? "" : " (loading)") : ""), 4, H - 1);
 }
 
@@ -270,20 +395,26 @@ function details() {
       `<td style="text-align:right;padding:0 8px">${d.interval_label[q]}</td><td style="color:rgb(${ICOL[d.interval_class[q]]})">${INAME[d.interval_class[q]]}</td></tr>`;
   el.innerHTML = t + "</table>";
 }
-function setPick(c) { C.pick = c; section(); drawSection(); details(); redraw(); }
-function redraw() { if (C.data) upload3d(); V.draw3d(); redrawTiles(); }
+function setPick(c) { C.pick = c; C.pickV = vertexOf(c); section(); details(); redraw(); }
+function redraw() { if (C.data) upload3d(); else if (C.gl) C.gl.m = 0; V.draw3d(); redrawTiles(); }
 
 // ------------------------------------------------------------------ the shared state
-V.hooks.selection.push(() => { if (C.meta) load(); });
+// a new WM selection (a click, the box, ?v=, another window): the picked column is the selection's
+V.hooks.selection.push((sel, frame, how) => {
+  C.pickV = sel ? sel.true_vertex : null;
+  C.slice = sel && how && how.slice ? { v: sel.true_vertex, n: how.slice } : null;   // any other selection: the usual plane
+  if (C.meta) load();
+});
 V.hooks.state.push(st => {
   if (!("columns" in st) || !st.columns || !C.meta) return;
-  const s = st.columns, old = settings();
+  const s = st.columns, old = settings(), sel = V.selection;
   for (const [id, k] of [["crad", "radius"], ["cevery", "every"], ["cein", "e_in"], ["ceout", "e_out"]]) if (k in s) $(id).value = String(s[k]);
   const same = Object.keys(old).every(k => old[k] === settings()[k]);
-  if (same && C.data && s.column !== null && s.column !== undefined) {
-    for (let c = 0; c < C.head.n; c++) if (vertexOf(c) === s.column) { setPick(c); return; }
-  }
-  C.wantVertex = s.column; if (!same) load();
+  // a picked column counts only for the selection it was picked in (an older one is stale)
+  const col = sel && s.at === sel.true_vertex && s.column !== null && s.column !== undefined ? s.column : null;
+  if (!same) { if (col !== null) C.pickV = col; load(); return; }
+  if (col === null || col === C.pickV) return;
+  C.pickV = col; if (C.sec) section();
 });
 V.hooks.resize.push(() => drawSection());
 (async () => {

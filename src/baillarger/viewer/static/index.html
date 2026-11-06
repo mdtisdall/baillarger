@@ -36,6 +36,8 @@
 <div id="bar">
   <b id="title">Column viewer</b>
   <button id="newwin" title="open another window with these panes">new window</button>
+  <label title="a true vertex of the white surface: Enter makes it the WM selection and turns the 3D view to it (also ?v= in the address)">go to vertex
+    <input id="goto" type="text" inputmode="numeric" size="10" placeholder="true vertex"></label>
   <span id="sync">connecting…</span>
 </div>
 <div id="main">
@@ -84,6 +86,9 @@ function layout() {
   const n = PANES.length, m = $("main");
   m.style.setProperty("--cols", n >= 3 ? 2 : n);
   m.style.gridTemplateRows = n >= 3 ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(0, 1fr)";
+  // three panes on two columns: the last one spans the bottom row, so no quarter stays empty
+  for (const p of ["volume", "surface", "columns"]) $("p-" + p).style.gridColumn = "";
+  if (n === 3) $("p-" + PANES[2]).style.gridColumn = "1 / -1";
 }
 $("newwin").onclick = () => window.open(location.pathname + "?" + q.toString(), "_blank", "width=1100,height=800");
 
@@ -100,15 +105,18 @@ async function apply(st) {
     vHook("state", st);
   } finally { applying = false; }
 }
+let helloDone; const HELLO = new Promise(r => { helloDone = r; });   // the first state from the server is applied
 function connect() {
   const es = new EventSource("/events");
-  es.addEventListener("hello", e => { $("sync").textContent = "in step with the other windows"; apply(JSON.parse(e.data).state); });
+  es.addEventListener("hello", async e => { $("sync").textContent = "in step with the other windows"; await apply(JSON.parse(e.data).state); helloDone(); });
   es.onmessage = e => { const m = JSON.parse(e.data); if (m.sender !== ME) apply(m.patch); };
   es.onerror = () => { $("sync").textContent = "not connected: retrying"; };
 }
 // the two points: the crosshair (a world point: the slices) and the WM selection (a vertex of the
 // overview, with its true vertex: the columns, the markers)
-async function setSelection(sel, frame) {
+// how: { slice: [x, y, z] } after a shift-click in a slice view (the normal of that slice, world mm), else undefined;
+// it goes to the selection hooks, not to the other windows
+async function setSelection(sel, frame, how) {
   SELN = sel; FRAME = frame;
   if (sel && NV.nv) {
     if (!inBox(sel.voxel)) await loadWhiteBox(sel.voxel);
@@ -117,12 +125,23 @@ async function setSelection(sel, frame) {
   showSelectionMarker();
   $("info").textContent = !sel ? OVTXT : `WM selection: true vertex ${sel.true_vertex} (overview vertex ${sel.vertex}) at (${sel.world_mm}) mm`;
   draw3d();
-  vHook("selection", sel, frame);
+  vHook("selection", sel, frame, how);
 }
-async function selectHere(sel, frame) { await setSelection(sel, frame); share({ selection: sel, frame }); }
+async function selectHere(sel, frame, how) { await setSelection(sel, frame, how); share({ selection: sel, frame }); }
 function crossHere(mm) { CROSS = mm; moveVolumeCrosshair(mm); share({ crosshair: mm }); }
 const selectVertex = async (v, frame) => selectHere(await get(`/vertex?v=${v}`), frame);
 const crossVertex = async v => crossHere((await get(`/vertex?v=${v}`)).world_mm);
+// go to a true vertex (the box in the bar, ?v=): the WM selection there, the 3D view turned to it. A number that is not a
+// true vertex: an error in the log, and the selection does not change.
+async function goTo(text) {
+  const t = String(text).trim();
+  if (!/^\d+$/.test(t)) { log(`go to vertex: ${JSON.stringify(t)} is not a true vertex number`); return; }
+  let sel; try { sel = await get(`/vertex/true?v=${t}`); } catch (e) { return; }   // get() logs the error
+  turnTo(sel.vertex);
+  await selectHere(sel, screenFrame());
+  log(`go to vertex: true vertex ${sel.true_vertex} (overview vertex ${sel.vertex})`);
+}
+$("goto").addEventListener("keydown", e => { if (e.key === "Enter") goTo($("goto").value); });
 
 // ---------------------------------------------------------------- white surface (WebGL2, box mm)
 const GL = { g: null, nv: 0, nf: 0, pos: null, vtrace: null, R: [1,0,0, 0,1,0, 0,0,1], target: [0,0,0], dist: 50, radius: 25, level: 0 };
@@ -235,6 +254,21 @@ function pick3d(px, py) {
   }
   return best;
 }
+// the 3D view: the target at overview vertex v, the camera along its normal, the up direction kept as far as it can be
+function turnTo(v) {
+  if (!GL.pos || !GL.nrm || v < 0 || v >= GL.nv) return;
+  const n = [GL.nrm[3 * v], GL.nrm[3 * v + 1], GL.nrm[3 * v + 2]], nl = Math.hypot(...n); if (!(nl > 0)) return;
+  for (let k = 0; k < 3; k++) n[k] /= nl;
+  let up = [GL.R[3], GL.R[4], GL.R[5]], d = up[0] * n[0] + up[1] * n[1] + up[2] * n[2];
+  up = up.map((x, k) => x - d * n[k]); let ul = Math.hypot(...up);
+  if (ul < 1e-3) { up = Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [0, 1, 0]; d = up[0] * n[0] + up[1] * n[1] + up[2] * n[2]; up = up.map((x, k) => x - d * n[k]); ul = Math.hypot(...up); }
+  up = up.map(x => x / ul);
+  const right = [up[1] * n[2] - up[2] * n[1], up[2] * n[0] - up[0] * n[2], up[0] * n[1] - up[1] * n[0]];   // up × back
+  GL.R = [...right, ...up, ...n];
+  GL.target = [GL.pos[3 * v], GL.pos[3 * v + 1], GL.pos[3 * v + 2]];
+  GL.dist = Math.min(GL.dist, 0.6 * GL.radius);
+  draw3d();
+}
 const screenFrame = () => { const R = GL.R; return { right: [R[0], R[1], R[2]], up: [R[3], R[4], R[5]], level: GL.level }; };
 function initGL() {
   const c = $("gl"), g = c.getContext("webgl2", { antialias: true }); if (!g) { log("no WebGL2"); return; }
@@ -287,12 +321,12 @@ async function initVolume() {
   setView();
   nv.onLocationChange = d => {
     const mm = Array.from(d.mm).slice(0, 3);
-    if (NV.shift) { const back = NV.shift.back; NV.shift = null; volumeShiftClick(mm, back); return; }
+    if (NV.shift) { const { back, axis } = NV.shift; NV.shift = null; volumeShiftClick(mm, back, axis); return; }
     $("vstat").textContent = `crosshair ${mm.map(x => x.toFixed(2)).join(", ")} mm  voxel ${d.vox.join(", ")}`;
     if (!applying && !NV.moving) { CROSS = mm; share({ crosshair: mm }); }
   };
   // a shift-click: note it before NiiVue moves its crosshair, then treat that move as a WM click
-  $("nv").addEventListener("pointerdown", e => { NV.shift = e.shiftKey && e.button === 0 ? { back: CROSS } : null; }, true);
+  $("nv").addEventListener("pointerdown", e => { NV.shift = e.shiftKey && e.button === 0 ? { back: CROSS, axis: nvSliceAxis(e) } : null; }, true);
   log(`volume pane ready (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
 }
 const VIEWS = { multi: SLICE_TYPE.MULTIPLANAR, ax: SLICE_TYPE.AXIAL, cor: SLICE_TYPE.CORONAL, sag: SLICE_TYPE.SAGITTAL, render: SLICE_TYPE.RENDER };
@@ -304,9 +338,27 @@ function moveVolumeCrosshair(mm) {
   if (!NV.nv || !mm) return; NV.moving = true;
   try { NV.nv.scene.crosshairPos = NV.nv.mm2frac(mm); NV.nv.drawScene(); NV.nv.createOnLocationChange(); } finally { NV.moving = false; }
 }
-async function volumeShiftClick(mm, back) {   // the WM selection to the white-surface vertex nearest the click
+// the world axis normal to the NiiVue slice under a pointer event (0 sagittal, 1 coronal, 2 axial), or null (the 3D tile).
+// The echoes' affine is diagonal, so NiiVue's slices are planes of the world axes, as the bricks viewer's.
+function nvSliceAxis(e) {
+  const nv = NV.nv; if (!nv || !nv.screenSlices) return null;
+  const r = $("nv").getBoundingClientRect(), dpr = (nv.uiData && nv.uiData.dpr) || window.devicePixelRatio || 1;
+  const x = (e.clientX - r.left) * dpr, y = (e.clientY - r.top) * dpr;
+  for (const s of nv.screenSlices) {
+    const [L, T, W, H] = s.leftTopWidthHeight;
+    if (x >= L && x <= L + W && y >= T && y <= T + H) return { 0: 2, 1: 1, 2: 0 }[s.axCorSag] ?? null;
+  }
+  return null;
+}
+// the WM selection to the white-surface vertex nearest the click; axis: the world axis normal to the clicked slice
+async function volumeShiftClick(mm, back, axis) {
   if (back) moveVolumeCrosshair(back);   // the crosshair stays where it was
-  await selectHere(await get(`/snap?mm=${mm.join(",")}`), null);
+  const how = axis === null || axis === undefined ? undefined : { slice: [0, 1, 2].map(k => k === axis ? 1 : 0) };
+  const sel = await get(`/snap?mm=${mm.join(",")}`);
+  // the section is cut in the clicked slice through the root: in the bricks viewer (whose crosshair does not follow the
+  // selection) that slice moves to the root; NiiVue's crosshair goes to the root anyway (setSelection)
+  if (how && BV.on && CROSS) { const c = CROSS.slice(); c[axis] = sel.world_mm[axis]; crossHere(c); }
+  await selectHere(sel, null, how);
 }
 function showSelectionMarker() {
   if (!NV.nv) return; if (NV.sel) { dropMesh(NV.sel); NV.sel = null; }
@@ -584,7 +636,7 @@ function bvEvents() {
     if (bvTook("up", e, at(e))) { BV.drag = null; return; }
     const d = BV.drag; BV.drag = null; if (!d || d.button !== 0) return;
     const [X, Y] = xy(e), mm = bvPx2W(d.t, X - d.t.x, Y - d.t.y);
-    if (d.shift) { if (!d.moved) volumeShiftClick(mm, null); return; }   // the WM selection; the crosshair stays
+    if (d.shift) { if (!d.moved) volumeShiftClick(mm, null, d.t.n); return; }   // the WM selection; the crosshair stays
     crossHere(mm);
   });
   o.addEventListener("pointerleave", () => { if (!BV.drag) BV.hover = null; });
@@ -612,11 +664,12 @@ $("vengine").onchange = () => { q.set("vol", $("vengine").value); location.searc
 // VIEWER.hooks: selection(sel, frame) after each WM selection; state(st) after each shared-state change; draw3d(g, mvp) at
 // the end of each 3D frame (box mm, the true surface at level 0); resize(); colour(nv) gives the overview's RGB colours or
 // null (colour3d). VIEWER.recolour() applies the colour hooks again. VIEWER.select(sel, frame) makes sel (a /vertex answer,
-// or one like it) the WM selection; VIEWER.screenFrame() is the 3D view's frame. VIEWER.ready resolves when the page has
+// or one like it) the WM selection; VIEWER.screenFrame() is the 3D view's frame; VIEWER.turnTo(v) turns it to overview vertex v;
+// VIEWER.points(g, mvp, xyz, rgb, size) draws discs at the points xyz (Float32Array, box mm) in a draw3d hook. VIEWER.ready resolves when the page has
 // started.
 let viewerReady;
-const VIEWER = window.VIEWER = { $, get, log, share, GL, NV, mvp, program, draw3d: () => draw3d(), has,
-  selectVertex: v => selectVertex(v, null), select: (sel, frame) => selectHere(sel, frame), screenFrame: () => screenFrame(),
+const VIEWER = window.VIEWER = { $, get, log, share, GL, NV, mvp, program, points, draw3d: () => draw3d(), has,
+  selectVertex: v => selectVertex(v, null), select: (sel, frame) => selectHere(sel, frame), screenFrame: () => screenFrame(), turnTo,
   recolour: () => { colour3d(); draw3d(); }, get selection() { return SELN; }, get frame() { return FRAME; },
   get meta() { return META; }, hooks: { selection: [], state: [], draw3d: [], resize: [], colour: [] },
   ready: new Promise(r => { viewerReady = r; }) };
@@ -652,6 +705,7 @@ window.addEventListener("resize", () => { draw3d(); vHook("resize"); });
   connect();
   log(`loaded the white surface ${META.site}`);
   viewerReady();
+  if (q.get("v") !== null) { await HELLO; $("goto").value = q.get("v"); await goTo(q.get("v")); }   // ?v=<true vertex>
 })();
 </script>
 <script type="module" src="/static/columns.js"></script>

@@ -110,6 +110,36 @@ class WhiteView:
             root_mm=None,
         )
 
+    def true_vertex(self, t: int) -> dict[str, Any]:
+        """The WM selection at true vertex t (GET /vertex/true): its world point,
+        the voxel nearest it (as baillarger.viewer.overlay.Overlays.voxels), and
+        the overview vertex that snap gives for that point."""
+        t = int(t)
+        if not 0 <= t < len(self.W.v):
+            raise ValueError(f"true vertex {t}: not in [0, {len(self.W.v)})")
+        p = np.asarray(self.pts[t], np.float64)
+        h = np.linalg.inv(self.ov.affine) @ np.r_[p, 1.0]
+        return dict(
+            vertex=int(self.S.nearest(p)),
+            true_vertex=t,
+            world_mm=[round(float(x), 3) for x in p],
+            voxel=[int(x) for x in np.round(h[:3])],
+            trace=None,
+            root_mm=None,
+        )
+
+    def overview_vertices(self, true_vertices: list[int]) -> dict[str, Any]:
+        """The overview vertex of each true vertex (GET /vertex/overview): the
+        one that snap gives for its point, as true_vertex gives it."""
+        t = np.asarray(true_vertices, np.int64)
+        bad = t[(t < 0) | (t >= len(self.W.v))]
+        if len(bad):
+            raise ValueError(f"true vertex {int(bad[0])}: not in [0, {len(self.W.v)})")
+        u, inv = np.unique(t, return_inverse=True)
+        _, near = self.S.vertex_tree.query(np.asarray(self.pts[u], np.float64))
+        k = np.asarray(near, np.int64).reshape(-1)
+        return dict(v=t.tolist(), vertex=k[inv].tolist())
+
     def voxel(self, true_vertex: int) -> list[int]:
         """The voxel of the grid nearest a true vertex."""
         return [int(x) for x in np.round(np.asarray(self.W.v[true_vertex], float))]
