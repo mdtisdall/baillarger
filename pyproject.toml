@@ -64,6 +64,7 @@ testpaths = [
   "tests",
   "prototypes/scripts/test_bent_box.py",
   "prototypes/scripts/test_bent_phantom.py",
+  "prototypes/scripts/test_bent_texture.py",
   "prototypes/scripts/test_crossing_lib.py",
   "prototypes/scripts/test_edit_priority.py",
   "prototypes/scripts/test_edit_resolve.py",
