@@ -399,7 +399,13 @@ Tests:
 1. Run the fit on the box at true vertex 12182770, radius 5 mm, under
    `scripts/memguard`.
 2. Run it once with each form of cost 3, each with and without cost 7.
-3. Scan each weight over a decade each way from the start weights.
+   Labels: the painted box (`box-paint`). Texture: the two-threshold mask
+   (`texture-paint-hyst`). Settings: those of the phantom runs (4 rounds
+   of at most 15 L-BFGS iterations, extend 0.1, seed 0, float32 on cpu).
+3. Scan each weight over a decade each way from the start weights: each
+   weighted term × 0.1 and × 10, one at a time, in arm B7 (form B with
+   cost 7) only. B7 was chosen because form B follows a real thickness
+   gradient. The other arms are not scanned.
 4. Make the views of *Diagnostics*, for the straight rays and each fit,
    side by side.
 5. Sparse depths (evidence for scaling, not a refit). At the straight rays
@@ -412,6 +418,14 @@ Tests:
    sparse mean and spread against its dense value, and the columns whose
    top or return differs. Cost 4 needs no samples: compare the closed form
    ∫|x″|² of the spline with the sampled sum.
+6. Mark the columns that pass bad labels: voxels below −5 robust SD in
+   every echo, in 26-connected pieces of at least 200 voxels. The rule
+   also marks the partial-volume rim at the pial edge, so the views count
+   separately the columns that pass a piece deeper than 0.32 mm from
+   label 0.
+7. Phase 6 ran with H2 open: the user was away and told the coordinator
+   not to stop at a checkpoint. Its results are provisional until H2 is
+   answered.
 
 **H3.** The user looks at the views. The user decides:
 
