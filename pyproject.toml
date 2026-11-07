@@ -63,6 +63,7 @@ ignore_missing_imports = true
 testpaths = [
   "tests",
   "prototypes/scripts/test_bent_box.py",
+  "prototypes/scripts/test_bent_fit.py",
   "prototypes/scripts/test_bent_phantom.py",
   "prototypes/scripts/test_bent_sample.py",
   "prototypes/scripts/test_bent_terms.py",

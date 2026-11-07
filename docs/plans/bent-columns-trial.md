@@ -150,14 +150,29 @@ The costs, summed:
 
 - H1 (user): at 160 µm no radial fibres are expected, and the box shows
   none. The tangential (laminar) texture is used: cost 7.
-- Dark outliers: a voxel of the cortex whose detrended log echo is below
-  −k robust SD (median absolute deviation × 1.4826) in every echo, dilated
-  by 1 voxel, is removed from the cortex mask before `orient`
-  (`bent_texture.outliers`, k = 5). At the site it removes 16,652 voxels.
-  It removes a vessel in the cortex (grid voxel 513, 202, 458: dark in all
-  three echoes, no growth with echo time, not in the bubble mask) and the
-  partial-volume rim along the pia. A vessel that is not dark in all three
-  echoes stays a known limit.
+- Dark outliers (`bent_texture.outliers`, two thresholds: k = 5,
+  grow = 3): seeds are voxels of the cortex whose detrended log echo is
+  below −5 robust SD (median absolute deviation × 1.4826) in at least one
+  echo. The outliers are the connected pieces (26 neighbours, in the
+  cortex) of the voxels below −3 SD in at least one echo that hold a seed,
+  dilated by 1 voxel. They leave the cortex mask before `orient`.
+  - Why two thresholds: a thin vessel can be dark in different voxels in
+    each echo. The first rule (below −5 SD in every echo) masked none of
+    the user's third vessel (grid voxel 524, 210, 474), and the vessel
+    turned l1 by a median of 22–54° within 0.6 mm of it.
+  - At the site (painted box): 43,107 voxels (8.1 % of the cortex), against
+    16,652 (3.1 %) for the first rule. It covers 388 of 390, 65 of 65 and
+    39 of 40 dark voxels of the three vessels that the user marked.
+  - Its cost: it masks 73 % of the cortex within 0.32 mm of the outside
+    (the partial-volume rim along the pia), 13 % at 0.32–0.64 mm, and a
+    dark band at the WM edge in places. There, cost 7 has no field (A = 0).
+  - A shape filter is not used. The Hessian of the lowest z of the three
+    echoes (σ 0.7–3 voxels, the scale of the largest response) classes
+    voxels as sheet, tube or blob. It does not separate the vessels from
+    the rest: the second vessel (along the WM edge) is 63 % sheet; most
+    sheet-shaped seeds away from the pia are dark outside medium at slot
+    ends and in a small pocket that the labels call cortex, which the mask
+    must keep.
 - The l1 streamlines are a view, not a method. At the end of the slot l1
   turns 90° (from parallel to the fundus floor to parallel to the slot
   wall) at low coherence (median 0.12). A streamline that keeps the sign
@@ -346,13 +361,26 @@ Tests:
       stated number of rounds.
 2. Record each cost at each round.
 3. Set the start weights so that terms 1–7 are of equal size at the
-   straight rays.
+   straight rays: w = 1/|T(p0)|. A term below 1e-9 at the straight rays
+   takes w = 1/|T(p_ref)|, with p_ref a constant bend of curvature
+   0.05/mm in a random direction per column; if that is also below 1e-9,
+   w = 1. The arm without cost 7 sets its weight to 0 and keeps the
+   others. (The first rule, 1/max(|T0|, |T_ref − T0|), gave the return
+   term a weight of 1.7e28 from float32 rounding; it was replaced after one
+   run of crown_w0.32, and every phantom was run again.)
 4. Run the fit on the fold phantoms of `fold_phantoms.standard()` and on
    the curved phantom. Use the phantom's white mesh and roots from
    `column_tracers`.
 5. Compare the path errors (`fold_eval.errors`) of the fit and the
    straight rays.
 6. Run each fit with cost 7 and without it.
+7. Settings of the phantom runs: 4 rounds of at most 15 L-BFGS iterations
+   (strong Wolfe), float32 on cpu. Columns: the white-mesh vertices in a
+   slab of ±0.7 mm, at least 1 mm from a face; those within 0.3 mm (on the
+   mesh) of the slab's edge stay straight (a halo), because the barrier
+   pushes an open mesh edge outward. Errors on the `pick_vertices` roots
+   within ±0.4 mm and at least 2 mm from a face. Orient on the phantom uses
+   the phantom's own noise (C_rest only) and no reach mask.
 
 Tests:
 
@@ -374,6 +402,16 @@ Tests:
 3. Scan each weight over a decade each way from the start weights.
 4. Make the views of *Diagnostics*, for the straight rays and each fit,
    side by side.
+5. Sparse depths (evidence for scaling, not a refit). At the straight rays
+   and at each fit's final paths, evaluate each cost with the dense samples
+   (step 0.04 mm to the cap) and with sparse samples: one sample per voxel
+   (0.16 mm) with a random offset per evaluation, the same depths for the
+   columns of an edge or face, to the soft top plus a margin. Repeat with
+   10 seeds. Evaluate a second sparse form with dense samples in a window
+   round the soft top and where the labels change. Report each cost's
+   sparse mean and spread against its dense value, and the columns whose
+   top or return differs. Cost 4 needs no samples: compare the closed form
+   ∫|x″|² of the spline with the sampled sum.
 
 **H3.** The user looks at the views. The user decides:
 
@@ -434,6 +472,9 @@ fit, side by side:
   With cost 7 in the fit it is not independent; the run without cost 7
   gives the independent check (§4b, *Smooth does not prove correct*).
 - `closest_outside` of censored columns.
+- Dense against sparse depths (phase 6, step 5): per cost, the sparse
+  estimates against the dense value; the columns whose top or return
+  differs, on the mesh.
 - own-bank returns, and columns that enter outside before their top
   through a hole, a tear (catalogue type F) or an excision edge (type C).
 
@@ -447,7 +488,8 @@ fit, side by side:
 - Cost 7 is the laminar alignment, in every fit from phase 5 on, with a
   run without it beside each fit.
 - The cost 5 barrier is extended with δ = 0.1.
-- Dark outliers (k = 5) are removed before `orient`.
+- Dark outliers are removed before `orient` with two thresholds (k = 5,
+  grow = 3), set before the site fits.
 - Both forms of cost 3 are fitted and shown. Neither is chosen in
   advance.
 - The fit alternates: torch moves the paths with the warp fixed, and

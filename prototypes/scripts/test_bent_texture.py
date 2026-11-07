@@ -20,6 +20,7 @@ import bent_texture as BT  # noqa: E402
 from baillarger import orient as O  # noqa: E402
 
 type F64 = npt.NDArray[np.float64]
+type Bool = npt.NDArray[np.bool_]
 
 #: the voxel size of the synthetic images, mm (isotropic)
 VOX = 0.16
@@ -312,6 +313,73 @@ def test_outliers_need_every_echo() -> None:
     rng = np.random.default_rng(4)
     echoes = echoes + rng.normal(0.0, SIGMA, echoes.shape)
     odd, _ = BT.outliers(echoes, np.ones(spot.shape, bool), np.full(3, VOX), 5.0)
+    assert not odd.any()
+
+
+def _streak() -> tuple[F64, Bool, Bool]:
+    """Laminae with a thin dark streak (1 voxel wide, 16 voxels long, along
+    a diagonal of two axes), as a thin vessel looks: echo 1 is dark (40 % of
+    the level) on its first half, echo 2 on its second half, and the middle
+    voxel is dark (20 %) in echo 2 only. No voxel is dark in both echoes.
+    Returns the echoes (2, N, N, N), the streak and the middle voxel."""
+    img = _planes(N_PLANE)
+    e1, e2 = img.copy(), 0.6 * img
+    streak = np.zeros(img.shape, bool)
+    mid = np.zeros(img.shape, bool)
+    c = N // 2 - 8
+    for q in range(16):
+        p = (c + q, c + q, N // 2)
+        streak[p] = True
+        if q < 8:
+            e1[p] *= 0.4
+        else:
+            e2[p] *= 0.4
+    m = (c + 8, c + 8, N // 2)
+    mid[m] = True
+    e2[m] = 0.2 * 0.6 * img[m]
+    return np.stack([e1, e2]), streak, mid
+
+
+def test_two_thresholds_find_a_streak_dark_in_different_echoes() -> None:
+    """The rule of every echo finds nothing on the streak. Two thresholds
+    (seed below -5 SD in one echo, grow through voxels below -3 SD in any
+    echo, connected in 26 neighbours) find the whole streak and nothing
+    else (dilate 0)."""
+    echoes, streak, _ = _streak()
+    rng = np.random.default_rng(6)
+    echoes = echoes + rng.normal(0.0, SIGMA, echoes.shape)
+    cortex = np.ones(streak.shape, bool)
+    vs = np.full(3, VOX)
+    old, _ = BT.outliers(echoes, cortex, vs, k=5.0, dilate=0)
+    assert not old[streak].any()
+    new, _ = BT.outliers(echoes, cortex, vs, k=5.0, dilate=0, grow=3.0)
+    assert np.array_equal(new, streak)
+
+
+def test_two_thresholds_need_a_seed() -> None:
+    """A streak at -3.3 robust SD in both echoes is not an outlier: the
+    test checks that some of its voxels are below -3 and none below -5
+    (the laminae add about 1 SD either way). Noise and laminae alone give
+    none."""
+    _, streak, _ = _streak()
+    img = _planes(N_PLANE)
+    rng = np.random.default_rng(7)
+    cortex = np.ones(streak.shape, bool)
+    vs = np.full(3, VOX)
+    flat = np.stack([img, 0.6 * img])
+    flat = flat + rng.normal(0.0, SIGMA, flat.shape)
+    odd, sd = BT.outliers(flat, cortex, vs, k=5.0, dilate=0, grow=3.0)
+    assert not odd.any()
+    dim = np.exp(-3.3 * sd)
+    faint = np.stack(
+        [img * np.where(streak, dim[0], 1.0), 0.6 * img * np.where(streak, dim[1], 1.0)]
+    )
+    faint = faint + rng.normal(0.0, SIGMA, faint.shape)
+    lv = O.local_level(faint, cortex, O.SIGMA, vs)
+    z = (O.log_echo(faint) - lv) / sd[:, None, None, None]
+    assert np.any(z[:, streak] < -3.0)
+    assert not np.any(z[:, streak] < -5.0)
+    odd, _ = BT.outliers(faint, cortex, vs, k=5.0, dilate=0, grow=3.0)
     assert not odd.any()
 
 

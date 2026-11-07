@@ -43,6 +43,14 @@ first echo on, and with strong gradients round it. orient's masked
 convolutions then fill its place from the cortex round it. k is set before a
 run and is not tuned to the result.
 
+With two thresholds (--outlier-grow g): the seeds are the voxels below -k
+robust SDs in at least one echo. The outliers are the connected pieces (26
+neighbours, inside the cortex) of the voxels below -g robust SDs in at least
+one echo that hold a seed, then grown by OUTLIER_DILATE voxels. A thin
+vessel can be dark in different voxels in each echo, so the rule of every
+echo misses it; this rule finds it. It also removes more of the dark rim of
+the cortex along the pia.
+
 The views sample the tensor along the straight rays of the inner columns,
 from s = 0 to the first outside. They show the cortex beside references: the
 WM, the outside medium, a pure-noise image and a laminar image (fields).
@@ -67,6 +75,7 @@ from typing import Any, Literal
 import numpy as np
 import numpy.typing as npt
 from scipy.ndimage import binary_dilation, distance_transform_edt, map_coordinates
+from scipy.ndimage import label as ndi_label
 
 sys.path.insert(0, str(Path(__file__).parent))
 import bent_box as BB  # noqa: E402
@@ -342,9 +351,12 @@ def outliers(
     k: float,
     sigma_mm: float = O.SIGMA,
     dilate: int = OUTLIER_DILATE,
+    grow: float | None = None,
 ) -> tuple[Bool, F64]:
     """The outliers of the cortex (see the module docstring) and the robust
-    SD of each echo's detrended log echo. echoes (E, ...), cortex (...)."""
+    SD of each echo's detrended log echo. echoes (E, ...), cortex (...).
+    grow None: dark below -k in every echo. grow g: two thresholds, seeds
+    below -k in one echo, grown through voxels below -g in one echo."""
     ctx = np.asarray(cortex, bool)
     lv = O.local_level(echoes, ctx, sigma_mm, voxel_mm)
     det = O.log_echo(echoes) - lv
@@ -353,7 +365,17 @@ def outliers(
         [MAD_SD * float(np.median(np.abs(d[use] - np.median(d[use])))) for d in det]
     )
     z = det / sd.reshape((-1,) + (1,) * ctx.ndim)
-    dark = use & np.all(np.nan_to_num(z, nan=0.0) < -k, 0)
+    zz = np.nan_to_num(z, nan=0.0)
+    if grow is None:
+        dark = use & np.all(zz < -k, 0)
+    else:
+        if not 0 < grow <= k:
+            raise ValueError("grow must be in (0, k]")
+        seed = use & np.any(zz < -k, 0)
+        low = use & np.any(zz < -grow, 0)
+        pieces, _ = ndi_label(low, structure=np.ones((3, 3, 3), bool))
+        keep = np.unique(pieces[seed])
+        dark = np.isin(pieces, keep[keep > 0])
     if dilate > 0 and dark.any():
         dark = binary_dilation(dark, iterations=dilate) & ctx
     return dark, sd
@@ -365,6 +387,7 @@ def fields(
     sigma_mm: float = O.SIGMA,
     grown: Grown | None = None,
     outlier_k: float | None = None,
+    outlier_grow: float | None = None,
 ) -> dict[str, Any]:
     """The tensors on the box (NaN where not valid), each orient_arrays on
     its own mask: the cortex, the WM and the outside medium; and two
@@ -396,7 +419,7 @@ def fields(
     out["outlier_sd"] = None
     if outlier_k is not None:
         odd, out["outlier_sd"] = outliers(
-            echoes, masks["cortex"], vs, outlier_k, sigma_mm
+            echoes, masks["cortex"], vs, outlier_k, sigma_mm, grow=outlier_grow
         )
         masks["cortex"] = masks["cortex"] & ~odd
     for k, m in masks.items():
@@ -794,6 +817,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="remove the voxels dark in every echo by more than k robust SDs "
         "(and OUTLIER_DILATE voxels round them) from the tensor's mask",
     )
+    p.add_argument(
+        "--outlier-grow",
+        type=float,
+        default=None,
+        help="two thresholds: seeds below -k in one echo, grown through the "
+        "connected voxels below -g in one echo (needs --outlier-k)",
+    )
     a = p.parse_args(argv)
     t0 = time.perf_counter()
     b = BB.load(a.box)
@@ -807,7 +837,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     if a.grow:
         side = json.loads((a.box.parent / BB.SIDECAR).read_text())
         grown = read_grown(b, side, O.orient_reach(b.voxel_mm, a.sigma))
-    F = fields(b, noise, a.sigma, grown, a.outlier_k)
+    if a.outlier_grow is not None and a.outlier_k is None:
+        p.error("--outlier-grow needs --outlier-k")
+    F = fields(b, noise, a.sigma, grown, a.outlier_k, a.outlier_grow)
     del grown
     tex = {k: texture(F[k]) for k in REGIONS}
     t1 = time.perf_counter()
@@ -912,6 +944,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         reach_voxels=list(F["reach"]),
         grown=F["grown"],
         outlier_k=a.outlier_k,
+        outlier_grow=a.outlier_grow,
         outlier_dilate=OUTLIER_DILATE,
         outlier_voxels=int(F["outliers"].sum()),
         outlier_sd=None
