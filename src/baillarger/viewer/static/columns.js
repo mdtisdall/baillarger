@@ -20,7 +20,7 @@
 // - The section's roots (a "section roots" checkbox in the surface pane's bar and one in the volume pane's bar, each
 //   apart from the columns menu): the roots of the columns that the section shows (nearest: one a step; mean across: every
 //   column of a step's mean), coloured by their step's place along the section (ARC, plasma from the left end of the
-//   section to the right end; the same colours in a bar along the top of the section), with a dark rim; the picked
+//   section to the right end; the same colours in a bar along the top of the section), with a dark rim in the slices only; the picked
 //   column's root in white. 3D view (VIEWER.points): on the true surface (level 0) at the roots themselves; on an inflated
 //   level at the overview vertex of each root (GET /vertex/overview, as the WM selection marker). Bricks: the roots
 //   within half a voxel of a tile's slice, as discs on that slice.
@@ -261,20 +261,21 @@ function upload3d() {
 }
 V.hooks.draw3d.push((g, M) => {   // the section's roots
   if (!C.meta) return;
-  const hl = C.hl, on = hl && $("chl").checked, G = V.GL, rim = [0.04, 0.04, 0.05];
+  const hl = C.hl, on = hl && $("chl").checked, G = V.GL;
   const note = !on ? "" : G.level === 0 ? `${hl.xyz.length / 3} roots` :
     `${hl.sec.roots.length} roots, shown at their overview vertices (inflated surface)`;
   if ($("chlnote").textContent !== note) $("chlnote").textContent = note;
   if (!on) return;
-  // the picked root first, then the coloured discs, then their dark rims: at equal depth a later disc fails the depth test
-  if (G.level === 0) { V.points(g, M, hl.pick, [1, 1, 1], 9); V.points(g, M, hl.xyz, hl.rgb, 6); V.points(g, M, hl.xyz, rim, 8, 6); return; }
+  // the picked root first, then the coloured discs: at equal depth a later disc fails the depth test. No dark rims: the
+  // roots are closer than a disc, so each one's rim would cover its neighbours' colours
+  if (G.level === 0) { V.points(g, M, hl.pick, [1, 1, 1], 9); V.points(g, M, hl.xyz, hl.rgb, 6); return; }
   if (!hl.ov) { if (!hl.asked) highlightOverview(hl); return; }
   const at = v => [G.pos[3*v], G.pos[3*v+1], G.pos[3*v+2]];
   // an overview vertex with several roots takes the colour of the first along the section
   const first = new Map(); hl.cols.forEach((c, i) => { const v = hl.ovOf.get(vertexOf(c)); if (v !== undefined && !first.has(v)) first.set(v, i); });
   const xyz = new Float32Array(3 * first.size), rgb = new Float32Array(3 * first.size); let i = 0;
   for (const [v, k] of first) { xyz.set(at(v), 3 * i); rgb.set(hl.rgb.subarray(3 * k, 3 * k + 3), 3 * i); i++; }
-  V.points(g, M, new Float32Array(at(hl.pickOv)), [1, 1, 1], 9); V.points(g, M, xyz, rgb, 6); V.points(g, M, xyz, rim, 8, 6);
+  V.points(g, M, new Float32Array(at(hl.pickOv)), [1, 1, 1], 9); V.points(g, M, xyz, rgb, 6);
 });
 V.hooks.draw3d.push((g, M) => {
   if (!C.gl || !C.gl.m || V.GL.level !== 0) return;

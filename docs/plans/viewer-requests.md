@@ -95,9 +95,9 @@ answer.
    within half a voxel of a tile's slice. The picked root stays white.
 4. A "log" toggle in the header, per window (localStorage). While the log is hidden, an error puts a red dot on the
    toggle until the log is shown. The information line stays.
-5. The section's roots are coloured by their step's place along the section (plasma, 0.12 to 0.95 of it, with a dark
-   rim), and the same colours run in a thin bar along the top of the section. Mean across: every root of a step has
-   that step's colour.
+5. The section's roots are coloured by their step's place along the section (plasma, 0.12 to 0.95 of it, with a
+   dark rim in the slices only: in the 3D view the roots are too close for rims), and the same colours run in a
+   thin bar along the top of the section. Mean across: every root of a step has that step's colour.
 6. A tooltip over the section gives a column's details (true vertex, arc, distance, |n̄|, derived class, label
    intervals); one line under the section names the picked column. The details list goes.
 
