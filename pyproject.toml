@@ -62,6 +62,7 @@ ignore_missing_imports = true
 # prototypes/scripts: not test_curv.py (a script, not pytest)
 testpaths = [
   "tests",
+  "prototypes/scripts/test_bent_box.py",
   "prototypes/scripts/test_crossing_lib.py",
   "prototypes/scripts/test_edit_priority.py",
   "prototypes/scripts/test_edit_resolve.py",
