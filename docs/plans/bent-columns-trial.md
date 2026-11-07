@@ -433,6 +433,30 @@ Tests:
 - which form of cost 3 to keep for phase 7.
 - if phase 7 is needed.
 
+### Phase 6b: probes (`bent_probes.py`)
+
+The user's design: straight rays are probes that collect laminar evidence
+(the top and the bottom too); the columns are a discretised
+diffeomorphism refined in parallel with the laminar agreement. Finding the
+best cheap probe is a goal of its own.
+
+1. The top of every probe: the first crossing of 0 by the antialiased
+   field of label 0 (`baillarger.antialias.thin_plate`).
+2. Probes: straight along the box normals; straight along normals
+   smoothed by 24 and 97 more steps; an l1 streamline (c >= 0.3, turn at
+   most 45°, else the heading is kept); the fit with only agreement,
+   alignment, length and bending (bend_ac); B7.
+3. Scores on the inner columns: censored, far top (more than twice the
+   distance to label 0), jumps above 1 mm, drop 2, angle to l1, profile
+   difference with neighbours at equal arc length, returns, and folding
+   by the local Jacobian over 0.4 mm (not by triangles: slivers flip).
+4. Views: the tops along the section, and maps of top, profile
+   difference and angle to l1.
+
+Tests: the first crossing is linear between samples; the l1 heading keeps
+its sign and falls back to the heading; straight probe points; the local
+Jacobian is 1 for a translation and negative for a mirror.
+
 ### Phase 7: a second site (only after H3)
 
 1. If the marked M1S1 points (`prototypes/data/M1S1_points_full0.json`)

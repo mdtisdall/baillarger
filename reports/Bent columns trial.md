@@ -7,7 +7,16 @@ The plan is `docs/plans/bent-columns-trial.md`. "Normal rays stay
 straight" (#47) stays the rule. This report is evidence for the user, not a
 change of the rule.
 
-**Status.** Phases 0–6 ran. Phase 7 (a second site) did not run: the plan
+**How to read it (user, review of 2026-11-07).** The design the user has
+in mind keeps two things apart. Straight rays are *probes*: cast once,
+they collect laminar evidence, including where the top and the bottom are.
+The *columns* are a discretised diffeomorphism (they cannot cross at any
+length), refined in parallel with the laminar agreement. This trial bent
+the rays themselves, so it tests a way to improve the probes, not the
+user's column design. "The best cheap probe is an important discovery"
+(user): *Probes* below compares cheap probes at the site.
+
+**Status.** Phases 0–6 ran, then the probe comparison from the review. Phase 7 (a second site) did not run: the plan
 makes it the user's decision at H3. The user was away during phases 5 and
 6 and told the coordinator not to stop at a checkpoint. So H2 and H3 are
 open, and the phase 6 results are provisional until H2 is answered.
@@ -23,10 +32,17 @@ open, and the phase 6 results are provisional until H2 is answered.
   shape. 1,619 of 15,123 inner columns find no top (censored). 985 of
   them pass through label 0, because the stand-in top (smoothed label 0
   above 0.5) misses thin outside medium.
-- On the fold phantoms the fit does not stay straight. It bends by up to
-  0.19 mm, scattered column by column, and it does not reduce the path
-  errors (change below 0.007 mm at the median).
+- On the fold phantoms the fit moves the columns by up to 0.19 mm. Where
+  it moves a column most, it mostly moves it toward the true column, but
+  the change in the median error is below 0.007 mm. The phantom errors
+  (0.03–0.4 mm, from the mesh normals) are much smaller than the site's
+  errors (1–6 mm, from the top).
 - No fit converged in its budget of 4 rounds.
+- **Probes.** A short local bend with only the agreement, alignment,
+  length and bending terms (no barrier, crowding, shear or length
+  agreement) is the best probe tested: with the antialiased top, 528
+  censored inner probes against 1,255 for the straight rays, and drop 2
+  gone. It moves the probes by a median of 0.034 mm (p90 0.10 mm).
 
 ## The code
 
@@ -40,6 +56,7 @@ All code is in `prototypes/scripts/`. Nothing moves to `src`.
 | `bent_sample.py`, `bent_terms.py` | 3 | Paths as splines from fixed roots, sampling, and the cost terms in torch. |
 | `bent_fit.py` | 5 | The alternating fit: refit the warp, then L-BFGS on the paths. Phantom runs. |
 | `bent_columns.py`, `bent_views.py` | 6 | The site fits, the wrong-label mask, the sparse-depth test, the weight scan, the views. |
+| `bent_probes.py` | review | Cheap probes with the antialiased top, scored side by side; the local Jacobian for folding. |
 
 The cost terms (the plan, *The model*): 1 agreement of the profiles after
 the warp, 2 length, 3 length agreement (form A: equal lengths; form B:
@@ -128,9 +145,17 @@ errors. The change was not chosen to improve them.
   crown_w0.32 goes from 0.415 to 0.404 mm and fundus_g0.16 from 0.101 to
   0.093 mm.
 - The fold phantoms do not stay straight. The largest shear is
-  0.02–0.19 mm, largest on the thin crown and the kissing pair. The bends
-  are scattered column by column. They do not follow the straight rays'
-  errors.
+  0.02–0.19 mm, largest on the thin crown and the kissing pair.
+- Column by column (figure below), the columns the fit moves most mostly
+  move toward the true column. The straight rays' errors grow linearly with
+  depth: they come from small angle errors of the mesh normals. Columns
+  better / worse by more than 0.01 mm / within 0.01 mm: thin crown (arm B)
+  106 / 95 / 205 of 406; narrow fundus (B7) 31 / 7 / 448 of 486; kissing
+  pair (B7) 195 / 103 / 1,462 of 1,760. The fit removes part of the error
+  of the columns it moves, at best about half.
+- These errors are not the kind that matter at the site. The phantoms have
+  no fused gap where label 0 ends below the dark band, no banks of very
+  different thickness, and no real bend to recover.
 - A gradient check at the start points to cost 3 on the crowns (it evens
   out lengths that differ because of the mesh normals' own errors) and to
   the barrier at the fundi (the rays converge and faces invert). This is
@@ -150,6 +175,8 @@ errors. The change was not chosen to improve them.
 ![Cut of fundus_g0.16](figures/bent-columns/phantom_fundus_g0.16_cut.png)
 
 ![Cut of crown_w0.32](figures/bent-columns/phantom_crown_w0.32_cut.png)
+
+![Errors column by column](figures/bent-columns/phantom_error_detail.png)
 
 ## The fit at the site (phase 6, H3 open)
 
@@ -200,7 +227,10 @@ run. The asymmetry between the walls was not checked: it can come from the
 classification rule (∇O at 45°).
 
 **Crowding.** About 40 % of the top triangles are inverted. The fit hardly
-changes this.
+changes this. A per-triangle count overstates folding: the mesh has 2,797
+inner sliver triangles (smallest angle below 5°) that flip with any small
+change of direction. *Folding of the columns* gives a measure that does
+not depend on the triangles.
 
 ![Tops and crowding](figures/bent-columns/site_tops.png)
 
@@ -249,6 +279,98 @@ changes bend the paths more than B7, and the largest median shear is
 17 µm. Fewer columns are censored when crowding is weaker or alignment is
 stronger. The views of these runs were not made, so it is not known if
 those columns are better.
+
+## The column ends and folding (review)
+
+**The end surface.** The ends of the columns form an implicit "pial"
+surface. Its smoothness is the measure the user named: not that the ends
+of neighbours are close, but that the surface they make is smooth. Mean
+angle between each end's surface normal and its neighbours' (median /
+p90): white surface (the roots) 1.5° / 3.7°; ends of the straight rays
+32° / 116°; B7 31° / 107°; crowding × 0.1 6.9° / 90°.
+
+![The end surface](figures/bent-columns/site_end_surface.png)
+
+**An antialiased top.** The top can come from the white surface's own
+method: `baillarger.antialias.thin_plate` on label 0 gives the smoothest
+field that keeps every voxel's label (5.9 s on the box), and the top is
+its first crossing of 0. The top then lies anywhere between an inside and
+an outside voxel centre, so it is not tied to the label staircase.
+
+- Censored inner columns: straight 1,619 → 1,255; B7 1,641 → 1,247. A
+  one-voxel slot still crosses 0, where smoothed label 0 stays below 0.5.
+- The end surface is as rough as before (straight 31.9° / 116°), and
+  drop 2 stays (5.89 / 5.60 mm). So the roughness is not the staircase.
+
+![The end surface with the two tops](figures/bent-columns/site_end_surface_aa.png)
+
+**Folding of the columns.** The local Jacobian of the map from the roots
+to the ray points at a depth, by least squares over the roots within
+0.4 mm, in the root's tangent plane (`bent_probes.fold_dets`). It does not
+depend on the shape of single triangles.
+
+| Rays along | det < 0 at 1 mm | at 2.5 mm | folded before their own top |
+|---|---|---|---|
+| The box normals | 0 % | 25 % | 16.1 % |
+| Normals smoothed about 0.6 mm (97 steps) | 0 % | 16 % | 13.6 % |
+
+The straight rays do not fold in the first 1.5 mm. Deeper, a quarter
+fold, and about one in six fold before they reach their top. So they are
+not a valid discrete diffeomorphism through the full depth. Probes may
+fold; columns may not.
+
+## Probes (review)
+
+`bent_probes.py` scores cheap probes at the site, all with the antialiased
+top, on the 15,123 inner columns. The constants were set before the run.
+
+- **normal:** straight along the box normals.
+- **smooth24, smooth97:** straight along normals smoothed by 24 and 97
+  more steps (about 0.3 and 0.6 mm).
+- **l1:** a streamline of l1 with the sign closest to the heading, used
+  only where c ≥ 0.3 and the turn is at most 45°; else the heading is
+  kept. The tensor has the two-threshold vessel mask.
+- **bend_ac:** the alternating fit with only agreement, alignment, length
+  and bending (form B, cost 7 on; the other weights 0), 4 rounds × 15
+  L-BFGS. It was not converged: the rounds moved the paths 0.2–0.35 mm.
+- **B7:** the phase 6 fit.
+
+| Probe | Censored | Far top | Section jumps > 1 mm | Drop 2 (mm) | Profile difference, med / p90 | Folded before top | Seconds |
+|---|---|---|---|---|---|---|---|
+| normal | 1,255 | 711 | 40 | 5.89 / 5.59 | 0.079 / 0.427 | 16.1 % | 0.1 |
+| smooth24 | 1,245 | 733 | 41 | 6.04 / 5.61 | 0.075 / 0.401 | 14.6 % | 0.2 |
+| smooth97 | 1,141 | 785 | 46 | 5.75 / 5.45 | 0.073 / 0.374 | 13.6 % | 0.3 |
+| l1 | 2,186 | 627 | 99 | 4.04 / 4.68 | 0.060 / 0.420 | 11.0 % | 10 |
+| **bend_ac** | **528** | 670 | **25** | **5.59 / 2.22** | **0.058 / 0.306** | 14.2 % | 655 |
+| B7 | 1,247 | 711 | 31 | 5.85 / 5.63 | 0.072 / 0.373 | 16.0 % | 550 |
+
+Far top: the top is more than twice the distance from the root to the
+nearest label 0. Profile difference: mean squared difference of the
+detrended log echo 2 of the two probes of a mesh edge, at equal arc
+length, to the shorter top (in robust SD²). No probe returns into WM. The
+angle to l1 (c ≥ 0.7) is about 7° / 30° (median / p90) for all probes
+except l1, which follows l1 by construction.
+
+- **bend_ac is the best probe on every score but folding.** 733 probes
+  that the straight rays censor find a top, at a median of 2.31 mm (p90
+  3.59 mm), with a median shift of 0.127 mm: a sub-voxel lean onto thin
+  outside medium that the straight ray passes. Drop 2's second column now
+  meets the top at 2.22 mm, where label 0 is (2.24 mm).
+- Its moves are small: the largest shift below the top has a median of
+  0.034 mm (p90 0.103, max 0.42). B7's is 0.005 mm. So the barrier,
+  crowding, shear and length-agreement terms held B7's probes back.
+- Smoothed normals help a little (fewer censored, less folding) and cost
+  nothing. The l1 streamline is worse on censoring and jumps.
+- **Not independent:** bend_ac has the agreement and length terms in its
+  cost, so its profile difference and censored count are partly what it
+  optimised. Drop 2 and the far tops are not in its cost.
+- **What no probe fixes:** along the section, u from −2 to 0.7 mm, every
+  probe keeps far tops of 4–8 mm. These are the rays beside the slot end,
+  where label 0 stops below the dark band.
+
+![Probe tops along the section](figures/bent-columns/probe_section.png)
+
+![Probe maps](figures/bent-columns/probe_maps.png)
 
 ## Sparse depths (phase 6, step 5)
 
@@ -318,9 +440,15 @@ This is an analysis, not a measurement at scale.
   (the sawtooth, the long fundus rays) come from the labels and the top,
   not from the path shape. Painting the labels removed one drop. The other
   drop is a soft-top miss.
-- On the phantoms, the fit bends where it should not, by up to 0.19 mm,
-  and does not reduce the errors.
-- Two weights move the paths more than the others: crowding and agreement.
+- On the phantoms, the fit moves columns by up to 0.19 mm, mostly toward
+  the truth where it moves them most, with almost no change of the
+  median error.
+- As probes, a short bend on agreement, alignment, length and bending only
+  finds the top far more often than straight rays and removes drop 2. The
+  full fit's barrier and crowding hold the probes back.
+- The antialiased top is better than smoothed label 0 and costs seconds.
+- Straight rays fold below about 1.5 mm in a quarter of the box, so they
+  can be probes but not columns.
 
 **Do not show.**
 
@@ -330,13 +458,16 @@ This is an analysis, not a measurement at scale.
 - If the fit can find a real bend. The curved phantom's bend is too small
   to tell.
 - If the result holds at another site (phase 7 did not run).
+- Anything about the user's column design (a diffeomorphism refined from
+  the probes' evidence). It was not built.
+- Why the rays beside the slot end (u from −2 to 0.7 mm) still meet the
+  outside at 4–8 mm with every probe.
 
 ## Open checkpoints
 
-- **H2** (phase 5): the fold phantoms bend by up to 0.19 mm. The plan says
-  "If they bend, stop. Find the cause and report it." The cause found is
-  an indication (cost 3 on the crowns, the barrier at the fundi), not a
-  proof. The user decides if this is acceptable or needs more work.
+- **H2** (phase 5): reviewed with the user on 2026-11-07. The phantom
+  errors are small and of a different kind from the site's; the bends
+  mostly move toward the truth. Not yet formally closed.
 - **H3** (phase 6): better, worse or not different at this fundus; which
   form of cost 3 to keep; if phase 7 is needed.
 - **Phase 7** can run: the 23 marked M1S1 points
@@ -350,5 +481,6 @@ This is an analysis, not a measurement at scale.
 
 Outputs are in `scratch/bent-columns/` (not kept): `box-paint/`,
 `texture-paint-hyst/`, `fit-phantoms/`, `fit-site/` (views.json,
-scan.md, sparse.json). The coordinator's notes are
+scan.md, sparse.json, phi_outside.npy), `probes/` (probes.json,
+probes.md, bend_ac_paths.npz). The coordinator's notes are
 `scratch/bent-columns/notes.md`.
