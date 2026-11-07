@@ -438,6 +438,9 @@ Tests:
 1. If the marked M1S1 points (`prototypes/data/M1S1_points_full0.json`)
    can be placed on the current derivatives: run the fit there. Measure
    the profile split at the marked points against normal's 0.17 mm (§4c).
+2. The points can be placed: the dseg and the echoes have the same grid,
+   and all 23 points lie on label 42. The split measurement needs new
+   code. Phase 7 waits for H3.
 
 ### Phase 8: the report
 
