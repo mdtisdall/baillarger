@@ -28,6 +28,14 @@ inner root is in Box.faces. The plan is that a fit moves only the inner
 columns and holds the halo columns fixed. With halo_mm = 0 the box has the
 columns of Columns.compute(Request(vertex, radius_mm)).
 
+Painted labels (paint): crops of the dseg that the user painted
+(baillarger.wm_paint export, then ITK-SNAP). Their changed voxels
+(wm_paint.changes) replace the box's labels where they fall in the box, in
+the order given. Only the box's labels change. The straight rays' label
+intervals stay those of the dseg (the ray sampler reads the dseg itself), so
+a caller that needs the painted labels along a ray samples Box.labels. The
+sidecar of the command line lists the crops.
+
 The voxel box holds the straight rays of all chosen columns from -CAP_IN to
 CAP_OUT, widened by MARGIN_MM on each axis, and cut to the grid. A bent
 path can leave it: a caller must check.
@@ -51,6 +59,8 @@ import numpy.typing as npt
 from scipy.sparse.csgraph import dijkstra
 
 from baillarger import rays as R
+from baillarger import wm_paint
+from baillarger.bids import file_sha256, read_sidecar
 from baillarger.blocks import Source, open_volume
 from baillarger.column_volume import ColumnVolumeSampler
 from baillarger.mesh_graph import BlockIndex, local_graph
@@ -184,6 +194,31 @@ def _echo_sampler(rs: R.RaySampler, echoes: Sequence[Path]) -> list[Source]:
     return srcs
 
 
+def paint(
+    labels: npt.NDArray[np.int32],
+    offset: I64,
+    crops: Sequence[Path],
+    dseg: Path | None = None,
+) -> tuple[npt.NDArray[np.int32], int]:
+    """labels (a box of the grid at offset) with the changed voxels of each
+    painted crop applied, in order, and the number of voxels changed in the
+    box. With dseg, a crop exported from another dseg raises ValueError."""
+    out = np.array(labels, np.int32, copy=True)
+    n = 0
+    sha = file_sha256(Path(dseg)) if dseg is not None else None
+    for crop in crops:
+        side = read_sidecar(Path(crop) / wm_paint.SIDECAR, wm_paint.PAINT_SPEC)
+        if sha is not None and side["DsegSHA256"] != sha:
+            raise ValueError(f"{crop}: exported from another dseg")
+        pts, vals = wm_paint.changes(Path(crop))
+        q = pts - np.asarray(offset, np.int64)
+        ok = np.all((q >= 0) & (q < np.asarray(out.shape)), axis=1)
+        q, v = q[ok], vals[ok]
+        n += int(np.count_nonzero(out[tuple(q.T)] != v))
+        out[tuple(q.T)] = v
+    return out, n
+
+
 def box(
     white: Path,
     dseg: Path,
@@ -192,10 +227,12 @@ def box(
     radius_mm: float,
     halo_mm: float = HALO_MM,
     margin_mm: float = MARGIN_MM,
+    crops: Sequence[Path] = (),
 ) -> Box:
     """The box at a vertex: see the module docstring. white is the
     _white.surf.gii; dseg is the segmentation that the surface was made from
-    (the sampler checks its SHA-256); echoes are on the dseg's grid."""
+    (the sampler checks its SHA-256); echoes are on the dseg's grid; crops
+    are painted crops of that dseg (paint)."""
     if not radius_mm >= 0 or not halo_mm >= 0 or not margin_mm >= 0:
         raise ValueError("radius_mm, halo_mm and margin_mm must be >= 0")
     rs = R.RaySampler(Path(white), Path(dseg))
@@ -251,6 +288,8 @@ def box(
     sl = tuple(slice(int(a), int(b)) for a, b in zip(lo, hi, strict=True))
     lab = np.ascontiguousarray(rs.labels.read(sl), np.int32)
     echo = np.stack([np.asarray(s.read(sl), np.float32) for s in srcs])
+    if crops:
+        lab, _ = paint(lab, lo, crops, dseg)
     return Box(
         vertex=int(vertex),
         radius_mm=float(radius_mm),
@@ -344,9 +383,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--halo", type=float, default=HALO_MM, help="mm")
     p.add_argument("--margin", type=float, default=MARGIN_MM, help="mm")
     p.add_argument("--out", type=Path, required=True, help="output directory")
+    p.add_argument(
+        "--paint",
+        type=Path,
+        action="append",
+        default=[],
+        help="a painted crop of the dseg (wm_paint export); repeatable",
+    )
     a = p.parse_args(argv)
     t0 = time.perf_counter()
-    b = box(a.white, a.dseg, a.echoes, a.vertex, a.radius, a.halo, a.margin)
+    b = box(a.white, a.dseg, a.echoes, a.vertex, a.radius, a.halo, a.margin, a.paint)
     t1 = time.perf_counter()
     a.out.mkdir(parents=True, exist_ok=True)
     save(b, a.out / NPZ)
@@ -360,6 +406,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         radius_mm=a.radius,
         halo_mm=a.halo,
         margin_mm=a.margin,
+        paint=[str(Path(c).resolve()) for c in a.paint],
         ray_sampler=R.VERSION,
         superblock=list(b.superblock),
         columns=n,

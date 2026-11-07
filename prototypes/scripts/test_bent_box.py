@@ -312,3 +312,33 @@ def test_echoes_on_another_grid_are_refused(
     nib.save(nib.nifti1.Nifti1Image(np.zeros((4, 4, 4), np.float32), AFF), bad)
     with pytest.raises(ValueError):
         BB.box(data["surf"], data["dseg"], [bad], 0, RADIUS, 0.0)
+
+
+def test_painted_crops_change_only_the_labels(
+    data: dict[str, Path], cols: VC.Columns, box: BB.Box, tmp_path: Path
+) -> None:
+    """A crop exported by wm_paint, with some labels changed: the box's
+    labels change at those voxels only (the ones in the box), the rays and
+    the echoes do not."""
+    from baillarger import wm_paint
+
+    v = vertex_of(cols)
+    site = np.rint(box.to_box(box.roots[0]) + box.offset).astype(int)
+    crop = tmp_path / "crop"
+    wm_paint.export(data["dseg"], tuple(int(x) for x in site), crop, half=4)
+    img = nib.load(crop / wm_paint.LABELS)
+    lab = np.asarray(img.dataobj).copy()
+    lab[2:5, 3, 4] = 0
+    lab[0, 0, 0] = 99
+    nib.save(nib.Nifti1Image(lab, img.affine, img.header), crop / wm_paint.LABELS)
+    pts, vals = wm_paint.changes(crop)
+    b2 = BB.box(data["surf"], data["dseg"], echoes(data), v, 1.0, 0.5, crops=[crop])
+    q = pts - b2.offset
+    ok = np.all((q >= 0) & (q < np.asarray(b2.labels.shape)), axis=1)
+    want = box.labels.copy()
+    want[tuple(q[ok].T)] = vals[ok]
+    assert np.array_equal(b2.labels, want)
+    assert int(np.count_nonzero(b2.labels != box.labels)) >= 1
+    assert np.array_equal(b2.echoes, box.echoes)
+    assert np.array_equal(b2.rays.position, box.rays.position)
+    assert np.array_equal(b2.rays.interval_label, box.rays.interval_label)

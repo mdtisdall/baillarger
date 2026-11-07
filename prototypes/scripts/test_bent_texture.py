@@ -274,3 +274,73 @@ def test_noise_image_has_the_model_covariance(seed: int) -> None:
     r = (img - 500.0).reshape(2, -1)
     C = np.cov(r)
     np.testing.assert_allclose(C, np.outer(sig, sig) * R, rtol=0.05)
+
+
+# ---------------------------------------------------------------- outliers
+
+
+def _laminae_with_spot() -> tuple[F64, F64, tuple[int, int, int]]:
+    """Laminae normal to N_PLANE (contrast 3 %, period 8 voxels), with a dark
+    spot of 2 x 2 x 2 voxels (20 % of the level, in every echo) at a point
+    off the centre. Two echoes: the second is the first at 0.6 times the
+    level. Returns the echoes (2, N, N, N), the spot's mask and its corner."""
+    img = _planes(N_PLANE)
+    c = (N // 2 + 3, N // 2 - 2, N // 2 + 1)
+    spot = np.zeros(img.shape, bool)
+    spot[c[0] : c[0] + 2, c[1] : c[1] + 2, c[2] : c[2] + 2] = True
+    img = np.where(spot, 0.2 * img, img)
+    return np.stack([img, 0.6 * img]), spot, c
+
+
+def test_outliers_find_a_dark_spot_and_nothing_else() -> None:
+    echoes, spot, _ = _laminae_with_spot()
+    rng = np.random.default_rng(3)
+    echoes = echoes + rng.normal(0.0, SIGMA, echoes.shape)
+    cortex = np.ones(spot.shape, bool)
+    odd, sd = BT.outliers(echoes, cortex, np.full(3, VOX), k=5.0, dilate=0)
+    assert np.array_equal(odd, spot)
+    assert np.all(sd > 0)
+    grown, _ = BT.outliers(echoes, cortex, np.full(3, VOX), k=5.0, dilate=1)
+    assert spot.sum() < grown.sum() <= 4 * 4 * 4
+    assert np.all(grown[spot])
+
+
+def test_outliers_need_every_echo() -> None:
+    """A spot dark in one echo only is not an outlier."""
+    echoes, spot, _ = _laminae_with_spot()
+    echoes[1] = 0.6 * _planes(N_PLANE)
+    rng = np.random.default_rng(4)
+    echoes = echoes + rng.normal(0.0, SIGMA, echoes.shape)
+    odd, _ = BT.outliers(echoes, np.ones(spot.shape, bool), np.full(3, VOX), 5.0)
+    assert not odd.any()
+
+
+def test_masking_the_spot_restores_the_laminar_normal() -> None:
+    """Near the spot, the leading eigenvector without the mask leaves the
+    laminae's normal; with the spot out of the mask it is back within a few
+    degrees."""
+    echoes, spot, c = _laminae_with_spot()
+    rng = np.random.default_rng(5)
+    echoes = echoes + rng.normal(0.0, SIGMA, echoes.shape)
+    vs = np.full(3, VOX)
+    noise = Noise(
+        sigma=np.full(2, SIGMA),
+        R=np.eye(2),
+        gain=O.gradient_gain(O.SD),
+        rest=np.zeros((2, 2)),
+    )
+    cortex = np.ones(spot.shape, bool)
+    odd, _ = BT.outliers(echoes, cortex, vs, 5.0)
+    near = np.zeros(spot.shape, bool)
+    near[c[0] - 2 : c[0] + 4, c[1] - 2 : c[1] + 4, c[2] - 2 : c[2] + 4] = True
+    near &= ~odd
+    a0 = _angle(
+        BT.texture(O.orient_arrays(echoes, cortex, noise, vs)["tensor"]).leading,
+        N_PLANE,
+    )
+    a1 = _angle(
+        BT.texture(O.orient_arrays(echoes, cortex & ~odd, noise, vs)["tensor"]).leading,
+        N_PLANE,
+    )
+    assert np.nanmedian(a0[near]) > 20.0
+    assert np.nanmedian(a1[near]) < 10.0
