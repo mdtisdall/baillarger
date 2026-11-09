@@ -28,10 +28,12 @@ open, and the phase 6 results are provisional until H2 is answered.
   shear is about 5 µm. The four arms give almost the same views.
 - The fit does not remove the sawtooth. The painted labels removed the
   first drop before any fit. The second drop stays in every arm.
-- The large errors at the fundus come from the top, not from the path
-  shape. 1,619 of 15,123 inner columns find no top (censored). 985 of
-  them pass through label 0, because the stand-in top (smoothed label 0
-  above 0.5) misses thin outside medium.
+- The large errors at the fundus come from the direction of the rays. The
+  labels are close to correct there (user). Rays from the fundus floor pass
+  the slot tip and run up the wall's cortex at a shallow angle, so they
+  meet the outside late or not at all (*The failing stretch*). The
+  stand-in top adds to this: 1,619 of 15,123 inner columns find no top
+  with it, and 1,255 with the antialiased top.
 - On the fold phantoms the fit moves the columns by up to 0.19 mm. Where
   it moves a column most, it mostly moves it toward the true column, but
   the change in the median error is below 0.007 mm. The phantom errors
@@ -214,8 +216,10 @@ straight rays already, because of the painted labels. Drop 2 (columns
 12183700 / 12184198) stays in every arm. There, the first label 0 is at
 5.92 and 2.24 mm, but the soft tops are at 5.84 and 5.58 mm (straight)
 and 5.80 and 5.61 mm (B7). Column 12184198 passes through thin outside
-medium where smoothed label 0 is below 0.5. So the soft top, not the path
-shape, makes this drop.
+medium where smoothed label 0 is below 0.5. The antialiased top does not
+remove the drop (5.89 and 5.60 mm), but a lean of a fraction of a voxel
+does (the short bend, 5.59 and 2.22 mm). So the straight ray only grazes
+this medium: the path's direction makes this drop.
 
 ![The first outside along the section](figures/bent-columns/site_sawtooth.png)
 
@@ -365,12 +369,39 @@ except l1, which follows l1 by construction.
   cost, so its profile difference and censored count are partly what it
   optimised. Drop 2 and the far tops are not in its cost.
 - **What no probe fixes:** along the section, u from −2 to 0.7 mm, every
-  probe keeps far tops of 4–8 mm. These are the rays beside the slot end,
-  where label 0 stops below the dark band.
+  probe keeps far tops of 4–8 mm (*The failing stretch*).
 
 ![Probe tops along the section](figures/bent-columns/probe_section.png)
 
 ![Probe maps](figures/bent-columns/probe_maps.png)
+
+## The failing stretch (review)
+
+The rays on the section from u = −2 to 0.7 mm meet the outside at 4–8 mm
+or not at all, with every probe.
+
+**The labels are not the cause.** The user read the cuts: label 0 is very
+close to covering all the outside medium, and the few missing voxels would
+not change this result. There is no fused gap in the cuts that were drawn.
+
+**The direction of the rays is the candidate cause.** Roots on the fundus
+floor beside the slot tip send their rays past the tip and up through the
+cortex beside the wall. For the straight far-top probes:
+
+- The angle to the outside surface at the top has a median of 21° (p10–p90
+  13–27°), against 68° for the other probes.
+- The distance to label 0 at depths of 2–3.5 mm has a median of
+  0.32–0.40 mm.
+- The distance from WM falls by more than 0.3 mm after its peak in only
+  14 %, so most of them stay on one bank.
+
+The short bend's 99th-percentile shift is 0.18 mm, so it does not reach
+the wall. These were six places on the stretch, in cuts across the sulcus.
+The correct end of a column from these roots was not judged.
+
+![Cuts of the stretch, image only and with probes](figures/bent-columns/far_zoom.png)
+
+![Echo 2 along each probe of the section](figures/bent-columns/far_stack.png)
 
 ## Sparse depths (phase 6, step 5)
 
@@ -427,19 +458,18 @@ This is an analysis, not a measurement at scale.
     then interpolate the bend and refine.
   - Fewer evaluations: a warm start from the neighbouring block and a
     warp refit less often than each round.
-- **The real limit is not speed.** The fit does not change the columns
-  much, and the errors that remain are in the top. A faster fit of the
-  same model does not fix them.
+- **The real limit is not speed.** The full fit does not change the
+  columns much, and rays beside a slot tip point the wrong way by more than
+  the fit moves them. A faster fit of the same model does not fix them.
 
 ## What the results show and do not show
 
 **Show.**
 
 - With the stand-in soft top, an optimisation on these costs keeps the
-  columns almost straight at this fundus. The errors that the user saw
-  (the sawtooth, the long fundus rays) come from the labels and the top,
-  not from the path shape. Painting the labels removed one drop. The other
-  drop is a soft-top miss.
+  columns almost straight at this fundus. Painting the labels removed one
+  drop. The other drop and the long fundus rays come from the direction of
+  the rays, which graze the slot wall.
 - On the phantoms, the fit moves columns by up to 0.19 mm, mostly toward
   the truth where it moves them most, with almost no change of the
   median error.
@@ -460,8 +490,7 @@ This is an analysis, not a measurement at scale.
 - If the result holds at another site (phase 7 did not run).
 - Anything about the user's column design (a diffeomorphism refined from
   the probes' evidence). It was not built.
-- Why the rays beside the slot end (u from −2 to 0.7 mm) still meet the
-  outside at 4–8 mm with every probe.
+- Where a correct column from the roots beside the slot tip should end.
 
 ## Open checkpoints
 
