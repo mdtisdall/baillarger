@@ -250,10 +250,10 @@ and the label set (`label-set/1`, `baillarger.labels`):
 
 | Class | Code | Labels |
 |---|---|---|
-| `OUTSIDE` | 0 | 0 (outside, which includes fluid and excisions) |
+| `OUTSIDE` | 0 | 0 (outside: the medium, excisions, and the ventricles, the choroid plexus and CSF, which `wm-dseg/1` sets to 0) |
 | `WM` | 1 | The labels in the sidecar's `FilledLabels` |
 | `CORTEX` | 2 | The cortex label of the hemisphere: 42 (R) or 3 (L) |
-| `OTHER` | 3 | Every other label, for example the hippocampus (53, 17), the amygdala (54, 18) and the inferior lateral ventricle (44, 5) |
+| `OTHER` | 3 | Every other label, for example the hippocampus (53, 17) and the amygdala (54, 18) |
 | `OFF_GRID` | 4 | No label: the part of the ray outside the grid. Its label is −1 |
 
 The class of a label follows from `FilledLabels`. If a later phase adds a

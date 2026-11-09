@@ -387,11 +387,12 @@ def label_classes(
     label: npt.ArrayLike, filled: npt.ArrayLike, cortex: int
 ) -> npt.NDArray[np.uint8]:
     """The class of each label (docs/formats/ray-sampler.md, "The label
-    classes"): WM for the filled labels, CORTEX for cortex, OUTSIDE for 0,
+    classes"): WM for the filled labels, CORTEX for cortex, OUTSIDE for the
+    outside label (labels.OUTSIDE; the dseg has the ventricles there),
     OFF_GRID for OFF_GRID_LABEL, OTHER for every other label."""
     lab = np.asarray(label)
     out = np.full(lab.shape, OTHER, np.uint8)
-    out[lab == 0] = OUTSIDE
+    out[lab == L.OUTSIDE] = OUTSIDE
     out[lab == cortex] = CORTEX
     out[np.isin(lab, np.asarray(filled))] = WM
     out[lab == OFF_GRID_LABEL] = OFF_GRID

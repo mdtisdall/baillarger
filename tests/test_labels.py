@@ -53,6 +53,25 @@ def test_every_label_has_a_name_and_the_right_hemisphere() -> None:
 
 
 def test_the_ventricles_are_outside() -> None:
-    for hemi, (lv, cp) in (("R", (43, 63)), ("L", (4, 31))):
-        assert lv not in labels.FILLED_LABELS[hemi]
-        assert cp not in labels.FILLED_LABELS[hemi]
+    for hemi, (lv, ilv, cp) in (("R", (43, 44, 63)), ("L", (4, 5, 31))):
+        for v in (lv, ilv, cp):
+            assert v in labels.TO_OUTSIDE
+            assert v not in labels.FILLED_LABELS[hemi]
+            assert v not in labels.LUT_NAMES  # not a class of the set
+    assert 24 in labels.TO_OUTSIDE and labels.OUTSIDE == 0
+
+
+def test_doc_lists_the_labels_that_become_outside() -> None:
+    rows = {}
+    for line in DOC.read_text().splitlines():
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) == 3 and cells[1].isdigit() and cells[2].isdigit():
+            rows[cells[0]] = (int(cells[1]), int(cells[2]))
+    got = {v for pair in rows.values() for v in pair}
+    assert got == set(labels.TO_OUTSIDE)
+    assert set(rows) == {
+        "CSF",
+        "Lateral ventricle",
+        "Inferior lateral ventricle",
+        "Choroid plexus",
+    }

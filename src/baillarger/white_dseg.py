@@ -12,8 +12,10 @@ correction is made once, on the whole mask (baillarger.handles,
 remove_handles), because a box crop of a handle-free solid has planar surface
 pieces, while a box alone cannot tell a handle from a fold that closes outside
 it. wm_topo makes the corrected segmentation: the aseg's labels, with the
-mask's cavities and handle fills set to the WM label, each handle cut
-given the label of its nearest neighbour outside the mask, and each piece of
+labels of TO_OUTSIDE (the ventricles, the choroid plexus and CSF, which
+are outside in an isolated hemisphere) set to OUTSIDE, the mask's
+cavities and handle fills set to the WM label, each handle cut given the
+label of its nearest neighbour outside the mask, and each piece of
 the mask below CRUMB_MM3 given the labels of its neighbours outside the mask
 (small_pieces). Every later stage
 reads its labels from the corrected segmentation, never the aseg plus a list
@@ -67,6 +69,7 @@ from baillarger.handles import kuhn_betti, kuhn_structure, remove_handles
 from baillarger.labels import CRUMB_MM3 as CRUMB_MM3
 from baillarger.labels import FILLED_LABELS as FILLED_LABELS
 from baillarger.labels import LUT_NAMES as LUT_NAMES
+from baillarger.labels import OUTSIDE, TO_OUTSIDE
 from baillarger.labels import WM_LABEL as WM_LABEL
 from baillarger.timing import Laps, log_to_stderr
 from baillarger.wm_edits import Log, read_log, replay
@@ -93,6 +96,7 @@ DSEG_SPEC = SidecarSpec(
     COMMON_KEYS
     + (
         Key("Hemisphere", "string", True, "R or L"),
+        Key("ToOutside", "object", True, "input label set to outside: count"),
         Key("FilledLabels", "array of integers", True, "labels of the WM mask"),
         Key("WMLabel", "integer", True, "label given to cavity and handle fills"),
         Key("BettiBefore", "array of integers", True, "b0, b1, b2 of the mask"),
@@ -141,6 +145,21 @@ def hemisphere(labels: npt.ArrayLike) -> str:
             f"WM labels present for hemispheres {present}: need exactly one"
         )
     return present[0]
+
+
+def to_outside(
+    labels: npt.NDArray[np.integer[Any]],
+) -> tuple[npt.NDArray[np.integer[Any]], dict[int, int]]:
+    """labels with each voxel of a label in TO_OUTSIDE set to OUTSIDE (a new
+    array if a voxel changes, else labels itself), and the number of voxels
+    set, by input label (only the labels that are present)."""
+    m = np.isin(labels, TO_OUTSIDE)
+    if not m.any():
+        return labels, {}
+    old, cnt = np.unique(labels[m], return_counts=True)
+    out = labels.copy()
+    out[m] = OUTSIDE
+    return out, {int(k): int(c) for k, c in zip(old, cnt, strict=True)}
 
 
 def cavities(obj: Bool) -> Bool:
@@ -287,6 +306,8 @@ class WMTopo:
     diff: npt.NDArray[np.void] = field(default_factory=lambda: np.zeros(0, DIFF_DTYPE))
     #: the fixes, by id (1, 2, ...): the voxels that each changed last
     fix_list: list[Fix] = field(default_factory=list)
+    #: input label: count, for the voxels set to OUTSIDE (to_outside)
+    to_outside: dict[int, int] = field(default_factory=dict)
 
 
 def wm_topo(
@@ -294,7 +315,8 @@ def wm_topo(
 ) -> WMTopo:
     """The corrected segmentation of an aseg: the site answers of the log
     replayed first (baillarger.wm_edits.replay: in log order, each writes its
-    voxels over the labels; scribbles are not applied), then the mask of its
+    voxels over the labels; scribbles are not applied), then the labels of
+    TO_OUTSIDE set to OUTSIDE (to_outside), then the mask of its
     FILLED_LABELS,
     with its cavities filled and its handles removed
     (baillarger.handles.remove_handles). Cavity and handle fills become the
@@ -322,6 +344,8 @@ def wm_topo(
         flat_in, flat0 = a_in.reshape(-1), a0.reshape(-1)
         manual.reshape(-1)[ver_idx] = flat0[ver_idx] != flat_in[ver_idx]
         lap("answers")
+    a0, outside = to_outside(a0)
+    lap("to outside")
     hemi = hemisphere(a0)
     filled, wm_label = FILLED_LABELS[hemi], WM_LABEL[hemi]
     m = np.isin(a0, filled)
@@ -501,6 +525,7 @@ def wm_topo(
         n_small,
         diff,
         fix_list,
+        outside,
     )
 
 
@@ -572,11 +597,14 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
         DSEG_SPEC,
         dict(
             SpecVersion=DSEG_SPEC.version,
-            Description="The segmentation with its WM mask (FilledLabels) made "
-            f"cavity- and handle-free, without pieces below {CRUMB_MM3:g} mm3.",
+            Description="The segmentation with the ventricles, the choroid "
+            "plexus and CSF set to outside (ToOutside), and its WM mask "
+            "(FilledLabels) made cavity- and handle-free, without pieces below "
+            f"{CRUMB_MM3:g} mm3.",
             **src,
             Provenance=prov,
             Hemisphere=t.hemi,
+            ToOutside={str(k): v for k, v in t.to_outside.items()},
             FilledLabels=list(FILLED_LABELS[t.hemi]),
             WMLabel=WM_LABEL[t.hemi],
             BettiBefore=list(t.betti_before),
@@ -645,12 +673,12 @@ def replay_dseg(
     aseg: npt.ArrayLike, diff: npt.NDArray[np.void], log: Log | None = None
 ) -> npt.NDArray[Any]:
     """desc-wmtopo rebuilt from the input labels, the site answers of the log
-    (baillarger.wm_edits.replay) and the fix diff
-    (baillarger.fix_diff.apply_diff), with no correction run."""
+    (baillarger.wm_edits.replay), the labels set to outside (to_outside) and
+    the fix diff (baillarger.fix_diff.apply_diff), with no correction run."""
     a = np.asarray(aseg)
     if log is not None:
         a = replay(a, log).labels
-    return apply_diff(a, diff)
+    return apply_diff(to_outside(a)[0], diff)
 
 
 def filled_labels(dseg: Path) -> tuple[int, ...]:

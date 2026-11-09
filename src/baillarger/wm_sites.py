@@ -64,6 +64,7 @@ from baillarger.bids import (
 from baillarger.blocks import open_volume
 from baillarger.decimate import CHUNK, normals
 from baillarger.fix_diff import fix_voxels, overlap, read_diff, read_table, same_fix
+from baillarger.labels import OUTSIDE, TO_OUTSIDE
 from baillarger.timing import log_to_stderr
 from baillarger.white_dseg import DSEG_SPEC, history_dir
 from baillarger.white_surf import SURF_SPEC, WhiteSurface
@@ -79,10 +80,10 @@ TISSUE = 3  # voxels (a cube): labels outside the mask that name its tissue
 CONTACT = 4  # voxels (a cube): the window of the piece counts
 CORE = 2  # voxels (a cube): where thickness and gap are read
 CORTEX = (3, 42)  # FreeSurfer LUT: left and right cerebral cortex
-#: background, CSF, and the ventricles and the choroid plexus (left: 4, 5, 31;
-#: right: 43, 44, 63). label-set/1 puts the ventricles outside the WM mask:
-#: ex vivo they hold outside medium.
-FLUID = (0, 24, 4, 5, 31, 43, 44, 63)
+#: outside (0) and the labels that the dseg step sets to outside (TO_OUTSIDE:
+#: CSF, the ventricles and the choroid plexus), which a dseg written before
+#: that step can still hold. Ex vivo they hold outside medium.
+FLUID = (OUTSIDE, *TO_OUTSIDE)
 TISSUES = ("grey matter", "mixed", "fluid", "other")
 FIX_KINDS = ("cut", "fill", "cavity")  # codes 1, 2, 3 of desc-wmtopofixes
 

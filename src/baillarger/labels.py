@@ -6,8 +6,18 @@ Values follow FreeSurferColorLUT. A label has one value for each hemisphere
 
 VERSION = "label-set/1"
 
+#: the one label of outside: the medium round the specimen, excisions and,
+#: ex vivo, the ventricles (docs/formats/label-set.md, "The labels that
+#: become outside")
 OUTSIDE = 0
 CC = 192
+
+#: FreeSurferColorLUT labels that inherited labels (the purple-mri aseg) can
+#: hold, and that are outside in an isolated hemisphere: CSF (24), the lateral
+#: ventricle (4, 43), the inferior lateral ventricle (5, 44) and the choroid
+#: plexus (31, 63). They are not classes of the set: the dseg step
+#: (baillarger.white_dseg) sets them to OUTSIDE.
+TO_OUTSIDE = (4, 5, 24, 31, 43, 44, 63)
 
 #: the class of the white matter, of the cortex and of the hippocampus
 WM_LABEL = {"R": 41, "L": 2}
@@ -16,8 +26,7 @@ HIPPOCAMPUS_LABEL = {"R": 53, "L": 17}
 
 #: the labels filled into the WM mask, by hemisphere: WM, thalamus, caudate,
 #: putamen, pallidum, corpus callosum, accumbens, ventral DC and vessel. The
-#: lateral ventricle, the choroid plexus, the inferior lateral ventricle and
-#: the amygdala are outside. The hippocampus is open (phase 1.8).
+#: amygdala is not filled. The hippocampus is open (phase 1.8).
 FILLED_LABELS = {
     "R": (41, 49, 50, 51, 52, 58, 60, 62, 192),
     "L": (2, 10, 11, 12, 13, 26, 28, 30, 192),
@@ -28,8 +37,6 @@ LUT_NAMES = {
     0: "Unknown",
     2: "Left-Cerebral-White-Matter",
     3: "Left-Cerebral-Cortex",
-    4: "Left-Lateral-Ventricle",
-    5: "Left-Inf-Lat-Vent",
     10: "Left-Thalamus",
     11: "Left-Caudate",
     12: "Left-Putamen",
@@ -39,11 +46,8 @@ LUT_NAMES = {
     26: "Left-Accumbens-area",
     28: "Left-VentralDC",
     30: "Left-vessel",
-    31: "Left-choroid-plexus",
     41: "Right-Cerebral-White-Matter",
     42: "Right-Cerebral-Cortex",
-    43: "Right-Lateral-Ventricle",
-    44: "Right-Inf-Lat-Vent",
     49: "Right-Thalamus",
     50: "Right-Caudate",
     51: "Right-Putamen",
@@ -53,7 +57,6 @@ LUT_NAMES = {
     58: "Right-Accumbens-area",
     60: "Right-VentralDC",
     62: "Right-vessel",
-    63: "Right-choroid-plexus",
     192: "Corpus_Callosum",
 }
 
