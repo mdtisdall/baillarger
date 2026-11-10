@@ -22,6 +22,10 @@ the sites use no confidence threshold (group_columns):
    (its seed). With more than one such site, it joins the site with the
    earliest seed.
 3. Otherwise, the column starts a new site and is its seed.
+4. Touching lows merge: each other site that the column touches, with a
+   later seed, merges into the column's site if all its columns are within
+   radius mm of the column's site's seed. The merged site keeps that seed,
+   the lowest of the seeds.
 
 Each column is in exactly one site. The sites are in the order of their
 seeds. A site's score is its seed's confidence, and its voxel is its seed's
@@ -196,21 +200,38 @@ def group_columns(order: Int, edges: Int, pos: Float, radius: float) -> Grouping
     ptr, nbr = A.indptr, A.indices
     site = np.full(n, -1, np.int64)
     seeds: list[int] = []
+    members: list[list[int]] = []
     r2 = radius * radius
     for c in order.tolist():
+        near = sorted({int(site[q]) for q in nbr[ptr[c] : ptr[c + 1]].tolist()} - {-1})
         best = -1
-        for q in nbr[ptr[c] : ptr[c + 1]].tolist():
-            s = int(site[q])
-            if s < 0 or (best >= 0 and s >= best):
-                continue
+        for s in near:
             d = pos[c] - pos[seeds[s]]
             if float(d @ d) <= r2:
                 best = s
+                break
         if best < 0:
             best = len(seeds)
             seeds.append(c)
+            members.append([])
         site[c] = best
-    return Grouping(site, np.array(seeds, np.int64))
+        members[best].append(c)
+        # a touching site with a later seed merges, if all its columns are
+        # within the radius of this site's seed
+        p0 = pos[seeds[best]]
+        for s in near:
+            if s <= best or not members[s]:
+                continue
+            m = members[s]
+            d2 = ((pos[m] - p0) ** 2).sum(1)
+            if float(d2.max()) <= r2:
+                site[m] = best
+                members[best].extend(m)
+                members[s] = []
+    kept = np.array([s for s in range(len(seeds)) if members[s]], np.int64)
+    new = np.full(len(seeds), -1, np.int64)
+    new[kept] = np.arange(len(kept))
+    return Grouping(new[site], np.array(seeds, np.int64)[kept])
 
 
 def column_causes(top_k: npt.ArrayLike, terms: npt.ArrayLike, names: Any) -> Int:

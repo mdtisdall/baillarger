@@ -43,10 +43,42 @@ def test_grouping_on_a_chain_as_computed_by_hand() -> None:
     order = np.array([3, 0, 1, 2, 4, 5, 6, 7])
     g = C.group_columns(order, edges, pos, 2.5)
     # 3 seeds site 0; 0 seeds site 1; 1 joins 0's site; 2 touches both sites
-    # and joins the earlier seed (3); 4 and 5 are within 2.5 mm of 3; 6 is
-    # 3 mm from 3 and seeds site 2; 7 joins it.
+    # and joins the earlier seed (3). The sites do not merge: column 0 is 3 mm
+    # from seed 3. 4 and 5 are within 2.5 mm of 3; 6 is 3 mm from 3 and seeds
+    # site 2; 7 joins it.
     assert g.seeds.tolist() == [3, 0, 6]
     assert g.site.tolist() == [1, 1, 0, 0, 0, 0, 2, 2]
+
+
+def test_touching_lows_merge_into_one_site() -> None:
+    pos, edges = chain(5)
+    # lows at 1 and 3 (in that order); 2 touches both
+    g = C.group_columns(np.array([1, 3, 0, 2, 4]), edges, pos, 2.5)
+    # 1 seeds site 0, 3 seeds site 1, 0 joins site 0. 2 joins site 0 (seed 1,
+    # the earlier seed); site 1 (column 3, 2 mm from seed 1) merges into it.
+    # 4 is 3 mm from seed 1 and seeds a new site.
+    assert g.seeds.tolist() == [1, 4]
+    assert g.site.tolist() == [0, 0, 0, 0, 1]
+
+
+def test_a_chain_of_lows_longer_than_the_radius_still_splits() -> None:
+    pos, edges = chain(9)
+    order = np.array([0, 2, 4, 6, 8, 1, 3, 5, 7])  # lows at the even columns
+    g = C.group_columns(order, edges, pos, 2.0)
+    # 1 joins seed 0 and the site of 2 merges into it. 3 is 3 mm from seed 0,
+    # so it joins seed 4. 5 joins seed 4 and the site of 6 merges into it.
+    # 7 is 3 mm from seed 4, so it joins seed 8.
+    assert g.seeds.tolist() == [0, 4, 8]
+    assert g.site.tolist() == [0, 0, 0, 1, 1, 1, 1, 2, 2]
+
+
+def test_a_site_merges_only_if_all_its_columns_stay_within_the_radius() -> None:
+    pos, edges = chain(5)
+    # 1 seeds site 0; 3 seeds site 1 and takes 4; 0 joins site 0. 2 joins
+    # site 0, but column 4 is 3 mm from seed 1: site 1 does not merge.
+    g = C.group_columns(np.array([1, 3, 4, 0, 2]), edges, pos, 2.5)
+    assert g.seeds.tolist() == [1, 3]
+    assert g.site.tolist() == [0, 0, 0, 1, 1]
 
 
 def test_a_chain_longer_than_the_radius_gives_more_sites() -> None:

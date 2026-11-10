@@ -48,8 +48,12 @@ for `n/a`). The session records the SHA-256 of this table as its
    of that site's first column, its seed. With more than one such site, it
    joins the site with the earliest seed.
 3. Otherwise, the column starts a new site and is its seed.
+4. Lows that touch merge. Each other site that the column touches, with a
+   later seed than the column's site, merges into the column's site if all
+   its columns are within `RadiusMm` of the column's site's seed. The merged
+   site keeps that seed, the lowest of the seeds.
 
-So each site is connected on the column graph, and all its columns are
+There is no confidence threshold. So each site is connected on the column graph, and all its columns are
 within `RadiusMm` of its seed. `RadiusMm` is the size of one review view,
 not a measure of correctness. The default is 2 mm.
 
