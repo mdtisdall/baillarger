@@ -162,11 +162,21 @@ Waves:
 2. Wave 2: the joins, one at a time, because they share `review.py`, `review.js` and
    `index.html`. Order: 1 + 2, 3, 4a, 4b, 5.
 
+Who does the work:
+
+- One coordinator session holds this plan. It starts one sub-session for each top-level
+  task (a core, then a join), at the same time where the waves allow. It keeps the plan
+  and the contracts current, reviews each sub-session's PR, and asks the user to merge.
+- Each sub-session owns its task: its branch, its worktree, its own steps, and its own
+  sub-agents (the `parallel-agents` skill: each sub-agent owns different files). It
+  reports its PR to the coordinator.
+- A sub-session that needs a change to a contract asks the coordinator. The coordinator
+  changes the plan first, then tells the other sub-sessions that use the contract.
+
 Rules:
 
 - One part, one branch, one PR (CLAUDE.md). Parts that run at the same time each have
-  their own worktree, best in their own session. Sub-agents work inside one part, and
-  each sub-agent owns different files (the `parallel-agents` skill).
+  their own worktree.
 - A core's PR can merge before its join. Then the join's PR is small.
 - Heavy runs (more than a few GB) stay one at a time, under `scripts/memguard`: the
   hemisphere checks of 4b and the full regeneration of 5 (about 22 GB). Agents can write
