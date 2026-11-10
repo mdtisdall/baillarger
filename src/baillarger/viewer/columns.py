@@ -796,15 +796,19 @@ def dseg_for(surf: Path, sidecar: dict[str, Any]) -> Path:
     return here if here.exists() else Path(sidecar["Sources"][0])
 
 
+def echo_file(k: int, directory: Path) -> Path:
+    """Echo k in a directory: the decompressed .nii if it is there, else the
+    .nii.gz (baillarger.data.echo_path names)."""
+    from baillarger.data import echo_path
+
+    gz = echo_path(k, directory)
+    nii = gz.with_suffix("")
+    return nii if nii.exists() else gz
+
+
 def echo_files(directory: Path) -> list[Path]:
     """Echoes 1 to 3 in a directory: the decompressed .nii if it is there,
     else the .nii.gz (baillarger.data.echo_path names). None if one is
     missing: then the pane has no profiles."""
-    from baillarger.data import echo_path
-
-    out = []
-    for k in (1, 2, 3):
-        gz = echo_path(k, directory)
-        nii = gz.with_suffix("")
-        out.append(nii if nii.exists() else gz)
+    out = [echo_file(k, directory) for k in (1, 2, 3)]
     return out if all(p.exists() for p in out) else []

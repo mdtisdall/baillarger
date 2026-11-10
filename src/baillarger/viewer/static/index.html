@@ -48,6 +48,8 @@
       <label title="the volume viewer: NiiVue, or our own (the volume as bricks at levels of detail; slices only for now)">viewer
         <select id="vengine"><option value="niivue">NiiVue</option><option value="bricks">bricks (ours)</option></select></label>
       <button id="vfit" style="display:none" title="the whole volume in each slice">fit</button>
+      <label id="bvecho" style="display:none" title="the background image: echo 1, 2 or 3 (each its own pyramid, built on the server the first time)">echo
+        <select id="bvechosel"></select></label>
       <label>view <select id="vview"><option value="multi">orthogonal + 3D</option><option value="ax">axial</option>
         <option value="cor">coronal</option><option value="sag">sagittal</option><option value="render">3D</option></select></label>
       <label><input type="checkbox" id="vwhite" checked> white</label>
@@ -136,7 +138,7 @@ async function setSelection(sel, frame, how) {
     if (!inBox(sel.voxel)) await loadWhiteBox(sel.voxel);
     CROSS = sel.world_mm; moveVolumeCrosshair(sel.world_mm);
   }
-  showSelectionMarker();
+  showSelectionMarker(); if (BV.on) bvDraw();
   $("info").textContent = !sel ? OVTXT : `WM selection: true vertex ${sel.true_vertex} (overview vertex ${sel.vertex}) at (${sel.world_mm}) mm`;
   draw3d();
   vHook("selection", sel, frame, how);
@@ -152,6 +154,7 @@ async function goTo(text) {
   if (!/^\d+$/.test(t)) { log(`go to vertex: ${JSON.stringify(t)} is not a true vertex number`); return; }
   let sel; try { sel = await get(`/vertex/true?v=${t}`); } catch (e) { return; }   // get() logs the error
   turnTo(sel.vertex);
+  if (BV.on) crossHere(sel.world_mm);   // the slices through it (NiiVue's crosshair follows every selection)
   await selectHere(sel, screenFrame());
   log(`go to vertex: true vertex ${sel.true_vertex} (overview vertex ${sel.vertex})`);
 }
@@ -463,31 +466,17 @@ async function initBricks() {
   if ($("vview").value === "render") $("vview").value = "multi";
   $("vhelp").textContent = "click: crosshair · shift-click: WM selection to the nearest white-surface point · pinch or ctrl-wheel: zoom at the cursor · two-finger scroll or middle-drag: pan · ↑ ↓: next slice under the pointer (page up / down: 10)";
   const t0 = performance.now();
-  $("vstat").textContent = "reading the volume (the first time: its levels are built on the server)…";
-  const M = BV.M = await get("/volume/meta"), nl = BV.nl = M.levels.length, B = M.brick;
-  $("vtitle").textContent = `Volume: ${M.name}, ${nl} levels of ${B}³ bricks (ours, world mm)`;
-  BV.inv = M.levels.map(lv => affInv(lv.affine)); BV.f32 = M.dtype === "float32"; BV.win = M.window;
-  const A = M.levels[0].affine, sh = M.levels[0].shape;
-  BV.vs0 = Math.min(...[0, 1, 2].map(k => Math.hypot(A[0][k], A[1][k], A[2][k])));   // the finest voxel spacing, mm
-  BV.step = [0, 1, 2].map(n => 1 / Math.max(...[0, 1, 2].map(k => Math.abs(BV.inv[0][k][n]))));   // a move along world axis n that changes a voxel index by one
-  BV.lo = [Infinity, Infinity, Infinity]; BV.hi = [-Infinity, -Infinity, -Infinity];   // the world box of the voxels' extent
-  for (let m = 0; m < 8; m++) { const w = affApply(A, [0, 1, 2].map(k => (m >> k) & 1 ? sh[k] - 0.5 : -0.5));
-    for (let k = 0; k < 3; k++) { BV.lo[k] = Math.min(BV.lo[k], w[k]); BV.hi[k] = Math.max(BV.hi[k], w[k]); } }
   const c = $("bv"), g = BV.g = c.getContext("webgl2", { antialias: false }); if (!g) { log("no WebGL2"); return; }
-  BV.prog = program(g, BVVS, BVFS(BV.f32 ? "sampler3D" : "isampler3D"));
-  // the page table: per level, a slot + 1 per brick (0: not loaded), the levels one after another along z
-  const grid = M.levels.map(lv => lv.shape.map(n => Math.ceil(n / B)));
-  BV.gx = grid[0][0]; BV.gy = grid[0][1]; BV.pz = []; let z = 0; for (const gr of grid) { BV.pz.push(z); z += gr[2]; }
-  BV.pages = new Uint32Array(BV.gx * BV.gy * z);
-  BV.ptex = g.createTexture(); g.bindTexture(g.TEXTURE_3D, BV.ptex); g.texStorage3D(g.TEXTURE_3D, 1, g.R32UI, BV.gx, BV.gy, z);
-  for (const p of [g.TEXTURE_MIN_FILTER, g.TEXTURE_MAG_FILTER]) g.texParameteri(g.TEXTURE_3D, p, g.NEAREST);
-  // the atlas: as many slots of B³ as ATLAS_BYTES holds, within the 3D texture size limit
-  const mx = g.getParameter(g.MAX_3D_TEXTURE_SIZE), side = Math.min(512, mx), bpv = BV.f32 ? 4 : 2;
-  BV.sx = BV.sy = Math.floor(side / B); BV.sz = Math.max(1, Math.floor(Math.min(mx, ATLAS_BYTES / bpv / (BV.sx * B) ** 2) / B));
-  BV.nslots = BV.sx * BV.sy * BV.sz; BV.free = Array.from({ length: BV.nslots }, (_, k) => BV.nslots - 1 - k);
-  BV.atlas = g.createTexture(); g.bindTexture(g.TEXTURE_3D, BV.atlas);
-  g.texStorage3D(g.TEXTURE_3D, 1, BV.f32 ? g.R32F : g.R16I, BV.sx * B, BV.sy * B, BV.sz * B);
-  for (const p of [g.TEXTURE_MIN_FILTER, g.TEXTURE_MAG_FILTER]) g.texParameteri(g.TEXTURE_3D, p, g.NEAREST);
+  // the echo choice: the image volumes echo1 to echo3 of /volume/list; "echo" (the default volume) is offered only when no
+  // echo k is a second name of it (an --echo of another file)
+  let vols = []; try { vols = await get("/volume/list"); } catch (e) { /* no registry: the default volume only */ }
+  const echoes = vols.filter(v => v.kind === "image" && /^echo\d$/.test(v.name));
+  const dflt = echoes.find(v => v.same_as === "echo");
+  const opts = (dflt || !vols.some(v => v.name === "echo") ? [] : [["echo", "--echo"]]).concat(echoes.map(v => [v.name, v.name.slice(4)]));
+  for (const [v, t] of opts) { const o = document.createElement("option"); o.value = v; o.textContent = t; $("bvechosel").appendChild(o); }
+  if (opts.length) { $("bvecho").style.display = ""; $("bvechosel").value = dflt ? dflt.name : opts[0][0]; }
+  $("bvechosel").onchange = async () => { await bvSource($("bvechosel").value); bvUpdate(); };
+  await bvSource(opts.length ? $("bvechosel").value : null);
   g.pixelStorei(g.UNPACK_ALIGNMENT, 1);
   if (!CROSS) CROSS = [0, 1, 2].map(k => (BV.lo[k] + BV.hi[k]) / 2);
   bvEvents(); bvFit();
@@ -495,7 +484,43 @@ async function initBricks() {
   window.BVAPI = { BV, $, get, log, share, crossHere, program, affInv, affApply, VS: BVVS, px2w: bvPx2W, w2px: bvW2Px, draw: bvDraw,
                    update: bvUpdate, get cross() { return CROSS; } };
   for (const p of BVP) if (p.init) try { await p.init(window.BVAPI); } catch (e) { log(`init: ${e.message}`); }
-  log(`volume pane (ours) ready: ${M.name}, level 0 ${sh.join(" × ")}, atlas ${BV.nslots} bricks (${(performance.now() - t0) / 1000 | 0} s)`);
+  log(`volume pane (ours) ready: ${BV.M.name}, level 0 ${BV.M.levels[0].shape.join(" × ")}, atlas ${BV.nslots} bricks (${(performance.now() - t0) / 1000 | 0} s)`);
+}
+// the background image: named volume `name` (/volume/<name>/...), or the default volume (/volume/...) for null. Its meta,
+// a new page table and atlas (the old bricks are dropped: a load of the old image that comes back later is ignored)
+async function bvSource(name) {
+  const t0 = performance.now(), base = name ? `/volume/${name}` : "/volume";
+  $("vstat").textContent = `reading ${name || "the volume"} (the first time: its levels are built on the server)…`;
+  const M = await get(`${base}/meta`), nl = M.levels.length, B = M.brick, g = BV.g;
+  BV.gen = (BV.gen || 0) + 1; BV.base = base; BV.M = M; BV.nl = nl;
+  $("vtitle").textContent = `Volume: ${M.name}, ${nl} levels of ${B}³ bricks (ours, world mm)`;
+  BV.inv = M.levels.map(lv => affInv(lv.affine)); BV.win = M.window;
+  const A = M.levels[0].affine, sh = M.levels[0].shape;
+  BV.vs0 = Math.min(...[0, 1, 2].map(k => Math.hypot(A[0][k], A[1][k], A[2][k])));   // the finest voxel spacing, mm
+  BV.step = [0, 1, 2].map(n => 1 / Math.max(...[0, 1, 2].map(k => Math.abs(BV.inv[0][k][n]))));   // a move along world axis n that changes a voxel index by one
+  BV.lo = [Infinity, Infinity, Infinity]; BV.hi = [-Infinity, -Infinity, -Infinity];   // the world box of the voxels' extent
+  for (let m = 0; m < 8; m++) { const w = affApply(A, [0, 1, 2].map(k => (m >> k) & 1 ? sh[k] - 0.5 : -0.5));
+    for (let k = 0; k < 3; k++) { BV.lo[k] = Math.min(BV.lo[k], w[k]); BV.hi[k] = Math.max(BV.hi[k], w[k]); } }
+  const f32 = M.dtype === "float32";
+  if (!BV.prog || BV.f32 !== f32) { if (BV.prog) g.deleteProgram(BV.prog); BV.prog = program(g, BVVS, BVFS(f32 ? "sampler3D" : "isampler3D")); }
+  BV.f32 = f32;
+  if (BV.ptex) g.deleteTexture(BV.ptex); if (BV.atlas) g.deleteTexture(BV.atlas);
+  // the page table: per level, a slot + 1 per brick (0: not loaded), the levels one after another along z
+  const grid = M.levels.map(lv => lv.shape.map(n => Math.ceil(n / B)));
+  BV.gx = grid[0][0]; BV.gy = grid[0][1]; BV.pz = []; let z = 0; for (const gr of grid) { BV.pz.push(z); z += gr[2]; }
+  BV.pages = new Uint32Array(BV.gx * BV.gy * z);
+  BV.ptex = g.createTexture(); g.bindTexture(g.TEXTURE_3D, BV.ptex); g.texStorage3D(g.TEXTURE_3D, 1, g.R32UI, BV.gx, BV.gy, z);
+  for (const p of [g.TEXTURE_MIN_FILTER, g.TEXTURE_MAG_FILTER]) g.texParameteri(g.TEXTURE_3D, p, g.NEAREST);
+  g.texSubImage3D(g.TEXTURE_3D, 0, 0, 0, 0, BV.gx, BV.gy, z, g.RED_INTEGER, g.UNSIGNED_INT, BV.pages);
+  // the atlas: as many slots of B³ as ATLAS_BYTES holds, within the 3D texture size limit
+  const mx = g.getParameter(g.MAX_3D_TEXTURE_SIZE), side = Math.min(512, mx), bpv = f32 ? 4 : 2;
+  BV.sx = BV.sy = Math.floor(side / B); BV.sz = Math.max(1, Math.floor(Math.min(mx, ATLAS_BYTES / bpv / (BV.sx * B) ** 2) / B));
+  BV.nslots = BV.sx * BV.sy * BV.sz; BV.free = Array.from({ length: BV.nslots }, (_, k) => BV.nslots - 1 - k);
+  BV.atlas = g.createTexture(); g.bindTexture(g.TEXTURE_3D, BV.atlas);
+  g.texStorage3D(g.TEXTURE_3D, 1, f32 ? g.R32F : g.R16I, BV.sx * B, BV.sy * B, BV.sz * B);
+  for (const p of [g.TEXTURE_MIN_FILTER, g.TEXTURE_MAG_FILTER]) g.texParameteri(g.TEXTURE_3D, p, g.NEAREST);
+  BV.cache = new Map(); BV.pending = new Set(); BV.inflight = 0;
+  if (name) log(`volume pane: ${name} (${M.name}, ${((performance.now() - t0) / 1000).toFixed(1)} s)`);
 }
 // the tiles of the view (CSS px in the canvas): one slice, or axial, coronal and sagittal in a 2 x 2 grid (the fourth: 3D, later)
 function bvLayout() {
@@ -548,8 +573,9 @@ function bvFetch() {
     if (!miss.length) break;
     const L = Math.max(...miss.map(m => m[0])), batch = miss.filter(m => m[0] === L).slice(0, BATCH);   // coarse levels first
     const keys = batch.map(m => bkey(L, m.slice(1)));
-    for (const k of keys) BV.pending.add(k); BV.inflight++;
-    bvLoad(L, batch.map(m => m.slice(1)), keys).finally(() => { BV.inflight--; for (const k of keys) BV.pending.delete(k); bvFetch(); bvStat(); });
+    for (const k of keys) BV.pending.add(k); BV.inflight++; const gen = BV.gen;
+    bvLoad(L, batch.map(m => m.slice(1)), keys, gen).finally(() => { if (gen !== BV.gen) return;
+      BV.inflight--; for (const k of keys) BV.pending.delete(k); bvFetch(); bvStat(); });
   }
   bvStat();
 }
@@ -562,11 +588,12 @@ function bvAlloc(key) {
   if (s === undefined) return -1;
   BV.cache.set(key, s); return s;
 }
-async function bvLoad(L, bs, keys) {
+async function bvLoad(L, bs, keys, gen) {
   let buf;
-  try { const r = await fetch(`/volume/bricks?level=${L}&b=${bs.map(b => b.join(",")).join(";")}`);
+  try { const r = await fetch(`${BV.base}/bricks?level=${L}&b=${bs.map(b => b.join(",")).join(";")}`);
         if (!r.ok) throw new Error(`${r.status} ${await r.text()}`); buf = await r.arrayBuffer(); }
   catch (e) { log("bricks: " + e.message, true); return; }
+  if (gen !== BV.gen) return;   // another image since the request
   const g = BV.g, B = BV.M.brick, sh = BV.M.levels[L].shape, T = BV.f32 ? Float32Array : Int16Array; let o = 0;
   g.bindTexture(g.TEXTURE_3D, BV.atlas);
   bs.forEach((b, m) => {
@@ -614,6 +641,7 @@ function bvOverlay(o, dpr, W, H) {
     g.save(); g.beginPath(); g.rect(t.x, t.y, t.w, t.h); g.clip(); g.translate(t.x, t.y);
     const [px, py] = bvW2Px(t, CROSS);
     bvHook("draw2d", g, t);
+    bvSelMarker(g, t);
     g.strokeStyle = "rgba(255, 51, 204, 0.9)"; g.lineWidth = 1; g.beginPath();
     g.moveTo(0, py + 0.5); g.lineTo(t.w, py + 0.5); g.moveTo(px + 0.5, 0); g.lineTo(px + 0.5, t.h); g.stroke();
     g.fillStyle = "#c8ccd2"; g.textAlign = "left"; g.fillText(SIDE[t.r][0], 4, t.h / 2); g.textAlign = "right"; g.fillText(SIDE[t.r][1], t.w - 4, t.h / 2);
@@ -625,6 +653,21 @@ function bvOverlay(o, dpr, W, H) {
   }
   if (BV.tiles.length === 3) { const t = BV.tiles[1]; g.fillStyle = "#6a7078"; g.textAlign = "center";
     g.fillText("3D: NiiVue for now", t.x + t.w / 2, BV.tiles[2].y + t.h / 2); }
+}
+// the WM selection on a tile (the 3D pane's colour): a ring and a dot when it is in the slice (within half a voxel of it),
+// a dashed ring where it projects onto the slice when it is not, with its distance
+function bvSelMarker(g, t) {
+  if (!SELN) return; const w = SELN.world_mm, [x, y] = bvW2Px(t, w), d = w[t.n] - CROSS[t.n];
+  if (x < -8 || y < -8 || x > t.w + 8 || y > t.h + 8) return;
+  const on = Math.abs(d) <= BV.step[t.n] / 2;
+  g.save(); if (!on) g.setLineDash([4, 3]);
+  // a dark halo under the ring, so that it shows on bright tissue too
+  for (const [col, lw] of [["rgba(0, 0, 0, 0.8)", 4.5], ["rgb(51, 255, 255)", 2]]) {
+    g.strokeStyle = col; g.lineWidth = lw; g.beginPath(); g.arc(x, y, 7, 0, 2 * Math.PI); g.stroke(); }
+  if (on) { g.fillStyle = "rgb(51, 255, 255)"; g.beginPath(); g.arc(x, y, 1.75, 0, 2 * Math.PI); g.fill(); }
+  else { const txt = `${d > 0 ? "+" : ""}${d.toFixed(2)} mm`; g.textAlign = "left"; g.lineWidth = 3; g.strokeStyle = "rgba(0, 0, 0, 0.8)";
+    g.setLineDash([]); g.strokeText(txt, x + 10, y - 8); g.fillStyle = "rgb(51, 255, 255)"; g.fillText(txt, x + 10, y - 8); }
+  g.restore();
 }
 function bvStat() {
   if (!BV.M) return; const v = bvVox(0, CROSS).map(x => Math.round(x)), n = BV.pending.size;

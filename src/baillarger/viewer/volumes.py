@@ -1,11 +1,13 @@
 """Named volumes for the brick pane: a registry of brick pyramids
-(baillarger.viewer.bricks) by name, each an image (the echo: block means) or a label
-image (the segmentation, the fixes image: block modes), with the colour table of each
-label image.
+(baillarger.viewer.bricks) by name, each an image (the echoes: block means) or a label
+image (the segmentation, the WM mask, the fixes image: block modes), with the colour
+table of each label image.
 
 Routes (served in every mode that has the registry; see route):
 - /volume/list: the names, their kinds ("image" or "labels"), the dtype on disk and
-  the wire dtype (null until the pyramid is built), and the colour table's name.
+  the wire dtype (null until the pyramid is built), and the colour table's name. A
+  name that is a second name of another volume (the same pyramid) also has
+  `same_as`: the other name.
 - /volume/<name>/meta: the pyramid's meta (bricks.meta), with the kind and, for a
   label image, its colour table {value: {name, rgba}}. The pyramid is built on the
   first call.
@@ -17,18 +19,25 @@ two builds never hold their temporaries at the same time.
 
 With --white, the segmentation is the first entry of the white surface's `Sources`
 (white-surf/1), and the fixes image is its `desc-wmtopofixes` neighbour (wm-dseg/1).
+The WM mask ("wm") is 1 where the segmentation holds one of the surface's
+`FilledLabels` (the region whose boundary the surface is), else 0. With the fixes
+image over it, it shows what the old NiiVue overlay showed: the WM mask, the handle
+cuts, the handle fills and the cavity fills. The echoes "echo1" to "echo3" are the
+files of baillarger.viewer.columns.echo_files' rule in --echo-dir (the .nii, else
+the .nii.gz); the one that is the default volume ("echo") is a second name of it.
 When a source path is not a file (the derivatives were moved), the file of the same
 name next to the surface is used. --dseg and --fixes give other paths.
 
 Colours: the labels of label-set/1 take their FreeSurferColorLUT colours
-(LABEL_RGB). The fixes image takes FIX_RGB (our own: FreeSurfer has no such image).
+(LABEL_RGB). The fixes image takes FIX_RGB and the WM mask WM_RGB (our own:
+FreeSurfer has no such images; WM_RGB is the old NiiVue overlay's orange).
 """
 
 import argparse
 import gzip
 import json
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -94,14 +103,22 @@ FIX_RGB: dict[int, tuple[int, int, int]] = {
     5: (180, 110, 255),
 }
 
+#: the values of the WM mask
+WM_NAMES = {1: "wm_mask"}
+WM_RGB: dict[int, tuple[int, int, int]] = {1: (255, 149, 0)}
+
 #: names that the routes use, so no volume can have them
 RESERVED = {"list", "meta", "bricks"}
 
 
 def colour_table(kind: str) -> dict[str, dict[str, Any]]:
-    """The colour table of a label image: "labels" (label-set/1) or "fixes". Value 0
-    is transparent (alpha 0); every other value is opaque."""
-    names, rgb = (LUT_NAMES, LABEL_RGB) if kind == "labels" else (FIX_NAMES, FIX_RGB)
+    """The colour table of a label image: "labels" (label-set/1), "fixes" or "wm".
+    Value 0 is transparent (alpha 0); every other value is opaque."""
+    names, rgb = {
+        "labels": (LUT_NAMES, LABEL_RGB),
+        "fixes": (FIX_NAMES, FIX_RGB),
+        "wm": (WM_NAMES, WM_RGB),
+    }[kind]
     out: dict[str, dict[str, Any]] = {}
     for v, n in sorted(names.items()):
         if v == 0:
@@ -123,6 +140,7 @@ class Volumes:
 
     def __init__(self) -> None:
         self.items: dict[str, Named] = {}
+        self.same_as: dict[str, str] = {}  # a second name -> the first one
         self.build = threading.Lock()  # one pyramid built at a time
 
     def add(
@@ -157,6 +175,13 @@ class Volumes:
         volume.make = built
         self.items[name] = Named(volume, "image", None, disk_dtype)
 
+    def alias(self, name: str, of: str) -> None:
+        """A second name for volume `of`: the same pyramid, built once."""
+        if name in RESERVED or "/" in name or not name or name in self.items:
+            raise ValueError(f"a volume cannot be named {name!r}")
+        self.items[name] = self.items[of]
+        self.same_as[name] = self.same_as.get(of, of)
+
     def add_nifti(
         self, name: str, path: Path, kind: str, table: str | None, brick: int = 32
     ) -> None:
@@ -176,15 +201,16 @@ class Volumes:
         out = []
         for name, n in self.items.items():
             src = n.volume._src
-            out.append(
-                dict(
-                    name=name,
-                    kind=n.kind,
-                    table=n.table,
-                    dtype=n.disk_dtype,
-                    wire=None if src is None else WIRE_NAMES[np.dtype(src.dtype)],
-                )
+            d: dict[str, Any] = dict(
+                name=name,
+                kind=n.kind,
+                table=n.table,
+                dtype=n.disk_dtype,
+                wire=None if src is None else WIRE_NAMES[np.dtype(src.dtype)],
             )
+            if name in self.same_as:
+                d["same_as"] = self.same_as[name]
+            out.append(d)
         return out
 
     def meta(self, name: str) -> dict[str, Any]:
@@ -269,6 +295,14 @@ def white_paths(
     return d, _found(d.with_name(name), surf)
 
 
+def wm_mask(dseg: Path, filled: Sequence[int], brick: int = 32) -> ArrayPyramid:
+    """The WM mask's pyramid: 1 where the segmentation at dseg holds one of the
+    labels `filled`, else 0 (the module docstring)."""
+    img = nifti(Path(dseg))
+    m = np.isin(np.asanyarray(img.dataobj), np.asarray(filled)).astype(np.uint8)
+    return ArrayPyramid(m, img.affine, brick=brick, reducer="mode")
+
+
 def for_white(
     surf: Path,
     sources: list[str],
@@ -276,12 +310,29 @@ def for_white(
     echo_dtype: str,
     dseg: Path | None = None,
     fixes: Path | None = None,
+    filled: Sequence[int] = (),
+    echoes: dict[int, Path] | None = None,
+    echo_path: Path | None = None,
 ) -> Volumes:
-    """The registry of --white mode: the echo (if any), the labels and the fixes."""
+    """The registry of --white mode: the echo (if any, at echo_path), the echoes
+    1 to 3 (those in `echoes`; the one at echo_path a second name of "echo"), the
+    labels, the WM mask (if `filled` names labels) and the fixes."""
     vs = Volumes()
     if echo is not None:
         vs.add_lazy("echo", echo, echo_dtype)
+    for k, p in sorted((echoes or {}).items()):
+        if (
+            echo is not None
+            and echo_path is not None
+            and Path(p).resolve() == Path(echo_path).resolve()
+        ):
+            vs.alias(f"echo{k}", "echo")
+        else:
+            vs.add_nifti(f"echo{k}", Path(p), "image", None)
     d, f = white_paths(surf, sources, dseg, fixes)
     vs.add_nifti("labels", d, "labels", "labels")
+    if len(filled):
+        fl = [int(x) for x in filled]
+        vs.add("wm", lambda: wm_mask(d, fl), "labels", "wm", "uint8")
     vs.add_nifti("fixes", f, "labels", "fixes")
     return vs

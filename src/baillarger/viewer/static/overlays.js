@@ -3,7 +3,11 @@
 // A plug-in of the brick pane: index.html calls the hooks of each object in window.BVP (init, update, render, draw2d,
 // text, pointer) with its API (window.BVAPI). This file adds no code to index.html beyond those hooks.
 //
-// Label layers. Each label volume (/volume/list, kind "labels") is its own brick pyramid on its own grid: a page table and
+// Label layers: the choice "WM mask + fixes" (the default when the server has both) shows the WM mask (/volume/wm: the
+// white surface's filled labels) with the fixes image over it, as the old NiiVue overlay did; one opacity slider acts on
+// every shown layer. A key under the bar names the colours of each shown layer with a small table.
+//
+// Each label volume (/volume/list, kind "labels") is its own brick pyramid on its own grid: a page table and
 // an atlas (R16I or R32I: labels are never float) of its own, with its own level for each tile (its voxels at least one CSS
 // pixel, coarser when its bricks do not fit the atlas) and the same fallback to coarser loaded levels as the echo. Labels
 // are sampled nearest, never interpolated; a colour table (a small RGBA texture, value -> colour, from the volume's meta)
@@ -173,7 +177,9 @@ class Layer {   // one label volume on the brick pane
 
 const OVL = window.OVL = { api: null, vols: [], layers: new Map(), show: [], alpha: 0.5, edge: false, outlines: true,
                            ocache: new Map(), otimer: 0, cursor: null, ostat: new Map() };
-const CHOICES = { none: [], labels: ["labels"], fixes: ["fixes"], both: ["labels", "fixes"] };
+const CHOICES = { none: [], wm: ["wm", "fixes"], labels: ["labels"], fixes: ["fixes"], both: ["labels", "fixes"] };
+const CHOICE_TEXT = { wm: "WM mask + fixes", both: "labels + fixes" };
+const KEY_MAX = 8;   // a layer whose table has at most this many values gets a key
 
 async function layer(name) {
   if (!OVL.layers.has(name)) {
@@ -190,19 +196,27 @@ async function choose(v) {
   if (names.some(n => !OVL.layers.has(n))) return;
   OVL.show = names.map(n => OVL.layers.get(n));
   if (names.length) OVL.api.log(`overlay ${names.join(" + ")} ready (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
-  hooks.update(); OVL.api.draw();
+  key(); hooks.update(); OVL.api.draw();
+}
+function key() {   // the colours of the shown layers with small tables
+  const el = OVL.api.$("bvkey"); if (!el) return;
+  const css = rgba => `rgb(${rgba[0]}, ${rgba[1]}, ${rgba[2]})`;
+  const parts = OVL.show.filter(l => l.table.size <= KEY_MAX).flatMap(l => [...l.table].map(([v, e]) =>
+    `<span title="${l.name} ${v}"><span class="sw" style="height:8px;background:${css(e.rgba)}"></span>${e.name.replace(/_/g, " ")}</span>`));
+  el.innerHTML = parts.join(""); el.style.display = parts.length ? "" : "none";
 }
 function controls() {
   const box = document.createElement("span"); box.id = "bvovl";
   const opt = OVL.vols.length ? Object.keys(CHOICES).filter(k => CHOICES[k].every(n => OVL.vols.some(x => x.name === n))) : ["none"];
   box.innerHTML = `<label title="the label volume over the echo (the most common label of each 2 × 2 × 2 block on coarse levels)">labels
-      <select id="ovsel">${opt.map(k => `<option value="${k}">${k === "both" ? "labels + fixes" : k}</option>`).join("")}</select></label>
+      <select id="ovsel">${opt.map(k => `<option value="${k}">${CHOICE_TEXT[k] || k}</option>`).join("")}</select></label>
     <label>opacity <input type="range" id="ovop" min="0" max="1" step="0.05" value="${OVL.alpha}" style="width:60px"></label>
     <label title="draw each label's edge, not its fill"><input type="checkbox" id="ovedge"> edges only</label>
     <label title="where the true white surface crosses each slice (the overview when the view holds too many faces)"><input type="checkbox" id="ovout" checked> surface outline</label>`;
   const bar = OVL.api.$("vfit").parentElement; bar.appendChild(box);
+  const kb = document.createElement("div"); kb.id = "bvkey"; kb.className = "key pbar"; kb.style.display = "none"; bar.after(kb);
   const $ = OVL.api.$;
-  $("ovsel").value = opt.includes("labels") ? "labels" : "none";
+  $("ovsel").value = opt.includes("wm") ? "wm" : opt.includes("labels") ? "labels" : "none";
   $("ovsel").onchange = () => choose($("ovsel").value);
   $("ovop").oninput = () => { OVL.alpha = Number($("ovop").value); OVL.api.draw(); };
   $("ovedge").onchange = () => { OVL.edge = $("ovedge").checked; OVL.api.draw(); };
