@@ -21,8 +21,8 @@ With --white, the segmentation is the first entry of the white surface's `Source
 (white-surf/1), and the fixes image is its `desc-wmtopofixes` neighbour (wm-dseg/1).
 The WM mask ("wm") is 1 where the segmentation holds one of the surface's
 `FilledLabels` (the region whose boundary the surface is), else 0. With the fixes
-image over it, it shows what the old NiiVue overlay showed: the WM mask, the handle
-cuts, the handle fills and the cavity fills. The echoes "echo1" to "echo3" are the
+image over it, it shows the WM mask, the handle cuts, the handle fills and the cavity
+fills. The echoes "echo1" to "echo3" are the
 files of baillarger.viewer.columns.echo_files' rule in --echo-dir (the .nii, else
 the .nii.gz); the one that is the default volume ("echo") is a second name of it.
 When a source path is not a file (the derivatives were moved), the file of the same
@@ -30,7 +30,7 @@ name next to the surface is used. --dseg and --fixes give other paths.
 
 Colours: the labels of label-set/1 take their FreeSurferColorLUT colours
 (LABEL_RGB). The fixes image takes FIX_RGB and the WM mask WM_RGB (our own:
-FreeSurfer has no such images; WM_RGB is the old NiiVue overlay's orange).
+FreeSurfer has no such images).
 """
 
 import argparse

@@ -22,8 +22,7 @@ Requests:
   /vertex/overview?v=t1,t2,... (the overview vertex of each true vertex, as
   /vertex/true gives it);
   /snap?mm=x,y,z (the WM selection at the overview vertex nearest a world point);
-  /white.gii; /white/echo<k>.nii.gz, /white/surface.gii and
-  /white/overlay.nii.gz?c=i,j,k (NiiVue's box round voxel (i, j, k)).
+  /white.gii.
 - The volume as bricks (baillarger.viewer.bricks), the whole echo 2: /volume (its
   name, without reading it; 404: none), /volume/meta (the levels' shapes and affines,
   the brick size, the dtype, the default window: read on first use),
@@ -109,16 +108,6 @@ class Shared:
 
 def floats(s: str | None) -> list[float] | None:
     return None if not s else [float(x) for x in s.split(",")]
-
-
-# a white surface's box round a voxel (?c=i,j,k): echoes, the true surface, the overlay
-BOX_ROUTES = {
-    "/white/echo1.nii.gz": "1",
-    "/white/echo2.nii.gz": "2",
-    "/white/echo3.nii.gz": "3",
-    "/white/surface.gii": "surface",
-    "/white/overlay.nii.gz": "overlay",
-}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -294,18 +283,6 @@ class Handler(BaseHTTPRequestHandler):
             self.json(lambda: w.snap(mm_ or []))
         elif u.path == "/white.gii":
             self.binary(w.white_bytes)
-        elif u.path in BOX_ROUTES:
-            cv = [int(x) for x in q.get("c", "0,0,0").split(",")]
-            if len(cv) != 3:
-                self.send_error(400)
-                return
-            kind = BOX_ROUTES[u.path]
-            if kind == "surface":
-                self.binary(lambda: w.surface_bytes(cv))
-            elif kind == "overlay":
-                self.binary(lambda: w.overlay_bytes(cv))
-            else:
-                self.binary(lambda: w.echo_bytes(int(kind), cv))
         else:
             self.send_error(404)
 

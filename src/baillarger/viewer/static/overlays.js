@@ -4,7 +4,7 @@
 // text, pointer) with its API (window.BVAPI). This file adds no code to index.html beyond those hooks.
 //
 // Label layers: the choice "WM mask + fixes" (the default when the server has both) shows the WM mask (/volume/wm: the
-// white surface's filled labels) with the fixes image over it, as the old NiiVue overlay did; one opacity slider acts on
+// white surface's filled labels) with the fixes image over it (handle cuts, handle fills, cavity fills); one opacity slider acts on
 // every shown layer. A key under the bar names the colours of each shown layer with a small table.
 //
 // Each label volume (/volume/list, kind "labels") is its own brick pyramid on its own grid: a page table and

@@ -332,10 +332,10 @@ def test_the_white_mode_serves_every_route(
     data: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """After the removal of the site mode: main() starts the server in --white
-    mode, and the server answers each route of phases 4.0 (the white surface and
-    its box), 4.0.5 (the bricks, the named volumes, the outlines), 4.3 (the
-    columns) and the viewer requests of wave 2.1 (go to a true vertex, the
-    section that follows the surface)."""
+    mode, and the server answers each route of phases 4.0 (the white surface),
+    4.0.5 (the bricks, the named volumes, the outlines), 4.3 (the columns) and
+    the viewer requests of wave 2.1 (go to a true vertex, the section that
+    follows the surface). The routes of NiiVue's box are gone (404)."""
     ed = tmp_path / "data"
     ed.mkdir()
     for k in (1, 2, 3):  # echo k as .nii.gz in data: the defaults of main()
@@ -364,21 +364,16 @@ def test_the_white_mode_serves_every_route(
     try:
         meta = json.loads(get(f"{base}/meta")[1])
         assert meta["surface_only"]
-        c = ",".join(str(x) for x in meta["box"]["centre"])
         lo, hi = "-9,-9,-9", "9,9,9"
         routes = [
             "/",
+            "/?vol=bricks",  # old links
             *(f"/static/{f.name}" for f in sorted(VS.STATIC.iterdir())),
             "/state",
             "/mesh?level=0&faces=1",
             "/vertex?v=0",
             "/snap?mm=0,5,9",
             "/white.gii",
-            f"/white/echo1.nii.gz?c={c}",
-            f"/white/echo2.nii.gz?c={c}",
-            f"/white/echo3.nii.gz?c={c}",
-            f"/white/surface.gii?c={c}",
-            f"/white/overlay.nii.gz?c={c}",
             "/volume",
             "/volume/meta",
             "/volume/bricks?level=0&b=0,0,0",
@@ -405,7 +400,15 @@ def test_the_white_mode_serves_every_route(
             "/overlay/at?v=0",
         ]:
             assert get(base + r)[0] == 404, r  # without --overlay
-        for gone in ["/filters", "/section?i=0", "/layer?name=x", "/labels/list"]:
+        for gone in [
+            "/filters",
+            "/section?i=0",
+            "/layer?name=x",
+            "/labels/list",
+            *(f"/white/echo{k}.nii.gz?c=1,1,1" for k in (1, 2, 3)),
+            "/white/surface.gii?c=1,1,1",
+            "/white/overlay.nii.gz?c=1,1,1",
+        ]:
             assert get(base + gone)[0] == 404, gone
     finally:
         srv.shutdown()
@@ -648,3 +651,14 @@ def test_the_section_over_the_cap(
         srv.server_close()
         VS.Handler.white = None
         VS.Handler.columns = None
+
+
+def test_the_page_has_no_reference_to_niivue() -> None:
+    """The page and its static scripts name no NiiVue and load no script from
+    another host (the NiiVue CDN was the only one)."""
+    files = sorted(VS.STATIC.iterdir())
+    assert any(f.name == "index.html" for f in files)
+    for f in files:
+        text = f.read_text().lower()
+        assert "niivue" not in text, f.name
+        assert "cdn.jsdelivr" not in text and "https://" not in text, f.name

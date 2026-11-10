@@ -43,22 +43,16 @@
 </div>
 <div id="main">
   <div class="pane" id="p-volume">
-    <h2><span id="vtitle">Volume and white surface (NiiVue, world mm)</span></h2>
+    <h2><span id="vtitle">Volume (world mm)</span></h2>
     <div class="pbar">
-      <label title="the volume viewer: NiiVue, or our own (the volume as bricks at levels of detail; slices only for now)">viewer
-        <select id="vengine"><option value="niivue">NiiVue</option><option value="bricks">bricks (ours)</option></select></label>
-      <button id="vfit" style="display:none" title="the whole volume in each slice">fit</button>
+      <button id="vfit" title="the whole volume in each slice">fit</button>
       <label id="bvecho" style="display:none" title="the background image: echo 1, 2 or 3 (each its own pyramid, built on the server the first time)">echo
         <select id="bvechosel"></select></label>
-      <label>view <select id="vview"><option value="multi">orthogonal + 3D</option><option value="ax">axial</option>
-        <option value="cor">coronal</option><option value="sag">sagittal</option><option value="render">3D</option></select></label>
-      <label><input type="checkbox" id="vwhite" checked> white</label>
-      <span id="vlab" style="display:none"><label>echo <select id="vecho"><option>1</option><option selected>2</option><option>3</option></select></label>
-        <label>overlay <input type="range" id="vlabop" min="0" max="1" step="0.05" value="0.6" style="width:60px"></label></span>
+      <label>view <select id="vview"><option value="multi">three slices</option><option value="ax">axial</option>
+        <option value="cor">coronal</option><option value="sag">sagittal</option></select></label>
     </div>
-    <div class="key pbar" id="vkey"></div>
-    <div class="fill"><canvas id="nv"></canvas><canvas id="bv" style="display:none"></canvas><canvas id="bvo" style="display:none;touch-action:none"></canvas><div id="vstat"></div>
-      <div class="help" id="vhelp">click a slice: move the crosshair · shift-click: WM selection to the nearest white-surface point · right-drag: contrast</div></div>
+    <div class="fill"><canvas id="bv"></canvas><canvas id="bvo" style="touch-action:none"></canvas><div id="vstat"></div>
+      <div class="help" id="vhelp">click: crosshair · shift-click: WM selection to the nearest white-surface point · pinch or ctrl-wheel: zoom at the cursor · two-finger scroll or middle-drag: pan · ↑ ↓: next slice under the pointer (page up / down: 10)</div></div>
   </div>
   <div class="pane" id="p-surface">
     <div class="pbar" id="sbar" style="padding-top:4px"><label>surface <select id="level"></select></label></div>
@@ -72,7 +66,6 @@
 <script type="module" src="/static/overlays.js"></script>
 <script type="module" src="/static/review.js"></script>
 <script type="module">
-import { Niivue, SLICE_TYPE, SHOW_RENDER } from "https://cdn.jsdelivr.net/npm/@niivue/niivue@0.69.0/+esm";
 const $ = id => document.getElementById(id);
 const ME = Math.random().toString(36).slice(2);
 let META = null, FRAME = null, SELN = null, CROSS = null;
@@ -134,11 +127,7 @@ function connect() {
 // it goes to the selection hooks, not to the other windows
 async function setSelection(sel, frame, how) {
   SELN = sel; FRAME = frame;
-  if (sel && NV.nv) {
-    if (!inBox(sel.voxel)) await loadWhiteBox(sel.voxel);
-    CROSS = sel.world_mm; moveVolumeCrosshair(sel.world_mm);
-  }
-  showSelectionMarker(); if (BV.on) bvDraw();
+  if (BV.on) bvDraw();
   $("info").textContent = !sel ? OVTXT : `WM selection: true vertex ${sel.true_vertex} (overview vertex ${sel.vertex}) at (${sel.world_mm}) mm`;
   draw3d();
   vHook("selection", sel, frame, how);
@@ -154,7 +143,7 @@ async function goTo(text) {
   if (!/^\d+$/.test(t)) { log(`go to vertex: ${JSON.stringify(t)} is not a true vertex number`); return; }
   let sel; try { sel = await get(`/vertex/true?v=${t}`); } catch (e) { return; }   // get() logs the error
   turnTo(sel.vertex);
-  if (BV.on) crossHere(sel.world_mm);   // the slices through it (NiiVue's crosshair follows every selection)
+  if (BV.on) crossHere(sel.world_mm);   // the slices through it
   await selectHere(sel, screenFrame());
   log(`go to vertex: true vertex ${sel.true_vertex} (overview vertex ${sel.vertex})`);
 }
@@ -317,94 +306,19 @@ function initGL() {
 }
 $("level").onchange = async () => { await loadMesh(+$("level").value, false); draw3d(); };
 
-// ---------------------------------------------------------------- volume pane (NiiVue, world mm)
-const NV = { nv: null };
-// the volume pane shows a box round voxel WB.c (the server's BOX each way)
-const WB = { c: null };
-const WBCOL = { R: [0, 255, 255, 64, 64], G: [0, 149, 59, 220, 140], B: [0, 0, 48, 80, 255], A: [0, 90, 255, 255, 255], I: [0, 1, 2, 3, 4],
-                labels: ["", "WM mask", "handle cut", "handle fill", "cavity fill"] };
-async function loadWhiteBox(c) {
-  const nv = NV.nv, q = `c=${c.join(",")}`, tag = c.join("_"), k = $("vecho").value;
-  WB.c = c;
-  await nv.loadVolumes([{ url: `/white/echo${k}.nii.gz?${q}`, name: `echo${k}_${tag}.nii.gz`, colormap: "gray" },
-                        { url: `/white/overlay.nii.gz?${q}`, name: `overlay_${tag}.nii.gz`, opacity: +$("vlabop").value }]);
-  nv.volumes[1].setColormapLabel(WBCOL);
-  await nv.loadMeshes([{ url: `/white/surface.gii?${q}`, name: `surface_${tag}.gii`, rgba255: [255, 210, 63, 255] }]);
-  nv.setMeshProperty(nv.meshes[0].id, "visible", $("vwhite").checked);
-  nv.updateGLVolume();
-  if (SELN) showSelectionMarker();
-  log(`volume pane: box round voxel ${c.join(", ")}`);
-}
-function inBox(v) { return WB.c && v.every((x, a) => Math.abs(x - WB.c[a]) <= META.box.half - 12); }
-async function initVolume() {
-  const nv = new Niivue({ backColor: [0.05, 0.055, 0.065, 1], show3Dcrosshair: true, crosshairColor: [1, 0.2, 0.8, 1],
-                          isColorbar: false, multiplanarShowRender: SHOW_RENDER.ALWAYS, multiplanarLayout: 2 /* grid */,
-                          meshThicknessOn2D: 0.4 });
-  NV.nv = nv; await nv.attachTo("nv");
-  const t0 = performance.now();
-  await loadWhiteBox(META.box.centre);
-  await nv.setVolumeRenderIllumination(-1);   // the 3D tile shows the three slices, so the meshes inside stay visible
-  setView();
-  nv.onLocationChange = d => {
-    const mm = Array.from(d.mm).slice(0, 3);
-    if (NV.shift) { const { back, axis } = NV.shift; NV.shift = null; volumeShiftClick(mm, back, axis); return; }
-    $("vstat").textContent = `crosshair ${mm.map(x => x.toFixed(2)).join(", ")} mm  voxel ${d.vox.join(", ")}`;
-    if (!applying && !NV.moving) { CROSS = mm; share({ crosshair: mm }); }
-  };
-  // a shift-click: note it before NiiVue moves its crosshair, then treat that move as a WM click
-  $("nv").addEventListener("pointerdown", e => { NV.shift = e.shiftKey && e.button === 0 ? { back: CROSS, axis: nvSliceAxis(e) } : null; }, true);
-  log(`volume pane ready (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
-}
-const VIEWS = { multi: SLICE_TYPE.MULTIPLANAR, ax: SLICE_TYPE.AXIAL, cor: SLICE_TYPE.CORONAL, sag: SLICE_TYPE.SAGITTAL, render: SLICE_TYPE.RENDER };
-function setView() { if (BV.on) { bvLayout(); bvUpdate(); return; } NV.nv.setSliceType(VIEWS[$("vview").value]); }
+function moveVolumeCrosshair(mm) { if (BV.on && mm) bvCross(mm); }
+const setView = () => { if (BV.on) { bvLayout(); bvUpdate(); } };
 $("vview").onchange = setView;
-$("vwhite").onchange = () => NV.nv.setMeshProperty(NV.nv.meshes[0].id, "visible", $("vwhite").checked);
-function moveVolumeCrosshair(mm) {
-  if (BV.on && mm) { bvCross(mm); return; }
-  if (!NV.nv || !mm) return; NV.moving = true;
-  try { NV.nv.scene.crosshairPos = NV.nv.mm2frac(mm); NV.nv.drawScene(); NV.nv.createOnLocationChange(); } finally { NV.moving = false; }
-}
-// the world axis normal to the NiiVue slice under a pointer event (0 sagittal, 1 coronal, 2 axial), or null (the 3D tile).
-// The echoes' affine is diagonal, so NiiVue's slices are planes of the world axes, as the bricks viewer's.
-function nvSliceAxis(e) {
-  const nv = NV.nv; if (!nv || !nv.screenSlices) return null;
-  const r = $("nv").getBoundingClientRect(), dpr = (nv.uiData && nv.uiData.dpr) || window.devicePixelRatio || 1;
-  const x = (e.clientX - r.left) * dpr, y = (e.clientY - r.top) * dpr;
-  for (const s of nv.screenSlices) {
-    const [L, T, W, H] = s.leftTopWidthHeight;
-    if (x >= L && x <= L + W && y >= T && y <= T + H) return { 0: 2, 1: 1, 2: 0 }[s.axCorSag] ?? null;
-  }
-  return null;
-}
 // the WM selection to the white-surface vertex nearest the click; axis: the world axis normal to the clicked slice
-async function volumeShiftClick(mm, back, axis) {
-  if (back) moveVolumeCrosshair(back);   // the crosshair stays where it was
+async function volumeShiftClick(mm, axis) {
   const how = axis === null || axis === undefined ? undefined : { slice: [0, 1, 2].map(k => k === axis ? 1 : 0) };
   const sel = await get(`/snap?mm=${mm.join(",")}`);
-  // the section is cut in the clicked slice through the root: in the bricks viewer (whose crosshair does not follow the
-  // selection) that slice moves to the root; NiiVue's crosshair goes to the root anyway (setSelection)
+  // the section is cut in the clicked slice through the root: that slice moves to the root (the crosshair does not
+  // follow the selection otherwise)
   if (how && BV.on && CROSS) { const c = CROSS.slice(); c[axis] = sel.world_mm[axis]; crossHere(c); }
   await selectHere(sel, null, how);
 }
-function showSelectionMarker() {
-  if (!NV.nv) return; if (NV.sel) { dropMesh(NV.sel); NV.sel = null; }
-  if (SELN) NV.sel = addNodes(nodes("WM selection", [SELN.world_mm], 0.5, 0.18, "winter"));
-}
-function nodes(name, pts, color, size, cmap = "warm") {
-  return { name, showLegend: false, nodeColormap: cmap, nodeColormapNegative: "winter", nodeMinColor: 0, nodeMaxColor: 1, nodeScale: 1,
-           edgeColormap: "warm", edgeColormapNegative: "winter", edgeMin: 0, edgeMax: 1, edgeScale: 0,
-           nodes: pts.map((p, k) => ({ name: String(k + 1), x: p[0], y: p[1], z: p[2], colorValue: color, sizeValue: size })), edges: [] };
-}
-// points as spheres: loadConnectomeAsMesh + addMesh (loadConnectome would drop every other mesh)
-function dropMesh(m) {   // removeMesh needs unloadMesh, which a connectome mesh lacks in 0.69
-  const nv = NV.nv; if (typeof m.unloadMesh === "function") { nv.removeMesh(m); return; }
-  const k = nv.meshes.indexOf(m); if (k >= 0) nv.meshes.splice(k, 1); nv.drawScene();
-}
-function addNodes(json) { const m = NV.nv.loadConnectomeAsMesh(json); NV.nv.addMesh(m); NV.nv.drawScene(); return m; }
-$("vecho").onchange = () => loadWhiteBox(WB.c);   // the background: echo 1, 2 or 3, under the overlay
-$("vlabop").oninput = () => { const vol = NV.nv?.volumes[1]; if (vol) { vol.opacity = +$("vlabop").value; NV.nv.updateGLVolume(); } };
-
-// ---------------------------------------------------------------- volume pane, our own (WebGL2: the volume as bricks at levels of detail, baillarger.viewer.bricks)
+// ---------------------------------------------------------------- volume pane (WebGL2: the volume as bricks at levels of detail, baillarger.viewer.bricks)
 // The slices are sampled in a shader from bricks in one 3D texture (the atlas), found through a page table per level; the
 // view asks only for the bricks its slices cross, at the level whose voxels are at least one CSS pixel (coarser when they
 // do not fit the atlas), and shows the finest level loaded at each point meanwhile. Voxels are nearest-neighbour.
@@ -419,7 +333,6 @@ const BVT = { ax: { r: 0, u: 1, n: 2, name: "axial" }, cor: { r: 0, u: 2, n: 1, 
 const SIDE = [["L", "R"], ["P", "A"], ["I", "S"]];   // world axes x, y, z (RAS): the minus and plus ends
 const BV = { on: false, g: null, M: null, C: [0, 0, 0], s: 1, fit: 1, tiles: [], hover: null, drag: null, gesture: null,
              cache: new Map(), pending: new Set(), free: [], want: new Set(), inflight: 0, frame: 0 };
-let BRICKS = false;
 // plug-ins of the brick pane (static/overlays.js, ...): objects in window.BVP with hooks init(api), update(), render(g, geoms, dpr),
 // draw2d(g2d, tile), text(tile) -> string, pointer(type, event, hit) -> true to take the event; api: window.BVAPI
 const BVP = window.BVP = window.BVP || [];
@@ -460,11 +373,7 @@ void main() {
 const BVVS = `#version 300 es
 void main() { vec2 p = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0))[gl_VertexID]; gl_Position = vec4(p, 0.0, 1.0); }`;
 async function initBricks() {
-  BV.on = true; $("nv").style.display = "none"; $("bv").style.display = ""; $("bvo").style.display = ""; $("vfit").style.display = "";
-  $("vwhite").closest("label").style.display = "none";
-  $("vkey").style.display = "none"; $("vview").querySelector("option[value=render]").disabled = true;
-  if ($("vview").value === "render") $("vview").value = "multi";
-  $("vhelp").textContent = "click: crosshair · shift-click: WM selection to the nearest white-surface point · pinch or ctrl-wheel: zoom at the cursor · two-finger scroll or middle-drag: pan · ↑ ↓: next slice under the pointer (page up / down: 10)";
+  BV.on = true;
   const t0 = performance.now();
   const c = $("bv"), g = BV.g = c.getContext("webgl2", { antialias: false }); if (!g) { log("no WebGL2"); return; }
   // the echo choice: the image volumes echo1 to echo3 of /volume/list; "echo" (the default volume) is offered only when no
@@ -484,7 +393,7 @@ async function initBricks() {
   window.BVAPI = { BV, $, get, log, share, crossHere, program, affInv, affApply, VS: BVVS, px2w: bvPx2W, w2px: bvW2Px, draw: bvDraw,
                    update: bvUpdate, get cross() { return CROSS; } };
   for (const p of BVP) if (p.init) try { await p.init(window.BVAPI); } catch (e) { log(`init: ${e.message}`); }
-  log(`volume pane (ours) ready: ${BV.M.name}, level 0 ${BV.M.levels[0].shape.join(" × ")}, atlas ${BV.nslots} bricks (${(performance.now() - t0) / 1000 | 0} s)`);
+  log(`volume pane ready: ${BV.M.name}, level 0 ${BV.M.levels[0].shape.join(" × ")}, atlas ${BV.nslots} bricks (${(performance.now() - t0) / 1000 | 0} s)`);
 }
 // the background image: named volume `name` (/volume/<name>/...), or the default volume (/volume/...) for null. Its meta,
 // a new page table and atlas (the old bricks are dropped: a load of the old image that comes back later is ignored)
@@ -493,7 +402,7 @@ async function bvSource(name) {
   $("vstat").textContent = `reading ${name || "the volume"} (the first time: its levels are built on the server)…`;
   const M = await get(`${base}/meta`), nl = M.levels.length, B = M.brick, g = BV.g;
   BV.gen = (BV.gen || 0) + 1; BV.base = base; BV.M = M; BV.nl = nl;
-  $("vtitle").textContent = `Volume: ${M.name}, ${nl} levels of ${B}³ bricks (ours, world mm)`;
+  $("vtitle").textContent = `Volume: ${M.name}, ${nl} levels of ${B}³ bricks (world mm)`;
   BV.inv = M.levels.map(lv => affInv(lv.affine)); BV.win = M.window;
   const A = M.levels[0].affine, sh = M.levels[0].shape;
   BV.vs0 = Math.min(...[0, 1, 2].map(k => Math.hypot(A[0][k], A[1][k], A[2][k])));   // the finest voxel spacing, mm
@@ -522,7 +431,8 @@ async function bvSource(name) {
   BV.cache = new Map(); BV.pending = new Set(); BV.inflight = 0;
   if (name) log(`volume pane: ${name} (${M.name}, ${((performance.now() - t0) / 1000).toFixed(1)} s)`);
 }
-// the tiles of the view (CSS px in the canvas): one slice, or axial, coronal and sagittal in a 2 x 2 grid (the fourth: 3D, later)
+// the tiles of the view (CSS px in the canvas): one slice, or axial, coronal and sagittal in a 2 x 2 grid (the fourth
+// quarter stays empty: the surface pane is the 3D view)
 function bvLayout() {
   const c = $("bv"), W = c.clientWidth, H = c.clientHeight, v = $("vview").value, gap = 2;
   if (v in BVT) { BV.tiles = [{ ...BVT[v], x: 0, y: 0, w: W, h: H }]; return; }
@@ -651,8 +561,6 @@ function bvOverlay(o, dpr, W, H) {
     const ptext = BVP.map(p => p.text ? p.text(t) : "").join(""); if (ptext) g.fillText(ptext.replace(/^ · /, ""), 6, t.h - 38);
     g.restore();
   }
-  if (BV.tiles.length === 3) { const t = BV.tiles[1]; g.fillStyle = "#6a7078"; g.textAlign = "center";
-    g.fillText("3D: NiiVue for now", t.x + t.w / 2, BV.tiles[2].y + t.h / 2); }
 }
 // the WM selection on a tile (the 3D pane's colour): a ring and a dot when it is in the slice (within half a voxel of it),
 // a dashed ring where it projects onto the slice when it is not, with its distance
@@ -702,7 +610,7 @@ function bvEvents() {
     if (bvTook("up", e, at(e))) { BV.drag = null; return; }
     const d = BV.drag; BV.drag = null; if (!d || d.button !== 0) return;
     const [X, Y] = xy(e), mm = bvPx2W(d.t, X - d.t.x, Y - d.t.y);
-    if (d.shift) { if (!d.moved) volumeShiftClick(mm, null, d.t.n); return; }   // the WM selection; the crosshair stays
+    if (d.shift) { if (!d.moved) volumeShiftClick(mm, d.t.n); return; }   // the WM selection; the crosshair stays
     crossHere(mm);
   });
   o.addEventListener("pointerleave", () => { if (!BV.drag) BV.hover = null; });
@@ -724,7 +632,6 @@ function bvEvents() {
   });
   $("vfit").onclick = bvFit;
 }
-$("vengine").onchange = () => { q.set("vol", $("vengine").value); location.search = q.toString(); };
 
 // ---------------------------------------------------------------- hooks for panes in their own files (static/columns.js)
 // VIEWER.hooks: selection(sel, frame) after each WM selection; state(st) after each shared-state change; draw3d(g, mvp) at
@@ -733,10 +640,9 @@ $("vengine").onchange = () => { q.set("vol", $("vengine").value); location.searc
 // or one like it) the WM selection; VIEWER.screenFrame() is the 3D view's frame; VIEWER.turnTo(v) turns it to overview vertex v;
 // VIEWER.points(g, mvp, xyz, rgb, size, lift) draws discs at the points xyz (Float32Array, box mm) in a draw3d hook (rgb: one
 // colour as an Array, or a Float32Array of one for each point). VIEWER.log(m, err) adds a line to the log (err: an error,
-// which marks the log toggle while the log is hidden). VIEWER.bricks: the volume pane is ours (?vol=bricks). VIEWER.ready resolves when the page has
-// started.
+// which marks the log toggle while the log is hidden). VIEWER.ready resolves when the page has started.
 let viewerReady;
-const VIEWER = window.VIEWER = { $, get, log, share, GL, NV, mvp, program, points, draw3d: () => draw3d(), has, bricks: q.get("vol") === "bricks",
+const VIEWER = window.VIEWER = { $, get, log, share, GL, mvp, program, points, draw3d: () => draw3d(), has,
   selectVertex: v => selectVertex(v, null), select: (sel, frame) => selectHere(sel, frame), screenFrame: () => screenFrame(), turnTo,
   recolour: () => { colour3d(); draw3d(); }, get selection() { return SELN; }, get frame() { return FRAME; },
   get meta() { return META; }, hooks: { selection: [], state: [], draw3d: [], resize: [], colour: [] },
@@ -749,28 +655,21 @@ window.addEventListener("resize", () => { draw3d(); vHook("resize"); });
   showLog(logShown());
   layout();
   META = await get("/meta");
-  // the white surface: its overview, and the volume pane: NiiVue on a box, or ours on the whole volume (?vol=bricks)
-  if (q.get("vol") === "bricks" && !(await fetch("/volume")).ok) { PANES = ["surface"]; layout(); }   // no volume for ours: the overview alone
+  // the white surface: its overview, and the volume pane on the whole volume (?vol=bricks of old links is ignored)
+  if (!(await fetch("/volume")).ok) { PANES = ["surface"]; layout(); }   // no volume: the overview alone
   if (q.get("columns") !== "0" && (await fetch("/columns/meta")).ok) {   // static/columns.js; ?panes= picks among the three
     const want = (q.get("panes") || "").split(",").filter(p => ["volume", "surface", "columns"].includes(p));
     PANES = want.length ? want : PANES.concat(["columns"]); }
   layout();
-  if (q.get("vol") !== "bricks") {
-    $("vlab").style.display = "";
-    $("vkey").textContent = "overlay: WM mask (orange) · handle cut (red) · handle fill (green) · cavity fill (blue); the box follows the WM selection";
-  }
   const o = META.overview;
   OVTXT = `White surface ${META.site}: overview of ${o.faces.toLocaleString()} faces (true surface ${o.true_faces.toLocaleString()}), ` +
     `every true vertex within ${o.max_distance_mm} mm of it (eps ${o.eps_mm} mm). Click: WM selection (its true vertex below); drag: turn; shift-drag: move; wheel: zoom.`;
   $("info").textContent = OVTXT;
-  // the volume viewer: NiiVue, or ours with ?vol=bricks (the select in the volume pane's bar)
-  BRICKS = q.get("vol") === "bricks";
-  $("vengine").value = BRICKS ? "bricks" : "niivue";
   $("title").textContent = `Column viewer — ${META.site}`; document.title = `Column viewer ${META.site}`;
   META.levels.forEach((n, k) => { const o = document.createElement("option"); o.value = k; o.textContent = n; $("level").appendChild(o); });
   if (has("surface")) { initGL(); const lv = Math.min(2, META.levels.length - 1); $("level").value = lv; await loadMesh(lv, true);
     colour3d(); draw3d(); }
-  if (has("volume")) { if (BRICKS) await initBricks(); else await initVolume(); }
+  if (has("volume")) await initBricks();
   connect();
   log(`loaded the white surface ${META.site}`);
   viewerReady();

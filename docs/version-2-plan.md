@@ -1269,7 +1269,7 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
   - References: Fischl, Sereno & Dale 1999, *NeuroImage* 9:195–207 (`mris_inflate`, the distance term; FreeSurfer's own licence, the idea is free to reuse); Desbrun, Meyer, Schröder & Barr 1999, SIGGRAPH (implicit fairing; the umbrella distorts irregular meshes); Taubin 1995, SIGGRAPH (λ|μ smoothing); Kazhdan, Solomon & Ben-Chen 2012, *CGF* 31:1745–1754 (cMCF); Angenent et al. 1999, *IEEE TMI* 18:700–711, and Gu et al. 2004, *IEEE TMI* 23:949–958 (conformal brain maps); Zhao et al. 2013, *IEEE TVCG* 19:2838–2850 (optimal mass transport); Choi & Rycroft 2018, *SIAM J Imaging Sci* 11:1134–1178 (density-equalising maps); Drury et al. 1996, *J Cogn Neurosci* 8:1–28, and Van Essen 2005, *NeuroImage* 28:635–662 (Caret; GPL, ideas only).
 - **Flat map:** per geodesic patch round a selection (LSCM, R ≤ 5 mm in 0.1–0.44 s). A whole-hemisphere flat map is out of scope. `splu` with MMD and no pivoting; pyamg does not converge on LSCM; CHOLMOD is GPL.
   - **Known case: closed pieces.** A gyrus that an excision cuts off is a closed piece of the mesh (stream 1 phase 0.5 removes the specks smaller than 1 mm³; none is left on the bootstrap hemisphere). A patch that covers a whole closed piece has no boundary, and `lscm` stops ("LSCM needs a boundary"). Options: #55's slit, which opens a closed piece before LSCM (written for the box flat map); the `exp` patch method (`exp_map`, geodesic polar coordinates about the patch's root vertex), if it handles a closed piece; or no flat map for a closed piece. Decide when the hemisphere viewer first meets one.
-- **NiiVue 0.69 pitfalls:** load it from the pinned `+esm` URL; `readTCK` drops the first line (start the data with a NaN row); `loadMeshes`/`removeMesh` race (use `addMeshFromUrl`); catch keys in the capture phase.
+- **One volume viewer:** the brick pane is the only volume viewer. It has the echo choice (echoes 1 to 3, each its own pyramid), the label layers (the segmentation, the WM mask from the surface's `FilledLabels`, the fixes image) with one opacity control, the WM selection marker, and three slices or one. It has no 3D render: the surface pane is the 3D view. NiiVue is gone, because it loads one box into the browser, which does not scale to 50 µm whole brain, and two engines double the work of each volume-pane feature. The columns pane's `.tck` download stays; its data starts with a NaN row, because some readers (NiiVue 0.69, for one) start the first line at the header and drop it otherwise.
 
 #### Step 3: review panes
 
@@ -1295,7 +1295,6 @@ A way to see any result at full resolution anywhere in a whole brain, and to ans
 
 #### Open
 
-- The 3D tile on the brick viewer.
 - Placing points from the volume pane.
 - A camera shared between windows.
 - **A root-list call in the ray sampler.** The columns pane needs about 2 k columns, but a call traverses every root of the superblock and its halo (30–200 k), at 0.06–0.5 s. `ray-sampler/1` has no call for a list of roots (#128).
