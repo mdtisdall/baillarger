@@ -355,12 +355,3 @@ def step_columns(
             rho = min(2 * rho, limit)
         out.append(best)
     return out, dist
-
-
-def mean_spacing(roots: Float) -> float:
-    """The mean distance from each root to its nearest other root, mm."""
-    r = np.asarray(roots, np.float64)
-    if len(r) < 2:
-        raise ValueError("fewer than two roots: no spacing")
-    d, _ = cKDTree(r).query(r, k=2)
-    return float(d[:, 1].mean())

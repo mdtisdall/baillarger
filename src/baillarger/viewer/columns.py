@@ -76,6 +76,11 @@ MAX_RADIUS = 5.0
 #: so 4000 columns make about 28 MB: the most that a page loads and draws
 #: without a pause. Use `every` for a larger radius.
 MAX_COLUMNS = 4000
+#: the section's step along its curve, in voxels (the largest voxel side): half a
+#: voxel resolves what the image can show, the same at every site and on every
+#: mesh. Where roots are closer than that, "nearest" shows one of them a step;
+#: "mean across" averages those within one voxel.
+SECTION_STEP_VOXELS = 0.5
 #: how long a request waits for its job before it answers "running", s
 WAIT_S = 2.0
 #: the results kept in memory, and the local graphs
@@ -417,8 +422,8 @@ class Columns:
     ) -> dict[str, Any]:
         """The profile section of a request (baillarger.viewer.section), without
         sampling its columns, so the cap MAX_COLUMNS does not apply: the curve
-        through the root of column `at` (a true vertex), one step for each mean
-        spacing of the request's roots, and the columns at each step, as
+        through the root of column `at` (a true vertex), one step every
+        SECTION_STEP_VOXELS voxels of arc length, and the columns at each step, as
         indices into the /columns answer of the whole request and as true
         vertices. The centre: `at` if it is a column of the request, else the
         request's vertex if it is one, else the column nearest it along the
@@ -449,7 +454,8 @@ class Columns:
         if i0 >= len(g.vertex) or g.vertex[i0] != v0:
             raise RuntimeError(f"vertex {v0}: not in the local graph")
         normal = roots.normal[chosen[c0]]
-        step = VSec.mean_spacing(np.asarray(roots.root[chosen], np.float64))
+        voxel = float(np.max(self.vox))
+        step = SECTION_STEP_VOXELS * voxel
         curve, why = VSec.section_curve(
             m.pts, m.faces, m.pts[i0], normal, u, req.radius, step, plane
         )
@@ -473,7 +479,6 @@ class Columns:
         column_of = -np.ones(len(g.vertex), np.int64)
         ok = g.vertex[pos] == vertex
         column_of[pos[ok]] = np.flatnonzero(ok)
-        voxel = float(np.max(self.vox))
         cols, d = VSec.step_columns(
             pts,
             faces,

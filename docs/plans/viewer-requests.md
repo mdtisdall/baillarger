@@ -65,8 +65,12 @@ The new section:
    cut that goes through the selected root. It runs in both directions from
    the root, to the column radius along the curve.
 2. **The columns.** One column for each step along the curve: the column
-   whose root is nearest to the curve point at that step. The step is the
-   mean spacing of the roots near the selection.
+   whose root is nearest to the curve point at that step. The step is half
+   a voxel of arc length (`SECTION_STEP_VOXELS`), not a spacing of the roots:
+   the mesh has many vertices a few hundredths of a millimetre apart, so a
+   spacing of the roots depends on the mesh and varies from site to site.
+   Where roots are closer than half a voxel, "nearest" shows one a step and
+   "mean across" averages those within one voxel.
 3. **The order.** Arc length along the curve, from the root (negative on one
    side). Where the surface turns around a thin edge, the curve goes around
    the turn, and the profile shows the turn at one place.

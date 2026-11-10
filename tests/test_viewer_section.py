@@ -22,6 +22,13 @@ GAP = 0.16  # the distance between the fold's sheets, mm (one voxel)
 VOXEL = 0.16
 
 
+def mean_spacing(roots: Float) -> float:
+    """The phantoms' step: the mean distance from each root to its nearest
+    other root, mm (the grid spacing on a regular sheet)."""
+    d, _ = cKDTree(roots).query(roots, k=2)
+    return float(d[:, 1].mean())
+
+
 def grid(t: Float, y: Float) -> tuple[I64, Float, Float]:
     """The faces of a grid of len(t) x len(y) vertices (vertex i * len(y) + j
     at (t[i], y[j])), two triangles a cell, and the grid's coordinates."""
@@ -98,7 +105,7 @@ def section(
     cols = np.arange(len(pts)) if column_of is None else column_of
     curve = VSec.plane_cut(pts, f, pts[origin], normal, u, radius)
     on = cols >= 0
-    step = VSec.mean_spacing(pts[on])
+    step = mean_spacing(pts[on])
     arc, p, fi = VSec.steps(curve, step)
     out, dist = VSec.step_columns(
         p, fi, pts, f, g, cKDTree(pts), cols, mode, VOXEL, radius
@@ -360,7 +367,7 @@ def slice_section(
 ) -> tuple[VSec.Curve, str | None, Float, list[list[int]]]:
     """The section as Columns.section makes it, with a slice plane."""
     g = edge_graph(pts, f, [1.0, 1.0, 1.0])
-    step = VSec.mean_spacing(pts)
+    step = mean_spacing(pts)
     curve, why = VSec.section_curve(pts, f, pts[origin], normal, u, radius, step, plane)
     arc, p, fi = VSec.steps(curve, step)
     cols = np.arange(len(pts))
@@ -425,7 +432,7 @@ def test_a_slanted_slice_gives_a_curve_in_the_slice(mode: str) -> None:
     k = int(np.argmin(np.abs(curve.arc - 0.05)))
     assert (curve.point[k] - pts[o]) @ [1, 0, 0] > 0
     g = edge_graph(pts, f, [1.0, 1.0, 1.0])
-    step = VSec.mean_spacing(pts)
+    step = mean_spacing(pts)
     _, p, fi = VSec.steps(curve, step)
     _, dist = VSec.step_columns(
         p, fi, pts, f, g, cKDTree(pts), np.arange(len(pts)), mode, VOXEL, 0.8

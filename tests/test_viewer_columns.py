@@ -403,8 +403,8 @@ def test_the_white_mode_serves_every_route(
 
 
 def test_the_section_route(cols: VC.Columns) -> None:
-    """GET /columns/section on the hemisphere phantom: the steps every mean
-    spacing of the request's roots, in order of arc length from 0 at the
+    """GET /columns/section on the hemisphere phantom: the steps every half
+    voxel, in order of arc length from 0 at the
     selected root; each column an index into the /columns answer, the nearest
     along the surface (checked on the whole graph); the errors."""
     srv = VS.serve(None, 0, white=WhiteView.__new__(WhiteView), columns=cols)
@@ -425,9 +425,8 @@ def test_the_section_route(cols: VC.Columns) -> None:
         assert np.diff(arc) == pytest.approx(sec["step"])
         assert 0.0 in arc.round(9)
         assert -radius - 1e-9 <= arc[0] and arc[-1] <= radius + 1e-9
-        roots = arr["root"].astype(np.float64)
-        d, _ = cKDTree(roots).query(roots, k=2)
-        assert sec["step"] == pytest.approx(float(d[:, 1].mean()))
+        # half a voxel (the largest side), whatever the spacing of the roots
+        assert sec["step"] == pytest.approx(0.5 * float(max(cols.vox)))
         assert all(len(c) == 1 and 0 <= c[0] < head["n"] for c in sec["columns"])
         # the step at arc 0 is the selected root itself
         k0 = int(np.flatnonzero(arc.round(9) == 0)[0])

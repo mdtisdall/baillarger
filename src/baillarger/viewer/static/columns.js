@@ -13,7 +13,7 @@
 //   bricks viewer only (NiiVue keeps its .tck), so it is disabled with NiiVue.
 // - The profile section that follows the surface: GET /columns/section (baillarger.viewer.section) cuts the true white
 //   mesh with the plane through the picked column's root that holds its normal and the section axis u, and gives one step
-//   for each mean spacing of the roots along that curve, in order of arc length, with the column nearest along the surface
+//   every half voxel along that curve, in order of arc length, with the column nearest along the surface
 //   ("nearest") or the columns within one voxel along the surface ("mean across": their mean echo). Side by side, the
 //   echo along s (s = 0, the root, at the dashed line; outward is down); in "nearest", a tick at each label-interval
 //   boundary in the colour of the interval that starts there.
