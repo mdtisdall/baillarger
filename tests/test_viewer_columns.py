@@ -16,6 +16,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 from scipy.sparse.csgraph import dijkstra
+from scipy.spatial import cKDTree
 
 from baillarger import rays as R
 from baillarger import white_dseg, white_overview, white_surf
@@ -24,6 +25,7 @@ from baillarger.column_volume import ColumnVolumeSampler
 from baillarger.data import echo_path
 from baillarger.mesh_graph import edge_graph
 from baillarger.viewer import columns as VC
+from baillarger.viewer import section as VSec
 from baillarger.viewer import server as VS
 from baillarger.viewer.tck import read_tck
 from baillarger.viewer.white_view import WhiteView
@@ -315,8 +317,9 @@ def test_the_white_mode_serves_every_route(
 ) -> None:
     """After the removal of the site mode: main() starts the server in --white
     mode, and the server answers each route of phases 4.0 (the white surface and
-    its box), 4.0.5 (the bricks, the named volumes, the outlines) and 4.3 (the
-    columns)."""
+    its box), 4.0.5 (the bricks, the named volumes, the outlines), 4.3 (the
+    columns) and the viewer requests of wave 2.1 (go to a true vertex, the
+    section that follows the surface)."""
     ed = tmp_path / "data"
     ed.mkdir()
     for k in (1, 2, 3):  # echo k as .nii.gz in data: the defaults of main()
@@ -368,6 +371,10 @@ def test_the_white_mode_serves_every_route(
             "/columns/meta",
             "/columns?v=0&radius=0.5",
             "/columns/profiles?v=0&radius=0.5",
+            "/columns/section?v=0&radius=0.5&u=1,0,0",
+            "/columns/section?v=0&radius=0.5&u=1,0,0&mode=mean",
+            "/vertex/true?v=0",
+            "/vertex/overview?v=0,1,2",
         ]
         for r in routes:
             assert get(base + r)[0] == 200, r
@@ -393,3 +400,235 @@ def test_the_white_mode_serves_every_route(
         VS.Handler.outlines = None
         VS.Handler.columns = None
         VS.Handler.overlays = None
+
+
+def test_the_section_route(cols: VC.Columns) -> None:
+    """GET /columns/section on the hemisphere phantom: the steps every half
+    voxel, in order of arc length from 0 at the
+    selected root; each column an index into the /columns answer, the nearest
+    along the surface (checked on the whole graph); the errors."""
+    srv = VS.serve(None, 0, white=WhiteView.__new__(WhiteView), columns=cols)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        v, radius = corner_vertex(cols), 1.0
+        q = f"v={v}&radius={radius}"
+        code, body = get(f"{base}/columns?{q}")
+        assert code == 200
+        head, arr = VC.decode(body)
+        code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2")
+        assert code == 200
+        sec = json.loads(body)
+        assert sec["key"] == head["key"] and sec["vertex"] == v
+        assert int(arr["vertex"][sec["column"]]) == v
+        arc = np.asarray(sec["arc"])
+        assert np.diff(arc) == pytest.approx(sec["step"])
+        assert 0.0 in arc.round(9)
+        assert -radius - 1e-9 <= arc[0] and arc[-1] <= radius + 1e-9
+        # half a voxel (the largest side), whatever the spacing of the roots
+        assert sec["step"] == pytest.approx(0.5 * float(max(cols.vox)))
+        assert all(len(c) == 1 and 0 <= c[0] < head["n"] for c in sec["columns"])
+        # the step at arc 0 is the selected root itself
+        k0 = int(np.flatnonzero(arc.round(9) == 0)[0])
+        assert sec["columns"][k0] == [sec["column"]] and sec["distance"][k0] == 0
+        # the same section on the whole mesh and the whole graph (the route
+        # reads only the local faces of the superblock)
+        A = cols.rays.affine
+        pts = np.asarray(cols.v, np.float64) @ A[:3, :3].T + A[:3, 3]
+        g = edge_graph(cols.v, cols.f, cols.vox)
+        colv = arr["vertex"].astype(np.int64)
+        column_of = -np.ones(len(pts), np.int64)
+        column_of[colv] = np.arange(len(colv))
+        curve = VSec.plane_cut(
+            pts, cols.f, pts[v], arr["normal"][sec["column"]], [0.3, 1, 0.2], radius
+        )
+        s_arc, s_pts, s_face = VSec.steps(curve, sec["step"])
+        assert s_arc == pytest.approx(arc, abs=1e-9)
+        assert np.abs(s_pts - np.asarray(sec["point"])).max() < 1e-4
+        for mode in VSec.MODES:
+            want, wd = VSec.step_columns(
+                s_pts,
+                s_face,
+                pts,
+                cols.f,
+                g,
+                cKDTree(pts),
+                column_of,
+                mode,
+                float(max(cols.vox)),
+                radius,
+            )
+            if mode == "nearest":
+                assert sec["columns"] == want
+                assert sec["distance"] == pytest.approx(wd.tolist(), abs=1e-9)
+            else:
+                mean_want = want
+        # mean across: the columns within one voxel along the surface
+        code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2&mode=mean")
+        assert code == 200
+        mean = json.loads(body)
+        assert mean["arc"] == sec["arc"] and mean["voxel"] == float(max(cols.vox))
+        assert mean["columns"] == mean_want
+        # the roots that the page highlights: the roots of the section's columns
+        for a_sec in (sec, mean):
+            want_roots = {int(colv[c]) for cs in a_sec["columns"] for c in cs}
+            assert a_sec["roots"] == sorted(want_roots)
+        # through another column of the request (a click on the section)
+        other = int(arr["vertex"][sec["columns"][-1][0]])
+        code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2&at={other}")
+        assert code == 200 and json.loads(body)["vertex"] == other
+        # a picked column that is not in the request (a stale one from another
+        # selection): the section falls back to the request's vertex, no error
+        for stale in (
+            -5,
+            other + 10**9,
+            int(np.setdiff1d(np.arange(len(cols.v)), colv)[0]),
+        ):
+            code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2&at={stale}")
+            assert code == 200
+            fb = json.loads(body)
+            assert fb["vertex"] == v and fb["column"] == sec["column"]
+            assert fb["fallback"] == f"vertex {stale}: not a column of the request"
+            assert fb["columns"] == sec["columns"] and fb["arc"] == sec["arc"]
+        assert sec["fallback"] is None
+        assert sec["step_vertices"] == [
+            [int(colv[c]) for c in cs] for cs in sec["columns"]
+        ]
+        # a slice plane (a shift-click in a slice view): the curve is the
+        # slice's cut (VSec.section_curve) on the whole mesh, or the fallback
+        # where the slice is near the tangent plane (the plane normal to n)
+        nrm = np.asarray(arr["normal"][sec["column"]], np.float64)
+        for plane in ([0.2, 1.0, 0.6], nrm.tolist()):
+            pq = ",".join(repr(float(x)) for x in plane)
+            code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2&plane={pq}")
+            assert code == 200
+            sl = json.loads(body)
+            curve, why = VSec.section_curve(
+                pts, cols.f, pts[v], nrm, [0.3, 1, 0.2], radius, sl["step"], plane
+            )
+            s_arc, s_pts, _ = VSec.steps(curve, sl["step"])
+            assert s_arc == pytest.approx(sl["arc"], abs=1e-9)
+            assert np.abs(s_pts - np.asarray(sl["point"])).max() < 1e-4
+            pn = np.asarray(plane) / np.linalg.norm(plane)
+            assert sl["slice"]["used"] == (why is None)
+            assert sl["slice"]["fallback"] == why
+            assert sl["slice"]["plane"] == pytest.approx(pn.tolist())
+            angle = np.degrees(np.arcsin(abs(pn @ nrm) / np.linalg.norm(nrm)))
+            assert sl["slice"]["angle"] == pytest.approx(angle)
+            if plane[1] == 1.0:  # the slanted slice cuts through the root
+                assert why is None
+                assert np.abs((np.asarray(sl["point"]) - pts[v]) @ pn).max() < 1e-3
+        assert sl["slice"]["angle"] == pytest.approx(90.0)
+        assert sec["slice"] is None
+        for bad in (
+            "u=1,0",
+            "u=0.3,1,0.2&mode=median",
+            "u=0.3,1,0.2&plane=0,0,0",
+            "u=0.3,1,0.2&plane=1,2",
+            "",
+        ):
+            code, body = get(f"{base}/columns/section?{q}&{bad}")
+            assert code == 400 and "error" in json.loads(body), bad
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        VS.Handler.white = None
+        VS.Handler.columns = None
+
+
+@pytest.mark.parametrize("plane", [None, (0.0, 1.0, 0.0)])
+@pytest.mark.parametrize("mode", VSec.MODES)
+def test_every_does_not_change_the_section(
+    cols: VC.Columns, mode: str, plane: tuple[float, ...] | None
+) -> None:
+    """The section chooses from every root within the radius: with every=4 it
+    is the section of every=1 (its columns, steps, roots, arc, distances and
+    key), also with a slice plane. every=4 alone would leave out some of the
+    section's roots, so the test can fail."""
+    v, radius, u = corner_vertex(cols), 1.0, (0.3, 1.0, 0.2)
+    one = cols.section(VC.Request(vertex=v, radius=radius), u, mode, plane=plane)
+    four = cols.section(
+        VC.Request(vertex=v, radius=radius, every=4), u, mode, plane=plane
+    )
+    for k in ("columns", "step_vertices", "roots", "arc", "distance", "key", "n"):
+        assert four[k] == one[k], k
+    thin = cols.candidates(VC.Request(vertex=v, radius=radius, every=4))
+    shown = set(thin[1].vertex[thin[2]].tolist())
+    assert not set(one["roots"]) <= shown
+
+
+def test_the_section_over_the_cap(
+    cols: VC.Columns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A request over MAX_COLUMNS: /columns refuses, but /columns/section still
+    answers, with the same columns as without the cap; /columns and
+    /columns/profiles with cols= (the section's roots) give those columns, each
+    the whole request's own column byte for byte, and their echoes."""
+    srv = VS.serve(None, 0, white=WhiteView.__new__(WhiteView), columns=cols)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        v, radius = corner_vertex(cols), 1.3  # a radius no other test asks for
+        q = f"v={v}&radius={radius}"
+        sq = f"{q}&u=0.3,1,0.2"
+        free = {}
+        for mode in VSec.MODES:
+            code, body = get(f"{base}/columns/section?{sq}&mode={mode}")
+            assert code == 200
+            free[mode] = json.loads(body)
+            assert not free[mode]["capped"]
+        n = free["nearest"]["n"]
+        monkeypatch.setattr(VC, "MAX_COLUMNS", n - 1)
+        code, body = get(f"{base}/columns?{q}")
+        assert code == 400 and "more than" in json.loads(body)["error"]
+        parts = {}
+        for mode in VSec.MODES:
+            code, body = get(f"{base}/columns/section?{sq}&mode={mode}")
+            assert code == 200
+            capped = json.loads(body)
+            assert capped["capped"] and capped["n"] == n
+            assert capped["max_columns"] == n - 1
+            for k in ("columns", "step_vertices", "roots", "arc", "distance"):
+                assert capped[k] == free[mode][k], k
+            # the section's columns alone, under the cap
+            roots = capped["roots"]
+            assert 0 < len(roots) < n
+            cq = f"{q}&cols={','.join(map(str, roots))}"
+            code, body = get(f"{base}/columns?{cq}")
+            assert code == 200
+            h2, part = VC.decode(body)
+            # in the whole answer's order (owned, then halo): checked below
+            assert sorted(part["vertex"].tolist()) == roots
+            code, body = get(f"{base}/columns/profiles?{cq}")
+            assert code == 200
+            parts[mode] = (h2["key"], part["vertex"].tolist(), VC.decode(body)[1])
+        # the whole request, without the cap: the same columns, the same echoes
+        monkeypatch.undo()
+        code, body = get(f"{base}/columns?{q}")
+        assert code == 200
+        head, full = VC.decode(body)
+        assert head["n"] == n
+        code, body = get(f"{base}/columns/profiles?{q}")
+        assert code == 200
+        full_prof = VC.decode(body)[1]
+        fr = cols.result(head["key"]).rays
+        at = {int(x): i for i, x in enumerate(full["vertex"])}
+        for key, pv, prof in parts.values():
+            pr = cols.result(key).rays
+            assert [at[x] for x in pv] == sorted(at[x] for x in pv)
+            for i, x in enumerate(pv):
+                assert as_column(pr, i) == as_column(fr, at[x])
+                a, b = pr.sample_start[i], pr.sample_start[i + 1]
+                fa, fb = fr.sample_start[at[x]], fr.sample_start[at[x] + 1]
+                assert np.array_equal(
+                    prof["echo"][a:b], full_prof["echo"][fa:fb], equal_nan=True
+                )
+                assert np.array_equal(prof["valid"][a:b], full_prof["valid"][fa:fb])
+        out = np.setdiff1d(np.arange(len(cols.v)), full["vertex"])
+        code, body = get(f"{base}/columns?{q}&cols={int(out[0])}")
+        assert code == 400 and "not a column" in json.loads(body)["error"]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        VS.Handler.white = None
+        VS.Handler.columns = None

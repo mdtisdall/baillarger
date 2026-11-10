@@ -38,7 +38,7 @@ function build() {
     <button id="ovreset" title="the 1st to the 99th percentile">1–99 %</button>
     <canvas id="ovbarc" width="160" height="12" style="width:160px;height:12px;vertical-align:middle"></canvas>
     <span id="ovstat" style="color:var(--mute);font-size:11px"></span></span>`;
-  const h2 = $("p-surface").querySelector("h2"); h2.after(bar);
+  $("sbar").after(bar);
   const panel = document.createElement("div"); panel.id = "ovpanel";
   panel.style.cssText = "flex:none;max-height:32%;display:none;gap:10px;padding:2px 8px 4px;font-size:12px;min-height:0";
   panel.innerHTML = `
@@ -124,25 +124,9 @@ async function openSite(s) {
   // the marker's overview vertex: the server's, else the overview vertex nearest the site
   const ov = s.overview_vertex ?? (await V.get(`/snap?mm=${s.world_mm.join(",")}`)).vertex;
   const sel = { vertex: ov, true_vertex: s.vertex, world_mm: s.world_mm, voxel: s.voxel, trace: null, root_mm: null };
-  turnTo(ov);
+  V.turnTo(ov);
   await V.select(sel, V.screenFrame());
   for (const tr of $("ovsites").querySelectorAll("tr[data-k]")) tr.style.background = O.sites[+tr.dataset.k] === s ? "#2f3a48" : "";
-}
-
-// the 3D view: the target at overview vertex v, the camera along its normal, the up direction kept as far as it can be
-function turnTo(v) {
-  const G = V.GL; if (!G.pos || !G.nrm || v < 0 || v >= G.nv) return;
-  const n = [G.nrm[3 * v], G.nrm[3 * v + 1], G.nrm[3 * v + 2]], nl = Math.hypot(...n); if (!(nl > 0)) return;
-  for (let k = 0; k < 3; k++) n[k] /= nl;
-  let up = [G.R[3], G.R[4], G.R[5]], d = up[0] * n[0] + up[1] * n[1] + up[2] * n[2];
-  up = up.map((x, k) => x - d * n[k]); let ul = Math.hypot(...up);
-  if (ul < 1e-3) { up = Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [0, 1, 0]; d = up[0] * n[0] + up[1] * n[1] + up[2] * n[2]; up = up.map((x, k) => x - d * n[k]); ul = Math.hypot(...up); }
-  up = up.map(x => x / ul);
-  const right = [up[1] * n[2] - up[2] * n[1], up[2] * n[0] - up[0] * n[2], up[0] * n[1] - up[1] * n[0]];   // up × back
-  G.R = [...right, ...up, ...n];
-  G.target = [G.pos[3 * v], G.pos[3 * v + 1], G.pos[3 * v + 2]];
-  G.dist = Math.min(G.dist, 0.6 * G.radius);
-  V.draw3d();
 }
 
 // ------------------------------------------------------------------ the values at the WM selection
