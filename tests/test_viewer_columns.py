@@ -6,6 +6,7 @@ radius is along the surface; the profiles, the TCK and the routes."""
 
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -223,12 +224,14 @@ def get(url: str) -> tuple[int, bytes]:
         return int(e.code), bytes(e.read())
 
 
-def settled(cols: VC.Columns, url: str) -> tuple[int, bytes]:
-    """GET url; on 202 (the job runs), wait for the job and ask again."""
+def settled(url: str) -> tuple[int, bytes]:
+    """GET url as the page does: while the answer is 202 (the columns job runs,
+    longer than WAIT_S on a slow runner), wait 0.1 s and ask again; at most
+    60 s."""
+    t0 = time.monotonic()
     code, body = get(url)
-    if code == 202:
-        assert cols.jobs.thread is not None
-        cols.jobs.thread.join(60)
+    while code == 202 and time.monotonic() - t0 < 60:
+        time.sleep(0.1)
         code, body = get(url)
     return code, body
 
@@ -252,7 +255,7 @@ def test_the_routes(
     try:
         v = corner_vertex(cols)
         q = f"v={v}&radius=1&e_in=0.5&e_out=2"
-        code, body = settled(cols, f"{base}/columns?{q}")
+        code, body = settled(f"{base}/columns?{q}")
         assert code == 200
         head, arr = VC.decode(body)
         ref = cols.compute(VC.Request(vertex=v, radius=1.0, e_in=0.5, e_out=2.0))
@@ -264,7 +267,7 @@ def test_the_routes(
                 .tobytes()
             ), k
         assert head["n"] == len(ref.rays.roots.vertex) and head["key"] == ref.key
-        code, body = settled(cols, f"{base}/columns/profiles?{q}")
+        code, body = settled(f"{base}/columns/profiles?{q}")
         assert code == 200
         _, pa = VC.decode(body)
         srcs = [open_volume(p) for p in VC.echo_files(data["echoes"])]
@@ -390,10 +393,10 @@ def test_the_white_mode_serves_every_route(
             "/vertex/overview?v=0,1,2",
         ]
         for r in routes:
-            assert get(base + r)[0] == 200, r
+            assert settled(base + r)[0] == 200, r
         for name in json.loads(get(f"{base}/volume/list")[1]):
             assert get(f"{base}/volume/{name['name']}/meta")[0] == 200, name
-        key = VC.decode(get(f"{base}/columns?v=0&radius=0.5")[1])[0]["key"]
+        key = VC.decode(settled(f"{base}/columns?v=0&radius=0.5")[1])[0]["key"]
         assert get(f"{base}/columns/{key}.tck")[0] == 200
         for r in [
             "/overlay/meta",
@@ -426,7 +429,7 @@ def test_the_section_route(cols: VC.Columns) -> None:
     try:
         v, radius = corner_vertex(cols), 1.0
         q = f"v={v}&radius={radius}"
-        code, body = get(f"{base}/columns?{q}")
+        code, body = settled(f"{base}/columns?{q}")
         assert code == 200
         head, arr = VC.decode(body)
         code, body = get(f"{base}/columns/section?{q}&u=0.3,1,0.2")
@@ -592,7 +595,7 @@ def test_the_section_over_the_cap(
             assert not free[mode]["capped"]
         n = free["nearest"]["n"]
         monkeypatch.setattr(VC, "MAX_COLUMNS", n - 1)
-        code, body = get(f"{base}/columns?{q}")
+        code, body = settled(f"{base}/columns?{q}")
         assert code == 400 and "more than" in json.loads(body)["error"]
         parts = {}
         for mode in VSec.MODES:
@@ -607,21 +610,21 @@ def test_the_section_over_the_cap(
             roots = capped["roots"]
             assert 0 < len(roots) < n
             cq = f"{q}&cols={','.join(map(str, roots))}"
-            code, body = get(f"{base}/columns?{cq}")
+            code, body = settled(f"{base}/columns?{cq}")
             assert code == 200
             h2, part = VC.decode(body)
             # in the whole answer's order (owned, then halo): checked below
             assert sorted(part["vertex"].tolist()) == roots
-            code, body = get(f"{base}/columns/profiles?{cq}")
+            code, body = settled(f"{base}/columns/profiles?{cq}")
             assert code == 200
             parts[mode] = (h2["key"], part["vertex"].tolist(), VC.decode(body)[1])
         # the whole request, without the cap: the same columns, the same echoes
         monkeypatch.undo()
-        code, body = get(f"{base}/columns?{q}")
+        code, body = settled(f"{base}/columns?{q}")
         assert code == 200
         head, full = VC.decode(body)
         assert head["n"] == n
-        code, body = get(f"{base}/columns/profiles?{q}")
+        code, body = settled(f"{base}/columns/profiles?{q}")
         assert code == 200
         full_prof = VC.decode(body)[1]
         fr = cols.result(head["key"]).rays
@@ -638,7 +641,7 @@ def test_the_section_over_the_cap(
                 )
                 assert np.array_equal(prof["valid"][a:b], full_prof["valid"][fa:fb])
         out = np.setdiff1d(np.arange(len(cols.v)), full["vertex"])
-        code, body = get(f"{base}/columns?{q}&cols={int(out[0])}")
+        code, body = settled(f"{base}/columns?{q}&cols={int(out[0])}")
         assert code == 400 and "not a column" in json.loads(body)["error"]
     finally:
         srv.shutdown()
