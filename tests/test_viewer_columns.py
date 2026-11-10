@@ -223,6 +223,16 @@ def get(url: str) -> tuple[int, bytes]:
         return int(e.code), bytes(e.read())
 
 
+def settled(cols: VC.Columns, url: str) -> tuple[int, bytes]:
+    """GET url; on 202 (the job runs), wait for the job and ask again."""
+    code, body = get(url)
+    if code == 202:
+        assert cols.jobs.thread is not None
+        cols.jobs.thread.join(60)
+        code, body = get(url)
+    return code, body
+
+
 def test_the_routes(
     data: dict[str, Path],
     cols: VC.Columns,
@@ -231,7 +241,10 @@ def test_the_routes(
 ) -> None:
     """/columns gives compute's columns; /columns/profiles the column-volume
     sampler's echoes of them; /columns/<key>.tck their positions; a slow
-    request answers 202 and then the columns."""
+    request answers 202 and then the columns. The first requests follow that
+    contract as the page does (202: wait for the job, ask again), so that a
+    slow runner, where the first job takes longer than WAIT_S, gives the same
+    answer."""
     w = WhiteView(data["surf"], tmp_path / "cache", log=quiet)
     srv = VS.serve(None, 0, white=w, columns=cols)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -239,7 +252,7 @@ def test_the_routes(
     try:
         v = corner_vertex(cols)
         q = f"v={v}&radius=1&e_in=0.5&e_out=2"
-        code, body = get(f"{base}/columns?{q}")
+        code, body = settled(cols, f"{base}/columns?{q}")
         assert code == 200
         head, arr = VC.decode(body)
         ref = cols.compute(VC.Request(vertex=v, radius=1.0, e_in=0.5, e_out=2.0))
@@ -251,7 +264,7 @@ def test_the_routes(
                 .tobytes()
             ), k
         assert head["n"] == len(ref.rays.roots.vertex) and head["key"] == ref.key
-        code, body = get(f"{base}/columns/profiles?{q}")
+        code, body = settled(cols, f"{base}/columns/profiles?{q}")
         assert code == 200
         _, pa = VC.decode(body)
         srcs = [open_volume(p) for p in VC.echo_files(data["echoes"])]
