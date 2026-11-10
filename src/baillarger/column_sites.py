@@ -63,6 +63,12 @@ type Int = npt.NDArray[np.int64]
 RADIUS = 2.0
 #: the site kinds: the seed has no top, or the seed has a top
 KINDS = ("column-no-top", "column-top")
+#: the causes of a column, for the catalogue of error types (column_causes):
+#: no top; the first of its lowest confidence terms is non_wm_behind_root;
+#: any other column
+CAUSES = ("no-top", "non-wm-behind-root", "other")
+#: the term whose lowest value gives the cause non-wm-behind-root
+NON_WM_TERM = "non_wm_behind_root"
 #: the keys of the stage's top confidence (.npz) that the sites read
 CONF_KEYS = (
     "vert",
@@ -86,7 +92,10 @@ COLUMNS = (
     "score",
     "vertex",
     "columns",
+    "cause",
     "no_top",
+    "non_wm_behind_root",
+    "other",
     "median_score",
     "extent_mm",
     "top_mm",
@@ -96,7 +105,17 @@ COLUMNS = (
 )
 #: the columns of the table that are integers, and those that are numbers
 #: (n/a: no value, read as None)
-_INTS = ("rank", "i", "j", "k", "vertex", "columns", "no_top")
+_INTS = (
+    "rank",
+    "i",
+    "j",
+    "k",
+    "vertex",
+    "columns",
+    "no_top",
+    "non_wm_behind_root",
+    "other",
+)
 _NUMS = (
     "score",
     "median_score",
@@ -119,6 +138,8 @@ COLUMN_SITES_SPEC = SidecarSpec(
         Key("Edges", "integer", True, "edges of the column graph that were used"),
         Key("Sites", "integer", True, "rows of the table"),
         Key("SitesByKind", "object", True, "rows of the table, by kind"),
+        Key("SitesByCause", "object", True, "rows of the table, by cause"),
+        Key("ColumnsByCause", "object", True, "columns, by cause"),
         Key("TermNames", "array of strings", True, "the stage's confidence terms"),
     ),
 )
@@ -192,6 +213,26 @@ def group_columns(order: Int, edges: Int, pos: Float, radius: float) -> Grouping
     return Grouping(site, np.array(seeds, np.int64))
 
 
+def column_causes(top_k: npt.ArrayLike, terms: npt.ArrayLike, names: Any) -> Int:
+    """The cause of each column, an index into CAUSES: 0 if it has no top
+    (top_k < 0); else 1 if the first of its lowest terms (NaN terms do not
+    count) is NON_WM_TERM; else 2 (also for a column with no finite term)."""
+    no_top = np.asarray(top_k) < 0
+    t = np.asarray(terms, np.float64)
+    names = [str(n) for n in names]
+    lowest = np.where(np.isnan(t), np.inf, t).argmin(1)
+    has = np.isfinite(t).any(1)
+    non_wm = (
+        has & (lowest == names.index(NON_WM_TERM))
+        if NON_WM_TERM in names
+        else np.zeros(len(t), bool)
+    )
+    out = np.full(len(no_top), 2, np.int64)
+    out[non_wm] = 1
+    out[no_top] = 0
+    return out
+
+
 def _num(x: float) -> float | None:
     return round(float(x), 4) if math.isfinite(x) else None
 
@@ -209,6 +250,7 @@ def site_rows(
     no_top = np.asarray(conf["top_k"]) < 0
     terms = np.asarray(conf["terms"], np.float64)
     names = [str(t) for t in conf["term_names"]]
+    cause = column_causes(conf["top_k"], terms, names)
     by = np.argsort(g.site, kind="stable")
     cuts = np.searchsorted(g.site[by], np.arange(len(g.seeds) + 1))
     rows = []
@@ -216,6 +258,7 @@ def site_rows(
         m = by[cuts[s] : cuts[s + 1]]
         t = terms[seed]
         lowest = names[int(np.nanargmin(t))] if np.isfinite(t).any() else "n/a"
+        nc = np.bincount(cause[m], minlength=len(CAUSES))
         ext = np.sqrt(((pos[m] - pos[seed]) ** 2).sum(1)).max()
         rows.append(
             dict(
@@ -227,7 +270,10 @@ def site_rows(
                 score=_num(score[seed]),
                 vertex=int(conf["vert"][seed]),
                 columns=len(m),
-                no_top=int(no_top[m].sum()),
+                cause=CAUSES[int(nc.argmax())],
+                no_top=int(nc[0]),
+                non_wm_behind_root=int(nc[1]),
+                other=int(nc[2]),
                 median_score=_num(float(np.median(score[m]))),
                 extent_mm=_num(ext),
                 top_mm=_num(float(conf["top_mm"][seed])),
@@ -310,6 +356,10 @@ def write_column_sites(
             Edges=len(E),
             Sites=len(rows),
             SitesByKind={k: sum(r["kind"] == k for r in rows) for k in KINDS},
+            SitesByCause={c: sum(r["cause"] == c for r in rows) for c in CAUSES},
+            ColumnsByCause={
+                c: sum(r[c.replace("-", "_")] for r in rows) for c in CAUSES
+            },
             TermNames=[str(t) for t in conf["term_names"]],
         ),
     )

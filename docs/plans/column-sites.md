@@ -36,6 +36,18 @@ review pane.
 
 ## Design
 
+### The user's decisions (2026-11-10)
+
+1. A separate format, `column-sites/1`. The answers go to the same
+   `wm-edits/1` log.
+2. All the columns become sites, each column in one site. The sites are in
+   the order of their worst column: no top first, then the lowest
+   confidence. There is no cut-off.
+3. Spatial sites with `R` = 2 mm. Each site records the count of each cause
+   (no top, non-WM signal behind the root, other) and its dominant cause,
+   for the catalogue of error types. The causes do not split the sites.
+4. The site voxel is the seed's root, rounded to the dseg grid.
+
 ### A separate format, `column-sites/1`
 
 Column sites get their own files and spec, not new kinds in `wm-sites/1`:
@@ -78,9 +90,21 @@ rounded to the dseg grid. The root is where the review found most errors
 reviewer stops where they choose. The sites at the back of the queue are
 there, but a person seldom reaches them.
 
+### The causes
+
+Each column has one cause:
+
+- `no-top`: the column has no top;
+- `non-wm-behind-root`: the first of its lowest confidence terms is
+  `non_wm_behind_root`;
+- `other`: any other column.
+
+The cause uses no threshold. The dominant cause of a site is the cause with
+the most columns (a tie goes to the first cause in the list).
+
 ### The measures of a site
 
-For each site: its columns, the columns with no top, the seed's confidence,
+For each site: its columns, the count of each cause, the dominant cause, the seed's confidence,
 the median confidence, the seed's top (mm), its GM-like and fluid-like
 length behind the root, and the name of the seed's lowest term. These order
 nothing. They help the reviewer and the diagnostics.
@@ -123,6 +147,20 @@ views, not pass or fail rules. The script is
 
 All the no-top columns are in the first 10,860 sites.
 
+The causes:
+
+| Measure | `no-top` | `non-wm-behind-root` | `other` |
+|---|---|---|---|
+| Columns | 57,649 | 278,524 | 842,975 |
+| Sites with this dominant cause | 3,520 | 30,922 | 100,603 |
+| Dominant cause, first 1,000 sites | 263 | 196 | 541 |
+| Dominant cause, first 10,000 sites | 3,220 | 851 | 5,929 |
+
+A site with a no-top seed often has more columns with a top than with no
+top, so its dominant cause is not `no-top`. The `non_wm_behind_root` term
+of the `non-wm-behind-root` columns: p10 / 50 / 90 = −8.0 / −3.35 / −0.37.
+For 214,815 of the 278,524 columns it is below −1.
+
 The sites are small. The radius has little effect:
 
 | `R` (mm) | Sites | One-column sites | Sites that hold the first 5 % |
@@ -155,12 +193,11 @@ label. Cyan: outside medium label. White dot: the seed root. Red: a column
 with no top (root and ray). Orange: a column with a top (root and ray to the
 top). Magenta X: a top. Faint markers are more than 1 mm from the plane.*
 
-## Open decisions (the user's)
+## Open items (the user's)
 
-1. A separate format, or new kinds in `wm-sites/1`.
-2. All columns in sites (as built), or only a part of the queue.
-3. The join rule and `R`. One option: let a later column also join a site
-   whose seed is a lower local value within `R`, so that local lows merge.
-4. The site voxel: the seed's root (as built) or its top.
-5. The order of tied columns. All no-top columns have the confidence
+1. The join rule. The radius does not make the sites larger. One option:
+   let a later column also join a site whose seed is a lower local value
+   within `R`, so that local lows merge.
+2. The order of tied columns. All no-top columns have the confidence
    `-inf`. The stage's rank orders them by column index.
+3. The review pane does not read `column-sites/1` yet. That is a later step.

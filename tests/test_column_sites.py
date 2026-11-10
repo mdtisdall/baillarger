@@ -16,7 +16,7 @@ from baillarger import bids
 from baillarger import column_sites as C
 from baillarger import wm_edits as E
 
-NAMES = np.array(["a", "b", "c"])
+NAMES = np.array(["a", "non_wm_behind_root", "c"])
 
 
 def chain(n: int) -> tuple[np.ndarray, np.ndarray]:
@@ -111,6 +111,38 @@ def conf_arrays(n: int) -> dict[str, np.ndarray]:
     )
 
 
+def test_column_causes() -> None:
+    nan = np.nan
+    terms = np.array(
+        [
+            [-1.0, -2.0, 0.0],  # non-WM term lowest
+            [-2.0, -1.0, 0.0],  # another term lowest
+            [-2.0, -2.0, 0.0],  # a tie: the first lowest term counts
+            [nan, -0.5, nan],  # NaN terms do not count
+            [nan, nan, nan],  # no finite term
+            [-9.0, -9.5, 0.0],  # no top, whatever the terms
+        ]
+    )
+    top_k = np.array([3, 3, 3, 3, 3, -1])
+    got = C.column_causes(top_k, terms, NAMES)
+    assert got.tolist() == [1, 2, 2, 1, 2, 0]
+    # without the non-WM term, no column has that cause
+    assert C.column_causes(top_k, terms, ["a", "b", "c"]).tolist() == [2] * 5 + [0]
+
+
+def test_a_tie_of_causes_goes_to_the_first_cause() -> None:
+    pos, edges = chain(2)
+    c = conf_arrays(2)
+    c["top_k"][0], c["conf"][0] = -1, -np.inf  # column 0: no top
+    c["top_k"][1] = 10  # column 1: non-WM behind the root
+    c["terms"][1] = [0.0, -1.0, 0.0]
+    g = C.group_columns(np.array([0, 1]), edges, pos, 5.0)
+    vox = np.zeros((2, 3), np.int64)
+    (row,) = C.site_rows(g, c, pos, vox)
+    assert (row["no_top"], row["non_wm_behind_root"], row["other"]) == (1, 1, 0)
+    assert row["cause"] == "no-top"
+
+
 def test_site_rows_on_a_chain() -> None:
     pos, edges = chain(6)
     c = conf_arrays(6)
@@ -127,10 +159,13 @@ def test_site_rows_on_a_chain() -> None:
     assert first["score"] is None and first["top_mm"] is None
     assert first["lowest_term"] == "n/a" and first["vertex"] == 101
     assert first["columns"] == 3 and first["no_top"] == 1
+    # causes: 1 has no top; the others' lowest term is non_wm_behind_root
+    assert (first["non_wm_behind_root"], first["other"]) == (2, 0)
+    assert first["cause"] == "non-wm-behind-root"
     assert first["median_score"] == pytest.approx(round(float(c["conf"][0]), 4))
     assert first["extent_mm"] == 1.0
     assert second["score"] == pytest.approx(round(float(c["conf"][3]), 4))
-    assert second["lowest_term"] == "b" and second["top_mm"] == 2.0
+    assert second["lowest_term"] == "non_wm_behind_root" and second["top_mm"] == 2.0
     assert second["gm_behind_mm"] == 0.5 and second["fluid_behind_mm"] == 0.0
     assert rows[2]["columns"] == 1 and rows[2]["extent_mm"] == 0.0
 
@@ -165,8 +200,11 @@ def test_the_command_writes_sites_that_the_answer_log_takes(
     rows, side = C.read_column_sites(p["table"])
     assert side["Sites"] == len(rows) and side["Columns"] == n
     assert side["Edges"] == n - 1 and side["Hemisphere"] == "R"
-    assert side["RadiusMm"] == C.RADIUS and side["TermNames"] == ["a", "b", "c"]
+    assert side["RadiusMm"] == C.RADIUS and side["TermNames"] == NAMES.tolist()
     assert sum(side["SitesByKind"].values()) == len(rows)
+    assert sum(side["SitesByCause"].values()) == len(rows)
+    assert sum(side["ColumnsByCause"].values()) == n
+    assert side["ColumnsByCause"]["no-top"] == 1
     assert [r["rank"] for r in rows] == list(range(1, len(rows) + 1))
     assert rows[0]["kind"] == "column-no-top" and rows[0]["vertex"] == vert[1]
     # the members: every column once, in a site of the table
@@ -215,6 +253,8 @@ def test_a_table_with_other_columns_is_refused(tmp_path: Path) -> None:
         Edges=0,
         Sites=0,
         SitesByKind={},
+        SitesByCause={},
+        ColumnsByCause={},
         TermNames=[],
     )
     bids.write_sidecar(bids.sidecar_path(t), C.COLUMN_SITES_SPEC, side)

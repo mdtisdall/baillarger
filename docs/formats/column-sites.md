@@ -53,6 +53,21 @@ So each site is connected on the column graph, and all its columns are
 within `RadiusMm` of its seed. `RadiusMm` is the size of one review view,
 not a measure of correctness. The default is 2 mm.
 
+## Causes
+
+Each column has one cause, for the catalogue of error types
+(`baillarger.column_sites.column_causes`). The causes do not split the
+sites. A site records the count of each cause and its dominant cause.
+
+| Cause | The column |
+|---|---|
+| `no-top` | Has no top (`top_k` < 0) |
+| `non-wm-behind-root` | Has a top, and the first of its lowest terms is `non_wm_behind_root` (NaN terms do not count) |
+| `other` | Any other column, also a column with no finite term |
+
+The dominant cause of a site is the cause with the most columns. A tie goes
+to the cause that comes first in the table above.
+
 ## Files
 
 Next to the white surface, in `DERIV/sub-<sub>/ses-<ses>/anat/`, or in `DIR`
@@ -81,7 +96,8 @@ columns are as in `wm-sites/1` (`rank`, `kind`, `i`, `j`, `k`, then
 | `score` | number or `n/a` | The seed's confidence; `n/a` for no top |
 | `vertex` | integer | The seed's vertex of the white surface |
 | `columns` | integer | The site's columns |
-| `no_top` | integer | Its columns with no top |
+| `cause` | string | The dominant cause (Causes) |
+| `no_top`, `non_wm_behind_root`, `other` | integer | Its columns of each cause |
 | `median_score` | number or `n/a` | The median confidence of its columns; `n/a` if not finite |
 | `extent_mm` | number | The largest distance (mm) from a column's root to the seed's root |
 | `top_mm` | number or `n/a` | The seed's top, mm from its root; `n/a` for no top |
@@ -106,4 +122,6 @@ diagnostics.
 | `Edges` | integer | yes | The edges of the column graph that the grouping used |
 | `Sites` | integer | yes | Rows of the table |
 | `SitesByKind` | object | yes | Rows of the table, by kind |
+| `SitesByCause` | object | yes | Rows of the table, by dominant cause |
+| `ColumnsByCause` | object | yes | Columns, by cause |
 | `TermNames` | array of strings | yes | The stage's confidence terms, in its order |

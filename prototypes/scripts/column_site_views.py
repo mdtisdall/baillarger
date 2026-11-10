@@ -31,6 +31,9 @@ p = C.sites_paths(Path(SITES.name.replace("_desc-columnsites_sites.tsv", "_white
 mv, ms = C.read_members(p["members"])
 z = np.load(CONF)
 vert, conf, top_k, rank = z["vert"], z["conf"], z["top_k"], z["rank"]
+names = [str(t) for t in z["term_names"]]
+nwt = z["terms"][:, names.index(C.NON_WM_TERM)]
+cause_col = C.column_causes(top_k, z["terms"], names)
 s_of = np.empty(len(vert), np.int64)
 s_of[np.searchsorted(vert, mv) if np.all(np.diff(vert) > 0) else np.argsort(vert)[np.searchsorted(np.sort(vert), mv)]] = ms
 n_sites = len(rows)
@@ -38,6 +41,8 @@ cols = np.array([r["columns"] for r in rows])
 ext = np.array([r["extent_mm"] for r in rows])
 kind = np.array([r["kind"] for r in rows])
 no_top = np.array([r["no_top"] for r in rows])
+by_cause = {c: np.array([r[c.replace("-", "_")] for r in rows]) for c in C.CAUSES}
+dom = np.array([r["cause"] for r in rows])
 score = np.array([np.nan if r["score"] is None else r["score"] for r in rows])
 
 # ---------------------------------------------------------------- numbers
@@ -50,6 +55,8 @@ stats = dict(
     columns_in_single_sites=int(cols[cols == 1].sum()),
     extent_mm_p10_50_90=np.round(np.percentile(ext, [10, 50, 90]), 3).tolist(),
     no_top_columns=int(no_top.sum()),
+    sites_by_cause={c: int((dom == c).sum()) for c in C.CAUSES},
+    columns_by_cause={c: int(v.sum()) for c, v in by_cause.items()},
     no_top_columns_in_no_top_sites=int(no_top[kind == "column-no-top"].sum()),
 )
 for share in (0.01, 0.05, 0.1, 0.2):
@@ -58,6 +65,11 @@ for share in (0.01, 0.05, 0.1, 0.2):
     stats[f"sites_holding_front_{int(share * 100)}pct_columns"] = int(len(np.unique(s_of[front])))
 first_top = int(np.flatnonzero(kind == "column-top")[0]) + 1
 stats["first_column_top_rank"] = first_top
+nw = nwt[cause_col == 1]
+stats["non_wm_cause_term_p10_50_90"] = np.round(np.percentile(nw, [10, 50, 90]), 3).tolist()
+stats["non_wm_cause_columns_term_below_minus1"] = int((nw < -1).sum())
+for k in (1000, 10000):
+    stats[f"first_{k}_sites_by_cause"] = {c: int((dom[:k] == c).sum()) for c in C.CAUSES}
 lt = {}
 for r in rows[:20000]:
     lt[r["lowest_term"]] = lt.get(r["lowest_term"], 0) + 1
@@ -81,7 +93,9 @@ ax = axs[2]
 cum = np.cumsum(cols) / cols.sum()
 x = np.arange(1, n_sites + 1)
 ax.plot(x, 100 * cum, color="#333", label="all columns")
-ax.plot(x, 100 * np.cumsum(no_top) / max(no_top.sum(), 1), color="#d62728", label="no-top columns")
+for c, colr in zip(C.CAUSES, ("#d62728", "#9467bd", "#8c564b")):
+    v = by_cause[c]
+    ax.plot(x, 100 * np.cumsum(v) / max(v.sum(), 1), color=colr, label=f"{c} columns")
 ax.axvline(first_top, color="#1f77b4", ls=":", lw=1, label="first column-top site")
 ax.set_xscale("log"); ax.set_xlabel("sites reviewed, in queue order"); ax.set_ylabel("% of columns covered")
 ax.legend(fontsize=8); ax.set_title("Columns covered by the front of the site queue")
