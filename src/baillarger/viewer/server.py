@@ -29,7 +29,8 @@ Requests:
   the brick size, the dtype, the default window: read on first use),
   /volume/bricks?level=L&b=i,j,k;i,j,k;... (those bricks' bytes, one after another;
   gzip when the page accepts it).
-- Named volumes (baillarger.viewer.volumes: echo, labels, fixes):
+- Named volumes (baillarger.viewer.volumes: echo, echo1 to echo3, labels, wm,
+  fixes):
   /volume/list, /volume/<name>/meta, /volume/<name>/bricks?level=&b=.
 - The stream 1 review (baillarger.viewer.review; with --sites and --edits):
   GET /review/queue, /review/next, /review/preview?job=; POST /review/session,
@@ -369,14 +370,15 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument(
         "--echo",
         type=Path,
-        help="the volume pane's image (default: echo 2 in data, if the file is there)",
+        help="the volume pane's default image (default: echo 2 of --echo-dir, if the "
+        "file is there)",
     )
     VV.add_arguments(ap)
     ap.add_argument(
         "--echo-dir",
         type=Path,
-        help="the directory of echoes 1-3 (.nii, else .nii.gz) for the columns pane's "
-        "profiles (default: data)",
+        help="the directory of echoes 1-3 (.nii, else .nii.gz): the volume pane's "
+        "echo choice and the columns pane's profiles (default: data)",
     )
     VR.add_arguments(ap)
     VOL.add_arguments(ap)
@@ -393,12 +395,25 @@ def main(argv: list[str] | None = None) -> None:
         log=print,
     )
     volume: LazyVolume | None = None
-    e_ = a.echo or echo_path(2)
+    # echoes 1 to 3 in --echo-dir (the .nii, else the .nii.gz); the default volume:
+    # --echo, else echo 2 of them
+    edir = a.echo_dir or echo_path(1).parent
+    echoes = {k: VC.echo_file(k, edir) for k in (1, 2, 3)}
+    echoes = {k: p for k, p in echoes.items() if p.is_file()}
+    e_ = a.echo or echoes.get(2) or echo_path(2)
     if e_.is_file():
         volume = LazyVolume(lambda: ArrayPyramid.from_nifti(e_), e_.name)
     dt = str(nifti(e_).get_data_dtype()) if volume is not None else ""
     volumes = VV.for_white(
-        white.surf, white.W.sidecar["Sources"], volume, dt, a.dseg, a.fixes
+        white.surf,
+        white.W.sidecar["Sources"],
+        volume,
+        dt,
+        a.dseg,
+        a.fixes,
+        filled=white.filled,
+        echoes=echoes,
+        echo_path=e_,
     )
     outlines = VO.Outlines.from_white_view(white)
     lab = volumes.items["labels"]

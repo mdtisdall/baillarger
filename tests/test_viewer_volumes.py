@@ -157,3 +157,121 @@ def test_white_paths_from_sources_or_next_to_the_surface(tmp_path: Path) -> None
     assert VV.white_paths(surf, [str(moved)], o, o) == (o, o)
     with pytest.raises(FileNotFoundError):
         VV.white_paths(tmp_path / "x.surf.gii", [str(moved)], None, None)
+
+
+def test_the_wm_table() -> None:
+    assert VV.colour_table("wm") == {"1": dict(name="wm_mask", rgba=[255, 149, 0, 255])}
+
+
+def _blocks(a: np.ndarray) -> np.ndarray:
+    """The 2 x 2 x 2 blocks of an array of even shape, as (nx/2, ny/2, nz/2, 8)."""
+    nx, ny, nz = a.shape
+    return (
+        a.reshape(nx // 2, 2, ny // 2, 2, nz // 2, 2)
+        .transpose(0, 2, 4, 1, 3, 5)
+        .reshape(nx // 2, ny // 2, nz // 2, 8)
+    )
+
+
+def _brick(base: str, name: str, level: int, shape: tuple[int, ...]) -> np.ndarray:
+    """Brick (0, 0, 0) of a level whose shape fits one brick, as an array."""
+    meta = json.loads(get(f"{base}/volume/{name}/meta"))
+    dt = {"int16": "<i2", "int32": "<i4", "float32": "<f4"}[meta["dtype"]]
+    b = np.frombuffer(get(f"{base}/volume/{name}/bricks?level={level}&b=0,0,0"), dt)
+    return b.reshape(shape, order="F")
+
+
+def test_the_echo_choice_and_the_wm_mask(tmp_path: Path) -> None:
+    """--white mode's registry with echoes 1 to 3 and FilledLabels: each echo's
+    pyramid is the file at level 0 and the block means at level 1; the echo that
+    is the default volume is a second name of it (one pyramid, built once); the
+    WM mask is 1 on the filled labels at level 0 and the block modes at level 1
+    (a tie of 4 and 4 goes to 0)."""
+    rng = np.random.default_rng(7)
+    shape = (40, 34, 36)  # level 1 (20, 17, 18) fits one brick of 32
+    d = tmp_path / "anat"
+    d.mkdir()
+    echoes: dict[int, Path] = {}
+    data: dict[int, np.ndarray] = {}
+    for k in (1, 2, 3):
+        data[k] = rng.integers(0, 3000, shape).astype(np.int16)
+        echoes[k] = d / f"echo-{k}.nii"
+        nib.save(nib.nifti1.Nifti1Image(data[k], A0), echoes[k])
+    seg = rng.choice(np.array([0, 2, 41, 42, 49, 60], np.int16), shape)
+    filled = (41, 49, 60)
+    dseg = d / "s_desc-wmtopo_dseg.nii.gz"
+    fixes = d / "s_desc-wmtopofixes_dseg.nii.gz"
+    nib.save(nib.nifti1.Nifti1Image(seg, A0), dseg)
+    nib.save(nib.nifti1.Nifti1Image(np.zeros(shape, np.uint8), A0), fixes)
+    built: list[str] = []
+
+    def make() -> VB.BrickSource:
+        built.append("echo")
+        return VB.ArrayPyramid.from_nifti(echoes[2])
+
+    lazy = VB.LazyVolume(make, echoes[2].name)
+    vs = VV.for_white(
+        d / "s_hemi-R_white.surf.gii",
+        [str(dseg)],
+        lazy,
+        "int16",
+        filled=filled,
+        echoes=echoes,
+        echo_path=echoes[2],
+    )
+    srv = VS.serve(None, 0, white=object(), volume=lazy, volumes=vs)  # type: ignore[arg-type]
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        ls = {v["name"]: v for v in json.loads(get(base + "/volume/list"))}
+        assert list(ls) == ["echo", "echo1", "echo2", "echo3", "labels", "wm", "fixes"]
+        assert ls["echo2"]["same_as"] == "echo"
+        assert all("same_as" not in ls[n] for n in ls if n != "echo2")
+        assert ls["wm"]["kind"] == "labels" and ls["wm"]["table"] == "wm"
+        for k in (1, 2, 3):
+            n = f"echo{k}"
+            lv = json.loads(get(f"{base}/volume/{n}/meta"))["levels"]
+            assert [x["shape"] for x in lv] == [list(shape), [20, 17, 18]]
+            a0 = _brick(base, n, 0, (32, 32, 32))
+            assert np.array_equal(a0, data[k][:32, :32, :32])
+            a1 = _brick(base, n, 1, (20, 17, 18))
+            mean = _blocks(data[k].astype(np.float64)).mean(-1)
+            assert np.array_equal(a1, np.rint(mean).astype(np.int16))
+        assert built == ["echo"]  # echo 2 and the default volume: one pyramid
+        assert get(base + "/volume/echo2/bricks?level=1&b=0,0,0") == get(
+            base + "/volume/bricks?level=1&b=0,0,0"
+        )
+        mw = json.loads(get(base + "/volume/wm/meta"))
+        assert mw["table"] == VV.colour_table("wm")
+        m0 = _brick(base, "wm", 0, (32, 32, 32))
+        mask = np.isin(seg, filled)
+        assert np.array_equal(m0, mask[:32, :32, :32].astype(m0.dtype))
+        m1 = _brick(base, "wm", 1, (20, 17, 18))
+        ones = _blocks(mask.astype(np.int64)).sum(-1)
+        assert np.array_equal(m1, (ones > 4).astype(m1.dtype))
+        assert (ones == 4).any() and (ones > 4).any()  # the tie rule is tested
+    finally:
+        srv.shutdown()
+        VS.Handler.white = None
+        VS.Handler.volume = None
+        VS.Handler.volumes = None
+
+
+def test_no_filled_labels_no_mask_and_no_alias_without_the_default(
+    tmp_path: Path,
+) -> None:
+    """Without FilledLabels there is no WM mask; an echo that is not the default
+    volume's file is its own pyramid; an alias needs a free name."""
+    d = tmp_path
+    dseg = d / "s_desc-wmtopo_dseg.nii.gz"
+    fixes = d / "s_desc-wmtopofixes_dseg.nii.gz"
+    e1 = d / "e1.nii"
+    for f in (dseg, fixes, e1):
+        nib.save(nib.nifti1.Nifti1Image(np.zeros((2, 2, 2), np.int16), A0), f)
+    vs = VV.for_white(
+        d / "s.surf.gii", [str(dseg)], None, "", echoes={1: e1}, echo_path=None
+    )
+    assert [v["name"] for v in vs.list()] == ["echo1", "labels", "fixes"]
+    assert vs.same_as == {}
+    with pytest.raises(ValueError):
+        vs.alias("labels", "echo1")
