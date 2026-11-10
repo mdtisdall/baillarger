@@ -14,11 +14,11 @@ def test_tck_round_trip() -> None:
     assert SV.read_tck(SV.tck([])) == []
 
 
-def niivue_tck_offsets(data: bytes) -> list[int]:
-    """The line ends that NiiVue 0.69's readTCK finds (its loop, transcribed): it
-    starts the offsets at 0, then writes the point count at every non-finite row
-    from the first slot, and stops at a row that is not nan; it draws the points
-    between consecutive offsets."""
+def header_start_offsets(data: bytes) -> list[int]:
+    """The line ends that a reader finds that starts the first line at the header
+    (offset 0), then writes the point count at every non-finite row from the first
+    slot, and stops at a row that is not nan; it draws the points between
+    consecutive offsets. (NiiVue 0.69's readTCK loop, transcribed.)"""
     head = data[: data.index(b"END\n")].decode()
     off = int(next(x for x in head.splitlines() if x.startswith("file:")).split()[-1])
     a = np.frombuffer(data[off:], "<f4").reshape(-1, 3)
@@ -37,9 +37,9 @@ def niivue_tck_offsets(data: bytes) -> list[int]:
     return h[:u]
 
 
-def test_niivue_draws_every_line_of_a_tck() -> None:
+def test_a_reader_that_starts_at_the_header_gets_every_line() -> None:
     lines = [np.zeros((4, 3)), np.ones((3, 3)), np.ones((2, 3))]
-    h = niivue_tck_offsets(SV.tck(lines))
+    h = header_start_offsets(SV.tck(lines))
     drawn = [b - a for a, b in zip(h[:-1], h[1:], strict=True) if b > a]
     assert drawn == [4, 3, 2]
-    assert niivue_tck_offsets(SV.tck(lines[:1]))[:2] == [0, 4]
+    assert header_start_offsets(SV.tck(lines[:1]))[:2] == [0, 4]

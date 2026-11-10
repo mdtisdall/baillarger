@@ -9,8 +9,8 @@
 // - The brick tiles (a plug-in of window.BVP, draw2d on #bvo): a dot where a column crosses the tile's plane.
 // - Which columns the 3D view and the tiles show: a menu in the surface pane's bar and one in the volume pane's bar,
 //   "columns: off | section | all". section (the default): the columns of the section (one a step; mean across, the
-//   columns of each step's mean); all: every column in the radius (the cap applies). The volume pane's menu acts on the
-//   bricks viewer only (NiiVue keeps its .tck), so it is disabled with NiiVue.
+//   columns of each step's mean); all: every column in the radius (the cap applies).
+// - The .tck link in the pane's bar downloads the displayed columns (MRtrix .tck, for other tools).
 // - The profile section that follows the surface: GET /columns/section (baillarger.viewer.section) cuts the true white
 //   mesh with the plane through the picked column's root that holds its normal and the section axis u, and gives one step
 //   every half voxel along that curve, in order of arc length, with the column nearest along the surface
@@ -56,7 +56,7 @@ function plasma(t) {
 }
 const css = c => `rgb(${c.map(x => Math.round(255 * x)).join(",")})`;
 const esc = x => String(x).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const C = { meta: null, data: null, prof: null, key: null, req: null, pick: -1, sec: null, sseq: 0, seq: 0, gl: null, nvMesh: null,
+const C = { meta: null, data: null, prof: null, key: null, req: null, pick: -1, sec: null, sseq: 0, seq: 0, gl: null,
   slice: null,   // { v: the selection's true vertex, n: the slice's normal } after a shift-click in a slice view
   pickV: null,   // the picked column's true vertex (the section's centre)
   vidx: new Map(),   // true vertex -> index in C.data
@@ -106,9 +106,7 @@ function build() {
   const vb = document.createElement("span"); vb.style.display = "contents";
   vb.innerHTML = menu("ctile", "where they cross the slices") +
     `<label title="the roots of the profile section's columns within half a voxel of each slice, coloured by their place along the section; the picked column's root white"><input type="checkbox" id="chlv" checked> section roots</label>`;
-  $("vwhite").closest(".pbar").appendChild(vb);
-  if (!V.bricks) for (const id of ["ctile", "chlv"]) { const el = $(id); el.disabled = true;
-    el.closest("label").title = "these act on the bricks viewer (viewer: bricks (ours)); NiiVue shows the columns as a .tck"; el.closest("label").style.opacity = 0.5; }
+  $("vfit").closest(".pbar").appendChild(vb);
   $("ckey").innerHTML = ICOL.map((c, k) => `<span class="sw" style="background:rgb(${c})"></span>${INAME[k]}`).join(" ");
   for (const id of ["crad", "cevery", "cein", "ceout"]) $(id).onchange = () => { shareSettings(); load(); };
   $("ccol").onchange = () => { redraw(); };
@@ -193,7 +191,6 @@ async function load() {
       setTck(head);
       st = `${head.n} columns, ${head.samples.toLocaleString()} samples · ${(a.ms / 1000).toFixed(2)} s ` +
         `(server: graph ${head.seconds.graph} s, sampler ${head.seconds.sample} s on ${head.seconds.calls.toLocaleString()} roots of superblock ${head.superblock.join(",")})`;
-      loadTck();
     }
     $("cstat").textContent = st;
     C.loading = false;
@@ -326,16 +323,6 @@ BVP.push({
 });
 function redrawTiles() { if (BVAPI) BVAPI.draw(); }
 
-// ------------------------------------------------------------------ NiiVue: the columns as .tck (when NiiVue is the volume pane)
-async function loadTck() {
-  const nv = V.NV && V.NV.nv; if (!nv || !C.key || !nv.addMeshFromUrl) return;
-  try {
-    if (C.nvMesh && nv.meshes.includes(C.nvMesh)) nv.removeMesh(C.nvMesh);
-    C.nvMesh = await nv.addMeshFromUrl({ url: `/columns/${C.key}.tck`, name: `columns_${C.key}.tck`, rgba255: [255, 120, 60, 255] });
-    nv.drawScene();
-  } catch (e) { V.log("columns .tck in NiiVue: " + e.message); }
-}
-
 // ------------------------------------------------------------------ the profile section
 // the section axis u: the 3D view's screen right at the time of the selection, in the plane normal to the picked column
 // (world mm); the server makes the curve and picks the columns (GET /columns/section)
@@ -371,7 +358,7 @@ async function section() {
     if ((C.capped || C.all) && need.some(v => !C.vidx.has(v))) {   // the section's columns alone, from every root
       const cq = `${query(sel, 1)}&cols=${need.join(",")}`;
       const a = await fetchBinary(`/columns?${cq}`, lseq); if (!a || seq !== C.sseq) return;
-      const [head, d] = decode(a.buf); setData(head, d); if (C.capped) { setTck(head); loadTck(); }
+      const [head, d] = decode(a.buf); setData(head, d); if (C.capped) setTck(head);
       const p = await fetchBinary(`/columns/profiles?${cq}`, lseq); if (!p || seq !== C.sseq) return;
       C.prof = decode(p.buf)[1];
       const what = C.capped ? `radius ${settings().radius} mm: over the cap` : `${C.all.head.n} columns shown (every ${settings().every})`;

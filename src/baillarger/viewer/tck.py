@@ -1,6 +1,6 @@
-"""The MRtrix .tck track format, which NiiVue reads: the viewer's writer of
-polylines (columns, section curves) for the 3D views and for export, and its
-reader for tests. It reads no data files."""
+"""The MRtrix .tck track format: the viewer's writer of polylines (the columns pane's
+.tck download, which other tools open), and its reader for tests. It reads no data
+files."""
 
 import numpy as np
 import numpy.typing as npt
@@ -10,9 +10,10 @@ type Float = npt.NDArray[np.float64]
 
 def tck(lines: list[Float]) -> bytes:
     """MRtrix .tck bytes (float32 little-endian) of polylines in mm: a row of nan, then
-    each line's points and a row of nan; an inf row ends the file. NiiVue (0.69) takes
-    each nan row as the end of a line and the first offset as 0 only after a nan row:
-    without the leading one it draws every line but the first (none of one line)."""
+    each line's points and a row of nan; an inf row ends the file. The leading nan row
+    is for a reader that starts the first line at the header's offset and ends a line
+    at each nan row (NiiVue 0.69 is one): without it, such a reader joins the first
+    line to the header and draws every line but the first (none of one line)."""
     body = [np.full((1, 3), np.nan, np.float32)]
     for p in lines:
         body.append(np.asarray(p, np.float32).reshape(-1, 3))
