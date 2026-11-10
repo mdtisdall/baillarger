@@ -83,16 +83,23 @@ The costs, summed:
    squared difference of neighbours' shear at equal s.
 5. **No crossing, no crowding.** A barrier on each mesh face: the triangle
    of its three columns' points at equal warped depth keeps a positive area
-   and its orientation. A mild L2 term on the log of that area against its
+   and its orientation. The barrier is extended: below a relative area of
+   δ = 0.1 it continues as the quadratic of −log at δ, so it is finite.
+   The straight rays at the site have inverted faces (3,230 of 29,749
+   inner faces at s = 0.5 mm, 15,032 at 3 mm), so the pure barrier is
+   infinite at the start. δ is fixed before any fit. A mild L2 term on the log of that area against its
    neighbours' areas, so columns spread over the pia and do not crowd onto
    the nearer bank or the tip.
 6. **No return.** A barrier on a path that enters WM (filled labels) again
    after it has left it.
-7. **Texture.** Added only after phase 2 finds texture. The angle between
-   the path's tangent and the direction of radial texture, weighted by its
-   strength. The plan records that at 160 µm no source shows radial fibres
-   that give column orientation (§4c, *Open*). So this term is added only
-   where the box shows it.
+7. **Laminar alignment.** Σ w_k m tᵀ A t, with A = c (I − v vᵀ): v is
+   orient's leading eigenvector l1 (the data normal, across the laminae),
+   c its coherence (l1 − l2)/(l1 + l2), t the path's unit tangent. It is
+   c sin²θ, θ the angle between t and v. It has no sign. It gives the axis
+   on which a column crosses the laminae. Costs 2, 3 and 6 give the
+   direction along that axis. Where the tensor is not valid (outside the
+   cortex, outliers), A = 0. Cost 7 stays in the fit from phase 5 on.
+   Each fit also runs once without it, to show its effect.
 
 ## Facts from the current code
 
@@ -141,6 +148,36 @@ The costs, summed:
 
 ### Texture
 
+- H1 (user): at 160 µm no radial fibres are expected, and the box shows
+  none. The tangential (laminar) texture is used: cost 7.
+- Dark outliers (`bent_texture.outliers`, two thresholds: k = 5,
+  grow = 3): seeds are voxels of the cortex whose detrended log echo is
+  below −5 robust SD (median absolute deviation × 1.4826) in at least one
+  echo. The outliers are the connected pieces (26 neighbours, in the
+  cortex) of the voxels below −3 SD in at least one echo that hold a seed,
+  dilated by 1 voxel. They leave the cortex mask before `orient`.
+  - Why two thresholds: a thin vessel can be dark in different voxels in
+    each echo. The first rule (below −5 SD in every echo) masked none of
+    the user's third vessel (grid voxel 524, 210, 474), and the vessel
+    turned l1 by a median of 22–54° within 0.6 mm of it.
+  - At the site (painted box): 43,107 voxels (8.1 % of the cortex), against
+    16,652 (3.1 %) for the first rule. It covers 388 of 390, 65 of 65 and
+    39 of 40 dark voxels of the three vessels that the user marked.
+  - Its cost: it masks 73 % of the cortex within 0.32 mm of the outside
+    (the partial-volume rim along the pia), 13 % at 0.32–0.64 mm, and a
+    dark band at the WM edge in places. There, cost 7 has no field (A = 0).
+  - A shape filter is not used. The Hessian of the lowest z of the three
+    echoes (σ 0.7–3 voxels, the scale of the largest response) classes
+    voxels as sheet, tube or blob. It does not separate the vessels from
+    the rest: the second vessel (along the WM edge) is 63 % sheet; most
+    sheet-shaped seeds away from the pia are dark outside medium at slot
+    ends and in a small pocket that the labels call cortex, which the mask
+    must keep.
+- The l1 streamlines are a view, not a method. At the end of the slot l1
+  turns 90° (from parallel to the fundus floor to parallel to the slot
+  wall) at low coherence (median 0.12). A streamline that keeps the sign
+  nearest its heading cannot choose there. At the site, 86% of the
+  streamlines that return to WM turned away from the nearest outside.
 - `orient_arrays` (`orient.py` 281) returns the noise-whitened gradient
   tensor (6 components, NaN outside the cortex) and the local level.
   `leading`/`leading_any` (193, 360) give the leading eigenvector and the
@@ -156,6 +193,7 @@ The costs, summed:
   site, noise, seed, feats)` gives the image, labels and noise. The image
   is in voxel index space (0.16 mm). `fold.column(X)` gives the true
   straight column of each root.
+- `bent_phantom.py` gives the curved phantom (phase 4).
 - `features(site, path)` needs `fold_features.json`, which
   `fold_measure.py` writes and the repository does not hold. Tests build
   the features inline (`test_fold_phantoms.py` 21).
@@ -177,6 +215,17 @@ The costs, summed:
   `pyproject.toml`. A new prototype test must be added there.
   `affected-tests` follows imports, so no map entry is needed.
 
+### Labels at the site
+
+The segmentation comes before the columns: the trial judges column
+methods only where the labels are right. At the site the user painted a
+crop of the dseg (`wm_paint export`, ITK-SNAP; 410 changed voxels, fluid
+and cortex at the end of the slot). `bent_box --paint <crop>` applies the
+changes to the box's labels. The echoes and the straight rays do not
+change; the rays' label intervals stay those of the dseg. The costs read
+the box's labels, so the fit at the site uses the painted labels.
+`bent_texture` applies the same changes to its grown labels.
+
 ## Files
 
 Each file has one owner during a phase. Two agents never edit the same
@@ -187,7 +236,7 @@ file at the same time. All files are in `prototypes/scripts/`.
 | `bent_box.py` | The roots, straight rays, faces, edges, echoes and labels of a box | `test_bent_box.py` |
 | `bent_sample.py` | Trilinear sampling in torch, with gradients | `test_bent_sample.py` |
 | `bent_texture.py` | The eigenvalues of the tensor and the fibre measure | `test_bent_texture.py` |
-| `bent_terms.py` | The paths, soft tops, lengths and costs 1–7 in torch | `test_bent_terms.py` |
+| `bent_terms.py` | The paths, soft tops, lengths, costs 1–7 and the closest-outside view in torch | `test_bent_terms.py` |
 | `bent_phantom.py` | The curved phantom and its true columns | `test_bent_phantom.py` |
 | `bent_fit.py` | The alternating fit | `test_bent_fit.py` |
 | `bent_views.py` | The diagnostic figures | none |
@@ -242,8 +291,8 @@ Tests:
 - A synthetic image of parallel planes gives a fibre measure near 0.
 - The leading eigenvector equals `orient.leading` on the same tensor.
 
-**H1.** The user looks at the texture views. The user decides if term 7
-is built. If not, phase 7 does not include it.
+**H1** (answered). No radial fibres at this scale. Cost 7 uses the laminar
+texture (see *Texture*).
 
 ### Phase 3: sampling and costs (`bent_sample.py`, `bent_terms.py`)
 
@@ -257,8 +306,10 @@ after the other, or one agent writes all of it.
    tangent.
 3. Write the soft outside map and the soft top, the mask, and the length
    L_c.
-4. Write costs 1–6, each as its own function. Write cost 7 only if H1
-   says so.
+4. Write costs 1–7, each as its own function. Write the laminar field of
+   cost 7 (`align_field`) and the view `closest_outside`: the smallest
+   distance from a path to an outside voxel centre, which separates "almost
+   reaches the top" from "censored".
 5. Write cost 1 against a fixed warp. The warp comes from
    `flattening.fit` and is a constant inside the torch step.
 
@@ -276,6 +327,8 @@ Tests:
 - Cost 5 is finite for parallel paths and becomes infinite as a triangle's
   area goes to zero.
 - Cost 6 is zero for a path that leaves the WM one time.
+- Cost 7 is zero for paths along v, equals c sin²θ Σ m w_k at angle θ,
+  and does not change when v becomes −v.
 - Every cost has a gradient that equals a finite difference.
 
 ### Phase 4: the curved phantom (`bent_phantom.py`)
@@ -307,13 +360,27 @@ Tests:
    4. Repeat 2 and 3 until the paths move less than 0.01 mm, or for a
       stated number of rounds.
 2. Record each cost at each round.
-3. Set the start weights so that terms 1–6 are of equal size at the
-   straight rays.
+3. Set the start weights so that terms 1–7 are of equal size at the
+   straight rays: w = 1/|T(p0)|. A term below 1e-9 at the straight rays
+   takes w = 1/|T(p_ref)|, with p_ref a constant bend of curvature
+   0.05/mm in a random direction per column; if that is also below 1e-9,
+   w = 1. The arm without cost 7 sets its weight to 0 and keeps the
+   others. (The first rule, 1/max(|T0|, |T_ref − T0|), gave the return
+   term a weight of 1.7e28 from float32 rounding; it was replaced after one
+   run of crown_w0.32, and every phantom was run again.)
 4. Run the fit on the fold phantoms of `fold_phantoms.standard()` and on
    the curved phantom. Use the phantom's white mesh and roots from
    `column_tracers`.
 5. Compare the path errors (`fold_eval.errors`) of the fit and the
    straight rays.
+6. Run each fit with cost 7 and without it.
+7. Settings of the phantom runs: 4 rounds of at most 15 L-BFGS iterations
+   (strong Wolfe), float32 on cpu. Columns: the white-mesh vertices in a
+   slab of ±0.7 mm, at least 1 mm from a face; those within 0.3 mm (on the
+   mesh) of the slab's edge stay straight (a halo), because the barrier
+   pushes an open mesh edge outward. Errors on the `pick_vertices` roots
+   within ±0.4 mm and at least 2 mm from a face. Orient on the phantom uses
+   the phantom's own noise (C_rest only) and no reach mask.
 
 Tests:
 
@@ -331,10 +398,34 @@ Tests:
 
 1. Run the fit on the box at true vertex 12182770, radius 5 mm, under
    `scripts/memguard`.
-2. Run it once with each form of cost 3.
-3. Scan each weight over a decade each way from the start weights.
+2. Run it once with each form of cost 3, each with and without cost 7.
+   Labels: the painted box (`box-paint`). Texture: the two-threshold mask
+   (`texture-paint-hyst`). Settings: those of the phantom runs (4 rounds
+   of at most 15 L-BFGS iterations, extend 0.1, seed 0, float32 on cpu).
+3. Scan each weight over a decade each way from the start weights: each
+   weighted term × 0.1 and × 10, one at a time, in arm B7 (form B with
+   cost 7) only. B7 was chosen because form B follows a real thickness
+   gradient. The other arms are not scanned.
 4. Make the views of *Diagnostics*, for the straight rays and each fit,
    side by side.
+5. Sparse depths (evidence for scaling, not a refit). At the straight rays
+   and at each fit's final paths, evaluate each cost with the dense samples
+   (step 0.04 mm to the cap) and with sparse samples: one sample per voxel
+   (0.16 mm) with a random offset per evaluation, the same depths for the
+   columns of an edge or face, to the soft top plus a margin. Repeat with
+   10 seeds. Evaluate a second sparse form with dense samples in a window
+   round the soft top and where the labels change. Report each cost's
+   sparse mean and spread against its dense value, and the columns whose
+   top or return differs. Cost 4 needs no samples: compare the closed form
+   ∫|x″|² of the spline with the sampled sum.
+6. Mark the columns that pass bad labels: voxels below −5 robust SD in
+   every echo, in 26-connected pieces of at least 200 voxels. The rule
+   also marks the partial-volume rim at the pial edge, so the views count
+   separately the columns that pass a piece deeper than 0.32 mm from
+   label 0.
+7. Phase 6 ran with H2 open: the user was away and told the coordinator
+   not to stop at a checkpoint. Its results are provisional until H2 is
+   answered.
 
 **H3.** The user looks at the views. The user decides:
 
@@ -342,13 +433,38 @@ Tests:
 - which form of cost 3 to keep for phase 7.
 - if phase 7 is needed.
 
-### Phase 7: texture and a second site (only after H1 and H3)
+### Phase 6b: probes (`bent_probes.py`)
 
-1. If H1 found texture: add cost 7. Run phase 6 again with it. Show the
-   difference.
-2. If the marked M1S1 points (`prototypes/data/M1S1_points_full0.json`)
+The user's design: straight rays are probes that collect laminar evidence
+(the top and the bottom too); the columns are a discretised
+diffeomorphism refined in parallel with the laminar agreement. Finding the
+best cheap probe is a goal of its own.
+
+1. The top of every probe: the first crossing of 0 by the antialiased
+   field of label 0 (`baillarger.antialias.thin_plate`).
+2. Probes: straight along the box normals; straight along normals
+   smoothed by 24 and 97 more steps; an l1 streamline (c >= 0.3, turn at
+   most 45°, else the heading is kept); the fit with only agreement,
+   alignment, length and bending (bend_ac); B7.
+3. Scores on the inner columns: censored, far top (more than twice the
+   distance to label 0), jumps above 1 mm, drop 2, angle to l1, profile
+   difference with neighbours at equal arc length, returns, and folding
+   by the local Jacobian over 0.4 mm (not by triangles: slivers flip).
+4. Views: the tops along the section, and maps of top, profile
+   difference and angle to l1.
+
+Tests: the first crossing is linear between samples; the l1 heading keeps
+its sign and falls back to the heading; straight probe points; the local
+Jacobian is 1 for a translation and negative for a mirror.
+
+### Phase 7: a second site (only after H3)
+
+1. If the marked M1S1 points (`prototypes/data/M1S1_points_full0.json`)
    can be placed on the current derivatives: run the fit there. Measure
    the profile split at the marked points against normal's 0.17 mm (§4c).
+2. The points can be placed: the dseg and the echoes have the same grid,
+   and all 23 points lie on label 42. The split measurement needs new
+   code. Phase 7 waits for H3.
 
 ### Phase 8: the report
 
@@ -370,7 +486,7 @@ Tests:
   can start with phase 1.
 - Phase 5 needs phases 3 and 4.
 - Phase 6 needs phases 1, 2 (only for H1), 3 and 5, and the answer to H2.
-- Phase 7 needs the answers to H1 and H3.
+- Phase 7 needs the answer to H3.
 - Give each agent one file and its test file. The coordinator reviews
   each diff and runs the tests before the next phase starts.
 - Run heavy runs one at a time, each under `scripts/memguard`.
@@ -393,8 +509,13 @@ fit, side by side:
 - where the tops land: each bank's pial area reached per unit of root area
   (crowding), and the share of fundus columns that end at the tip, on
   each bank, or censored.
-- the angle between each path and the data normal where coherence is high:
-  the independent check (§4b, *Smooth does not prove correct*).
+- the angle between each path and the data normal where coherence is high.
+  With cost 7 in the fit it is not independent; the run without cost 7
+  gives the independent check (§4b, *Smooth does not prove correct*).
+- `closest_outside` of censored columns.
+- Dense against sparse depths (phase 6, step 5): per cost, the sparse
+  estimates against the dense value; the columns whose top or return
+  differs, on the mesh.
 - own-bank returns, and columns that enter outside before their top
   through a hole, a tear (catalogue type F) or an excision edge (type C).
 
@@ -405,7 +526,11 @@ fit, side by side:
   exists.
 - Censored columns get no top term. Their length comes from their
   neighbours.
-- Terms 1–6 first. Term 7 only where phase 2 shows texture.
+- Cost 7 is the laminar alignment, in every fit from phase 5 on, with a
+  run without it beside each fit.
+- The cost 5 barrier is extended with δ = 0.1.
+- Dark outliers are removed before `orient` with two thresholds (k = 5,
+  grow = 3), set before the site fits.
 - Both forms of cost 3 are fitted and shown. Neither is chosen in
   advance.
 - The fit alternates: torch moves the paths with the warp fixed, and
