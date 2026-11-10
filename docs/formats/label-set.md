@@ -19,7 +19,6 @@ Right values, the left hemisphere the Left values.
 | Outside | 0 | 0 | no | decided |
 | White matter (WM) | 41 | 2 | yes | decided |
 | Cortex | 42 | 3 | no | decided |
-| Lateral ventricle | 43 | 4 | no | decided 2026-11-03 |
 | Thalamus | 49 | 10 | yes | decided |
 | Caudate | 50 | 11 | yes | decided |
 | Putamen | 51 | 12 | yes | decided |
@@ -28,10 +27,11 @@ Right values, the left hemisphere the Left values.
 | Accumbens | 58 | 26 | yes | decided |
 | Ventral DC | 60 | 28 | yes | decided |
 | Vessel | 62 | 30 | yes | decided |
-| Choroid plexus | 63 | 31 | no | decided 2026-11-03 |
-| Inferior lateral ventricle | 44 | 5 | no | decided |
 | Amygdala | 54 | 18 | no | decided |
 | Hippocampus | 53 | 17 | open | open |
+
+The set has no class for the ventricles, the choroid plexus or CSF. In an
+isolated hemisphere they are outside (see "The labels that become outside").
 
 The network gives at least outside, WM, cortex, the filled classes and the
 hippocampus. The hippocampus is a class of its own, separate from cortex and
@@ -40,6 +40,37 @@ adds a class only when it needs it.
 
 Both hemispheres share the value 192. The hemisphere is the one whose WM
 value is in the segmentation (41: right, 2: left).
+
+## The labels that become outside
+
+In an isolated hemisphere, the ventricles and the outside are one
+compartment. Ex vivo, a ventricle holds the outside medium or collapses, and
+it has no contrast against the outside. On the purple-mri hemisphere, the
+lateral ventricle opens to the exterior through the medial cut. Decided by
+the user on 2026-11-03 and on 2026-11-09.
+
+Inherited labels (the purple-mri aseg) can hold these FreeSurferColorLUT
+labels. They are not classes of this set:
+
+| Label | Right | Left |
+|---|---|---|
+| CSF | 24 | 24 |
+| Lateral ventricle | 43 | 4 |
+| Inferior lateral ventricle | 44 | 5 |
+| Choroid plexus | 63 | 31 |
+
+The dseg step (`wm-dseg/1`, `baillarger.white_dseg`) sets each voxel with one
+of these labels to outside (0). This is a correction of the inherited
+labels. Thus the corrected segmentation has no ventricle label, and the
+stages after it read the ventricles as outside. The code is
+`baillarger.labels.TO_OUTSIDE` (all the labels of the table, for the two
+hemispheres) and `baillarger.labels.OUTSIDE` (0). Our own segmentation does
+not give these labels. A person who paints labels gives these voxels the
+class outside.
+
+The choroid plexus is in the lateral ventricle, so it follows the
+ventricle. CSF (24) is fluid outside the ventricles. The purple-mri aseg
+does not hold it.
 
 ## The filled mask
 
@@ -97,19 +128,19 @@ The aseg of the purple-mri hemisphere
 (`sub-INDD121850_ses-7THemix20250516_aseg.nii.gz`, right) holds only the
 labels 0, 41, 42, 43, 49, 50, 51, 52, 53 and 192. It holds the right lateral
 ventricle (43): about 3.18 million voxels, 13.1 cm³. So the ventricle
-decision changes the output on this aseg: the ventricle is outside, and
-`white_dseg` fills its voxels no more. The other decisions below have 0
+decision changes the output on this aseg: the ventricle is outside,
+`white_dseg` fills its voxels no more, and it sets them to 0. The other decisions below have 0
 voxels in this aseg and change no output now. They apply to later labels,
 from the network or from a person.
 
 | Label | Decision | Reason |
 |---|---|---|
-| Lateral ventricle (43, 4) | Out. Decided by the user on 2026-11-03. This departs from FreeSurfer (`-fillven`, which fills it) | Ex vivo, the ventricle holds outside medium or collapses, and it has no contrast against outside. Our own segmentation would need a ventricle class that has no contrast. Its position and shape are also unreliable in pathological brains: neurodegenerative cases have enlarged, atypical ventricles. As outside, nothing has to identify it. Its wall is found by the existing rule: a ray from WM straight into outside is a cut-like face. Phase 1.0 measured the cost on the purple-mri hemisphere: 5.9 % more vertices, 4,743 mm² more surface and 33 more topology fixes. |
+| Lateral ventricle (43, 4) | Out, and set to outside (0). Decided by the user on 2026-11-03 and 2026-11-09. This departs from FreeSurfer (`-fillven`, which fills it) | Ex vivo, the ventricle holds outside medium or collapses, and it has no contrast against outside. Our own segmentation would need a ventricle class that has no contrast. Its position and shape are also unreliable in pathological brains: neurodegenerative cases have enlarged, atypical ventricles. As outside, nothing has to identify it. Its wall is found by the existing rule: a ray from WM straight into outside is a cut-like face. Phase 1.0 measured the cost on the purple-mri hemisphere: 5.9 % more vertices, 4,743 mm² more surface and 33 more topology fixes. |
 | Accumbens (58, 26) | In. Decided | FreeSurfer fills it. It is deep grey matter inside the basal forebrain. |
 | Ventral DC (60, 28) | In. Decided | FreeSurfer fills it. It touches the brainstem. At the whole-brain stage, the cut that separates the hemispheres and the brainstem must separate the ventral DC from the midbrain. |
 | Vessel (62, 30) | In. Decided | FreeSurfer fills it. A vessel that is left out makes a cavity in the mask. |
-| Choroid plexus (63, 31) | Out. Decided by the user on 2026-11-03. This departs from FreeSurfer | It lies in the lateral ventricle and follows it: it is outside for the reason in the row above. FreeSurfer uses a neighbourhood rule, which a class set cannot hold. |
-| Inferior lateral ventricle (44, 5) | Out. Decided | FreeSurfer does not fill the voxel. It is the temporal horn beside the hippocampus, and the hippocampus is not in the mask. |
+| Choroid plexus (63, 31) | Out, and set to outside (0). Decided by the user on 2026-11-03 and 2026-11-09. This departs from FreeSurfer | It lies in the lateral ventricle and follows it: it is outside for the reason in the row above. FreeSurfer uses a neighbourhood rule, which a class set cannot hold. |
+| Inferior lateral ventricle (44, 5) | Out, and set to outside (0). Decided; set to outside on 2026-11-09 | FreeSurfer does not fill the voxel. It is the temporal horn beside the hippocampus, and the hippocampus is not in the mask. |
 | Amygdala (54, 18) | Out. Decided | FreeSurfer has no case for it. |
 | WM hypointensities (77) | Not in the label set. Decided | The network labels them as WM, which is filled. Add 77 only if a later analysis needs it as its own class. |
 

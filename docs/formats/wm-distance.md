@@ -16,7 +16,7 @@ edited in place (plan, §8).
 | WM | The voxels with a label in the sidecar's `FilledLabels` (the filled mask of `wm-dseg/1`). |
 | cortex | The voxels with the cortex label of the hemisphere (`label-set/1`): 42 (R) or 3 (L). |
 | free voxel | A WM voxel or a cortex voxel. |
-| obstacle | Every other voxel: outside (0, which includes fluid and excisions) and every other label (for example the hippocampus, the amygdala, the ventricles). |
+| obstacle | Every other voxel: outside (0, which includes the medium, excisions and the ventricles) and every other label (for example the hippocampus, the amygdala). |
 | interface | The faces that a WM voxel and a cortex voxel share. |
 | D | The WM distance: the signed length (mm) of the shortest path through free voxels from a voxel's centre to the interface. D > 0 in cortex, D < 0 in the WM. |
 | cap | The largest \|D\| that the call gives, in mm. `CAP` = 8.0, the column length cap (`ray-sampler/1`). A call can ask for a smaller cap. |

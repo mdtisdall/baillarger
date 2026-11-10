@@ -48,10 +48,11 @@ def write_fake(
 
 
 def test_rim_labels() -> None:
-    aseg = np.array([0, 41, 42, 43, 192, 49, 50, 0, 42], np.int16)
+    aseg = np.array([0, 41, 42, 43, 192, 49, 50, 0, 42, 44, 63, 24, 53], np.int16)
     rim = data.rim_labels(aseg)
     assert rim.dtype == np.int16
-    assert rim.tolist() == [1, 2, 3, 0, 0, 0, 0, 1, 3]
+    # the ventricles, the choroid plexus and CSF (43, 44, 63, 24) are outside
+    assert rim.tolist() == [1, 2, 3, 1, 0, 0, 0, 1, 3, 1, 1, 1, 0]
 
 
 def test_patch_boxes_match_the_data_notes() -> None:

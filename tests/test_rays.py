@@ -14,7 +14,7 @@ import numpy.typing as npt
 import pytest
 from nibabel.gifti.gifti import GiftiImage
 
-from baillarger import rays, white_dseg, white_surf
+from baillarger import labels, rays, white_dseg, white_surf
 from baillarger.bids import file_sha256, read_sidecar, sidecar_path
 
 DOC = Path(__file__).resolve().parents[1] / "docs" / "formats" / "ray-sampler.md"
@@ -191,6 +191,22 @@ def test_the_classes_of_the_labels() -> None:
     got = rays.label_classes(lab, [41, 43, 49], 42)
     o, w, c, x, g = rays.OUTSIDE, rays.WM, rays.CORTEX, rays.OTHER, rays.OFF_GRID
     assert got.tolist() == [o, w, w, c, x, x, x, g, x]
+
+
+def test_a_ventricle_voxel_of_the_dseg_is_outside() -> None:
+    """The dseg step sets the ventricles to 0, so a ray reads them as
+    OUTSIDE: a ray from the WM into the ventricle is OPEN, as at a cut face."""
+    a = np.zeros((16, 16, 16), np.int16)
+    a[2:14, 2:14, 2:14] = 42
+    a[4:12, 4:12, 4:12] = 41
+    a[6:10, 6:10, 9:14] = 43  # a lateral ventricle, through the cortex
+    a[6:10, 6:10, 14:16] = 44
+    t = white_dseg.wm_topo(a, (0.2, 0.2, 0.2))
+    assert t.to_outside == {43: 80, 44: 32}
+    assert not np.isin(t.dseg, labels.TO_OUTSIDE).any()
+    col = t.dseg[8, 8, :]
+    cls = rays.label_classes(col, white_dseg.FILLED_LABELS["R"], 42)
+    assert cls[9:].tolist() == [rays.OUTSIDE] * 7
 
 
 @pytest.mark.parametrize(

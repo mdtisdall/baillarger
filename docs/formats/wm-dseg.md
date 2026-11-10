@@ -39,6 +39,16 @@ not in `anat/`, so that readers of `anat/` see only the current run.
 
 ## The correction
 
+First, each voxel with a label in `baillarger.labels.TO_OUTSIDE` gets the
+label outside (0). These labels are CSF (24), the lateral ventricle (43,
+4), the inferior lateral ventricle (44, 5) and the choroid plexus (63, 31).
+In an isolated hemisphere they are outside (`docs/formats/label-set.md`,
+"The labels that become outside"). This is a correction of the inherited
+labels: the corrected segmentation has none of these labels. The sidecar
+key `ToOutside` gives the count of voxels for each label. These voxels are
+not in the fix diff and not in the fixes image. They are not in the filled
+mask before or after, so the mask and the white surface do not change.
+
 The hemisphere is the one whose WM label is in the input (41: R, 2: L; both
 or neither is refused). The WM mask is the voxels with a filled label:
 
@@ -82,7 +92,7 @@ writes nothing if b1 or b2 is not 0.
 ## The fixes
 
 The change from the labels that `dseg` reads (the input with the site
-answers replayed: the "old" labels) to the labels that it writes (the "new"
+answers replayed and the labels of `TO_OUTSIDE` set to 0: the "old" labels) to the labels that it writes (the "new"
 labels) is split into fixes. Each fix has an integer id, from 1, in this
 order:
 
@@ -127,7 +137,7 @@ one-dimensional structured records, 16 bytes each:
 |---|---|---|
 | `index` | `<i8` | The voxel's linear index on the grid (C order) |
 | `fix` | `<i4` | The id of the fix that changed it last |
-| `old` | `<i2` | Its old label (the input with the answers replayed) |
+| `old` | `<i2` | Its old label (the input with the answers replayed and `TO_OUTSIDE` set to 0) |
 | `new` | `<i2` | Its label in `desc-wmtopo` (not `old`) |
 
 The records are in Morton order of the 64³ block grid
@@ -140,7 +150,8 @@ could not be read by block.
 
 `baillarger.white_dseg.replay_dseg(aseg, diff, log)` rebuilds
 `desc-wmtopo` exactly from the input, the log and the diff, with no
-correction. `baillarger.fix_diff.revert_fix(dseg, diff, id)` gives
+correction. It replays the answers, sets the labels of `TO_OUTSIDE` to 0
+(`white_dseg.to_outside`), and then applies the diff. `baillarger.fix_diff.revert_fix(dseg, diff, id)` gives
 `desc-wmtopo` with one fix undone, for inspection: only that fix's voxels
 change, and the result can have a handle or a cavity.
 
@@ -160,8 +171,8 @@ correction did not reproduce its diff.
 
 With `--edits LOG`, the site answers of the answer log (`wm-edits/1`,
 `docs/formats/wm-edits.md`) are replayed first, in log order, each writing
-its voxels over the labels. Scribbles are not applied. The correction above
-then runs on the result: the filled labels, the mask and `BettiBefore` are
+its voxels over the labels. Scribbles are not applied. The labels of
+`TO_OUTSIDE` are then set to 0, and the correction above runs on the result: the filled labels, the mask and `BettiBefore` are
 those of the input with the answers replayed. The log must be on the
 input's grid; answers made against another input apply unchanged.
 
@@ -185,6 +196,7 @@ costs a `dseg` run.
 | `SourcesSHA256` | object | yes | SHA-256 of each source, by path |
 | `Provenance` | object | yes | `Created` (ISO 8601), `Function`, `Version` (baillarger), `Commit`, `Dirty` |
 | `Hemisphere` | string | yes | `R` or `L` |
+| `ToOutside` | object | yes | Input label (as a string): number of voxels set to outside (0). Only the labels of `TO_OUTSIDE` that are present; empty if none |
 | `FilledLabels` | array of integers | yes | The labels of the WM mask |
 | `WMLabel` | integer | yes | The label given to cavity and handle fills |
 | `BettiBefore` | array of integers | yes | (b0, b1, b2) of the mask of the input's filled labels |

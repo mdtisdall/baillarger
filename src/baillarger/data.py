@@ -8,8 +8,9 @@ directory that the environment variable BAILLARGER_DATA names.
 
 A patch is a box of voxels (lo inclusive, hi exclusive) round a set of areal
 boundary points. load_patch reads only the box from each file, checks that
-the four images share one grid, and makes the rim labels: 1 outside (aseg 0),
-2 WM (41), 3 cortex (42), 0 everything else. The voxel size comes from the
+the four images share one grid, and makes the rim labels: 1 outside (aseg 0,
+and the ventricles, the choroid plexus and CSF: labels.TO_OUTSIDE), 2 WM
+(41), 3 cortex (42), 0 everything else. The voxel size comes from the
 header: 0.16028 x 0.16 x 0.16028 mm, not quite isotropic.
 """
 
@@ -22,7 +23,7 @@ import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 
-from baillarger.labels import CORTEX_LABEL, OUTSIDE, WM_LABEL
+from baillarger.labels import CORTEX_LABEL, OUTSIDE, TO_OUTSIDE, WM_LABEL
 
 type Box = tuple[int, int, int]
 
@@ -104,11 +105,12 @@ def data_available(directory: Path | None = None) -> bool:
 
 
 def rim_labels(aseg: npt.ArrayLike) -> npt.NDArray[np.int16]:
-    """Rim labels from the aseg: 1 outside (0), 2 WM (41), 3 cortex (42), 0
+    """Rim labels from the aseg: 1 outside (0, and the labels of TO_OUTSIDE:
+    the ventricles, the choroid plexus and CSF), 2 WM (41), 3 cortex (42), 0
     everything else."""
     a = np.asarray(aseg)
     rim = np.zeros(a.shape, np.int16)
-    rim[a == ASEG_OUTSIDE] = RIM_OUTSIDE
+    rim[np.isin(a, (ASEG_OUTSIDE, *TO_OUTSIDE))] = RIM_OUTSIDE
     rim[a == ASEG_WM] = RIM_WM
     rim[a == ASEG_CORTEX] = RIM_CORTEX
     return rim

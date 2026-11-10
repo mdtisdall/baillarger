@@ -65,7 +65,7 @@ below), then the handle-fix sites (larger walls first; ties: by fix id).
 | `kind` | string | `override`, `misfacing`, `handle-fix` (in the file) or `random` (see Random sites) |
 | `i`, `j`, `k` | integer | The site's centre voxel (0-based) on the segmentation's grid |
 | `faces` | integer | Its misfacing faces (0 for the other kinds) |
-| `tissue` | string | The labels outside the WM mask within `TissueVoxels` (a cube): `grey matter` (cortex: 3 or 42), `fluid` (0, 24, or a ventricle or choroid plexus label: 4, 5, 31, 43, 44, 63; `label-set/1` puts these outside the WM mask, and ex vivo they hold outside medium), `mixed` (both) or `other` |
+| `tissue` | string | The labels outside the WM mask within `TissueVoxels` (a cube): `grey matter` (cortex: 3 or 42), `fluid` (outside, 0; or a label of `baillarger.labels.TO_OUTSIDE`: 24, 4, 5, 31, 43, 44, 63, which `wm-dseg/1` sets to 0 and only a dseg written before that rule holds; ex vivo they hold outside medium), `mixed` (both) or `other` |
 | `cut`, `fill`, `cavity` | integer | Voxels of each kind of topology fix (`desc-wmtopofixes` codes 1, 2, 3) within `FixVoxels` (a cube) |
 | `wm_face_pieces`, `wm_any_pieces` | integer | Pieces of the WM mask within `ContactVoxels` (a cube), with face adjacency and with any adjacency: more with face adjacency means pieces that touch only at an edge or a corner |
 | `gap_face_pieces`, `gap_any_pieces` | integer | The same for the voxels outside the mask |

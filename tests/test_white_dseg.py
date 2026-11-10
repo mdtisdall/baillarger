@@ -62,6 +62,34 @@ def test_wm_topo_of_a_synthetic_aseg() -> None:
     assert sum(m["Voxels"] for m in t.moves) == 5
 
 
+def test_the_ventricles_become_outside() -> None:
+    """The ventricles, the choroid plexus and CSF get the label 0 and are in
+    no fix. The filled mask and its fixes do not change."""
+    a = synthetic_aseg()
+    v = a.copy()
+    v[0:6, 0:6, 0:4] = 43  # touches nothing filled
+    v[0:2, 30:36, 0:2] = 63
+    v[38:40, 0:2, 0:2] = 24
+    v[30:32, 8:28, 22:24] = 44  # in the hole of the ring
+    t0, t = white_dseg.wm_topo(a, VOX), white_dseg.wm_topo(v, VOX)
+    assert t.to_outside == {24: 8, 43: 144, 44: 80, 63: 24}
+    assert t0.to_outside == {}
+    assert np.array_equal(t.dseg, t0.dseg)  # the same labels: 0 there
+    assert np.array_equal(t.fixes, t0.fixes)
+    assert np.array_equal(t.diff, t0.diff)
+    assert np.array_equal(white_dseg.replay_dseg(v, t.diff), t.dseg)
+
+
+def test_to_outside_leaves_other_labels() -> None:
+    a = np.array([0, 4, 5, 24, 31, 41, 42, 43, 44, 53, 54, 63], np.int16)
+    out, n = white_dseg.to_outside(a)
+    assert out.tolist() == [0, 0, 0, 0, 0, 41, 42, 0, 0, 53, 54, 0]
+    assert n == {4: 1, 5: 1, 24: 1, 31: 1, 43: 1, 44: 1, 63: 1}
+    assert out.dtype == a.dtype and a[1] == 4  # the input is not changed
+    b = np.array([0, 41], np.int16)
+    assert white_dseg.to_outside(b) == (b, {})
+
+
 def test_one_hemisphere_only() -> None:
     a = synthetic_aseg()
     a[0, 0, 0] = 2  # the left WM too
@@ -135,6 +163,7 @@ def test_the_dseg_command_writes_the_bids_files(tmp_path: Path) -> None:
     f = np.asarray(fimg.dataobj)
     assert [(f == k).sum() for k in (1, 2, 3)] == [1, 4, 8]
     assert side["SmallPieces"] == 0 and side["SmallPieceVoxels"] == 0
+    assert side["ToOutside"] == {}
     fside = bids.read_sidecar(anat / f"{fx}.json", white_dseg.FIXES_SPEC)
     assert "5 small_piece" in fside["Description"]
     rows = (anat / f"{fx}.tsv").read_text().splitlines()
