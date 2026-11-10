@@ -135,11 +135,72 @@ the old root is unchanged.
 
 ## Order of the PRs
 
+The joins merge in this order. The cores can merge earlier (see Parallel work).
+
 1. Parts 1 and 2 (they change the same format and the same pane).
 2. Part 3.
 3. Part 4a.
-4. Part 4b (the field derivative first, in the same PR).
+4. Part 4b.
 5. Part 5.
+
+## Parallel work
+
+Each part has a core and a join. The cores do not depend on each other. The joins put
+the cores into the routes and the pane, and they meet in a few shared files.
+
+| Part | Core (files) | Join (files) | The join needs |
+|---|---|---|---|
+| 1 + 2 | `wm_edits.py`, `docs/formats/wm-edits.md`, their tests | `viewer/review.py` (`/review/paint`), `static/review.js` (paint mode) | the `EditLog` contract |
+| 3 | `viewer/volumes.py` (the label layer), its tests | `static/overlays.js` (the layer menu) | the layer's name |
+| 4a | a new module beside `topology.py`, its tests | `viewer/review.py` (route), `static/review.js` (warning) | the topology contract |
+| 4b | `white_surf.py` (the field derivative), its format doc; a new module for the local solve; their tests | `viewer/review.py` (route), the 3D view and the slices (patch) | the preview contract |
+| 5 | a new `regenerate` command, its tests | `baillarger.viewer.jobs` (the job), `static/review.js` (message) | the command's arguments |
+
+Waves:
+
+1. Wave 1: the five cores, at the same time. They change different files.
+2. Wave 2: the joins, one at a time, because they share `review.py`, `review.js` and
+   `index.html`. Order: 1 + 2, 3, 4a, 4b, 5.
+
+Rules:
+
+- One part, one branch, one PR (CLAUDE.md). Parts that run at the same time each have
+  their own worktree, best in their own session. Sub-agents work inside one part, and
+  each sub-agent owns different files (the `parallel-agents` skill).
+- A core's PR can merge before its join. Then the join's PR is small.
+- Heavy runs (more than a few GB) stay one at a time, under `scripts/memguard`: the
+  hemisphere checks of 4b and the full regeneration of 5 (about 22 GB). Agents can write
+  and unit-test these parts at the same time, but their hemisphere runs must not overlap.
+
+### Contracts
+
+The joins use these interfaces. A core must keep them, or change this plan first.
+
+- `EditLog.start_session(random_share, random_seed, dseg_sha256, queue_sha256,
+  time=None, kind="queue")`. The session record gets the field `Kind`, "queue" or
+  "free". `Log.sessions()` gives `Kind` for each session; a record without the field
+  reads as "queue".
+- A paint answer: `EditLog.answer(session, site, "manual-paint", voxels, labels,
+  decided_against=<dseg SHA-256>, reviewer_seconds=s, params={"Tool": "viewer-paint",
+  "Radius": r})`.
+- `POST /review/paint`. Request: `{site: "i,j,k" or null, strokes: [{label: 0 | 41 | 42
+  (left: 0 | 2 | 3) | "input", voxels: [[i, j, k], ...]}], reviewer_seconds}`. With
+  `site` null, the server uses a free session (it starts one if none is open) and the
+  first voxel of the first stroke as the site. Response: `{answer, session, kind,
+  voxels}`, or `{error}` with nothing written.
+- The label layer: the volume `input-edits` in the volume list (`/volumes`), served as
+  bricks like the other label volumes. It changes when the log has a new answer.
+- The topology check: `local_topology(labels_box, changed, filled) -> {"euler": dE,
+  "pieces": dP, "background_pieces": dB}`, on a box round the changed voxels.
+  `POST /review/topology {voxels, labels}` gives the same object.
+- The field derivative: the antialiased field on the mask's box, float32, in the chunked
+  store, with `desc-antialias` in its BIDS name and a spec in `docs/formats/` (version 1).
+  The local solve: `preview_patch(field, mask, changed, radius) -> (vertices, faces)`, in
+  voxel coordinates of the grid. `POST /review/surface-preview {voxels, labels}` gives the
+  patch and the radius used.
+- The command: `python -m baillarger.regenerate INPUT --edits LOG --out ROOT`. It writes
+  the dseg, the white surface, the overview and the queue of sites into ROOT, and refuses
+  a ROOT that exists.
 
 ## Not in this plan
 
