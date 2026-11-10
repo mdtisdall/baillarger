@@ -120,8 +120,15 @@ What the prototypes found (`prototypes/scripts/antialias*.py`):
 - convergence is global, not local: blocks below tolerance stay at 28 of 515
   until iteration 1,300, then nearly all converge by 1,600; retiring
   converged blocks would save under 10 %;
-- the band only, gathered by index in 64³ blocks, gives the same answer; its
-  speed against the whole volume is not yet measured fairly.
+- the band only, gathered by index in 64³ blocks, gives the same answer. On
+  the hemisphere (box 646 × 337 × 1020, 222 M voxels) the band |sd| ≤ 5 has
+  31.5 M voxels (14 %), but the band is a thin folded sheet, so dense blocks
+  fill badly: the blocks that hold band voxels have 136 M voxels (64³),
+  104 M (32³), 78 M (16³) or 56 M (8³); with the 2-voxel halo, 163 M, 148 M,
+  153 M or 189 M. So dense blocks save at most about 1.5 times at 160 µm;
+  the band's own voxels (a sparse layout) would save about 7 times;
+- a local solve round an edit, for an interactive preview, needs a radius of
+  about 14 to 16 voxels: `docs/preview-radius.md`.
 
 ## Measuring
 
