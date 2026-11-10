@@ -60,6 +60,10 @@ All code is in `prototypes/scripts/`. Nothing moves to `src`.
 | `bent_columns.py`, `bent_views.py` | 6 | The site fits, the wrong-label mask, the sparse-depth test, the weight scan, the views. |
 | `bent_probes.py` | review | Cheap probes with the antialiased top, scored side by side; the local Jacobian for folding. |
 
+The column top stage for the whole hemisphere (tops from contrast, with a
+confidence and a review queue) has its own report: `reports/Column top
+stage.md`.
+
 The cost terms (the plan, *The model*): 1 agreement of the profiles after
 the warp, 2 length, 3 length agreement (form A: equal lengths; form B:
 smooth lengths), 4 bending, shear, 5 barrier on face inversion (extended,
