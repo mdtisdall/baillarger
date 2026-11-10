@@ -23,7 +23,7 @@ def excised_slab() -> tuple[Labels, F32, Bool]:
     """P3's slab as a right-hemisphere aseg (WM 41, cortex 42, outside 0),
     with a block 14 x 14 x 18 where the FLASH is black (an excision through
     the WM and the cortex), and a black spot of 8 voxels: too small to be an
-    excision."""
+    excision. The input of the old single-echo detector (dark_tissue)."""
     rim, flash, _ = ph.p3_stria_band()
     aseg = np.zeros(rim.shape, np.int16)
     aseg[rim == 2] = 41
@@ -36,40 +36,113 @@ def excised_slab() -> tuple[Labels, F32, Bool]:
     return aseg, flash, block
 
 
-def test_detect_finds_the_excision_only() -> None:
-    aseg, flash, block = excised_slab()
-    miss = excisions.detect(aseg, flash, VOX, "R")
-    tissue = (aseg == 41) | (aseg == 42)
-    core = block.copy()
-    core[16:18] = core[28:30] = False  # smoothing softens the block's edges
-    core[:, 16:18] = core[:, 28:30] = False
-    core[:, :, 4:6] = core[:, :, 20:22] = False
-    assert miss[core & tissue].all()
-    assert not miss[~tissue].any()
-    # within the margin round the block, and not at the small spot
-    far = np.ones(aseg.shape, bool)
-    far[12:34, 12:34, :] = False
-    assert not miss[far].any()
+# ---------------------------------------------------------------- three echoes
+
+SHAPE = (64, 48, 40)
+
+#: mean echoes 1, 2, 3 of each tissue (the first hemisphere's fitted classes)
+TISSUE = {
+    41: (650.0, 350.0, 180.0),
+    42: (780.0, 500.0, 316.0),
+    49: (570.0, 313.0, 168.0),
+    52: (386.0, 100.0, 51.0),
+    192: (570.0, 332.0, 188.0),
+}
+IRON = (262.0, 67.0, 48.0)  # iron-rich tissue in the thalamus label
+MEDIUM = 45.0
 
 
-def test_detect_reads_the_labels_of_the_hemisphere() -> None:
-    """The same slab with left-hemisphere labels (WM 2, cortex 3) gives the
-    same map with hemi L, and nothing with hemi R (no tissue of R)."""
-    aseg, flash, _ = excised_slab()
-    left = np.select([aseg == 41, aseg == 42], [2, 3], 0).astype(np.int16)
-    want = excisions.detect(aseg, flash, VOX, "R")
-    assert np.array_equal(excisions.detect(left, flash, VOX, "L"), want)
-    with pytest.raises(ValueError, match="WM label of hemisphere R"):
-        excisions.detect(left, flash, VOX, "R")
+def three_echo_phantom() -> tuple[Labels, tuple[F32, F32, F32], Bool, Bool]:
+    """A right-hemisphere aseg and three echoes with noise (seeded):
+    outside (x < 16), cortex 42, WM 41, thalamus 49 and pallidum 52, corpus
+    callosum 192. Two excisions hold the medium: one through the cortex and
+    the WM, one in the corpus callosum (a label the old detector did not
+    check). A patch of the thalamus holds iron-rich tissue: as dark as the
+    medium in echoes 2 and 3, not in echo 1. Returns the aseg, the echoes,
+    the excisions and the iron patch."""
+    aseg = np.zeros(SHAPE, np.int16)
+    aseg[16:24] = 42
+    aseg[24:40] = 41
+    aseg[40:52, :24] = 49
+    aseg[40:52, 24:] = 52
+    aseg[52:] = 192
+    exc = np.zeros(SHAPE, bool)
+    exc[18:34, 8:20, 10:26] = True
+    exc[54:62, 20:32, 12:22] = True
+    iron = np.zeros(SHAPE, bool)
+    iron[41:51, 2:20, 5:15] = True
+    rng = np.random.default_rng(7)
+    out = []
+    for i in range(3):
+        mean = np.full(SHAPE, MEDIUM, np.float64)
+        for lab, m in TISSUE.items():
+            mean[aseg == lab] = m[i]
+        mean[iron] = IRON[i]
+        tissue = (aseg > 0) & ~exc
+        mean[exc] = MEDIUM
+        sd = np.where(tissue, 0.08, 0.3)
+        out.append((mean * np.exp(sd * rng.standard_normal(SHAPE))).astype(np.float32))
+    return aseg, (out[0], out[1], out[2]), exc, iron
 
 
-def test_frame_missing_tissue_is_the_detector() -> None:
+def test_detect_finds_the_excisions_voxel_for_voxel() -> None:
+    """Both excisions, the one in the corpus callosum too, and nothing else:
+    not the iron-rich patch, and the edges are exact (no smoothing)."""
+    aseg, echoes, exc, iron = three_echo_phantom()
+    det = excisions.detect(aseg, echoes, VOX)
+    assert np.array_equal(det.mask, exc)
+    assert not det.mask[iron].any()
+    assert det.labels == [41, 42, 49, 52, 192]
+
+
+def test_a_label_without_excisions_has_no_medium_share() -> None:
+    """The thalamus label, iron-rich patch and all, holds no medium."""
+    aseg, echoes, _, _ = three_echo_phantom()
+    det = excisions.detect(aseg, echoes, VOX)
+    assert det.weights[49][0] < 0.01
+    assert det.weights[52][0] < 0.01
+
+
+def test_the_medium_share_of_a_label_is_its_excised_part() -> None:
+    aseg, echoes, exc, _ = three_echo_phantom()
+    det = excisions.detect(aseg, echoes, VOX)
+    cc = aseg == 192
+    assert det.weights[192][0] == pytest.approx((exc & cc).sum() / cc.sum(), abs=0.01)
+
+
+def test_the_medium_is_fitted_away_from_the_labels() -> None:
+    """The medium's mean is the medium's level in each echo, and the fit
+    refuses an aseg with no outside voxel far enough from the labels."""
+    aseg, echoes, _, _ = three_echo_phantom()
+    det = excisions.detect(aseg, echoes, VOX)
+    assert np.exp(det.medium.mean) == pytest.approx([MEDIUM] * 3, rel=0.02)
+    assert det.medium_voxels == 10 * 48 * 40  # x < 16 - 6 steps of 0.16 mm
+    with pytest.raises(ValueError, match="no medium"):
+        excisions.detect(np.full(SHAPE, 41, np.int16), echoes, VOX)
+
+
+def test_tissue_labels_leave_out_the_ventricles() -> None:
+    aseg = np.array([0, 41, 42, 43, 44, 49, 192, 4, 24, 2], np.int16)
+    assert excisions.tissue_labels(aseg) == [2, 41, 42, 49, 192]
+
+
+def test_the_detector_is_repeatable() -> None:
+    aseg, echoes, _, _ = three_echo_phantom()
+    a = excisions.detect(aseg, echoes, VOX, sample=5000)
+    b = excisions.detect(aseg, echoes, VOX, sample=5000)
+    assert np.array_equal(a.mask, b.mask)
+    assert np.array_equal(a.medium.mean, b.medium.mean)
+
+
+def test_frame_missing_tissue_is_the_old_detector() -> None:
     """frame.missing_tissue (rim labels: 2 WM, 3 cortex) gives the map of
-    excisions.detect on the matching aseg."""
+    excisions.dark_tissue on the matching masks."""
     aseg, flash, _ = excised_slab()
     rim = np.select([aseg == 41, aseg == 42], [2, 3], 1).astype(np.int16)
+    tis = (aseg == 41) | (aseg == 42)
     assert np.array_equal(
-        fr.missing_tissue(rim, flash, VOX), excisions.detect(aseg, flash, VOX, "R")
+        fr.missing_tissue(rim, flash, VOX),
+        excisions.dark_tissue(tis, aseg == 42, flash, VOX),
     )
 
 
@@ -166,6 +239,17 @@ def test_the_crumb_limit_is_exact() -> None:
     assert np.array_equal(crumb, want) and n == 1
 
 
+def known(found: Bool, labels: list[int]) -> "excisions.Detected":
+    """A detector result with the mask found (the models are not used)."""
+    g = excisions.Gauss(np.zeros(3), np.eye(3))
+    return excisions.Detected(found, labels, g, 0, {}, {})
+
+
+def ones3(shape: tuple[int, ...]) -> tuple[F32, F32, F32]:
+    e = np.ones(shape, np.float32)
+    return e, e, e
+
+
 def test_excise_drops_fragments_then_sets_crumbs_to_outside(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -183,8 +267,8 @@ def test_excise_drops_fragments_then_sets_crumbs_to_outside(
     aseg[2:6, 2:6, 16:20] = 0
     aseg[6, 2:7, 13:16] = 0
     aseg[2:7, 6, 13:16] = 0
-    monkeypatch.setattr(excisions, "detect", lambda *a, **k: found)
-    ex = excisions.excise(aseg, np.ones(aseg.shape, np.float32), VOX, "R")
+    monkeypatch.setattr(excisions, "detect", lambda *a, **k: known(found, [41, 42]))
+    ex = excisions.excise(aseg, ones3(aseg.shape), VOX, "R")
     crumb = np.zeros(aseg.shape, bool)
     crumb[2:6, 2:6, 13:16] = True  # 48 voxels
     exc = found.copy()
@@ -261,8 +345,8 @@ def test_excise_keeps_the_labels_of_a_bubble(monkeypatch: pytest.MonkeyPatch) ->
     aseg[10:62, 8:32, 8:32] = 41
     e1, e2, e3 = bubble_echoes()
     found = ball(SHAPE3, GROW, 6) | ball(SHAPE3, STILL, 6)
-    monkeypatch.setattr(excisions, "detect", lambda *a, **k: found)
-    ex = excisions.excise(aseg, e2, VOX, "R", echo1=e1, echo3=e3)
+    monkeypatch.setattr(excisions, "detect", lambda *a, **k: known(found, [41, 42]))
+    ex = excisions.excise(aseg, (e1, e2, e3), VOX, "R")
     still = ball(SHAPE3, STILL, 6)
     assert np.array_equal(ex.mask, still)
     want = aseg.copy()
@@ -273,9 +357,6 @@ def test_excise_keeps_the_labels_of_a_bubble(monkeypatch: pytest.MonkeyPatch) ->
     assert ex.bubbles["Pieces"] == 1
     assert ex.bubbles["Voxels"] == ball(SHAPE3, GROW, 6).sum()
     assert ex.bubbles["MaskVoxels"] == ex.bubble_mask.sum()
-    # without echoes 1 and 3 there is no bubble step
-    ex2 = excisions.excise(aseg, e2, VOX, "R")
-    assert np.array_equal(ex2.mask, found) and ex2.bubbles["Pieces"] == 0
 
 
 def old_missing_tissue(
@@ -309,14 +390,15 @@ def test_the_port_gives_the_old_mask() -> None:
     rim = np.select([aseg == 41, aseg == 42], [2, 3], 1).astype(np.int16)
     want = old_missing_tissue(rim, flash, VOX)
     assert want.sum() > 2000
-    assert np.array_equal(excisions.detect(aseg, flash, VOX, "R"), want)
+    tis = (aseg == 41) | (aseg == 42)
+    assert np.array_equal(excisions.dark_tissue(tis, aseg == 42, flash, VOX), want)
 
 
 def test_the_excised_slab_closes_at_the_cut() -> None:
     """The excision is outside after relabel: the WM mask of the excised
     slab has a pit where the block was, and needs no fix (Betti (1, 0, 0))."""
-    aseg, flash, _ = excised_slab()
-    miss = excisions.detect(aseg, flash, VOX, "R")
+    aseg, _, block = excised_slab()
+    miss = block & ((aseg == 41) | (aseg == 42))
     t = white_dseg.wm_topo(excisions.relabel(aseg, miss), VOX)
     assert t.betti_before == t.betti_after == (1, 0, 0)
     assert not t.fixes.any()
@@ -330,19 +412,19 @@ def read(p: Path) -> npt.NDArray[np.generic]:
 
 
 def write_inputs(d: Path) -> tuple[Path, Path, Path, Path, Labels, Bool]:
-    """The excised slab's aseg and FLASH. Echoes 1 and 3 are the same as echo
-    2, so the excision does not grow with the echo time: it is no bubble."""
-    aseg, flash, _ = excised_slab()
+    """The three-echo phantom's aseg and echoes (echo 2 is the FLASH). Its
+    excisions do not grow with the echo time: they are no bubbles."""
+    aseg, echoes, _, _ = three_echo_phantom()
     aff = np.diag([*VOX, 1.0])
     d.mkdir(parents=True, exist_ok=True)
     a = d / "sub-T01_ses-S1_aseg.nii.gz"
     nib.save(nib.nifti1.Nifti1Image(aseg, aff), a)
-    f = []
-    for e in (2, 1, 3):
-        f.append(d / f"sub-T01_ses-S1_echo-{e}_FLASH.nii.gz")
-        nib.save(nib.nifti1.Nifti1Image(flash.astype(np.float32), aff), f[-1])
-    miss = excisions.excise(aseg, flash, VOX, "R", echo1=flash, echo3=flash).mask
-    return a, f[0], f[1], f[2], aseg, miss
+    f = {}
+    for e in (1, 2, 3):
+        f[e] = d / f"sub-T01_ses-S1_echo-{e}_FLASH.nii.gz"
+        nib.save(nib.nifti1.Nifti1Image(echoes[e - 1], aff), f[e])
+    miss = excisions.excise(aseg, echoes, VOX, "R").mask
+    return a, f[2], f[1], f[3], aseg, miss
 
 
 def test_the_command_writes_the_bids_files(tmp_path: Path) -> None:
@@ -361,30 +443,40 @@ def test_the_command_writes_the_bids_files(tmp_path: Path) -> None:
     assert not b.any()
     assert np.array_equal(m.astype(bool), miss)
     assert np.array_equal(x, excisions.relabel(aseg, miss))
-    # the slab's excision has no fragment and cuts off no crumb
-    assert np.array_equal(miss, excisions.detect(read(a), read(f), VOX, "R"))
+    # the phantom's excisions have no fragment and cut off no crumb
+    _, _, exc, _ = three_echo_phantom()
+    assert np.array_equal(miss, exc)
     tsv = (anat / "sub-T01_ses-S1_desc-excised_dseg.tsv").read_text().split("\n")
     assert tsv[0] == "index\tname" and "41\tRight-Cerebral-White-Matter" in tsv
     spec = excisions.EXCISIONS_SPEC
     sides = [bids.read_sidecar(bids.sidecar_path(p), spec) for p in (dseg, mask, bub)]
     for side in sides:
-        assert side["Hemisphere"] == "R" and side["TissueLabels"] == [41, 42]
+        assert side["Hemisphere"] == "R"
+        assert side["TissueLabels"] == [41, 42, 49, 52, 192]
         assert side["ExcisedVoxels"] == miss.sum()
         assert sum(side["ExcisedByLabel"].values()) == miss.sum()
-        assert set(side["ExcisedByLabel"]) <= {"41", "42"}
+        assert set(side["ExcisedByLabel"]) == {"41", "42", "192"}
         assert side["CortexVoxels"] == (aseg == 42).sum()
-        assert side["Components"] == 1
+        assert side["Components"] == 2
         assert side["Detector"] == dict(
-            Frac=0.25,
-            Sigma=2.0,
             MinVoxels=250,
-            MarginMM=0.3,
-            DilationSteps=2,
+            MediumGapMM=1.0,
+            Sample=1_000_000,
+            Seed=0,
+            Ridge=1e-6,
             FragmentMM3=0.1,
             CrumbMM3=1.0,
+            Frac=0.25,
+            Sigma=2.0,
             BubbleRatio=2.0,
             BubbleBox=20,
         )
+        assert side["MediumClass"]["Voxels"] == 10 * 48 * 40
+        assert len(side["MediumClass"]["Covariance"]) == 3
+        assert set(side["TissueClasses"]) == {"41", "42", "49", "52", "192"}
+        for w in side["LabelWeights"].values():
+            assert list(w) == ["medium", "41", "42", "49", "52", "192"]
+            assert sum(w.values()) == pytest.approx(1.0)
         assert side["Fragments"] == dict(Pieces=0, Voxels=0)
         assert side["Crumbs"] == dict(Pieces=0, Voxels=0)
         assert side["Bubbles"] == dict(Pieces=0, Voxels=0, MaskVoxels=0)
