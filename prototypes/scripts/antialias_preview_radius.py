@@ -14,9 +14,9 @@ Two steps:
       Sites: 20,000 random boundary voxels (seed 0); c at a site is the largest distance from a
       free (band) voxel to a non-free one within 4 voxels; two sites in each class of c
       (CLASSES). At each site, a ball of radius 1, 2, 3, 5 and 8 is set inside (bump) and
-      outside (dent) the mask. For each edit and R, the field is solved in the box of the
-      changed voxels plus R + 3, the voxels farther than R from the changed voxels held at the
-      previous field; the reference is R = 56. For the ball of radius 3 the same sweep is also
+      outside (dent) the mask. For each edit and R, the field is solved (antialias.thin_plate)
+      in the box of the changed voxels plus R + S + 2, the voxels farther than R from the
+      changed voxels held at the previous field; the reference is R = 56. For the ball of radius 3 the same sweep is also
       run without the sign constraints (the linear problem; previous field = its own solution
       for A in the site's box; reference R = 40). Recorded: the largest |phi_R - phi_ref| over
       band voxels within S = BAND + 3 of the changed voxels (field error, voxels), the largest
@@ -35,20 +35,20 @@ import time
 from pathlib import Path
 
 import numpy as np
-import torch
 from scipy import ndimage as ndi
 
 from baillarger import antialias as AA
+from baillarger import backend
 from baillarger.bids import read_sidecar, sidecar_path
 from baillarger.blocks import open_volume
 from baillarger.white_dseg import DSEG_SPEC
 
 T0 = time.perf_counter()
-DEV = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+DEV = backend.device(None)
 S = int(AA.BAND + 3)  # sd changes only within S voxels of the changed voxels
 CLASSES = ((4.5, 5.5), (6.5, 7.5), (8.5, 11.0))  # classes of c (voxels)
 PER_CLASS = 2
-SITE_MARGIN = 56 + 3 + 3 + 2
+SITE_MARGIN = 56 + S + 2 + 3 + 2
 RS = (8, 10, 12, 14, 16, 20, 24, 32)
 RS_LIN = (8, 10, 12, 14, 16, 20, 24)
 R_REF, R_REF_LIN = 56, 40
@@ -83,43 +83,13 @@ def cropped_mask(dseg, box_with):
     return np.ascontiguousarray(ma[box(masks)])
 
 
-def iterate(free_np, fixed_np, m, x0, signs=True):
-    """antialias.thin_plate's loop: free voxels move, the others stay at fixed_np; with signs,
-    phi >= EPS on the mask and <= -EPS off it. Returns phi and the iterations."""
-    free = torch.as_tensor(free_np, device=DEV)
-    lo = torch.as_tensor(m, device=DEV) & free
-    hi = torch.as_tensor(~m, device=DEV) & free
-    watch = torch.as_tensor(AA.next_to_boundary(m), device=DEV) & free
-    fixed = torch.as_tensor(fixed_np, device=DEV)
-    L = AA._lipschitz(DEV)
-    eps = AA.EPS
-
-    def project(x):
-        x = torch.where(free, x, fixed)
-        if not signs:
-            return x
-        x = torch.where(lo, torch.clamp(x, min=eps), x)
-        return torch.where(hi, torch.clamp(x, max=-eps), x)
-
-    x = project(torch.as_tensor(np.array(x0, np.float32), device=DEV))
-    y, t, snap = x.clone(), 1.0, x.clone()
-    k = 0
-    for k in range(AA.MAX_ITER):
-        xn = project(y - AA.energy_gradient(y) / L)
-        if k > 0 and float(torch.sum((y - xn) * (xn - x))) > 0:
-            t = 1.0
-        tn = (1.0 + math.sqrt(1.0 + 4.0 * t * t)) / 2.0
-        y = xn + ((t - 1.0) / tn) * (xn - x)
-        x, t = xn, tn
-        if k > 0 and k % AA.WINDOW == 0:
-            w = torch.abs(x - snap)[watch]
-            step = float(torch.max(w)) / AA.WINDOW if w.numel() else 0.0
-            snap = x.clone()
-            if k % 200 == 0 and m.size > 1e7:
-                log(f"  iteration {k}: change {step:.2e}")
-            if step < AA.TOL:
-                break
-    return x.cpu().numpy(), k + 1
+def iterate(m, start=None, held=None, signs=True):
+    """antialias.thin_plate on m: from start (default sd), with held voxels at start;
+    with signs, phi >= EPS on the mask and <= -EPS off it (without, eps = -inf removes
+    the sign constraints: the linear problem). Returns phi and the iterations."""
+    eps = AA.EPS if signs else -math.inf
+    phi, solve = AA.thin_plate(m, DEV, eps=eps, start=start, held=held)
+    return phi, solve.iterations
 
 
 def take(a, sl, fill):
@@ -164,13 +134,13 @@ def sweep(mb, sdb, dist, prev, rs, rref, signs):
     out = {}
     e = np.argwhere(dist == 0)
     for R in (*rs, rref):
-        lo = np.maximum(e.min(0) - R - 3, 0)
-        hi = np.minimum(e.max(0) + R + 4, np.array(mb.shape))
+        # the margin of antialias.local_solve: sd of the box is exact within R
+        lo = np.maximum(e.min(0) - R - S - 2, 0)
+        hi = np.minimum(e.max(0) + R + S + 3, np.array(mb.shape))
         sb = tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))
         hold = dist[sb] > R
-        free = (np.abs(sdb[sb]) <= AA.BAND) & ~hold
-        fixed = np.where(hold, prev[sb], sdb[sb]).astype(np.float32)
-        phi, it = iterate(free, fixed, mb[sb], prev[sb], signs)
+        start = np.asarray(prev[sb], np.float32)
+        phi, it = iterate(np.ascontiguousarray(mb[sb]), start, hold, signs)
         full = prev.copy()
         full[sb] = phi
         out[R] = (full, it)
@@ -198,8 +168,7 @@ def sites_of(m):
 def run_solve(a):
     m = cropped_mask(a.dseg, a.box_with)
     log(f"box {m.shape}")
-    sd = AA.signed_distance(m, AA.BAND + 3.0)
-    phi, it = iterate(np.abs(sd) <= AA.BAND, sd, m, sd)
+    phi, it = iterate(m)
     np.save(a.out, phi)
     log(f"converged in {it} iterations: {a.out}")
 
@@ -213,7 +182,7 @@ def run_test(a):
     log(f"sites: {[(q.tolist(), round(w, 2)) for q, w in sites]}")
     res = dict(S=S, active_tol=ACTIVE, edits=[])
     for q, cwid in sites:
-        h = R_REF + 3 + max(RADII) + 2
+        h = R_REF + S + 2 + max(RADII) + 2
         big = tuple(slice(p - h, p + h + 1) for p in q)
         ma = take(m, big, False)
         pa = take(phi_a, big, np.float32(-(AA.BAND + 3.0))).astype(np.float32)
@@ -250,9 +219,10 @@ def run_test(a):
                                          vertex=vertex_shift(mb, phi, ref, dist <= S),
                                          iterations=it)
                 if rad == 3:
-                    inner = np.zeros(ma.shape, bool)
-                    inner[3:-3, 3:-3, 3:-3] = True
-                    lin_a, _ = iterate((np.abs(sda) <= AA.BAND) & inner, sda, ma, sda, False)
+                    # the rim where sd of the box is not exact is held at sda
+                    rim = np.ones(ma.shape, bool)
+                    rim[S + 1 : -S - 1, S + 1 : -S - 1, S + 1 : -S - 1] = False
+                    lin_a, _ = iterate(ma, sda, rim, False)
                     lsol = sweep(mb, sdb, dist, lin_a, RS_LIN, R_REF_LIN, False)
                     lref = lsol[R_REF_LIN][0]
                     for R in RS_LIN:

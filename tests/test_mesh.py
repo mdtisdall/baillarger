@@ -368,3 +368,23 @@ def test_vertex_keys_on_a_grid_past_3e9_points(device: str) -> None:
     a1, b1_ = edge_points(b1.vertex_key, src.ball.shape)
     low = np.ravel_multi_index(tuple((a1 + src.lo).T), shape)
     assert np.array_equal(np.sort(edge_key(low, b1_ - a1)), np.sort(k))
+
+
+def test_only_some_blocks_gives_their_faces_and_vertex_keys() -> None:
+    """A march of some blocks has, block by block, the faces of the full march at the
+    same vertices (by edge key); blocks off the grid are ignored."""
+    x = np.indices((40, 40, 40)).astype(float)
+    F = np.sqrt(((x - 19.6) ** 2).sum(0))
+    V, T, B = marching_tetrahedra_blocks(F, 14.0, 8)
+    pick = B.origin[[3, 7, 11]] // 8
+    Vs, Ts, Bs = marching_tetrahedra_blocks(
+        F, 14.0, 8, only=np.r_[pick[::-1], [[9, 0, 0], [-1, 0, 0]]]
+    )
+    assert np.array_equal(Bs.origin, B.origin[[3, 7, 11]])
+    for i, j in enumerate((3, 7, 11)):
+        full = B.vertex_key[T[B.face_start[j] : B.face_stop[j]]]
+        part = Bs.vertex_key[Ts[Bs.face_start[i] : Bs.face_stop[i]]]
+        assert np.array_equal(full, part)
+    pos = dict(zip(B.vertex_key.tolist(), map(tuple, V), strict=True))
+    for key, p in zip(Bs.vertex_key.tolist(), Vs, strict=True):
+        assert pos[key] == tuple(p)

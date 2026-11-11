@@ -4,6 +4,7 @@ the sidecar, on a synthetic segmentation."""
 
 import shutil
 from pathlib import Path
+from typing import Any
 
 import nibabel as nib
 import numpy as np
@@ -11,9 +12,11 @@ import numpy.typing as npt
 import pytest
 from nibabel.gifti.gifti import GiftiImage
 
-from baillarger import bids, white_dseg, white_surf
+from baillarger import antialias as AA
+from baillarger import backend, bids, white_dseg, white_surf
 from baillarger import mesh_smoothing as S
-from baillarger.mesh import topology
+from baillarger.blocks import ArraySource, PatchedSource
+from baillarger.mesh import marching_tetrahedra_blocks, topology
 
 VOX = (0.2, 0.16, 0.2)
 AFF = np.array([[0.2, 0, 0, -3.0], [0, 0.16, 0, 2.0], [0, 0, 0.2, 5.0], [0, 0, 0, 1.0]])
@@ -213,3 +216,149 @@ def test_the_reader_gives_float32(surface: tuple[Path, Path]) -> None:
     assert s.normlen.dtype == np.float32
     b = white_surf.WhiteSurface.load(surf, block=(0, 0, 0))
     assert b.v.dtype == np.float32
+
+
+# ------------------------------------------------------- the antialiased field
+
+
+def test_the_stored_field_reads_back_as_the_field_the_surface_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    used = []
+    solve = AA.thin_plate
+
+    def keep(*a: Any, **k: Any) -> tuple[npt.NDArray[np.float32], AA.Solve]:
+        phi, s = solve(*a, **k)
+        used.append(phi.copy())
+        return phi, s
+
+    monkeypatch.setattr(AA, "thin_plate", keep)
+    dseg = write_dseg(tmp_path)
+    w = white_surf.write_white_surface(dseg, tmp_path / "deriv", 8)
+    field, side = white_surf.read_field(w.paths["field"])
+    assert len(used) == 1
+    phi = used[0]
+    lo = np.array(side["BoxOrigin"])
+    box = tuple(slice(int(a), int(a) + n) for a, n in zip(lo, phi.shape, strict=True))
+    whole = field.read(tuple(slice(0, n) for n in field.shape))
+    assert field.dtype == np.float32 and np.array_equal(whole[box], phi)
+    rest = np.ones(whole.shape, bool)
+    rest[box] = False
+    assert white_surf.FIELD_FILL == side["Fill"] == -(AA.BAND + 3)
+    assert np.all(whole[rest] == side["Fill"])
+    assert w.paths["field"].name == "sub-T01_ses-S1_hemi-R_desc-antialias_white.nii"
+    assert side["GridShape"] == list(field.shape) and side["BoxShape"] == list(
+        phi.shape
+    )
+    assert np.allclose(np.reshape(side["VoxelToRAS"], (4, 4)), AFF)
+    img = nib.load(w.paths["field"])
+    assert isinstance(img, nib.nifti1.Nifti1Image)
+    assert np.allclose(img.affine[:3, 3], AFF[:3, :3] @ lo + AFF[:3, 3])
+    assert (
+        side["Antialias"]
+        == white_surf.WhiteSurface.load(w.paths["surf"]).sidecar["Antialias"]
+    )
+    # the surface is the march of the stored field
+    s = white_surf.WhiteSurface.load(w.paths["surf"])
+    _, _, mb = marching_tetrahedra_blocks(field, 0.0, 8, np.float32)
+    assert np.array_equal(np.sort(mb.vertex_key), np.sort(s.vertex_key))
+    # a changed file is refused
+    with w.paths["field"].open("r+b") as fh:
+        fh.seek(-4, 2)
+        fh.write(b"\0\0\0\0")
+    with pytest.raises(ValueError, match="SHA-256"):
+        white_surf.read_field(w.paths["field"])
+
+
+def wm_mask(dseg: Path) -> npt.NDArray[np.bool_]:
+    img = nib.load(dseg)
+    assert isinstance(img, nib.nifti1.Nifti1Image)
+    side = bids.read_sidecar(bids.sidecar_path(dseg), white_dseg.DSEG_SPEC)
+    out: npt.NDArray[np.bool_] = np.isin(np.asarray(img.dataobj), side["FilledLabels"])
+    return out
+
+
+def face_keys(
+    keys: npt.NDArray[np.int64], f: npt.NDArray[np.int64]
+) -> set[tuple[int, ...]]:
+    """The faces as sets of edge keys (independent of vertex numbers)."""
+    return {tuple(sorted(t)) for t in keys[f].tolist()}
+
+
+def test_an_edit_with_no_change_of_the_mask_gives_no_new_blocks(
+    surface: tuple[Path, Path],
+) -> None:
+    dseg, surf = surface
+    field, _ = white_surf.read_field(
+        surf.with_name(
+            surf.name.replace("_white.surf.gii", "_desc-antialias_white.nii")
+        )
+    )
+    mask = wm_mask(dseg)
+    dev = backend.device("cpu")
+    vox = np.argwhere(mask)[:50]
+    assert AA.local_solve(field, ArraySource(mask), vox, dev) is None
+    box = (slice(10, 30), slice(10, 30), slice(10, 30))
+    same = AA.LocalSolve(
+        box,
+        field.read(box),
+        np.zeros((0, 3), np.int64),
+        16,
+        5.0,
+        1.0,
+        AA.Solve(0, 0, 0.0, True, 0.0),
+    )
+    r = white_surf.remarch(field, same, 8)
+    assert len(r.blocks) == 0 and len(r.v) == 0 and len(r.f) == 0
+
+
+def test_the_remarched_blocks_replace_the_surfaces_blocks(
+    surface: tuple[Path, Path],
+) -> None:
+    """After a local solve of an edit, the march of the whole patched field is the
+    stored surface's blocks where the field did not change and the re-marched blocks
+    where it did."""
+    dseg, surf = surface
+    field, _ = white_surf.read_field(
+        surf.with_name(
+            surf.name.replace("_white.surf.gii", "_desc-antialias_white.nii")
+        )
+    )
+    mask = wm_mask(dseg)
+    edited = mask.copy()
+    x = np.indices(mask.shape).astype(float)
+    q = np.array([20, 19, 29])  # on the ball's surface (radius about 12)
+    bump = np.sqrt(((x - q[:, None, None, None]) ** 2).sum(0)) <= 2.0
+    edited |= bump
+    dev = backend.device("cpu")
+    local = AA.local_solve(field, ArraySource(edited), np.argwhere(bump), dev)
+    assert local is not None and len(local.changed)
+    r = white_surf.remarch(field, local, 8)
+    assert len(r.blocks) and r.v.dtype == np.float32
+    s = white_surf.WhiteSurface.load(surf)
+    idx = np.loadtxt(surf.with_name(s.sidecar["BlocksFile"]), skiprows=1, ndmin=2)
+    touched = {tuple(b) for b in r.blocks.tolist()}
+    want: set[tuple[int, ...]] = set()
+    for row in idx:
+        if (int(row[0]), int(row[1]), int(row[2])) not in touched:
+            want |= face_keys(s.vertex_key, s.f[int(row[5]) : int(row[6])])
+    want |= face_keys(r.mesh.vertex_key, r.f)
+    patched = PatchedSource(field, local.box, local.phi)
+    v, f, mb = marching_tetrahedra_blocks(patched, 0.0, 8, np.float32)
+    assert face_keys(mb.vertex_key, f) == want
+    # the re-marched vertices are those of the full march
+    pos = dict(zip(mb.vertex_key.tolist(), map(tuple, v), strict=True))
+    for key, p in zip(r.mesh.vertex_key.tolist(), r.v, strict=True):
+        assert pos[key] == tuple(p)
+    # orientation as the surface: normals out of the WM
+    c = np.array([20.3, 19.6, 17.8])
+    n = np.cross(r.v[r.f[:, 1]] - r.v[r.f[:, 0]], r.v[r.f[:, 2]] - r.v[r.f[:, 0]])
+    ball = r.v[r.f].mean(1)[:, 0] < 34
+    assert np.mean(np.sum(n[ball] * (r.v[r.f].mean(1)[ball] - c), 1) > 0) > 0.95
+
+
+def test_touched_blocks_include_the_block_before_on_a_shared_face() -> None:
+    pts = np.array([[8, 3, 3], [5, 16, 0], [12, 12, 12]])
+    got = {tuple(b) for b in white_surf.touched_blocks(pts, 8).tolist()}
+    assert got == {(1, 0, 0), (0, 0, 0), (0, 2, 0), (0, 1, 0), (1, 1, 1)}
+    assert len(white_surf.touched_blocks(np.zeros((0, 3), np.int64), 8)) == 0

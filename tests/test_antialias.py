@@ -10,6 +10,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
+from scipy import ndimage as ndi
 from scipy import sparse
 from scipy.optimize import minimize
 
@@ -17,6 +18,7 @@ from baillarger import antialias as AA
 from baillarger import backend
 from baillarger import mesh_intersect as mi
 from baillarger import mesh_smoothing as S
+from baillarger.blocks import ArraySource
 from baillarger.mesh import marching_tetrahedra_blocks
 
 DEVICES = [d for d in backend.available() if d != "numpy"]
@@ -256,3 +258,97 @@ def test_cvxpy_finds_the_same_optimum(tmp_path: Path) -> None:
     va, _ = mesh(ours)
     vb, _ = mesh(ref)
     assert np.abs(va - vb).max() < 1e-5
+
+
+# ------------------------------------------------- start, held and the local solve
+
+
+def test_no_start_and_no_held_is_the_solve_from_sd() -> None:
+    """The new parameters at their defaults, and start = sd with nothing held, give
+    the field of the solve from sd, bit for bit."""
+    mask = ball()
+    dev = backend.device("cpu")
+    a, sa = AA.thin_plate(mask, dev)
+    b, sb = AA.thin_plate(mask, dev, start=None, held=None)
+    sd = AA.signed_distance(mask, AA.BAND + 3.0)
+    c, sc = AA.thin_plate(mask, dev, start=sd, held=np.zeros(mask.shape, bool))
+    assert np.array_equal(a, b) and np.array_equal(a, c)
+    assert sa.iterations == sb.iterations == sc.iterations
+
+
+def test_held_voxels_keep_their_start_value() -> None:
+    mask = ball()
+    dev = backend.device("cpu")
+    rng = np.random.default_rng(1)
+    start = AA.signed_distance(mask, AA.BAND + 3.0) + rng.uniform(
+        -0.3, 0.3, mask.shape
+    ).astype(np.float32)
+    held = np.zeros(mask.shape, bool)
+    held[:, :, :20] = True
+    phi, _ = AA.thin_plate(mask, dev, start=start, held=held)
+    assert np.array_equal(phi[held], start[held])
+    free = ~held & (np.abs(AA.signed_distance(mask, AA.BAND + 3.0)) <= AA.BAND)
+    assert np.all(phi[free & mask] >= AA.EPS) and np.all(phi[free & ~mask] <= -AA.EPS)
+    with pytest.raises(ValueError):
+        AA.thin_plate(mask, dev, held=held)
+    with pytest.raises(ValueError):
+        AA.thin_plate(mask, dev, start=start[1:])
+
+
+def test_the_preview_radius_follows_the_rule() -> None:
+    # docs/preview-radius.md: a flat band (c = 5), delta0 = 1, tau = 0.01 gives 19
+    assert AA.preview_radius(5.0, 1.0, 0.01) == 19
+    assert AA.preview_radius(5.0, 1.0, 1e-3) == 25
+    assert AA.preview_radius(1.0, 1.0) == AA.PREVIEW_MIN_RADIUS
+    assert AA.preview_radius(10.0, 4.0) > AA.preview_radius(10.0, 1.0)
+
+
+def bumped(n: int = 64) -> tuple[npt.NDArray[np.bool_], ...]:
+    """A ball, and the ball with a bump of radius 2.5 on its surface; the bump's
+    neighbourhood (the voxels the edit may change)."""
+    x = np.indices((n, n, n)).astype(float)
+    c = np.array([n / 2 + 0.3, n / 2 - 0.2, n / 2 + 0.1])
+    a = np.sqrt(((x - c[:, None, None, None]) ** 2).sum(0)) < n / 2 - 12
+    q = np.array([int(c[0] + n / 2 - 12) - 1, int(c[1]), int(c[2])])
+    rq = np.sqrt(((x - q[:, None, None, None]) ** 2).sum(0))
+    return a, a | (rq <= 2.5), rq <= 3.5
+
+
+def test_the_local_solve_equals_the_full_solve_near_the_edit() -> None:
+    """docs/preview-radius.md: the preview of an edit is within tau = 0.01 voxel of
+    the full solve of the edited mask, near the edit; the voxels farther than R from
+    the changed voxels keep the earlier field."""
+    a, b, near_bump = bumped()
+    dev = backend.device("cpu")
+    pa, _ = AA.thin_plate(a, dev)
+    pb, _ = AA.thin_plate(b, dev)
+    local = AA.local_solve(ArraySource(pa), ArraySource(b), np.argwhere(near_bump), dev)
+    assert local is not None
+    assert np.array_equal(
+        np.sort(np.ravel_multi_index(local.changed.T, a.shape)), np.flatnonzero(a != b)
+    )
+    assert local.radius >= AA.PREVIEW_MIN_RADIUS and local.delta0 == 1.5
+    new = pa.copy()
+    new[local.box] = local.phi
+    seed = np.ones(a.shape, bool)
+    seed[tuple(local.changed.T)] = False
+    dist = ndi.distance_transform_edt(seed)
+    near = (dist <= AA.BAND + 3) & (np.abs(AA.signed_distance(b, 8.0)) <= AA.BAND)
+    assert np.abs(pb - pa)[near].max() > 0.3  # the edit moves the field
+    assert np.abs(new - pb)[near].max() < AA.PREVIEW_TAU
+    assert np.array_equal(new[dist > local.radius], pa[dist > local.radius])
+
+
+def test_an_edit_that_changes_no_voxel_gives_no_solve() -> None:
+    a, _, near_bump = bumped(48)
+    dev = backend.device("cpu")
+    sd = AA.signed_distance(a, AA.BAND + 3.0)  # any field with the mask's signs
+    assert (
+        AA.local_solve(ArraySource(sd), ArraySource(a), np.argwhere(near_bump), dev)
+        is None
+    )
+    assert (
+        AA.local_solve(ArraySource(sd), ArraySource(a), np.zeros((0, 3)), dev) is None
+    )
+    with pytest.raises(ValueError):
+        AA.local_solve(ArraySource(sd), ArraySource(a), [[48, 0, 0]], dev)
