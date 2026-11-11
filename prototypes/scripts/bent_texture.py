@@ -317,7 +317,7 @@ class Grown:
 
 def read_grown(b: BB.Box, side: dict[str, Any], reach: Sequence[int]) -> Grown:
     """Read the echoes and the dseg that bent_box read (paths in its sidecar
-    side) on the box grown by reach voxels, with the painted crops of the
+    side) on the box grown by reach voxels, with the label edits of the
     sidecar applied to the labels (bent_box.paint). The part in the box must
     equal the box's echoes and labels, else ValueError."""
     srcs = [open_volume(Path(e)) for e in side["echoes"]]

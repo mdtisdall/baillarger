@@ -28,13 +28,13 @@ inner root is in Box.faces. The plan is that a fit moves only the inner
 columns and holds the halo columns fixed. With halo_mm = 0 the box has the
 columns of Columns.compute(Request(vertex, radius_mm)).
 
-Painted labels (paint): crops of the dseg that the user painted
-(baillarger.wm_paint export, then ITK-SNAP). Their changed voxels
-(wm_paint.changes) replace the box's labels where they fall in the box, in
+Painted labels (paint): label edits on the dseg's grid (label-edits/1
+diffs, baillarger.label_edits; the viewer's paint mode writes them). Their
+voxels and labels replace the box's labels where they fall in the box, in
 the order given. Only the box's labels change. The straight rays' label
 intervals stay those of the dseg (the ray sampler reads the dseg itself), so
 a caller that needs the painted labels along a ray samples Box.labels. The
-sidecar of the command line lists the crops.
+sidecar of the command line lists the diffs.
 
 The voxel box holds the straight rays of all chosen columns from -CAP_IN to
 CAP_OUT, widened by MARGIN_MM on each axis, and cut to the grid. A bent
@@ -58,9 +58,8 @@ import numpy as np
 import numpy.typing as npt
 from scipy.sparse.csgraph import dijkstra
 
+from baillarger import label_edits
 from baillarger import rays as R
-from baillarger import wm_paint
-from baillarger.bids import file_sha256, read_sidecar
 from baillarger.blocks import Source, open_volume
 from baillarger.column_volume import ColumnVolumeSampler
 from baillarger.mesh_graph import BlockIndex, local_graph
@@ -197,20 +196,22 @@ def _echo_sampler(rs: R.RaySampler, echoes: Sequence[Path]) -> list[Source]:
 def paint(
     labels: npt.NDArray[np.int32],
     offset: I64,
-    crops: Sequence[Path],
-    dseg: Path | None = None,
+    diffs: Sequence[Path],
+    shape: Sequence[int] | None = None,
 ) -> tuple[npt.NDArray[np.int32], int]:
-    """labels (a box of the grid at offset) with the changed voxels of each
-    painted crop applied, in order, and the number of voxels changed in the
-    box. With dseg, a crop exported from another dseg raises ValueError."""
+    """labels (a box of the grid at offset) with the voxels and labels of
+    each label-edits/1 diff applied, in order, and the number of voxels
+    changed in the box. With shape (the grid's), a diff on another grid
+    raises ValueError."""
     out = np.array(labels, np.int32, copy=True)
     n = 0
-    sha = file_sha256(Path(dseg)) if dseg is not None else None
-    for crop in crops:
-        side = read_sidecar(Path(crop) / wm_paint.SIDECAR, wm_paint.PAINT_SPEC)
-        if sha is not None and side["DsegSHA256"] != sha:
-            raise ValueError(f"{crop}: exported from another dseg")
-        pts, vals = wm_paint.changes(Path(crop))
+    for path in diffs:
+        e, side, _ = label_edits.read_with_sidecar(Path(path))
+        grid = tuple(int(s) for s in side["Shape"])
+        if shape is not None and grid != tuple(int(s) for s in shape):
+            raise ValueError(f"{path}: the diff's grid {grid} is not the dseg's")
+        pts = np.stack(np.unravel_index(e.index, grid), 1).astype(np.int64)
+        vals = e.label.astype(np.int64)
         q = pts - np.asarray(offset, np.int64)
         ok = np.all((q >= 0) & (q < np.asarray(out.shape)), axis=1)
         q, v = q[ok], vals[ok]
@@ -227,12 +228,12 @@ def box(
     radius_mm: float,
     halo_mm: float = HALO_MM,
     margin_mm: float = MARGIN_MM,
-    crops: Sequence[Path] = (),
+    diffs: Sequence[Path] = (),
 ) -> Box:
     """The box at a vertex: see the module docstring. white is the
     _white.surf.gii; dseg is the segmentation that the surface was made from
-    (the sampler checks its SHA-256); echoes are on the dseg's grid; crops
-    are painted crops of that dseg (paint)."""
+    (the sampler checks its SHA-256); echoes are on the dseg's grid; diffs
+    are label edits on that grid (paint)."""
     if not radius_mm >= 0 or not halo_mm >= 0 or not margin_mm >= 0:
         raise ValueError("radius_mm, halo_mm and margin_mm must be >= 0")
     rs = R.RaySampler(Path(white), Path(dseg))
@@ -288,8 +289,8 @@ def box(
     sl = tuple(slice(int(a), int(b)) for a, b in zip(lo, hi, strict=True))
     lab = np.ascontiguousarray(rs.labels.read(sl), np.int32)
     echo = np.stack([np.asarray(s.read(sl), np.float32) for s in srcs])
-    if crops:
-        lab, _ = paint(lab, lo, crops, dseg)
+    if diffs:
+        lab, _ = paint(lab, lo, diffs, rs.shape)
     return Box(
         vertex=int(vertex),
         radius_mm=float(radius_mm),
@@ -388,7 +389,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=Path,
         action="append",
         default=[],
-        help="a painted crop of the dseg (wm_paint export); repeatable",
+        help="label edits on the dseg's grid (a label-edits/1 .npy diff, as the "
+        "viewer's paint mode writes); repeatable",
     )
     a = p.parse_args(argv)
     t0 = time.perf_counter()

@@ -51,9 +51,9 @@ not come from that log.
   used. An older output can be made again from its input labels, its copy of the diff
   and its commit.
 - The preview is approximate; the regeneration is exact.
-- ITK-SNAP is a bootstrap only. The goal is that editing does not need it. Until the
-  paint mode works, it is the only writer of the diff, so the diff has one writer at a
-  time and needs no locked read-change-write.
+- Editing does not need ITK-SNAP. It was a bootstrap only, and Part 2 removed it. The
+  writer of the diff is the viewer's review pane: its answers and paints hold the
+  review's lock for each read-change-write.
 - Reuse first: each part uses the code in "What exists" where it can, and adds a
   parameter to an existing function before it adds a new function.
 
@@ -64,7 +64,7 @@ not come from that log.
 | Edits on the input labels, edited voxels changed last by the correction, fixes that change them | `white_dseg.wm_topo` (now with a `Log`: `replay`, `remove_handles(..., verified)`, `Fix.overrides`) | 1 |
 | A brush on the slice tiles, strokes held in the page | `static/review.js` (scribble mode: `paint`, the dabs, the radius keys, Escape) | 2 |
 | Strokes to voxels: a voxel in two strokes keeps the later one; voxels on the grid | `Review.scribble` in `viewer/review.py` | 2 |
-| Only the voxels that change | `wm_paint.changes` (the ITK-SNAP import) | 1, 2 |
+| Only the voxels that change | `label_edits.paint` | 1, 2 |
 | What the automatic correction does after a change, on a box round it; whether it overrides; whether the box cuts the WM | `wm_choices.preview` (it takes a `Change`); `/review/preview` with its job for a slow preview | 4a |
 | Drawing voxel lists on the slice tiles (the cap `MAX_DRAWN`) | `static/review.js` (the preview drawing) | 3, 4a |
 | A label image as a brick volume in the pane | `Volumes.add_nifti` in `viewer/volumes.py` | 3 |
@@ -117,8 +117,7 @@ Facts that the plan must respect:
   labels (the dseg's first `Sources`) with the diff applied. The answer log still records
   them, for the queue. A scribble is a record of the log only. The viewer takes the log
   as `--log` and the diff as `--edits`; with `--sites`, both are needed.
-- The ITK-SNAP import (`wm_paint`) writes into the diff. It is a bootstrap only: it
-  stays until the paint mode of Part 2 works, and then Part 2 removes it.
+- The ITK-SNAP import (`wm_paint`) was a bootstrap only. Part 2 removed it.
 - Formats edited in place (version 1): `wm-dseg.md` (`--edits`, `overrides`, `Sources`,
   the copy of the diff), `wm-sites.md` (override sites), `wm-edits.md` (the log is the
   queue's record; `dseg` does not read it; `Accepts` goes).
@@ -132,20 +131,33 @@ queue answer writes into the diff.
 
 ## Part 2: paint and undo
 
-- Paint mode: the scribble mode of `review.js` with the label menu (Decisions). The
-  brush, the dabs, the radius keys and Escape are the scribble mode's.
+- Paint mode: the brush of `review.js` has two modes, paint and scribble (key p). Paint
+  has the label menu (Decisions; `review.menu`: outside, WM, cortex and the eraser
+  "input"); scribble keeps the classes of the label set and is a record of the log
+  only. The brush, the dabs, the radius keys and Escape are shared. Keys: w WM,
+  c cortex, o outside, e eraser, x submit, u undo.
 - Submit: `POST /review/paint {strokes}`. The server turns the strokes into voxels with
-  the code of `Review.scribble` (moved into one function that both routes call), checks
-  each label, keeps only the voxels whose label changes (`wm_paint.changes`, moved into
-  `label_edits`), writes them into the diff, and pushes their earlier diff entries (a
-  label, or none) on the undo stack.
-- Undo: `POST /review/undo` pops the stack and writes the earlier entries back.
-- At a queue site, the choice `manual-paint` opens the paint mode. Its Submit writes into
-  the diff, and the queue's log records the answer as now.
+  `review.stroke_voxels` (the function that `/review/scribble` also calls: a voxel in two
+  strokes keeps the later one), checks each label against the menu and each voxel
+  against the grid (one bad label or voxel refuses the whole paint), keeps only the
+  voxels whose label changes (`label_edits.paint`), writes them into the diff, and
+  pushes their earlier diff entries (a label, or none) on the undo stack. A paint that
+  changes no voxel writes nothing and pushes nothing. `wm_paint.changes` was not moved:
+  `label_edits.paint` already keeps only the voxels that change.
+- Undo: `POST /review/undo` writes the top entries back (`label_edits.restore`) and pops
+  them. The stack is in memory, for this viewer run. The other site answers do not go
+  on it, and an undo writes back over a later answer at the same voxels.
+- At a queue site, the choice `manual-paint` opens the paint mode. Its Submit is
+  `POST /review/answer` with the strokes: it writes into the diff as a paint (and goes on
+  the undo stack), and the queue's log records the answer: the voxels of the strokes
+  and the label each takes (the eraser's voxels: their input label). Its preview has no
+  voxels until Part 4a.
 - The viewer can start without a queue (`--edits` alone, with no `--sites` and no
-  `--log`): paint only.
-- When the paint mode works, this part removes the ITK-SNAP path: `wm_paint`, its format
+  `--log`): paint only. The hemisphere then comes from the dseg's sidecar.
+- This part removed the ITK-SNAP path: `wm_paint`, its format
   (`docs/formats/wm-paint.md`), its tests, and the ITK-SNAP commands of the review pane.
+  The prototype `bent_box --paint` now takes label-edits diffs in place of painted
+  crops.
 
 Tests: a paint writes the painted voxels and labels into the diff; a label that is not
 in the menu is refused, and nothing is written; a voxel with its current label is not
@@ -314,6 +326,11 @@ The joins use these interfaces. A core must keep them, or change this plan first
   nothing written.
 - `POST /review/undo`. Response: `{voxels, undo_depth}`, or `{error}` if the stack is
   empty.
+- `POST /review/answer {site, choice: "manual-paint", strokes, reviewer_seconds}` (the
+  strokes as for `/review/paint`); the response is the other answers' with
+  `undo_depth`. No other choice takes strokes.
+- `GET /review/queue` also gives `menu` (the paint labels), `paint_only` and
+  `undo_depth`.
 - `POST /review/preview` also takes `{site: "i,j,k", choice: "manual-paint", strokes}`;
   the response is the existing preview's.
 - `GET /review/pending`: `{voxels: [[i, j, k], ...], labels: [...]}`.

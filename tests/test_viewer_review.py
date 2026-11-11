@@ -69,7 +69,7 @@ class Fake:
         time.sleep(self.delay)
         a = self.answer(labels, lo, site, choice, params)
         c = np.array([(site[0], site[1] + 1, site[2])], np.int64)
-        return VR.Preview(a.voxels, c, choice == "fill-gap", None)
+        return VR.Preview(a.voxels, c, choice == "fill-gap")
 
 
 @pytest.fixture
@@ -143,7 +143,6 @@ def make(files: dict[str, Path], choices: Fake | None = None) -> VR.Review:
         A,
         randoms,
         choices or Fake(),
-        echoes=[files["dseg"]],
         inputs=files["input"],
     )
 
@@ -408,30 +407,6 @@ def test_random_count() -> None:
         VR.random_count(44, -0.1)
 
 
-def test_manual_paint_gives_the_commands_and_no_answer(server: Any) -> None:
-    base, rv, files = server
-    post(base + "/review/session", dict(random_share=0, seed=None))
-    get(base + "/review/next")
-    out = post(base + "/review/preview", dict(site="5,5,5", choice="manual-paint"))
-    assert out["status"] == "done" and out["answer"] == [] and out["correction"] == []
-    cmd = out["command"].splitlines()
-    assert cmd[0].startswith(
-        f"python -m baillarger.wm_paint export {files['dseg'].resolve()}"
-    )
-    assert "--site 5 5 5" in cmd[0] and f"--echo {files['dseg'].resolve()}" in cmd[0]
-    assert cmd[1].startswith("itksnap -g ")
-    assert (
-        f"--log {files['log'].resolve()} --edits {files['edits'].resolve()} "
-        f"--session {rv.session}"
-    ) in cmd[2]
-    with pytest.raises(urllib.error.HTTPError) as e:
-        post(
-            base + "/review/answer",
-            dict(site="5,5,5", choice="manual-paint", reviewer_seconds=1),
-        )
-    assert e.value.code == 400
-
-
 def test_the_real_choices_through_the_route(files: dict[str, Path]) -> None:
     from baillarger import wm_choices as wc
 
@@ -622,7 +597,7 @@ def test_accept_fix_is_only_a_choice_of_an_override_site(server: Any) -> None:
 # ------------------------------------------------------- the command line
 
 
-def test_sites_need_the_log_and_the_edits() -> None:
+def test_sites_need_the_log_and_the_edits(files: dict[str, Path]) -> None:
     import argparse
 
     ap = argparse.ArgumentParser()
@@ -631,13 +606,18 @@ def test_sites_need_the_log_and_the_edits() -> None:
         ["--sites", "q.tsv", "--log", "l.jsonl"],
         ["--sites", "q.tsv", "--edits", "e.npy"],
         ["--log", "l.jsonl"],
-        ["--edits", "e.npy"],
+        ["--log", "l.jsonl", "--edits", "e.npy"],
     ):
         a = ap.parse_args(argv)
         with pytest.raises(ValueError):
             VR.for_white(a, Path("s"), Path("d"), lambda: np.zeros(1), A)
     a = ap.parse_args([])
     assert VR.for_white(a, Path("s"), Path("d"), lambda: np.zeros(1), A) is None
+    # --edits alone: paint only, no queue and no log
+    paint_only(files)
+    a = ap.parse_args(["--edits", str(files["edits"])])
+    rv = VR.for_white(a, Path("s"), files["dseg"], lambda: np.zeros(1), A)
+    assert rv is not None and rv.queue()["paint_only"] is True
 
 
 def test_the_fix_diff_path_is_the_dseg_commands() -> None:
@@ -645,3 +625,232 @@ def test_the_fix_diff_path_is_the_dseg_commands() -> None:
     d = bids.derivative_path(root, ents, "dseg", ".nii.gz", desc="wmtopo")
     want = bids.derivative_path(root, ents, "diff", ".npy", desc="wmtopofixes")
     assert VR.fix_diff_path(d) == want
+
+
+# ------------------------------------------------------- paint and undo
+
+
+def paint_strokes(*strokes: tuple[Any, list[tuple[int, int, int]]]) -> Any:
+    return [dict(label=lab, voxels=[list(v) for v in vs]) for lab, vs in strokes]
+
+
+def test_the_shared_strokes_function_keeps_a_voxel_in_its_later_stroke() -> None:
+    strokes = [
+        {"class": 41, "voxels": [[4, 4, 4], [4, 5, 4]]},
+        {"class": 42, "voxels": [[4, 5, 4], [7, 7, 7]]},
+        {"class": 0, "voxels": [[7, 7, 7]]},
+    ]
+    out = VR.stroke_voxels(strokes, "class")
+    assert [(lab, v.tolist()) for lab, v in out] == [
+        (41, [[4, 4, 4]]),
+        (42, [[4, 5, 4]]),
+        (0, [[7, 7, 7]]),
+    ]
+    # a stroke left with no voxel is dropped
+    out = VR.stroke_voxels(strokes[1:2] + strokes[1:2], "class")
+    assert [(lab, v.tolist()) for lab, v in out] == [(42, [[4, 5, 4], [7, 7, 7]])]
+
+
+def test_a_paint_writes_the_painted_voxels_and_labels_into_the_diff(
+    server: Any,
+) -> None:
+    base, rv, files = server
+    # no session is needed: paint is not a queue answer
+    out = post(
+        base + "/review/paint",
+        dict(
+            strokes=paint_strokes(
+                (42, [(4, 4, 4), (4, 5, 4)]), (0, [(4, 5, 4), (10, 10, 10)])
+            )
+        ),
+    )
+    assert out == dict(voxels=3, undo_depth=1)
+    assert diff(files) == {(4, 4, 4): 42, (4, 5, 4): 0, (10, 10, 10): 0}
+    # the paint is not a record of the log
+    assert all(r["Record"] != "answer" for r in records(files))
+
+
+def test_a_label_not_in_the_menu_is_refused_and_nothing_is_written(
+    server: Any,
+) -> None:
+    base, rv, files = server
+    for bad in (2, 3, 17, "wm", None):  # 2 and 3 are the left hemisphere's
+        with pytest.raises(urllib.error.HTTPError) as e:
+            post(
+                base + "/review/paint",
+                dict(strokes=paint_strokes((42, [(4, 4, 4)]), (bad, [(5, 5, 5)]))),
+            )
+        assert e.value.code == 400
+    assert not files["edits"].exists()
+    assert rv.undo == []
+
+
+def test_a_voxel_with_its_current_label_is_not_written(server: Any) -> None:
+    base, rv, files = server
+    # (4, 4, 4) is 41 in the input labels; (8, 6, 7) is 42 there (the dseg's 41)
+    out = post(
+        base + "/review/paint",
+        dict(strokes=paint_strokes((41, [(4, 4, 4)]), (42, [(8, 6, 7)]))),
+    )
+    assert out == dict(voxels=0, undo_depth=0)
+    assert not files["edits"].exists()
+    post(base + "/review/paint", dict(strokes=paint_strokes((0, [(4, 4, 4)]))))
+    out = post(base + "/review/paint", dict(strokes=paint_strokes((0, [(4, 4, 4)]))))
+    assert out == dict(voxels=0, undo_depth=1)
+
+
+def test_the_eraser_gives_a_voxel_its_input_label_again(server: Any) -> None:
+    base, rv, files = server
+    post(
+        base + "/review/paint",
+        dict(strokes=paint_strokes((0, [(4, 4, 4), (5, 4, 4)]))),
+    )
+    out = post(
+        base + "/review/paint",
+        dict(strokes=paint_strokes(("input", [(4, 4, 4), (6, 6, 6)]))),
+    )
+    # (6, 6, 6) has no entry: erasing it changes nothing
+    assert out == dict(voxels=1, undo_depth=2)
+    assert diff(files) == {(5, 4, 4): 0}
+
+
+def test_a_voxel_off_the_grid_is_refused(server: Any) -> None:
+    base, rv, files = server
+    for v in ((20, 0, 0), (-1, 4, 4), (4, 4, 16)):
+        with pytest.raises(urllib.error.HTTPError) as e:
+            post(
+                base + "/review/paint",
+                dict(strokes=paint_strokes((42, [(4, 4, 4), v]))),
+            )
+        assert e.value.code == 400 and "grid" in json.loads(e.value.read())["error"]
+    assert not files["edits"].exists() and rv.undo == []
+
+
+def test_undo_restores_the_diff_exactly_after_overlapping_paints(
+    server: Any,
+) -> None:
+    base, rv, files = server
+    LE.write(
+        files["edits"],
+        LE.Edits(
+            np.array([np.ravel_multi_index((4, 4, 4), SHAPE)], np.int64),
+            np.array([0], np.int32),
+        ),
+        hemisphere="R",
+        shape=SHAPE,
+        affine=A,
+    )
+    d0 = diff(files)
+    post(
+        base + "/review/paint",
+        dict(strokes=paint_strokes((42, [(4, 4, 4), (4, 5, 4), (4, 6, 4)]))),
+    )
+    d1 = diff(files)
+    out = post(
+        base + "/review/paint",
+        dict(
+            strokes=paint_strokes((0, [(4, 5, 4), (4, 7, 4)]), ("input", [(4, 4, 4)]))
+        ),
+    )
+    assert out["undo_depth"] == 2
+    assert diff(files) == {(4, 5, 4): 0, (4, 6, 4): 42, (4, 7, 4): 0}
+    out = post(base + "/review/undo", {})
+    assert out == dict(voxels=3, undo_depth=1) and diff(files) == d1
+    out = post(base + "/review/undo", {})
+    assert out == dict(voxels=3, undo_depth=0) and diff(files) == d0
+    with pytest.raises(urllib.error.HTTPError) as e:
+        post(base + "/review/undo", {})
+    assert e.value.code == 400 and "undo" in json.loads(e.value.read())["error"]
+    assert diff(files) == d0
+
+
+def test_undo_of_a_first_paint_leaves_an_empty_diff(server: Any) -> None:
+    base, rv, files = server
+    post(base + "/review/paint", dict(strokes=paint_strokes((42, [(4, 4, 4)]))))
+    post(base + "/review/undo", {})
+    assert diff(files) == {}
+
+
+def test_manual_paint_at_a_site_writes_the_diff_and_the_log(server: Any) -> None:
+    base, rv, files = server
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    get(base + "/review/next")
+    p = post(base + "/review/preview", dict(site="5,5,5", choice=VR.MANUAL))
+    assert p["status"] == "done" and p["answer"] == [] and "command" not in p
+    with pytest.raises(urllib.error.HTTPError):  # a manual paint needs strokes
+        post(
+            base + "/review/answer",
+            dict(site="5,5,5", choice=VR.MANUAL, reviewer_seconds=1),
+        )
+    post(base + "/review/paint", dict(strokes=paint_strokes((0, [(5, 6, 5)]))))
+    out = post(
+        base + "/review/answer",
+        dict(
+            site="5,5,5",
+            choice=VR.MANUAL,
+            strokes=paint_strokes((42, [(5, 5, 5), (4, 4, 4)]), ("input", [(5, 6, 5)])),
+            reviewer_seconds=7.5,
+        ),
+    )
+    assert out["edited"] == 3 and out["undo_depth"] == 2
+    assert diff(files) == {(5, 5, 5): 42, (4, 4, 4): 42}
+    a = records(files)[-1]
+    assert a["Record"] == "answer" and a["Choice"] == VR.MANUAL
+    assert a["Id"] == out["answer"] and a["ReviewerSeconds"] == 7.5
+    v, lab, _ = E.read_log(files["log"]).voxels(a["Id"])
+    # the eraser's voxel is recorded with the label it takes: its input label
+    got = sorted(zip(map(tuple, v.tolist()), lab.tolist(), strict=True))
+    assert got == [((4, 4, 4), 42), ((5, 5, 5), 42), ((5, 6, 5), 41)]
+    post(base + "/review/undo", {})
+    assert diff(files) == {(5, 6, 5): 0}
+
+
+def test_strokes_are_refused_with_another_choice(server: Any) -> None:
+    base, rv, files = server
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    get(base + "/review/next")
+    with pytest.raises(urllib.error.HTTPError):
+        post(
+            base + "/review/answer",
+            dict(
+                site="5,5,5",
+                choice="thicken",
+                strokes=paint_strokes((42, [(4, 4, 4)])),
+                reviewer_seconds=1,
+            ),
+        )
+    assert not files["edits"].exists()
+
+
+# ------------------------------------------------------- paint only
+
+
+def paint_only(files: dict[str, Path]) -> VR.Review:
+    lab = np.asarray(nib.nifti1.load(files["dseg"]).dataobj)
+    s = bids.sidecar_path(files["dseg"])
+    s.write_text(json.dumps(dict(Hemisphere="R", Sources=[str(files["input"])])))
+    return VR.Review(None, None, files["edits"], files["dseg"], lambda: lab, A, None)
+
+
+def test_the_review_runs_with_the_edits_alone(files: dict[str, Path]) -> None:
+    rv = paint_only(files)
+    q = rv.queue()
+    assert q["paint_only"] is True and q["sites"] == [] and q["session"] is None
+    assert q["log"] is None and q["edits"] == str(files["edits"])
+    assert [m["value"] for m in q["menu"]] == [0, 41, 42, "input"]
+    out = rv.post("/review/paint", dict(strokes=paint_strokes((0, [(4, 4, 4)]))))
+    assert out == dict(voxels=1, undo_depth=1) and diff(files) == {(4, 4, 4): 0}
+    assert rv.post("/review/undo", {}) == dict(voxels=1, undo_depth=0)
+    for path, req in (
+        ("/review/session", dict(random_share=0)),
+        ("/review/scribble", dict(strokes=[], reviewer_seconds=1)),
+        ("/review/answer", dict(site="5,5,5", choice="leave", reviewer_seconds=1)),
+    ):
+        with pytest.raises(ValueError, match="paint only"):
+            rv.post(path, req)
+    assert not files["log"].exists()
+
+
+def test_the_menu_of_the_left_hemisphere() -> None:
+    assert [m["value"] for m in VR.menu("L")] == [0, 2, 3, "input"]
+    assert [m["key"] for m in VR.menu("R")] == ["outside", "wm", "cortex", "input"]

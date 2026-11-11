@@ -1,7 +1,7 @@
 # wm-edits: the answer log of the WM review
 
 SpecVersion `wm-edits/1`. Written by `baillarger.wm_edits.EditLog` (the
-review pane of stream 4, and the ITK-SNAP command); read by
+review pane of stream 4, `baillarger.viewer.review`); read by
 `baillarger.wm_edits.read_log`. The sidecar's keys are enforced by
 `baillarger.wm_edits.EDITS_SPEC`, and `tests/test_bids.py` checks that the
 table below lists the same keys, types and requirements.
@@ -27,8 +27,11 @@ There are two kinds of answer:
   `widen-gap`, `leave`, `manual-paint` or `accept-fix`. `accept-fix` is a
   choice of an override site (`wm-sites/1`): its voxels and labels are the
   site's fix's in the fix diff (`wm-dseg-fixes/1`), and its `Params` are
-  `{"Fix": <the fix's id>}`. The review pane writes the labels of each site
-  answer into the label edits; a scribble changes no label.
+  `{"Fix": <the fix's id>}`. `manual-paint`'s voxels are the strokes of the
+  pane's paint mode, each with the label that it takes (the eraser's
+  voxels: their input label). The review pane writes the labels of each site
+  answer into the label edits; a scribble changes no label. A paint of the
+  paint mode outside a site answer, and its undo, are not records of the log.
 - **A scribble** is a set of strokes, each with one class (a label of
   `label-set/1`). It can be at a site that was shown, or at no site.
 

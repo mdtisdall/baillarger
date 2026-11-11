@@ -22,7 +22,7 @@ written specs. Phase 1.3 needs no viewer.
    history. The topology guarantee wins over an edit, and `dseg` marks and
    queues each such fix.
 4. The site-answer choices as published code with a written contract.
-5. The ITK-SNAP bootstrap, as a command, kept until the viewer's paint works, then removed with `wm_paint`.
+5. The ITK-SNAP bootstrap, as a command (`wm_paint`), kept until the viewer's paint worked. The paint mode of `docs/plans/label-editing.md` (Part 2) removed it.
 
 ## Done when
 
@@ -269,9 +269,9 @@ A command with two subcommands:
 1. `export`: write a crop of the echoes and the current `desc-wmtopo` round
    a site, as `.nii.gz`, with the crop's offset in the sidecar.
 2. `import`: read the painted crop, compare it with the exported labels,
-   and write the changed voxels into the edits diff. The command is a
-   bootstrap only. It is kept until the viewer's paint works, then removed
-   with `wm_paint`.
+   and write the changed voxels into the edits diff. The command was a
+   bootstrap only. The viewer's paint mode (`docs/plans/label-editing.md`,
+   Part 2) removed it with `wm_paint`.
 
 Exact tests: export then import with no change gives an answer with no
 voxels; one painted voxel gives one voxel at the right world position.

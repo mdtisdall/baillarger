@@ -314,25 +314,31 @@ def test_echoes_on_another_grid_are_refused(
         BB.box(data["surf"], data["dseg"], [bad], 0, RADIUS, 0.0)
 
 
-def test_painted_crops_change_only_the_labels(
+def test_label_edits_change_only_the_labels(
     data: dict[str, Path], cols: VC.Columns, box: BB.Box, tmp_path: Path
 ) -> None:
-    """A crop exported by wm_paint, with some labels changed: the box's
-    labels change at those voxels only (the ones in the box), the rays and
-    the echoes do not."""
-    from baillarger import wm_paint
+    """A label-edits/1 diff on the dseg's grid: the box's labels change at
+    its voxels only (the ones in the box), the rays and the echoes do not;
+    a diff on another grid is refused."""
+    from baillarger import label_edits as LE
 
     v = vertex_of(cols)
+    img = nib.load(data["dseg"])
+    grid = tuple(int(n) for n in img.shape[:3])
     site = np.rint(box.to_box(box.roots[0]) + box.offset).astype(int)
-    crop = tmp_path / "crop"
-    wm_paint.export(data["dseg"], tuple(int(x) for x in site), crop, half=4)
-    img = nib.load(crop / wm_paint.LABELS)
-    lab = np.asarray(img.dataobj).copy()
-    lab[2:5, 3, 4] = 0
-    lab[0, 0, 0] = 99
-    nib.save(nib.Nifti1Image(lab, img.affine, img.header), crop / wm_paint.LABELS)
-    pts, vals = wm_paint.changes(crop)
-    b2 = BB.box(data["surf"], data["dseg"], echoes(data), v, 1.0, 0.5, crops=[crop])
+    pts = np.array([site + (d, 0, 0) for d in (-1, 0, 1)] + [[0, 0, 0]], np.int64)
+    vals = np.array([0, 0, 0, 42], np.int32)
+    idx = np.ravel_multi_index(tuple(pts.T), grid).astype(np.int64)
+    order = np.argsort(idx)
+    diff = tmp_path / "sub-T01_ses-S1_hemi-R_desc-labeledits_edits.npy"
+    LE.write(
+        diff,
+        LE.Edits(idx[order], vals[order]),
+        hemisphere="R",
+        shape=grid,
+        affine=img.affine,
+    )
+    b2 = BB.box(data["surf"], data["dseg"], echoes(data), v, 1.0, 0.5, diffs=[diff])
     q = pts - b2.offset
     ok = np.all((q >= 0) & (q < np.asarray(b2.labels.shape)), axis=1)
     want = box.labels.copy()
@@ -342,3 +348,7 @@ def test_painted_crops_change_only_the_labels(
     assert np.array_equal(b2.echoes, box.echoes)
     assert np.array_equal(b2.rays.position, box.rays.position)
     assert np.array_equal(b2.rays.interval_label, box.rays.interval_label)
+    other = tmp_path / "other" / diff.name
+    LE.write(other, LE.empty(), hemisphere="R", shape=(4, 4, 4), affine=img.affine)
+    with pytest.raises(ValueError, match="grid"):
+        BB.box(data["surf"], data["dseg"], echoes(data), v, 1.0, 0.5, diffs=[other])

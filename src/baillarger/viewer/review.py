@@ -1,11 +1,12 @@
 """The stream 1 review pane's server side (phase 4.2): the queue of sites
 (wm-sites/1), review sessions with random sites, the site answers with their
-previews, and scribbles, written to the answer log (wm-edits/1). A site
-answer also changes the labels: it writes into the label edits (label-edits/1,
-baillarger.label_edits), the one diff that the dseg command reads
-(white_dseg --edits). The pane holds no stream 1 logic: it calls phase 1.3's
-code (baillarger.wm_sites, baillarger.wm_edits, baillarger.wm_choices,
-baillarger.fix_diff) and baillarger.label_edits, and writes nothing else.
+previews, and scribbles, written to the answer log (wm-edits/1); and the
+paint mode with its undo. A site answer and a paint change the labels: they
+write into the label edits (label-edits/1, baillarger.label_edits), the one
+diff that the dseg command reads (white_dseg --edits). The pane holds no
+stream 1 logic: it calls phase 1.3's code (baillarger.wm_sites,
+baillarger.wm_edits, baillarger.wm_choices, baillarger.fix_diff) and
+baillarger.label_edits, and writes nothing else.
 
 Sites. A site is its voxel (i, j, k) on the segmentation's grid; the page names
 it "i,j,k". The ranked sites are the rows of the queue file, in its order (rank
@@ -49,6 +50,11 @@ Routes (Review.get, Review.post), JSON:
 - POST /review/scribble {strokes: [{class, voxels}], reviewer_seconds}:
   strokes appended to the log as one scribble. A voxel in two strokes stays in
   the later one only (the log takes a voxel in at most one stroke).
+- POST /review/paint {strokes: [{label, voxels}]}: the strokes written into
+  the label edits (Paint, below). {voxels, undo_depth}: voxels is the number
+  of voxels whose label changed.
+- POST /review/undo: the last paint of this viewer run undone (Paint).
+  {voxels, undo_depth}, or {error} if there is nothing to undo.
 
 Each write holds the review's lock and is flushed to the disk before the
 response (EditLog appends and fsyncs; label_edits.write replaces the files of
@@ -65,9 +71,28 @@ fix diff (desc-wmtopofixes_diff.npy, baillarger.fix_diff). Written into the
 edits, the fix's labels are edits, so the next dseg has no override there.
 Its preview gives the fix's voxels and no correction.
 
-manual-paint is not a choice of the server: its preview gives the commands of
-baillarger.wm_paint (export a crop, paint it in ITK-SNAP, import it into the
-log and the edits), and /review/answer refuses it.
+Paint. The strokes of the paint mode, each a label of the menu (menu: outside,
+WM and cortex of the hemisphere, and "input", the eraser:
+label_edits.INPUT) and its voxels. The strokes become voxels with the same
+function as a scribble's (stroke_voxels: a voxel in two strokes keeps the
+later one). A label that is not in the menu, or a voxel off the grid, refuses
+the whole paint, and nothing is written. Only the voxels whose label changes
+are written (label_edits.paint: from the input labels with the edits
+applied). The earlier entries of those voxels go on the undo stack;
+/review/undo writes the top entries back (label_edits.restore). The stack is
+in memory only, for this viewer run; a paint that changes no voxel does not
+go on it. The other site answers do not go on it.
+
+manual-paint (MANUAL) at a queue site: the page opens the paint mode, and its
+submit is /review/answer {site, choice: manual-paint, strokes,
+reviewer_seconds}. It writes into the edits as a paint (and goes on the undo
+stack), and the log records the answer: the voxels of the strokes and the
+label each takes (the eraser's voxels: their input label). Its preview has no
+voxels.
+
+Paint only. With no queue and no log (sites and log None; the viewer's
+--edits alone), the review has the paint routes only; the hemisphere comes
+from the dseg's sidecar (wm-dseg/1).
 """
 
 import argparse
@@ -92,8 +117,10 @@ from baillarger.wm_sites import read_random_sites, read_sites
 type Arr = npt.NDArray[Any]
 type Site = tuple[int, int, int]
 
-#: the choice whose answer comes from ITK-SNAP through baillarger.wm_paint
+#: the choice whose answer is the strokes of the paint mode
 MANUAL = "manual-paint"
+#: the eraser of the paint menu: the voxel takes its input label again
+ERASER = "input"
 #: the choice of an override site that writes its fix's labels into the edits
 ACCEPT = "accept-fix"
 #: seconds a preview request waits before it answers as a job
@@ -166,6 +193,38 @@ def classes(hemi: str) -> list[dict[str, Any]]:
     return out
 
 
+def menu(hemi: str) -> list[dict[str, Any]]:
+    """The labels of the paint mode: outside, WM and cortex of the hemisphere
+    (label-set/1), and the eraser (value "input")."""
+    wm, cx = WM_LABEL[hemi], CORTEX_LABEL[hemi]
+    return [
+        dict(value=0, name="outside", key="outside"),
+        dict(value=wm, name=LUT_NAMES[wm], key="wm"),
+        dict(value=cx, name=LUT_NAMES[cx], key="cortex"),
+        dict(value=ERASER, name="input label (eraser)", key="input"),
+    ]
+
+
+def stroke_voxels(
+    strokes: Sequence[dict[str, Any]], key: str
+) -> list[tuple[Any, npt.NDArray[np.int64]]]:
+    """Strokes, each {key: its label, voxels: [[i, j, k], ...]}, as (label,
+    voxels (N, 3)) in stroke order. A voxel in two strokes stays in the later
+    one only; a stroke left with no voxel is dropped. The labels are not
+    checked here."""
+    owner: dict[Site, int] = {}
+    for k, st in enumerate(strokes):
+        for v in st["voxels"]:
+            owner[parse_site(v)] = k
+    by: dict[int, list[Site]] = {}
+    for v, k in owner.items():
+        by.setdefault(k, []).append(v)
+    return [
+        (strokes[k][key], np.asarray(by[k], np.int64).reshape(-1, 3))
+        for k in sorted(by)
+    ]
+
+
 # ------------------------------------------------------------------ the choices
 
 
@@ -182,13 +241,12 @@ class Answer:
 class Preview:
     """A choice's preview on the grid: the voxels the answer changes, the voxels
     the correction then changes, whether the correction overrides the answer,
-    the ITK-SNAP command of manual-paint (or None), and whether a face of the
-    preview's box has WM on it (then the preview is approximate)."""
+    and whether a face of the preview's box has WM on it (then the preview is
+    approximate)."""
 
     answer: npt.NDArray[np.int64]
     correction: npt.NDArray[np.int64]
     overrides: bool
-    command: str | None = None
     cut_by_box: bool = False
 
 
@@ -279,37 +337,53 @@ class Job:
 
 class Review:
     """The review on the server: the queue, the answer log at log, the label
-    edits at edits (a .npy diff, made at the first answer that changes a
-    label), the session and the choices (module docstring). labels() gives
-    the segmentation's voxels (the whole grid, read once: the label pyramid's
-    level 0); random(n, seed) the random sites (wm_sites.read_random_sites);
-    inputs the input labels (default: input_labels(dseg)). Raises ValueError
-    if the edits are on another grid or of the other hemisphere."""
+    edits at edits (a .npy diff, made at the first answer or paint that
+    changes a label), the session, the choices and the undo stack of the
+    paints (module docstring). labels() gives the segmentation's voxels (the
+    whole grid, read once: the label pyramid's level 0); random(n, seed) the
+    random sites (wm_sites.read_random_sites); inputs the input labels
+    (default: input_labels(dseg)). With sites and log None, the review is
+    paint only (module docstring). Raises ValueError if the edits are on
+    another grid or of the other hemisphere, or if only one of sites and log
+    is given."""
 
     def __init__(
         self,
-        sites: Path,
-        log: Path,
+        sites: Path | None,
+        log: Path | None,
         edits: Path,
         dseg: Path,
         labels: Callable[[], Arr],
         affine: npt.ArrayLike,
-        random: Callable[[int, int], list[dict[str, Any]]],
+        random: Callable[[int, int], list[dict[str, Any]]] | None,
         choices: Choices | None = None,
-        echoes: Sequence[Path] = (),
         inputs: Path | None = None,
     ) -> None:
-        self.rows, self.side = read_sites(sites)
-        self.hemi = str(self.side["Hemisphere"])
-        self.queue_sha = file_sha256(sites)
+        import nibabel as nib
+
+        if (sites is None) != (log is None):
+            raise ValueError("a queue needs both its sites and its log")
         self.dseg_sha = file_sha256(dseg)
-        self.log_path = Path(log)
-        if not self.log_path.exists():
-            EditLog.create(self.log_path, dseg, self.hemi)
-        self.log = EditLog(self.log_path)
+        self.rows: list[dict[str, Any]] = []
+        self.log_path: Path | None = None
+        self._log: EditLog | None = None
+        if sites is not None and log is not None:
+            self.rows, self.side = read_sites(sites)
+            self.hemi = str(self.side["Hemisphere"])
+            self.queue_sha = file_sha256(sites)
+            self.log_path = Path(log)
+            if not self.log_path.exists():
+                EditLog.create(self.log_path, dseg, self.hemi)
+            self._log = EditLog(self.log_path)
+        else:
+            self.hemi = str(
+                json.loads(sidecar_path(Path(dseg)).read_text())["Hemisphere"]
+            )
         self.labels, self.random = labels, random
         self.affine = np.asarray(affine, np.float64)
-        self.shape = tuple(int(n) for n in self.log.read().shape)
+        self.shape = tuple(int(n) for n in nib.nifti1.load(dseg).shape[:3])
+        if self._log is not None and tuple(self._log.read().shape) != self.shape:
+            raise ValueError(f"{self.log_path}: the log is not on the dseg's grid")
         self.edits = Path(edits)
         if self.edits.exists():
             self._read_edits()
@@ -318,16 +392,30 @@ class Review:
         voxel_mm = np.linalg.norm(self.affine[:3, :3], axis=0)
         self.choices: Choices = choices or WmChoices(self.hemi, voxel_mm)
         self.dseg = Path(dseg)
-        self.echoes = [Path(e) for e in echoes]
         self.lock = threading.Lock()  # every write, and the session
         self.session: int | None = None
         self.share: float | None = None
         self.seed: int | None = None
         self.order: list[dict[str, Any]] = []
         self.jobs: dict[str, Job] = {}
-        last = self.log.sessions()
+        #: the undo stack of the paints: the earlier entries of each paint
+        self.undo: list[label_edits.Edits] = []
+        last = self._log.sessions() if self._log is not None else []
         if last:
             self._resume(last[-1])
+
+    @property
+    def paint_only(self) -> bool:
+        return self._log is None
+
+    @property
+    def log(self) -> EditLog:
+        """The answer log. Raises ValueError for a review that is paint only."""
+        if self._log is None:
+            raise ValueError(
+                "paint only: the viewer runs with --edits alone (no queue, no log)"
+            )
+        return self._log
 
     # -------------------------------------------------------------- sessions
     def _ranked(self) -> list[dict[str, Any]]:
@@ -335,6 +423,7 @@ class Review:
 
     def _draw(self, share: float, seed: int | None) -> list[dict[str, Any]]:
         n = random_count(len(self.rows), share)
+        assert self.random is not None
         rnd = (
             [dict(r, how="random", rank=None) for r in self.random(n, seed or 0)]
             if n
@@ -350,6 +439,7 @@ class Review:
 
     def start(self, share: float, seed: int | None) -> dict[str, Any]:
         """A new session (module docstring)."""
+        _ = self.log  # refused when paint only
         share = float(share)
         random_count(len(self.rows), share)  # checks the share
         if share > 0 and seed is None:
@@ -390,6 +480,7 @@ class Review:
         )
 
     def _need(self) -> int:
+        _ = self.log  # refused when paint only
         if self.session is None:
             raise ValueError("start a session first")
         return self.session
@@ -432,10 +523,13 @@ class Review:
             ],
             session=self.session_info(),
             classes=classes(self.hemi),
+            menu=menu(self.hemi),
             affine=self.affine.tolist(),
-            log=str(self.log_path),
+            log=None if self.log_path is None else str(self.log_path),
             edits=str(self.edits),
             hemisphere=self.hemi,
+            paint_only=self.paint_only,
+            undo_depth=len(self.undo),
         )
 
     def _find(self, site: Site) -> dict[str, Any]:
@@ -515,21 +609,91 @@ class Review:
         box = np.asarray(img.dataobj[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]])
         return box, (int(lo[0]), int(lo[1]), int(lo[2]))
 
-    def _painted(self, voxels: Arr, labels: Arr) -> tuple[label_edits.Edits, int]:
-        """The edits with the voxels painted with the labels (label_edits.paint),
-        and the number of voxels whose label changes. Raises ValueError for a
-        voxel off the grid or a label not in label-set/1."""
+    def _painted(
+        self, voxels: Arr, labels: Arr
+    ) -> tuple[label_edits.Edits, label_edits.Edits]:
+        """The edits with the voxels painted with the labels (label_edits.paint;
+        label_edits.INPUT for the eraser), and the undo: the earlier entries
+        of the voxels whose label changes. Raises ValueError for a voxel off
+        the grid or a label not in label-set/1."""
         e = self._read_edits()
         v = np.asarray(voxels, np.int64).reshape(-1, 3)
         if not len(v):
-            return e, 0
-        if not np.all((v >= 0) & (v < self.shape)):
-            raise ValueError("a voxel of the answer is outside the grid")
+            return e, label_edits.empty()
+        self._on_grid(v)
         box, lo = self._input_box(v)
-        new, undo = label_edits.paint(
+        return label_edits.paint(
             e, box, v, np.asarray(labels, np.int64), offset=lo, shape=self.shape
         )
-        return new, len(undo)
+
+    def _on_grid(self, v: Arr) -> None:
+        if len(v) and not np.all((v >= 0) & (v < self.shape)):
+            raise ValueError("a voxel is outside the grid")
+
+    def _write(self, edits: label_edits.Edits) -> None:
+        label_edits.write(
+            self.edits,
+            edits,
+            hemisphere=self.hemi,
+            shape=self.shape,
+            affine=self.affine,
+        )
+
+    # -------------------------------------------------------------- paint
+    def paint_voxels(self, strokes: Sequence[dict[str, Any]]) -> tuple[Arr, Arr]:
+        """The strokes of a paint (module docstring) as voxels (N, 3) and their
+        labels (label_edits.INPUT for the eraser), a voxel in two strokes in
+        the later one only (stroke_voxels). Raises ValueError for no stroke, a
+        label not in the menu or a voxel off the grid."""
+        if not strokes:
+            raise ValueError("a paint needs at least one stroke")
+        allowed = {m["value"] for m in menu(self.hemi)}
+        vs, labs = [], []
+        for lab, v in stroke_voxels(strokes, "label"):
+            if isinstance(lab, bool) or lab not in allowed:
+                raise ValueError(
+                    f"the label {lab!r} is not in the paint menu "
+                    f"{sorted(allowed, key=str)}"
+                )
+            self._on_grid(v)
+            vs.append(v)
+            labs.append(
+                np.full(len(v), label_edits.INPUT if lab == ERASER else int(lab))
+            )
+        if not vs:
+            raise ValueError("a paint needs at least one voxel")
+        return np.concatenate(vs).astype(np.int64), np.concatenate(labs).astype(
+            np.int64
+        )
+
+    def _paint_locked(self, voxels: Arr, labels: Arr) -> int:
+        """Under the lock: the voxels written into the edits, their earlier
+        entries pushed on the undo stack. Returns the number of voxels whose
+        label changed (none: nothing is written or pushed)."""
+        new, undo = self._painted(voxels, labels)
+        if len(undo):
+            self._write(new)
+            self.undo.append(undo)
+        return len(undo)
+
+    def paint(self, strokes: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        """A paint (module docstring): {voxels, undo_depth}."""
+        v, lab = self.paint_voxels(strokes)
+        with self.lock:
+            n = self._paint_locked(v, lab)
+            return dict(voxels=n, undo_depth=len(self.undo))
+
+    def undo_paint(self) -> dict[str, Any]:
+        """The last paint undone: its earlier entries written back
+        (label_edits.restore). {voxels, undo_depth}. Raises ValueError if the
+        stack is empty."""
+        with self.lock:
+            if not self.undo:
+                raise ValueError("nothing to undo in this viewer run")
+            u = self.undo[-1]
+            self._write(label_edits.restore(self._read_edits(), u))
+            self.undo.pop()
+            return dict(voxels=len(u), undo_depth=len(self.undo))
 
     def _fix(self, site: Site) -> tuple[int, Arr, Arr]:
         """The fix of the override site: its id, its voxels (N, 3, sorted by
@@ -563,35 +727,13 @@ class Review:
         box = np.array(lab[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]], np.int64)
         return box, (int(lo[0]), int(lo[1]), int(lo[2]))
 
-    def paint_commands(self, site: Site) -> str:
-        """The shell commands of manual-paint at the site (baillarger.wm_paint;
-        docs/formats/wm-paint.md), with absolute paths. The crop goes next to
-        the log."""
-        i, j, k = site
-        log, dseg = self.log_path.resolve(), self.dseg.resolve()
-        crop = log.parent / f"{log.stem}_paint" / f"site-{i}-{j}-{k}"
-        echo = "".join(f" --echo {e.resolve()}" for e in self.echoes)
-        snap = (
-            f"-g {crop}/echo-1.nii.gz -s {crop}/labels.nii.gz"
-            if self.echoes
-            else f"-g {crop}/labels.nii.gz"
-        )
-        return (
-            f"python -m baillarger.wm_paint export {dseg} --site {i} {j} {k} "
-            f"--out {crop}{echo}\n"
-            f"itksnap {snap}\n"
-            f"python -m baillarger.wm_paint import {crop} --log {log} "
-            f"--edits {self.edits.resolve()} "
-            f"--session {self.session} --seconds <reviewer seconds>"
-        )
-
     def _preview(
         self, site: Site, choice: str, params: dict[str, Any]
     ) -> dict[str, Any]:
         t0 = time.perf_counter()
         if choice == MANUAL:
             none = np.zeros((0, 3), np.int64)
-            p = Preview(none, none, False, self.paint_commands(site))
+            p = Preview(none, none, False)
         elif choice == ACCEPT:
             _, v, _ = self._fix(site)
             p = Preview(v, np.zeros((0, 3), np.int64), False)
@@ -603,7 +745,6 @@ class Review:
             answer=p.answer.tolist(),
             correction=p.correction.tolist(),
             overrides=p.overrides,
-            command=p.command,
             cut_by_box=p.cut_by_box,
             seconds=time.perf_counter() - t0,
         )
@@ -645,73 +786,81 @@ class Review:
         return j.result
 
     def answer(
-        self, site: str, choice: str, params: dict[str, Any], seconds: float
+        self,
+        site: str,
+        choice: str,
+        params: dict[str, Any],
+        seconds: float,
+        strokes: Sequence[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """The choice's voxels at the site, appended to the log with the reviewer
-        time, then written into the edits (module docstring). Returns the
-        answer's Id, the site's kind and how it was chosen (shown to the page
-        only now, for a random site), and the number of voxels written into
-        the edits. Nothing is written if the log or the edits refuse the
-        answer."""
+        time, then written into the edits (module docstring). manual-paint
+        takes the strokes of the paint mode, and no other choice takes
+        strokes. Returns the answer's Id, the site's kind and how it was
+        chosen (shown to the page only now, for a random site), the number of
+        voxels written into the edits, and the depth of the undo stack.
+        Nothing is written if the log or the edits refuse the answer."""
         s = self._need()
         c = parse_site(site)
         r = self._find(c)
-        if choice == MANUAL:
-            raise ValueError("manual-paint: use the commands of its preview")
+        if (choice == MANUAL) != (strokes is not None):
+            raise ValueError(
+                "strokes go with the choice manual-paint, and only with it"
+            )
         params = dict(params or {})
-        if choice == ACCEPT:
+        if choice == MANUAL:
+            assert strokes is not None
+            v, lab = self.paint_voxels(strokes)
+            a = Answer(v, lab, params)
+        elif choice == ACCEPT:
             fid, v, lab = self._fix(c)
             a = Answer(v, lab, {"Fix": fid})
         else:
             box, lo = self.window(c, params)
             a = self.choices.answer(box, lo, c, choice, params)
         with self.lock:
-            new, edited = self._painted(a.voxels, a.labels)
+            new, undo = self._painted(a.voxels, a.labels)
+            logged = a.labels
+            if choice == MANUAL and np.any(a.labels == label_edits.INPUT):
+                # the eraser's voxels: the log records the label they take
+                box, lo = self._input_box(a.voxels)
+                inp = box[tuple((a.voxels - np.asarray(lo)).T)].astype(np.int64)
+                logged = np.where(a.labels == label_edits.INPUT, inp, a.labels)
             aid = self.log.answer(
                 s,
                 c,
                 choice,
                 a.voxels,
-                a.labels,
+                logged,
                 self.dseg_sha,
                 float(seconds),
                 params=a.params,
             )
-            if edited:
-                label_edits.write(
-                    self.edits,
-                    new,
-                    hemisphere=self.hemi,
-                    shape=self.shape,
-                    affine=self.affine,
-                )
+            if len(undo):
+                self._write(new)
+                if choice == MANUAL:
+                    self.undo.append(undo)
         return dict(
             answer=aid,
             kind=r["kind"],
             how=r["how"],
             rank=r["rank"],
             voxels=len(a.voxels),
-            edited=edited,
+            edited=len(undo),
+            undo_depth=len(self.undo),
         )
 
     def scribble(self, strokes: list[dict[str, Any]], seconds: float) -> dict[str, Any]:
         """Strokes, each {class, voxels}, appended as one scribble (module
-        docstring: a voxel in two strokes stays in the later one)."""
+        docstring: a voxel in two strokes stays in the later one;
+        stroke_voxels)."""
         s = self._need()
         if not strokes:
             raise ValueError("a scribble needs at least one stroke")
-        owner: dict[Site, int] = {}
-        for k, st in enumerate(strokes):
-            for v in st["voxels"]:
-                owner[parse_site(v)] = k
-        out = []
-        for k, st in enumerate(strokes):
-            vs = [v for v, o in owner.items() if o == k]
-            if vs:
-                out.append((int(st["class"]), np.asarray(vs, np.int64)))
+        out = [(int(c), v) for c, v in stroke_voxels(strokes, "class")]
         with self.lock:
             aid = self.log.scribble(s, out, self.dseg_sha, float(seconds))
-        return dict(answer=aid, strokes=len(out), voxels=len(owner))
+        return dict(answer=aid, strokes=len(out), voxels=sum(len(v) for _, v in out))
 
     # -------------------------------------------------------------- routes
     def get(self, path: str, q: dict[str, str]) -> dict[str, Any]:
@@ -742,14 +891,20 @@ class Review:
                 str(req["site"]), str(req["choice"]), req.get("params") or {}
             )
         if path == "/review/answer":
+            st = req.get("strokes")
             return self.answer(
                 str(req["site"]),
                 str(req["choice"]),
                 req.get("params") or {},
                 float(req["reviewer_seconds"]),
+                None if st is None else list(st),
             )
         if path == "/review/scribble":
             return self.scribble(list(req["strokes"]), float(req["reviewer_seconds"]))
+        if path == "/review/paint":
+            return self.paint(list(req["strokes"]))
+        if path == "/review/undo":
+            return self.undo_paint()
         raise KeyError(path)
 
 
@@ -788,7 +943,8 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--sites",
         type=Path,
-        help="with --white: the review queue (a desc-wmsites_sites.tsv, wm-sites/1)",
+        help="with --white: the review queue (a desc-wmsites_sites.tsv, wm-sites/1); "
+        "needs --log and --edits",
     )
     ap.add_argument(
         "--log",
@@ -799,9 +955,9 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--edits",
         type=Path,
-        help="with --sites: the label edits (.npy, label-edits/1) that the answers "
-        "write into, made at the first answer that changes a label; there is no "
-        "default path",
+        help="with --white: the label edits (.npy, label-edits/1) that the answers "
+        "and the paint mode write into, made at the first write that changes a "
+        "label; there is no default path. Without --sites: paint only",
     )
 
 
@@ -811,15 +967,15 @@ def for_white(
     dseg: Path,
     labels: Callable[[], Arr],
     affine: Arr,
-    echoes: Sequence[Path] = (),
 ) -> Review | None:
-    """The review of --white mode, if --sites is given (--log and --edits are
-    then needed)."""
+    """The review of --white mode: with --sites (--log and --edits are then
+    needed), or paint only with --edits alone; None with neither."""
     if a.sites is None:
-        for flag, v in (("--log", a.log), ("--edits", a.edits)):
-            if v is not None:
-                raise ValueError(f"{flag} needs --sites")
-        return None
+        if a.log is not None:
+            raise ValueError("--log needs --sites")
+        if a.edits is None:
+            return None
+        return Review(None, None, a.edits, dseg, labels, affine, None)
     if a.log is None:
         raise ValueError("--sites needs --log: the log's path (there is no default)")
     if a.edits is None:
@@ -834,7 +990,6 @@ def for_white(
         labels,
         affine,
         lambda n, seed: read_random_sites(surf, n, seed),
-        echoes=echoes,
     )
 
 
