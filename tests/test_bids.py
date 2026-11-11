@@ -106,6 +106,7 @@ def doc_keys(doc: Path, version: str) -> set[tuple[str, str, bool]]:
         ("wm-dseg.md", white_dseg.DSEG_SPEC),
         ("wm-dseg.md", white_dseg.FIXES_SPEC),
         ("white-surf.md", white_surf.SURF_SPEC),
+        ("white-antialias.md", white_surf.FIELD_SPEC),
         ("white-overview.md", white_overview.OVERVIEW_SPEC),
         ("wm-edits.md", wm_edits.EDITS_SPEC),
         ("wm-excisions.md", excisions.EXCISIONS_SPEC),

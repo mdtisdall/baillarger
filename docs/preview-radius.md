@@ -1,6 +1,7 @@
 # The radius of a local preview of an edit
 
-Status: design and evidence. No code in `src/` uses this yet.
+Status: design and evidence. `baillarger.antialias.local_solve` uses the rule (see
+"The code").
 
 ## Purpose
 
@@ -82,6 +83,22 @@ For tau = 1e-3 voxel, R = 25 voxels. R increases only with the log of the precis
 The work of a preview is (the voxels in the box round the edit) x (iterations). The box
 has (2R + size of the edit)^3 voxels, and only the band in it is free. A small box has a
 smaller condition number than the full problem, so it needs fewer iterations.
+
+## The code
+
+`baillarger.antialias.local_solve` applies the rule with tau = 0.01 voxel
+(`PREVIEW_TAU`). Its smallest R is 16 voxels (`PREVIEW_MIN_RADIUS`): the evidence below
+gives an error of 0.002 voxel or less at R = 16 for each edit. c is the largest distance
+from a free voxel to a non-free voxel, over the voxels within 4 voxels of the changed
+voxels (`band_half_width`). delta0 is the larger of 1 and half the largest side of the
+box of the changed voxels (voxels). The changed voxels are the given voxels whose mask
+value differs from the sign of the earlier field.
+
+The solve is `antialias.thin_plate` on the box of the changed voxels plus R + S + 2
+voxels, with the earlier field as its start (`start`) and the voxels farther than R from
+the changed voxels held (`held`). The margin past R is S + 2, so that sd (computed on the
+box) is exact within R of the changed voxels. The prototype used a margin of 3 and sd
+from a larger box; the two give the same problem within R.
 
 ## Evidence
 

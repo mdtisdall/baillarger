@@ -12,6 +12,8 @@ from baillarger.blocks import (
     ArraySource,
     BlockReader,
     ChunkedSource,
+    EmbeddedSource,
+    PatchedSource,
     decompress,
     main,
     morton,
@@ -295,3 +297,35 @@ def test_open_volume_decompresses_a_gz_with_no_copy(tmp_path: Path) -> None:
     gc.collect()
     assert not tmpdir.exists()
     assert not (tmp_path / "x_dseg.nii").exists()
+
+
+def test_an_embedded_source_over_a_source_equals_one_over_its_array() -> None:
+    a = volume().astype(np.float32)
+    grid = (40, 30, 20)
+    arr = EmbeddedSource(a, (5, 3, 2), grid, -8.0)
+    src = EmbeddedSource(ArraySource(a), (5, 3, 2), grid, -8.0)
+    for box in (
+        (slice(0, 40), slice(0, 30), slice(0, 20)),
+        (slice(0, 7), slice(2, 4), slice(10, 15)),
+        (slice(30, 40), slice(0, 3), slice(0, 2)),  # outside the array
+    ):
+        assert np.array_equal(arr.read(box), src.read(box))
+    assert src.dtype == np.float32 and src.shape == grid
+
+
+def test_a_patched_source_reads_the_patch_on_its_box_only() -> None:
+    a = volume()
+    box = (slice(4, 10), slice(0, 5), slice(3, 9))
+    patch = -np.arange(6 * 5 * 6, dtype=np.int16).reshape(6, 5, 6)
+    src = PatchedSource(ArraySource(a), box, patch)
+    want = a.copy()
+    want[box] = patch
+    for b in (
+        (slice(0, 23), slice(0, 17), slice(0, 9)),
+        (slice(8, 20), slice(3, 17), slice(0, 4)),
+        (slice(12, 20), slice(0, 17), slice(0, 9)),  # misses the box
+    ):
+        assert np.array_equal(src.read(b), want[b])
+    assert np.array_equal(a, volume())  # the base is not changed
+    with pytest.raises(ValueError):
+        PatchedSource(ArraySource(a), (slice(20, 26), slice(0, 5), slice(3, 9)), patch)
