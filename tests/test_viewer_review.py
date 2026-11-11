@@ -821,6 +821,51 @@ def test_a_failed_log_append_leaves_the_diff_and_the_undo_stack(
     assert diff(files) == {} and rv.undo == []
 
 
+def test_a_refused_log_append_holds_the_lock_against_another_writer(
+    files: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The log append is under the diff's lock: a second writer (another
+    viewer process) cannot write between the answer's write and its log
+    append, so the roll-back is not refused and the error is the log's."""
+    rv = make(files)
+    rv.start(0, None)
+    rv.next()
+    rv.paint(paint_strokes((0, [(4, 4, 4)])))
+    before = files["edits"].read_bytes(), len(rv.undo), diff(files)
+    n_log = len(records(files))
+    started, done = threading.Event(), threading.Event()
+    other_voxel = (6, 6, 6)
+
+    def other() -> None:
+        started.set()
+        i = np.array([np.ravel_multi_index(other_voxel, SHAPE)], np.int64)
+        LE.update(
+            files["edits"],
+            lambda c: LE._set(c.edits, i, [42]),
+            hemisphere="R",
+            shape=SHAPE,
+            affine=A,
+        )
+        done.set()
+
+    t = threading.Thread(target=other)
+
+    def full(*a: Any, **k: Any) -> str:
+        t.start()
+        assert started.wait(10)
+        assert not done.wait(0.5)  # the other writer waits for the lock
+        raise OSError("no space left on the device")
+
+    monkeypatch.setattr(rv.log, "answer", full)
+    with pytest.raises(OSError, match="no space"):
+        rv.answer("5,5,5", "thicken", {}, 1.0)
+    t.join(10)
+    assert done.is_set()
+    assert len(rv.undo) == before[1] and len(records(files)) == n_log
+    # the other writer wrote on the diff as it was before the answer
+    assert diff(files) == {**before[2], other_voxel: 42}
+
+
 def test_a_write_reads_only_the_sidecar_when_its_copy_is_current(
     files: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

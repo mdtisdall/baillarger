@@ -32,7 +32,10 @@ correction. Nothing else applies edits.
 The answer log of the review queue (`wm-edits/1`) is a separate record. The
 diff does not come from it: a site answer of the queue writes its labels into
 the diff (`baillarger.label_edits.paint`), and then the log records the
-answer. If the log refuses the answer, the diff is written back as it was.
+answer. Both writes are in one `baillarger.label_edits.update` (the log
+append is its step after the write), so the diff's lock is held across both,
+and no other writer writes between them. If the log refuses the answer, the
+diff is written back as it was, under the same lock.
 At an override site, the choice `accept-fix` writes the fix's labels into the
 diff. A scribble is a record of the log only.
 
@@ -93,7 +96,10 @@ viewer, the dseg command and `bent_box` use this one reader.
 A change of the diff (a paint, an answer, an undo) is one
 `baillarger.label_edits.update`: it holds the exclusive lock across the
 read, the change and the write. So two writers (two viewer processes on one
-diff) do not lose each other's voxels. A writer can keep the diff that it
+diff) do not lose each other's voxels. An update can run a step after the
+write with the lock still held (the answer log's append); if that step
+fails, the update writes the diff before it back (the empty diff, if there
+was no file) under the same lock. A writer can keep the diff that it
 last wrote in memory: if the sidecar's `SHA256` and the records file are
 the ones that it wrote, the update reads only the sidecar.
 

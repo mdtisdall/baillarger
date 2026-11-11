@@ -14,7 +14,8 @@ caller gives. A write that stopped between its two renames leaves a sidecar
 older than the records: a reader checks the records on the sidecar's grid
 and writes a new sidecar (the repair). update holds the exclusive lock
 across one read, change and write, so that two writers do not lose each
-other's voxels.
+other's voxels; its step after the write (after), under the same lock, keeps
+a second record (the viewer's answer log) in step with the diff.
 
 paint and restore change a diff in memory; differ compares two diffs;
 changed gives the voxels where two label arrays differ.
@@ -407,6 +408,7 @@ def update(
     affine: npt.ArrayLike,
     known: Current | None = None,
     labels_checked: bool = False,
+    after: Callable[[Current], None] | None = None,
 ) -> Current:
     """One read-change-write of the diff at path, under the exclusive lock
     on its directory for all of it, so that no other writer (in this or
@@ -417,8 +419,13 @@ def update(
     returns None). known is the caller's memory copy: if it agrees with the
     sidecar, only the sidecar is read. labels_checked skips the check of the
     labels against label-set/1 (the caller, label_edits.paint, has checked
-    them). An error from fn propagates, and nothing is written. Returns the
-    diff on disk after the update."""
+    them). An error from fn propagates, and nothing is written. after, if
+    given, is called with the diff on disk after the write (or after the
+    read, if fn returned None), with the lock still held: for a second
+    record that must agree with the diff (the viewer's answer log). If after
+    raises, the diff before this update is written back, under the same
+    lock (the empty diff, if there was no file), and the error from after
+    propagates. Returns the diff on disk after the update."""
     p = edits_paths(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with flock(path.parent, exclusive=True):
@@ -442,8 +449,10 @@ def update(
             cur = Current(empty(), None, None)
         new = fn(cur)
         if new is None:
+            if after is not None:
+                after(cur)
             return cur
-        return _write_locked(
+        out = _write_locked(
             path,
             new,
             hemisphere=hemisphere,
@@ -452,6 +461,24 @@ def update(
             description=DESCRIPTION,
             labels_checked=labels_checked,
         )
+        if after is None:
+            return out
+        try:
+            after(out)
+        except BaseException:
+            # the diff before this update: its labels were checked when it
+            # was written or read
+            _write_locked(
+                path,
+                cur.edits,
+                hemisphere=hemisphere,
+                shape=shape,
+                affine=affine,
+                description=DESCRIPTION,
+                labels_checked=True,
+            )
+            raise
+        return out
 
 
 # ------------------------------------------------------------ the changes

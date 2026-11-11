@@ -124,8 +124,11 @@ Facts that the plan must respect:
 - The answers of the review queue change the labels by a write into the diff
   (`label_edits.paint` in one `label_edits.update`): only the voxels whose label changes
   from the current label (Decisions: the diff's entry, else the dseg's label). The answer
-  log still records them, for the queue: the diff is written first, then the log; if the
-  log refuses the answer, the diff is written back and its undo entry popped. A scribble is a record of the log only. The viewer
+  log still records them, for the queue: the diff is written first, then the log, in the
+  same `label_edits.update` (its `after` step), so the diff's lock is held across both
+  writes and no other writer writes between them. If the log refuses the answer, the
+  diff is written back under that lock, no undo entry is pushed, and the error is the
+  log's. A scribble is a record of the log only. The viewer
   takes the log as `--log` and the diff as `--edits`; with `--sites`, both are needed.
 - The ITK-SNAP import (`wm_paint`) was a bootstrap only. Part 2 removed it.
 - Formats edited in place (version 1): `wm-dseg.md` (`--edits`, `overrides`, `Sources`,
@@ -332,8 +335,11 @@ The joins use these interfaces. A core must keep them, or change this plan first
   a stopped write. `label_edits.write(path, edits, *, hemisphere, shape, affine)`
   (replaces the files, under the lock); `label_edits.empty() -> Edits`.
 - `label_edits.update(path, fn, *, hemisphere, shape, affine, known=None,
-  labels_checked=False) -> Current`: one read-change-write under the exclusive lock;
-  `fn(current)` returns the new diff, or None for no write. `known` (a `Current`: the
+  labels_checked=False, after=None) -> Current`: one read-change-write under the
+  exclusive lock; `fn(current)` returns the new diff, or None for no write.
+  `after(current)`, if given, runs after the write (after the read, for no write) with
+  the lock still held; if it raises, the diff before the update is written back under
+  the same lock (the empty diff, if there was no file) and its error propagates. `known` (a `Current`: the
   edits, the SHA-256 and the records file that the caller last wrote) skips the read of
   the records while it agrees with the sidecar. `labels_checked` skips the check of the
   labels against label-set/1, for a caller that has checked them (`label_edits.paint`).

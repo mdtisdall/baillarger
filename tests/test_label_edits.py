@@ -2,10 +2,12 @@
 the atomic replacement, apply, paint, the eraser, undo, differ, and their use
 by the dseg command (baillarger.white_dseg.wm_topo, write_wm_topo)."""
 
+import hashlib
 import json
 import logging
 import multiprocessing as mp
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,7 @@ from test_white_dseg import FILLED, VOX, synthetic_aseg
 
 from baillarger import bids, white_dseg
 from baillarger import label_edits as LE
+from baillarger.fileops import flock
 from baillarger.handles import kuhn_betti
 
 SHAPE = (12, 10, 8)
@@ -279,6 +282,69 @@ def test_an_update_whose_change_raises_writes_nothing(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="refused"):
         LE.update(p, fail, hemisphere="R", shape=SHAPE, affine=AFFINE)
     assert (p.read_bytes(), bids.sidecar_path(p).read_bytes()) == before
+
+
+def test_an_update_whose_after_raises_writes_the_diff_back(tmp_path: Path) -> None:
+    p = tmp_path / "e_edits.npy"
+    kw: dict[str, Any] = dict(hemisphere="R", shape=SHAPE, affine=AFFINE)
+    write(p, edits({(1, 1, 1): 41}))
+    before = p.read_bytes()
+    seen: list[tuple[LE.Edits, bool]] = []
+
+    def refuse(c: LE.Current) -> None:
+        # after runs after the write, with the lock held (a read would wait):
+        # the new diff is on disk
+        on_disk = hashlib.sha256(p.read_bytes()).hexdigest() == c.sha
+        seen.append((c.edits, on_disk))
+        raise OSError("the log refuses")
+
+    with pytest.raises(OSError, match="the log refuses"):
+        LE.update(p, lambda c: edits({(2, 2, 2): 42}), after=refuse, **kw)
+    assert same(seen[0][0], edits({(2, 2, 2): 42})) and seen[0][1]
+    assert p.read_bytes() == before and same(LE.read(p), edits({(1, 1, 1): 41}))
+    # no file before the update: the empty diff is written back
+    q = tmp_path / "f_edits.npy"
+    with pytest.raises(OSError, match="the log refuses"):
+        LE.update(q, lambda c: edits({(2, 2, 2): 42}), after=refuse, **kw)
+    assert len(LE.read(q)) == 0
+    # after that does not raise: the update returns the diff it wrote
+    cur = LE.update(p, lambda c: edits({(3, 3, 3): 0}), after=lambda c: None, **kw)
+    assert same(cur.edits, edits({(3, 3, 3): 0})) and same(LE.read(p), cur.edits)
+
+
+def test_after_holds_the_lock_so_another_update_waits(tmp_path: Path) -> None:
+    p = tmp_path / "e_edits.npy"
+    kw: dict[str, Any] = dict(hemisphere="R", shape=SHAPE, affine=AFFINE)
+    write(p, edits({(1, 1, 1): 41}))
+    started, done = threading.Event(), threading.Event()
+    order: list[str] = []
+
+    def other() -> None:
+        # a second writer (another viewer process: its own open of the lock)
+        started.set()
+        LE.update(p, lambda c: LE._set(c.edits, np.array([7], np.int64), [0]), **kw)
+        order.append("other")
+        done.set()
+
+    t = threading.Thread(target=other)
+
+    def refuse(c: LE.Current) -> None:
+        t.start()
+        assert started.wait(10)
+        # the other update cannot take the lock while after runs
+        assert not done.wait(0.5)
+        with pytest.raises(BlockingIOError):
+            with flock(p.parent, wait=False):
+                pass
+        order.append("after")
+        raise OSError("the log refuses")
+
+    with pytest.raises(OSError, match="the log refuses"):
+        LE.update(p, lambda c: edits({(2, 2, 2): 42}), after=refuse, **kw)
+    t.join(10)
+    assert order == ["after", "other"]
+    # the other writer wrote on the diff as it was before the refused update
+    assert same(LE.read(p), LE._set(edits({(1, 1, 1): 41}), np.array([7]), [0]))
 
 
 def test_set_merges_like_a_dict() -> None:
