@@ -67,7 +67,7 @@ not come from that log.
 | A label image as a brick volume in the pane | `Volumes.add_nifti` in `viewer/volumes.py` | 3 |
 | The antialiased field | `antialias.thin_plate`, `antialias.signed_distance` | 4b |
 | Marching on a crop, in the mesh blocks | `blocks.EmbeddedSource`, `mesh.marching_tetrahedra_blocks` (as `white_surf` uses them) | 4b |
-| A chunked store for a whole-grid array | `baillarger.blocks` | 4b |
+| A volume read box by box (a memory map of an uncompressed `.nii`) | `blocks.open_volume` | 4b |
 | The cut of a mesh by a slice plane | `viewer.outlines.plane_cut` | 4b |
 | The steps of the regeneration | the `write_*` functions of `white_dseg`, `white_surf`, `white_overview`, `wm_sites` | 5 |
 | The radius of a local field solve | `docs/preview-radius.md` | 4b |
@@ -173,9 +173,12 @@ on a flat sheet give no correction; a preview of strokes equals the preview of t
 
 ### 4b: surface preview
 
-- `white_surf` writes the antialiased field as a derivative: float32 on the box of the
-  mask, in the chunked store (`baillarger.blocks`), with a JSON sidecar and a spec in
-  `docs/formats/` (version 1). A BIDS name with `desc-antialias`.
+- `white_surf` writes the antialiased field as a derivative: an uncompressed float32
+  NIfTI (`.nii`) on the box of the mask (its affine moved to the box), with a JSON
+  sidecar and a spec in `docs/formats/` (version 1). A BIDS name with `desc-antialias`.
+  The viewer reads it with `blocks.open_volume`, which reads only the voxels of a box.
+  There is no chunked store yet: NIfTI-Zarr comes with `docs/scaling.md`, item 3, and
+  this plan does not make it.
 - `antialias.thin_plate` gets two optional parameters: a start field (default: the signed
   distance, as now) and a mask of held voxels (default: none). The local solve is this
   function on a crop; there is no second solver. (The loop of
@@ -304,8 +307,8 @@ The joins use these interfaces. A core must keep them, or change this plan first
   the response is the existing preview's.
 - `GET /review/pending`: `{voxels: [[i, j, k], ...], labels: [...]}`.
 - `antialias.thin_plate(mask, dev, band, eps, tol, max_iter, start=None, held=None)`.
-- The field derivative: the antialiased field on the mask's box, float32, in the chunked
-  store, with `desc-antialias` in its BIDS name and a spec in `docs/formats/` (version 1).
+- The field derivative: the antialiased field on the mask's box, an uncompressed float32
+  `.nii`, with `desc-antialias` in its BIDS name and a spec in `docs/formats/` (version 1).
   `POST /review/surface-preview {strokes}` gives the re-marched blocks' vertices and faces
   (voxel coordinates of the grid), their block ids and the radius used.
 - The command: `python -m baillarger.regenerate INPUT --edits EDITS --root ROOT`. INPUT
