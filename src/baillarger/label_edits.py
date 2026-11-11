@@ -17,8 +17,7 @@ across one read, change and write, so that two writers do not lose each
 other's voxels; its step after the write (after), under the same lock, keeps
 a second record (the viewer's answer log) in step with the diff.
 
-paint and restore change a diff in memory; differ compares two diffs;
-changed gives the voxels where two label arrays differ.
+paint and restore change a diff in memory; differ compares two diffs.
 """
 
 import hashlib
