@@ -610,7 +610,9 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
         affine=img.affine,
         description="The copy of the label edits that the dseg command used.",
     )
-    src = sources(aseg, p["edits"], sidecar_path(p["edits"]))
+    # the copy's records only: its sidecar holds the time of this run, so its
+    # SHA-256 would differ between two runs that are otherwise the same
+    src = sources(aseg, p["edits"])
     hdr = img.header.copy()
     hdr.set_data_dtype(t.dseg.dtype)
     nib.save(nib.nifti1.Nifti1Image(t.dseg, img.affine, hdr), p["dseg"])
