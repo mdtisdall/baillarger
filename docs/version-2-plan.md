@@ -135,7 +135,7 @@ These bind every stream from its first version. A first version may be rough, bu
 
 **The kinds of data apart from training**
 
-1. **Training labels.** The seed labels during bootstrapping (phase 7), then only verified answers. Needed now. Every answer trains the next generation; none is withheld. Whether review answers become training labels is open, for a separate training design; editing is not verification (`docs/plans/label-editing.md`).
+1. **Training labels.** The seed labels during bootstrapping (phase 7), needed now. After that, whether review answers become training labels is open, for a separate training design; editing is not verification (`docs/plans/label-editing.md`). The rest of this section assumes that they do.
 2. **Data held apart inside a training run.** Needed from the first generation, for two reasons that are internal to training, not a test of success: a spread that ranks the queue, and the calibration of P. The number of models is not fixed.
    - **The first generation uses nnU-Net's five folds:** each fold's model never sees its validation region. It has no answers yet, so both the spread and the calibration come from the folds.
      - **The fold spread** is the disagreement of the five fold models, the epistemic uncertainty that ranks the queue (phase 10).
@@ -163,7 +163,7 @@ These bind every stream from its first version. A first version may be rough, bu
 - Phase 8's first generation uses five folds, for the spread and the out-of-fold calibration, not for validation. Whether later generations keep them is decided by the spread comparison (phase 10).
 - Phase 9's diagnostics score each generation on the answers made against it before it trained on them, and report the answers it trained on apart.
 - The retrospective replay scores each schedule prequentially.
-- The painting mode (stream 4, phase 1) stays out of the plan. Free painting has the `manual-paint` site answer and the paint mode of `docs/plans/label-editing.md`; ITK-SNAP is a bootstrap only, kept until that paint works, then removed with `wm_paint`. It returns only if the de novo measure, when decided, needs dense labels.
+- The painting mode (stream 4, phase 1) is the paint mode of `docs/plans/label-editing.md`. It writes into the edits diff and has no evaluation role. ITK-SNAP is a bootstrap only, removed with `wm_paint` when that paint works.
 
 ## 2. Facts that cut across streams
 
