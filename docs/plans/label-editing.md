@@ -258,7 +258,9 @@ it only in its box.
   start.
 - When it ends, the pane shows the overrides (the fix table's `overrides`: the fix, its
   voxel and the number of edited voxels) and asks the user to restart the viewer, which
-  then shows the new outputs.
+  then shows the new outputs. Until the restart, the review refuses each paint, answer,
+  accept-fix and undo, and writes nothing: it compares the identity (`os.stat`: device,
+  inode, mtime) of the dseg, the queue and the fix diff with their identity at its start.
 
 Tests: the command on a phantom gives the same files as the four commands run by hand;
 if a step fails, the old outputs are unchanged; an edit that the correction must change

@@ -41,7 +41,20 @@ Routes (Review.get, Review.post), JSON:
   correction's voxels and whether the correction overrides the answer
   (wm_choices.preview), in grid voxels; a preview that takes more than
   WAIT_S runs on as a job: {status: "running", job}, then GET
-  /review/preview?job=... until {status: "done", ...}.
+  /review/preview?job=... until {status: "done", ...} (or {status:
+  "failed", error}). The previews of the choices are jobs of
+  baillarger.viewer.jobs.Jobs, keyed by the site, the choice, the params and
+  the SHA-256 of the edits, and the last PREVIEWS_KEPT finished previews stay
+  in memory for polling. One runs at a time, in one worker process (the
+  "spawn" context): the request reads the box round the site and sends only
+  the box and the choice's arguments. The newest request wins: a request
+  for another key while a preview runs stops the worker (terminate, join),
+  its job fails with "replaced by a newer preview", and the new preview
+  starts in a new worker. A request for the key that runs gets {status:
+  "running", job}. A worker that ends without a result (the memory cap
+  killed it) fails its job. The worker is a daemon process: it stops when
+  the viewer ends (and at Review.close). The previews of manual-paint and
+  accept-fix are computed in the request.
 - POST /review/answer {site, choice, params, reviewer_seconds}: the choice's
   voxels and labels at the site, written into the label edits
   (label_edits.paint: only the voxels whose label changes from the dseg's
@@ -57,6 +70,14 @@ Routes (Review.get, Review.post), JSON:
 - POST /review/undo: the last write into the label edits of this viewer run
   undone (Undo, below). {voxels, undo_depth}, or {error} if there is nothing
   to undo.
+
+Outputs replaced. At start, the review records the identity (os.stat:
+device, inode, mtime) of the dseg, the queue and the dseg's fix diff. If one
+of them changes while the viewer runs (regenerate replaced the outputs), a
+paint, an answer, an accept-fix and an undo are refused with an error that
+says to restart the viewer, and nothing is written: the review's labels, its
+queue and the fix ids of its rows are those of the old outputs. The check is
+made under the edits' file lock, before each write into the edits.
 
 Each write holds the review's lock and is flushed to the disk before the
 response (EditLog appends and fsyncs; label_edits.update replaces the files of
@@ -112,12 +133,14 @@ from the dseg's sidecar (wm-dseg/1).
 """
 
 import argparse
+import hashlib
 import json
+import multiprocessing
+import os
 import threading
 import time
-import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -127,6 +150,7 @@ import numpy.typing as npt
 from baillarger import blocks, label_edits
 from baillarger.bids import file_sha256, sidecar_path
 from baillarger.labels import CORTEX_LABEL, LUT_NAMES, WM_LABEL
+from baillarger.viewer.jobs import Jobs
 from baillarger.wm_edits import EditLog, read_log
 from baillarger.wm_sites import read_random_sites, read_sites
 
@@ -141,6 +165,20 @@ ERASER = "input"
 ACCEPT = "accept-fix"
 #: seconds a preview request waits before it answers as a job
 WAIT_S = 1.5
+#: the finished previews that the review keeps for polling (jobs.Jobs)
+PREVIEWS_KEPT = 8
+
+#: a file's identity (device, inode, mtime in ns), or None if it is not there
+type Identity = tuple[int, int, int] | None
+
+
+def identity(path: Path) -> Identity:
+    """The identity of the file at path (os.stat), or None if there is none."""
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_mtime_ns)
 
 
 def site_id(s: Sequence[int]) -> str:
@@ -340,15 +378,54 @@ def _local(site: Site, lo: Site) -> Site:
     return (site[0] - lo[0], site[1] - lo[1], site[2] - lo[2])
 
 
-# ------------------------------------------------------------------ the review
+# ------------------------------------------------------------------ the worker
+
+
+def _preview_worker(conn: Any) -> None:
+    """The preview worker process: for each request (choices, box, lo, site,
+    choice, params) on conn, ("ok", Preview) or ("error", message). Ends when
+    the viewer's end of conn closes."""
+    while True:
+        try:
+            choices, box, lo, site, choice, params = conn.recv()
+        except EOFError:
+            return
+        try:
+            out: tuple[str, Any] = (
+                "ok",
+                choices.preview(box, lo, site, choice, params),
+            )
+        except Exception as exc:  # reported to the viewer
+            out = ("error", f"{type(exc).__name__}: {exc}")
+        conn.send(out)
+
+
+def _preview_dict(p: Preview, t0: float) -> dict[str, Any]:
+    """A preview as the page gets it; t0: the time it started."""
+    return dict(
+        status="done",
+        answer=p.answer.tolist(),
+        correction=p.correction.tolist(),
+        overrides=p.overrides,
+        cut_by_box=p.cut_by_box,
+        seconds=time.perf_counter() - t0,
+    )
+
+
+class PreviewError(Exception):
+    """A preview that the worker did not give: it failed, it was replaced by a
+    newer preview, or the worker ended without a result."""
 
 
 @dataclass
-class Job:
-    status: str = "running"
-    result: dict[str, Any] | None = None
-    error: str | None = None
-    thread: threading.Thread | None = field(default=None, repr=False)
+class _Worker:
+    proc: Any  # multiprocessing.context.SpawnProcess
+    conn: Any  # multiprocessing.connection.Connection
+    #: stopped by a newer preview (Review._stop_worker)
+    replaced: bool = False
+
+
+# ------------------------------------------------------------------ the review
 
 
 class Review:
@@ -380,6 +457,14 @@ class Review:
         if (sites is None) != (log is None):
             raise ValueError("a queue needs both its sites and its log")
         self.dseg_sha = file_sha256(dseg)
+        #: the outputs that the review reads, and their identities at start
+        #: (_check_outputs)
+        self._outputs: dict[Path, Identity] = {
+            Path(dseg): identity(Path(dseg)),
+            fix_diff_path(Path(dseg)): identity(fix_diff_path(Path(dseg))),
+        }
+        if sites is not None:
+            self._outputs[Path(sites)] = identity(Path(sites))
         self.rows: list[dict[str, Any]] = []
         self.log_path: Path | None = None
         self._log: EditLog | None = None
@@ -421,7 +506,17 @@ class Review:
         self.share: float | None = None
         self.seed: int | None = None
         self.order: list[dict[str, Any]] = []
-        self.jobs: dict[str, Job] = {}
+        #: the previews of the choices (module docstring)
+        self.jobs: Jobs[dict[str, Any]] = Jobs(
+            log=lambda m: None, keep_in_memory=PREVIEWS_KEPT
+        )
+        #: the preview worker process, started at the first slow preview
+        self._worker: _Worker | None = None
+        self._wlock = threading.Lock()  # self._worker
+        self._plock = threading.Lock()  # a preview request's stop and start
+        #: the number of stops: a job started before a stop does not start
+        #: a worker after it
+        self._stops = 0
         #: the undo stack: the earlier entries of each write into the edits,
         #: and the SHA-256 of the edits that the write left
         self.undo: list[label_edits.Edits] = []
@@ -608,15 +703,37 @@ class Review:
             self.edits, shape=self.shape, affine=self.affine, hemisphere=self.hemi
         )
 
+    def _check_outputs(self) -> None:
+        """Raises ValueError if the dseg, the queue or the fix diff is not the
+        file that the review read at start (module docstring, Outputs
+        replaced)."""
+        changed = [p.name for p, i in self._outputs.items() if identity(p) != i]
+        if changed:
+            raise ValueError(
+                f"the outputs were regenerated while the viewer ran "
+                f"({', '.join(changed)} changed): restart the viewer; "
+                f"nothing was written"
+            )
+
     def _update(
-        self, fn: Callable[[label_edits.Current], label_edits.Edits | None]
+        self,
+        fn: Callable[[label_edits.Current], label_edits.Edits | None],
+        check: bool = True,
     ) -> label_edits.Current:
         """One locked read-change-write of the edits (label_edits.update),
         with the memory copy. The labels that fn writes are checked
-        (label_edits.paint, label_edits.restore). Call with the lock held."""
+        (label_edits.paint, label_edits.restore). check: first, under the
+        edits' file lock, refuse if the outputs were replaced
+        (_check_outputs). Call with the lock held."""
+
+        def checked(cur: label_edits.Current) -> label_edits.Edits | None:
+            if check:
+                self._check_outputs()
+            return fn(cur)
+
         self._cur = label_edits.update(
             self.edits,
-            fn,
+            checked,
             hemisphere=self.hemi,
             shape=self.shape,
             affine=self.affine,
@@ -703,11 +820,13 @@ class Review:
             self._undo_sha.append(cur.sha)
         return undo, out["inp"]
 
-    def _pop_undo(self) -> int:
+    def _pop_undo(self, check: bool = True) -> int:
         """Under the lock: the top of the undo stack written back
         (label_edits.restore) and popped. Returns its number of voxels.
         Raises ValueError, and changes nothing, if the edits on disk are not
-        the ones that the top write left."""
+        the ones that the top write left, or (check) if the outputs were
+        replaced (_update). check False: the roll-back of a write of the same
+        request, which the check let through."""
         u, sha = self.undo[-1], self._undo_sha[-1]
 
         def fn(cur: label_edits.Current) -> label_edits.Edits:
@@ -718,7 +837,7 @@ class Review:
                 )
             return label_edits.restore(cur.edits, u)
 
-        self._update(fn)
+        self._update(fn, check)
         self.undo.pop()
         self._undo_sha.pop()
         return len(u)
@@ -779,8 +898,12 @@ class Review:
             raise ValueError(
                 f"{ACCEPT}: the site {site_id(site)} is not an override site"
             )
+        # the fix ids of the rows are those of the fix diff at start
+        self._check_outputs()
         if self._fix_rows is None:
-            self._fix_rows = fix_diff.read_diff(fix_diff_path(self.dseg), self.shape)
+            rows = fix_diff.read_diff(fix_diff_path(self.dseg), self.shape)
+            self._check_outputs()  # not replaced during the read
+            self._fix_rows = rows
         fid = int(r["fix"])
         idx, new = fix_diff.fix_voxels(self._fix_rows, fid)
         if not len(idx):
@@ -803,60 +926,138 @@ class Review:
     def _preview(
         self, site: Site, choice: str, params: dict[str, Any]
     ) -> dict[str, Any]:
+        """The preview of manual-paint or accept-fix, computed here."""
         t0 = time.perf_counter()
         if choice == MANUAL:
             none = np.zeros((0, 3), np.int64)
             p = Preview(none, none, False)
-        elif choice == ACCEPT:
+        else:
             _, v, _ = self._fix(site)
             p = Preview(v, np.zeros((0, 3), np.int64), False)
-        else:
-            box, lo = self.window(site, params)
-            p = self.choices.preview(box, lo, site, choice, params)
-        return dict(
-            status="done",
-            answer=p.answer.tolist(),
-            correction=p.correction.tolist(),
-            overrides=p.overrides,
-            cut_by_box=p.cut_by_box,
-            seconds=time.perf_counter() - t0,
+        return _preview_dict(p, t0)
+
+    def _remote(
+        self,
+        box: Arr,
+        lo: Site,
+        site: Site,
+        choice: str,
+        params: dict[str, Any],
+        stops: int,
+    ) -> dict[str, Any]:
+        """The preview of a choice computed by the worker process (started if
+        there is none). stops: self._stops when the job started. Raises
+        PreviewError if it fails, if a newer preview stops the worker, or if
+        the worker ends without a result."""
+        t0 = time.perf_counter()
+        with self._wlock:
+            if self._stops != stops:
+                raise PreviewError("replaced by a newer preview")
+            w = self._worker
+            if w is None or not w.proc.is_alive():
+                if w is not None:  # ended while idle
+                    w.conn.close()
+                w = self._worker = self._start_worker()
+        try:
+            w.conn.send((self.choices, box, lo, site, choice, params))
+            tag, val = w.conn.recv()
+        except (EOFError, OSError):
+            w.proc.join()
+            with self._wlock:
+                if self._worker is w:
+                    self._worker = None
+            w.conn.close()
+            if w.replaced:
+                raise PreviewError("replaced by a newer preview") from None
+            raise PreviewError(
+                f"the preview worker ended without a result (exit code "
+                f"{w.proc.exitcode})"
+            ) from None
+        if tag != "ok":
+            raise PreviewError(val)
+        return _preview_dict(val, t0)
+
+    @staticmethod
+    def _start_worker() -> _Worker:
+        ctx = multiprocessing.get_context("spawn")
+        here, there = ctx.Pipe()
+        proc = ctx.Process(
+            target=_preview_worker, args=(there,), daemon=True, name="preview"
         )
+        proc.start()
+        there.close()  # so that recv sees the worker's end (EOFError)
+        return _Worker(proc, here)
+
+    def _stop_worker(self, replaced: bool = True) -> None:
+        """Stop the worker process (terminate, join); the job that waits on it
+        fails (_remote)."""
+        with self._wlock:
+            w, self._worker = self._worker, None
+            self._stops += 1
+        if w is not None:
+            w.replaced = replaced
+            w.proc.terminate()
+            w.proc.join()
+
+    def close(self) -> None:
+        """Stop the preview worker and wait for its job to end."""
+        self._stop_worker(replaced=False)
+        th = self.jobs.thread
+        if th is not None:
+            th.join()
+
+    def preview_key(self, site: Site, choice: str, params: dict[str, Any]) -> str:
+        """The job key of a preview: the SHA-256 of its site, choice, params and
+        the SHA-256 of the edits as the review last read or wrote them."""
+        sha = None if self._cur is None else self._cur.sha
+        text = json.dumps([list(site), choice, params, sha], sort_keys=True)
+        return hashlib.sha256(text.encode()).hexdigest()[:24]
 
     def preview(self, site: str, choice: str, params: dict[str, Any]) -> dict[str, Any]:
-        """The preview, or a job that computes it (module docstring)."""
+        """The preview, or a job that computes it (module docstring): the
+        newest request wins."""
         self._need()
         c = parse_site(site)
         self._find(c)
-        if choice == ACCEPT:
-            self._fix(c)  # refused at once at a site that is not an override site
-        job = Job()
-
-        def run() -> None:
-            try:
-                job.result = self._preview(c, choice, dict(params or {}))
-                job.status = "done"
-            except Exception as exc:  # reported through the job
-                job.error, job.status = f"{type(exc).__name__}: {exc}", "failed"
-
-        key = uuid.uuid4().hex[:12]
-        if len(self.jobs) > 32:
-            self.jobs = {k: j for k, j in self.jobs.items() if j.status == "running"}
-        self.jobs[key] = job
-        job.thread = threading.Thread(target=run, daemon=True)
-        job.thread.start()
-        job.thread.join(WAIT_S)
-        return self.job(key)
+        params = dict(params or {})
+        if choice in (MANUAL, ACCEPT):
+            return self._preview(c, choice, params)
+        key = self.preview_key(c, choice, params)
+        with self._plock:
+            st = self.jobs.status()
+            if st["status"] == "running" and st["key"] == key:
+                return dict(status="running", job=key)
+            if st["status"] == "running":
+                self._stop_worker()
+                th = self.jobs.thread
+                if th is not None:
+                    th.join()
+            box, lo = self.window(c, params)
+            stops = self._stops
+            out = self.jobs.run(
+                key,
+                f"preview {choice} at {site_id(c)}",
+                lambda log: self._remote(box, lo, c, choice, params, stops),
+            )
+            if out["status"] == "error":
+                return dict(status="failed", job=key, error=out["error"])
+        return self._outcome(key, self.jobs.wait(key, WAIT_S))
 
     def job(self, key: str) -> dict[str, Any]:
-        j = self.jobs.get(key)
-        if j is None:
-            raise ValueError(f"no preview job {key}")
-        if j.status == "running":
+        """The state of the preview job key: its result when it is done."""
+        return self._outcome(key, self.jobs.wait(key, 0))
+
+    def _outcome(self, key: str, out: dict[str, Any]) -> dict[str, Any]:
+        if out["status"] == "done":
+            try:
+                return self.jobs.get(key)
+            except KeyError:
+                pass  # dropped from memory: reported as no job, below
+        elif out["status"] == "error":
+            return dict(status="failed", job=key, error=out["error"])
+        elif out["status"] == "running":
             return dict(status="running", job=key)
-        if j.status == "failed":
-            return dict(status="failed", job=key, error=j.error)
-        assert j.result is not None
-        return j.result
+        raise ValueError(f"no preview job {key}")
 
     def answer(
         self,
@@ -910,7 +1111,7 @@ class Review:
                 )
             except BaseException:
                 if len(undo):
-                    self._pop_undo()
+                    self._pop_undo(check=False)
                 raise
         return dict(
             answer=aid,

@@ -3,6 +3,8 @@ phantom queue, a temporary log, phase 1.3's log writer and reader, and stand-in
 choices (the routes do not depend on what a choice does)."""
 
 import json
+import multiprocessing
+import os
 import threading
 import time
 import urllib.error
@@ -156,6 +158,7 @@ def server(files: dict[str, Path]) -> Iterator[tuple[str, VR.Review, dict[str, P
         yield f"http://127.0.0.1:{srv.server_address[1]}", rv, files
     finally:
         srv.shutdown()
+        rv.close()
         VS.Handler.white = None
         VS.Handler.wmreview = None
 
@@ -345,6 +348,11 @@ def test_the_preview_route_equals_the_choices_preview(server: Any) -> None:
     out = post(
         base + "/review/preview", dict(site="5,5,5", choice="fill-gap", params={})
     )
+    t = time.monotonic() + 60
+    while out["status"] == "running":  # the first preview starts the worker
+        assert time.monotonic() < t
+        time.sleep(0.05)
+        out = get(base + "/review/preview?job=" + out["job"])
     box, lo = rv.window((5, 5, 5), {})
     ref = Fake().preview(box, lo, (5, 5, 5), "fill-gap", {})
     assert out["status"] == "done"
@@ -357,16 +365,12 @@ def test_the_preview_route_equals_the_choices_preview(server: Any) -> None:
     assert lo == (1, 1, 1) and box.shape == (9, 9, 9)
 
 
-def test_a_slow_preview_runs_as_a_job(files: dict[str, Path], monkeypatch: Any) -> None:
+def test_a_slow_preview_runs_as_a_job(review: Any, monkeypatch: Any) -> None:
     monkeypatch.setattr(VR, "WAIT_S", 0.05)
-    rv = make(files, Fake(delay=0.3))
-    rv.start(0, None)
-    rv.next()
+    rv = review(Fake(delay=0.3))
     out = rv.preview("5,5,5", "thicken", dict(radius=1))
     assert out["status"] == "running"
-    while out["status"] == "running":
-        time.sleep(0.05)
-        out = rv.job(out["job"])
+    out = poll(rv, out)
     assert out["status"] == "done" and out["answer"] == [[5, 5, 5], [6, 5, 5]]
 
 
@@ -441,6 +445,7 @@ def test_the_real_choices_through_the_route(files: dict[str, Path]) -> None:
     order = np.lexsort(ch.voxels.T[::-1])
     assert v.tolist() == ch.voxels[order].tolist()
     assert labels.tolist() == ch.labels[order].tolist()
+    rv.close()
 
 
 # ------------------------------------------------------- answers into the diff
@@ -1060,3 +1065,182 @@ def test_far_apart_strokes_read_only_their_voxels(tmp_path: Path) -> None:
     e = LE.read(edits)
     got = set(map(tuple, np.stack(np.unravel_index(e.index, shape), 1).tolist()))
     assert got == {(80, 80, 60), *a, *b} and set(e.label.tolist()) == {42}
+
+
+# ------------------------------------------------------- outputs replaced
+
+
+def replace_on_disk(p: Path) -> None:
+    """p replaced as regenerate replaces it: a new file with the same bytes,
+    renamed over it (a new inode)."""
+    tmp = p.with_name(p.name + ".new")
+    tmp.write_bytes(p.read_bytes())
+    os.replace(tmp, p)
+
+
+@pytest.mark.parametrize("which", ["dseg", "queue", "fixdiff"])
+def test_writes_are_refused_after_the_outputs_are_replaced(
+    files: dict[str, Path], which: str
+) -> None:
+    rv = make(files)
+    rv.start(0, None)
+    rv.next()
+    rv.paint(paint_strokes((0, [(4, 4, 4)])))
+    replace_on_disk(files[which])
+    before = files["edits"].read_bytes(), diff(files), len(rv.undo)
+    n_log = len(records(files))
+    with pytest.raises(ValueError, match="restart the viewer"):
+        rv.paint(paint_strokes((0, [(5, 4, 4)])))
+    with pytest.raises(ValueError, match="restart the viewer"):
+        rv.answer("5,5,5", "thicken", {}, 1.0)
+    with pytest.raises(ValueError, match="restart the viewer"):
+        rv.answer("5,5,5", VR.ACCEPT, {}, 1.0)
+    with pytest.raises(ValueError, match="restart the viewer"):
+        rv.undo_last()
+    assert (files["edits"].read_bytes(), diff(files), len(rv.undo)) == before
+    assert len(records(files)) == n_log
+
+
+def test_a_fix_diff_that_appears_after_the_start_refuses_writes(
+    files: dict[str, Path],
+) -> None:
+    keep = files["fixdiff"].read_bytes()
+    files["fixdiff"].unlink()
+    rv = make(files)
+    files["fixdiff"].write_bytes(keep)
+    with pytest.raises(ValueError, match="restart the viewer"):
+        rv.paint(paint_strokes((0, [(4, 4, 4)])))
+    assert not LE.edits_paths(files["edits"])["sidecar"].exists()
+
+
+# ------------------------------------------------------- preview jobs
+
+
+class SlowThicken(Fake):
+    """A Fake whose thicken preview takes 60 s; the other choices are quick."""
+
+    def preview(
+        self, labels: Any, lo: Any, site: Any, choice: str, params: dict[str, Any]
+    ) -> VR.Preview:
+        if choice == "thicken":
+            time.sleep(60)
+        return super().preview(labels, lo, site, choice, params)
+
+
+class Broken(Fake):
+    """A Fake whose preview fails."""
+
+    def preview(self, *a: Any, **k: Any) -> VR.Preview:
+        raise RuntimeError("no WM in the box")
+
+
+class Dies(Fake):
+    """A Fake whose preview ends its process without a result (as the memory
+    cap's kill does)."""
+
+    def preview(self, *a: Any, **k: Any) -> VR.Preview:
+        os._exit(9)
+
+
+def poll(rv: VR.Review, out: dict[str, Any], timeout: float = 60) -> dict[str, Any]:
+    t = time.monotonic() + timeout
+    while out["status"] == "running":
+        assert time.monotonic() < t, "the preview did not end"
+        time.sleep(0.05)
+        out = rv.job(out["job"])
+    return out
+
+
+@pytest.fixture
+def review(files: dict[str, Path]) -> Iterator[Any]:
+    """make(files, choices), started at the first site; closed at the end."""
+    made: list[VR.Review] = []
+
+    def mk(choices: Fake) -> VR.Review:
+        rv = make(files, choices)
+        made.append(rv)
+        rv.start(0, None)
+        rv.next()
+        return rv
+
+    yield mk
+    for rv in made:
+        rv.close()
+
+
+def test_a_newer_preview_stops_the_running_one(
+    review: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(VR, "WAIT_S", 0.05)
+    rv = review(SlowThicken())
+    first = rv.preview("5,5,5", "thicken", {})
+    assert first["status"] == "running"
+    t = time.monotonic() + 60
+    while rv._worker is None:  # the job starts its worker
+        assert time.monotonic() < t
+        time.sleep(0.02)
+    old = rv._worker.proc
+    second = poll(rv, rv.preview("5,5,5", "fill-gap", {}))
+    assert not old.is_alive()
+    assert second["status"] == "done" and second["overrides"] is True
+    assert second["answer"] == [[5, 5, 5], [6, 5, 5]]
+    # the stopped preview: failed, or no longer a job
+    try:
+        out = rv.job(first["job"])
+    except ValueError as exc:
+        assert "no preview job" in str(exc)
+    else:
+        assert out["status"] == "failed" and "newer preview" in out["error"]
+
+
+def test_the_running_preview_again_starts_no_second_worker(
+    review: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(VR, "WAIT_S", 0.05)
+    rv = review(SlowThicken())
+    out = rv.preview("5,5,5", "thicken", {})
+    t = time.monotonic() + 60
+    while rv._worker is None:
+        assert time.monotonic() < t
+        time.sleep(0.02)
+    proc = rv._worker.proc
+    assert rv.preview("5,5,5", "thicken", {}) == out
+    assert out["status"] == "running" and rv._worker.proc is proc
+    assert rv.job(out["job"]) == out
+    assert [p for p in multiprocessing.active_children() if p.name == "preview"] == [
+        proc
+    ]
+
+
+def test_a_worker_that_ends_without_a_result_fails_its_job(review: Any) -> None:
+    rv = review(Dies())
+    out = poll(rv, rv.preview("5,5,5", "thicken", {}))
+    assert out["status"] == "failed" and "without a result" in out["error"]
+    # the next preview starts a new worker
+    rv.choices = Fake()
+    out = poll(rv, rv.preview("5,5,5", "fill-gap", {}))
+    assert out["status"] == "done"
+
+
+def test_a_finished_preview_stays_available_for_polling(
+    review: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(VR, "WAIT_S", 0.0)
+    monkeypatch.setattr(VR, "PREVIEWS_KEPT", 2)
+    rv = review(Fake())
+    first = rv.preview("5,5,5", "thicken", {})
+    done = poll(rv, first)
+    # read more than once, and after a later preview finished
+    assert done["status"] == "done" and rv.job(first["job"]) == done
+    poll(rv, rv.preview("5,5,5", "fill-gap", {}))
+    assert rv.job(first["job"]) == done
+    # bounded: PREVIEWS_KEPT finished previews are kept, the oldest goes
+    assert poll(rv, rv.preview("5,5,5", "remove-strand", {}))["status"] == "done"
+    with pytest.raises(ValueError, match="no preview job"):
+        rv.job(first["job"])
+
+
+def test_a_failed_preview_is_reported_to_the_poll(review: Any) -> None:
+    rv = review(Broken())
+    out = poll(rv, rv.preview("5,5,5", "thicken", {}))
+    assert out["status"] == "failed" and "no WM in the box" in out["error"]
