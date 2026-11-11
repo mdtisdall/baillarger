@@ -190,3 +190,110 @@ def test_the_log_is_json_lines(log: E.EditLog) -> None:
     session(log, (3, 3, 3))
     lines = log.path.read_text().splitlines()
     assert [json.loads(x)["Record"] for x in lines] == ["session", "shown"]
+
+
+def _count_voxel_reads(monkeypatch: pytest.MonkeyPatch, log: E.EditLog) -> list[str]:
+    """Each read of the .bin file, from now on: its open mode."""
+    reads: list[str] = []
+    real_open, real_bytes = Path.open, Path.read_bytes
+
+    def open_(self: Path, mode: str = "r", *a: object, **k: object) -> object:
+        if self == log.paths["voxels"] and "r" in mode:
+            reads.append(mode)
+        return real_open(self, mode, *a, **k)  # type: ignore[call-overload]
+
+    def read_bytes(self: Path) -> bytes:
+        if self == log.paths["voxels"]:
+            reads.append("read_bytes")
+        return real_bytes(self)
+
+    monkeypatch.setattr(Path, "open", open_)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    return reads
+
+
+def test_a_new_record_does_not_read_the_log_again(
+    log: E.EditLog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = session(log, (3, 3, 3), (5, 5, 5))
+    log.answer(s, (3, 3, 3), "thicken", [(1, 1, 1), (1, 1, 2)], [41, 41], SHA, 1)
+
+    def refuse(path: Path) -> None:
+        raise AssertionError("the whole log is read again")
+
+    monkeypatch.setattr(E, "read_log", refuse)
+    monkeypatch.setattr(E, "_read_all", refuse)
+    reads = _count_voxel_reads(monkeypatch, log)
+    b = log.answer(s, (5, 5, 5), "fill-gap", [(2, 2, 2)], [41], SHA, 1)
+    log.skipped(s, (3, 3, 3))
+    t = log.start_session(0, None, SHA, SHA)
+    L = log.read()
+    log.sessions(), log.answered(s)
+    # the .bin file is written (r+b), not read
+    assert reads == ["r+b"]
+    assert [r["Record"] for r in L.records][-3:] == ["answer", "skipped", "session"]
+    assert t == 2 and b == 2
+    assert L.voxels(b)[0].tolist() == [[2, 2, 2]]  # mapped, read when asked
+    assert L.voxels(1)[0].tolist() == [[1, 1, 1], [1, 1, 2]]
+
+
+def test_check_log_verifies_every_record(log: E.EditLog) -> None:
+    s = session(log, (3, 3, 3))
+    log.answer(s, (3, 3, 3), "thicken", [(1, 1, 1)], [41], SHA, 1)
+    raw = bytearray(log.paths["voxels"].read_bytes())
+    raw[8] ^= 1  # the label of the first answer, which the memory copy has
+    log.paths["voxels"].write_bytes(bytes(raw))
+    # an append checks the new record only
+    b = log.answer(s, (3, 3, 3), "fill-gap", [(2, 2, 2)], [41], SHA, 1)
+    assert b == 2
+    with pytest.raises(ValueError, match="line 3: the SHA-256"):
+        log.check_log()
+    with pytest.raises(ValueError, match="SHA-256"):
+        E.read_log(log.path)
+
+
+def test_check_log_on_a_good_log(log: E.EditLog) -> None:
+    s = session(log, (3, 3, 3))
+    a = log.answer(s, (3, 3, 3), "thicken", [(1, 1, 1)], [41], SHA, 1)
+    L = log.check_log()
+    assert L.records == E.read_log(log.path).records == log.read().records
+    assert L.voxels(a)[0].tolist() == [[1, 1, 1]]
+
+
+def test_the_appends_of_another_writer_are_read_and_checked(
+    log: E.EditLog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = session(log, (3, 3, 3))
+    other = E.EditLog(log.path)
+    a = other.answer(s, (3, 3, 3), "thicken", [(1, 1, 1)], [41], SHA, 1)
+    other.shown(s, (5, 5, 5), "misfacing", 2)
+    # this writer reads only the new part: the lines and their voxels
+    reads = _count_voxel_reads(monkeypatch, log)
+    b = log.answer(s, (5, 5, 5), "fill-gap", [(2, 2, 2)], [41], SHA, 1)
+    assert reads == ["rb", "r+b"]
+    assert (a, b) == (1, 2)
+    L = log.read()
+    assert L.answer(b)["Voxels"]["Offset"] == 1  # after the other's voxels
+    assert L.answer(b)["Rank"] == 2  # from the other's shown record
+    assert L.records == E.read_log(log.path).records
+    # a bad append by another writer is refused, with its line
+    c = other.answer(s, (3, 3, 3), "leave", [], [], SHA, 1)
+    with log.path.open("a") as fh:
+        fh.write(json.dumps(dict(Record="what")) + "\n")
+    with pytest.raises(ValueError, match="line 7: unknown record"):
+        log.read()
+    with pytest.raises(ValueError, match="line 7: unknown record"):
+        log.read()  # no memory copy is left half-updated
+    assert c == 3
+
+
+def test_a_replaced_log_is_read_again_in_full(log: E.EditLog) -> None:
+    s = session(log, (3, 3, 3))
+    log.answer(s, (3, 3, 3), "thicken", [(1, 1, 1)], [41], SHA, 1)
+    text = log.path.read_text().splitlines(keepends=True)
+    tmp = log.path.with_name("new.jsonl")
+    tmp.write_text("".join(text[:2]))  # the session and the shown record
+    tmp.replace(log.path)
+    L = log.read()
+    assert [r["Record"] for r in L.records] == ["session", "shown"]
+    assert log.answer(s, (3, 3, 3), "leave", [], [], SHA, 1) == 1

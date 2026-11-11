@@ -18,6 +18,11 @@ Log.without gives a log without one answer, in memory only, for inspection.
 Three files: the log (.jsonl, one JSON object per line), the voxels (.bin,
 VOXEL_DTYPE records) and the sidecar (.json, written one time). EditLog
 appends to them; read_log reads them.
+
+read_log reads and checks the whole log. EditLog does that one time, when it
+is made, and keeps the records in memory. Each later call reads and checks
+only the lines that another writer appended after that, and their voxels;
+EditLog.check_log reads and checks the whole log again.
 """
 
 import datetime
@@ -25,9 +30,10 @@ import fcntl
 import hashlib
 import json
 import os
-from collections.abc import Iterator, Sequence
+import threading
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -127,7 +133,9 @@ def _site(x: Any) -> Site | None:
 @dataclass(frozen=True)
 class Log:
     """A log, read: its sidecar, its records in order (dicts, as in the
-    file) and its voxels (VOXEL_DTYPE, the whole .bin file)."""
+    file) and its voxels (VOXEL_DTYPE: the whole .bin file from read_log;
+    from EditLog, the part of it that the records name, mapped and not
+    read)."""
 
     side: dict[str, Any]
     records: tuple[dict[str, Any], ...]
@@ -249,42 +257,96 @@ def _check_record(r: dict[str, Any], seen: dict[str, Any]) -> None:
     seen["ids"].add(r["Id"])
 
 
+def _new_seen() -> dict[str, Any]:
+    return dict(sessions=set(), shown={}, ids=set())
+
+
+@dataclass
+class _State:
+    """A log, read and checked up to a point: its records, the records seen
+    (_check_record), the bytes of the .jsonl file in complete lines read
+    (log_end), the VOXEL_DTYPE records of the .bin file that a record names
+    (bin_end), and the device and inode of the .jsonl file."""
+
+    side: dict[str, Any]
+    ident: tuple[int, int]
+    records: list[dict[str, Any]] = field(default_factory=list)
+    seen: dict[str, Any] = field(default_factory=_new_seen)
+    log_end: int = 0
+    bin_end: int = 0
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        s = self.side["Shape"]
+        return (int(s[0]), int(s[1]), int(s[2]))
+
+    def feed(
+        self,
+        name: str,
+        text: bytes,
+        rows: Callable[[int, int], npt.NDArray[np.void]],
+    ) -> None:
+        """Check and add the complete lines of text: the bytes of the .jsonl
+        file after log_end. rows(offset, count) gives the voxels of an
+        answer, and raises ValueError if they are not in the .bin file. The
+        part after the last line end (empty, or an append that did not
+        finish) is not read."""
+        size = int(np.prod(self.shape))
+        for line in text[: text.rfind(b"\n") + 1].split(b"\n")[:-1]:
+            try:
+                r = json.loads(line)
+                _check_record(r, self.seen)
+                if r["Record"] == "answer":
+                    v = r["Voxels"]
+                    x = rows(v["Offset"], v["Count"])
+                    if hashlib.sha256(x.tobytes()).hexdigest() != v["SHA256"]:
+                        raise ValueError("the SHA-256 of its voxels does not agree")
+                    if len(x) and (x["index"].min() < 0 or x["index"].max() >= size):
+                        raise ValueError("a voxel is outside the grid")
+                    self.bin_end = max(self.bin_end, v["Offset"] + v["Count"])
+            except (KeyError, ValueError, TypeError) as e:
+                raise ValueError(f"{name}, line {len(self.records) + 1}: {e}") from e
+            self.records.append(r)
+            self.log_end += len(line) + 1
+
+
+def _ident(fh: Any) -> tuple[int, int]:
+    st = os.fstat(fh.fileno())
+    return (st.st_dev, st.st_ino)
+
+
+def _read_all(path: Path) -> tuple[_State, npt.NDArray[np.void]]:
+    """The whole log at path, read and checked (read_log), and the whole
+    .bin file."""
+    p = _paths(path)
+    side = read_sidecar(p["sidecar"], EDITS_SPEC)
+    # the lines first: the voxels of a complete line are in the .bin file
+    # before the line is written
+    with p["log"].open("rb") as fh:
+        st = _State(side, _ident(fh))
+        text = fh.read()
+    raw = p["voxels"].read_bytes()
+    n = len(raw) // VOXEL_DTYPE.itemsize
+    data = np.frombuffer(raw[: n * VOXEL_DTYPE.itemsize], VOXEL_DTYPE)
+
+    def rows(offset: int, count: int) -> npt.NDArray[np.void]:
+        if offset < 0 or offset + count > n:
+            raise ValueError("its voxels are not in the .bin file")
+        out: npt.NDArray[np.void] = data[offset : offset + count]
+        return out
+
+    st.feed(path.name, text, rows)
+    return st, data
+
+
 def read_log(path: Path) -> Log:
     """The log at path (.jsonl), with its sidecar and voxels, checked against
     wm-edits/1: each record valid after the ones before it, and each answer's
     voxels inside the .bin file with their SHA-256. A last line with no line
     end (an append that did not finish) is ignored, and so are the bytes of
     the .bin file that no record names."""
-    p = _paths(path)
-    side = read_sidecar(p["sidecar"], EDITS_SPEC)
-    raw = p["voxels"].read_bytes()
-    n = len(raw) // VOXEL_DTYPE.itemsize
-    data = np.frombuffer(raw[: n * VOXEL_DTYPE.itemsize], VOXEL_DTYPE)
-    text = p["log"].read_text()
-    lines = text.split("\n")
-    lines = lines[:-1]  # the part after the last line end: empty, or unfinished
-    seen: dict[str, Any] = dict(sessions=set(), shown={}, ids=set())
-    recs = []
-    size = int(np.prod(side["Shape"]))
-    for k, line in enumerate(lines, 1):
-        r = json.loads(line)
-        try:
-            _check_record(r, seen)
-            if r["Record"] == "answer":
-                v = r["Voxels"]
-                if v["Offset"] < 0 or v["Offset"] + v["Count"] > n:
-                    raise ValueError("its voxels are not in the .bin file")
-                rows = data[v["Offset"] : v["Offset"] + v["Count"]]
-                if hashlib.sha256(rows.tobytes()).hexdigest() != v["SHA256"]:
-                    raise ValueError("the SHA-256 of its voxels does not agree")
-                if len(rows) and (
-                    rows["index"].min() < 0 or rows["index"].max() >= size
-                ):
-                    raise ValueError("a voxel is outside the grid")
-        except (KeyError, ValueError, TypeError) as e:
-            raise ValueError(f"{path.name}, line {k}: {e}") from e
-        recs.append(r)
-    return Log(side, tuple(recs), data)
+    st, data = _read_all(path)
+    return Log(st.side, tuple(st.records), data)
 
 
 # ----------------------------------------------------------------- the writer
@@ -304,12 +366,69 @@ class EditLog:
     """The writer of a log. Each call appends; nothing is changed or removed.
     Each append holds an exclusive lock (fcntl.flock) on the log, appends the
     voxels to the .bin file first, then the record to the .jsonl file, and
-    flushes both to the disk."""
+    flushes both to the disk.
+
+    The log is read and checked in full one time, when the EditLog is made
+    (read_log). The records stay in memory, and a new record is checked
+    against them. Each call reads only the lines that another writer
+    appended since, and their voxels, and checks them. check_log reads and
+    checks the whole log again."""
 
     def __init__(self, path: Path) -> None:
         self.paths = _paths(path)
         self.path = self.paths["log"]
-        read_sidecar(self.paths["sidecar"], EDITS_SPEC)
+        self._mutex = threading.Lock()  # the threads of this process
+        self._state: _State | None = None
+        with self._held():
+            st = self._current()
+        self.shape = st.shape
+
+    @contextmanager
+    def _held(self) -> Iterator[None]:
+        with self._mutex, _locked(self.path):
+            yield
+
+    def _current(self) -> _State:
+        """The memory copy, with the lines that another writer appended
+        since. A .jsonl file that is replaced or shorter is read again in
+        full. Call with the locks held."""
+        st = self._state
+        self._state = None  # until it is current: an error leaves no copy
+        if st is not None:
+            with self.path.open("rb") as fh:
+                if _ident(fh) == st.ident and os.fstat(fh.fileno()).st_size >= (
+                    st.log_end
+                ):
+                    fh.seek(st.log_end)
+                    text = fh.read()
+                    if b"\n" in text:
+                        with self.paths["voxels"].open("rb") as vh:
+
+                            def rows(offset: int, count: int) -> npt.NDArray[np.void]:
+                                if offset < 0:
+                                    raise ValueError(
+                                        "its voxels are not in the .bin file"
+                                    )
+                                vh.seek(offset * VOXEL_DTYPE.itemsize)
+                                b = vh.read(count * VOXEL_DTYPE.itemsize)
+                                if len(b) != count * VOXEL_DTYPE.itemsize:
+                                    raise ValueError(
+                                        "its voxels are not in the .bin file"
+                                    )
+                                return np.frombuffer(b, VOXEL_DTYPE)
+
+                            st.feed(self.path.name, text, rows)
+                    self._state = st
+                    return st
+        st = _read_all(self.path)[0]
+        self._state = st
+        return st
+
+    def _log(self, st: _State) -> Log:
+        data: npt.NDArray[np.void] = np.zeros(0, VOXEL_DTYPE)
+        if st.bin_end:
+            data = np.memmap(self.paths["voxels"], VOXEL_DTYPE, "r", shape=st.bin_end)
+        return Log(st.side, tuple(st.records), data)
 
     @staticmethod
     def create(path: Path, dseg: Path, hemi: str) -> "EditLog":
@@ -341,8 +460,18 @@ class EditLog:
         return EditLog(path)
 
     def read(self) -> Log:
-        """The log as it is now (read_log)."""
-        return read_log(self.path)
+        """The log as it is now. Its voxels are mapped, not read."""
+        with self._held():
+            return self._log(self._current())
+
+    def check_log(self) -> Log:
+        """The log as it is now, read and checked in full again (read_log).
+        It becomes the memory copy. Raises ValueError as read_log does."""
+        with self._held():
+            self._state = None
+            st, data = _read_all(self.path)
+            self._state = st
+            return Log(st.side, tuple(st.records), data)
 
     def sessions(self) -> list[dict[str, Any]]:
         """The session records."""
@@ -355,51 +484,38 @@ class EditLog:
     def _append(
         self, rec: dict[str, Any], rows: npt.NDArray[np.void] | None = None
     ) -> dict[str, Any]:
-        with _locked(self.path):
-            log = self.read()
+        with self._held():
+            st = self._current()
+            seen = st.seen
             if rec["Record"] == "session" and rec["Session"] is None:
-                rec["Session"] = 1 + max(
-                    (s["Session"] for s in log.sessions()), default=0
-                )
+                rec["Session"] = 1 + max(seen["sessions"], default=0)
             if rec["Record"] == "answer":
-                rec["Id"] = 1 + max((a["Id"] for a in log.answers()), default=0)
-                shown = log.shown(rec["Session"])
+                rec["Id"] = 1 + max(seen["ids"], default=0)
                 site = _site(rec["Site"])
                 if site is not None:
-                    hit = [s for s in shown if _site(s["Site"]) == site]
-                    if not hit:
+                    hit = seen["shown"].get((rec["Session"], site))
+                    if hit is None:
                         raise ValueError(
                             f"site {site} was not shown in session {rec['Session']}"
                         )
                     for k in ("SiteKind", "How", "Rank", "Score"):
-                        rec[k] = hit[-1][k]
+                        rec[k] = hit[k]
                 else:
                     rec.update(SiteKind=None, How="none", Rank=None, Score=None)
                 assert rows is not None
                 # the end of the voxels that a record names: bytes after it are
                 # from an append that did not finish
-                off = max(
-                    (
-                        x["Voxels"]["Offset"] + x["Voxels"]["Count"]
-                        for x in log.answers()
-                    ),
-                    default=0,
-                )
                 rec["Voxels"] = dict(
-                    Offset=int(off),
+                    Offset=int(st.bin_end),
                     Count=len(rows),
                     SHA256=hashlib.sha256(rows.tobytes()).hexdigest(),
                 )
-            seen: dict[str, Any] = dict(
-                sessions={s["Session"] for s in log.sessions()},
-                shown={
-                    (r["Session"], _site(r["Site"])): r
-                    for r in log.records
-                    if r["Record"] == "shown"
-                },
-                ids={a["Id"] for a in log.answers()},
-            )
-            _check_record(rec, seen)
+            line = (json.dumps(rec, separators=(",", ":")) + "\n").encode()
+            parsed = json.loads(line)  # the record as a reader sees it
+            # changes seen only if the record is valid; after that, a failed
+            # write leaves no memory copy, and the next call reads the log
+            _check_record(parsed, seen)
+            self._state = None
             if rows is not None:
                 with self.paths["voxels"].open("r+b") as fh:
                     # bytes that no record names (an append that did not
@@ -409,16 +525,19 @@ class EditLog:
                     fh.truncate()
                     fh.flush()
                     os.fsync(fh.fileno())
-            line = json.dumps(rec, separators=(",", ":")) + "\n"
-            with self.path.open("r+") as fh:
-                text = fh.read()
-                if text and not text.endswith("\n"):
-                    # an unfinished last line: write over it
-                    fh.seek(text.rfind("\n") + 1)
-                    fh.truncate()
+            with self.path.open("r+b") as fh:
+                # bytes after the last complete line (an append that did not
+                # finish) are written over
+                fh.seek(st.log_end)
+                fh.truncate()
                 fh.write(line)
                 fh.flush()
                 os.fsync(fh.fileno())
+            st.records.append(parsed)
+            st.log_end += len(line)
+            if rows is not None:
+                st.bin_end = rec["Voxels"]["Offset"] + len(rows)
+            self._state = st
         return rec
 
     def start_session(
@@ -488,7 +607,7 @@ class EditLog:
     def _rows(
         self, voxels: npt.ArrayLike, labels: npt.ArrayLike, strokes: npt.ArrayLike
     ) -> npt.NDArray[np.void]:
-        shape = tuple(self.read().shape)
+        shape = self.shape
         v = np.asarray(voxels, np.int64).reshape(-1, 3)
         lab = np.asarray(labels, np.int64).ravel()
         st = np.asarray(strokes, np.int64).ravel()
