@@ -1,0 +1,176 @@
+"""The regenerate command (baillarger.regenerate): the four white-surface
+commands in one, written into a new directory, then moved over the old
+outputs."""
+
+import json
+from pathlib import Path
+from typing import Any
+
+import nibabel as nib
+import numpy as np
+import pytest
+
+from baillarger import (
+    regenerate,
+    white_dseg,
+    white_overview,
+    white_surf,
+    wm_sites,
+)
+from baillarger.fix_diff import write_table
+
+ANAT = Path("sub-T01/ses-S1/anat")
+NAME = "sub-T01_ses-S1_aseg.nii.gz"
+BLOCK = ["--block-cells", "8"]
+
+
+def sphere(path: Path, wm_radius: float = 9.0) -> Path:
+    """A synthetic aseg at path: a WM ball in a cortex shell (right
+    hemisphere labels)."""
+    x = np.indices((34, 34, 30)).astype(float)
+    r = np.sqrt(((x - np.array([16.6, 16.3, 14.8])[:, None, None, None]) ** 2).sum(0))
+    a = np.zeros(x.shape[1:], np.int16)
+    a[r < 13] = 42
+    a[r < wm_radius] = 41
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nib.save(nib.nifti1.Nifti1Image(a, np.diag([0.16, 0.16, 0.16, 1.0])), path)
+    return path
+
+
+def by_hand(inp: Path, root: Path) -> None:
+    """The four commands, run one after another."""
+    white_dseg.main([str(inp), "--out", str(root)])
+    dseg = root / ANAT / "sub-T01_ses-S1_desc-wmtopo_dseg.nii.gz"
+    white_surf.main([str(dseg), "--out", str(root), *BLOCK])
+    surf = root / ANAT / "sub-T01_ses-S1_hemi-R_white.surf.gii"
+    white_overview.main([str(surf)])
+    wm_sites.main([str(surf)])
+
+
+def files(root: Path) -> dict[str, bytes]:
+    """Each file in root, by its path relative to root."""
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+#: sidecar keys that hold a time: of creation, and the seconds of a step
+TIMES = ("Created", "seconds")
+
+
+def _norm(x: Any) -> Any:
+    """A sidecar without its times."""
+    if isinstance(x, dict):
+        return {k: _norm(v) for k, v in x.items() if k not in TIMES}
+    if isinstance(x, list):
+        return [_norm(v) for v in x]
+    return x
+
+
+def assert_same(a: Path, b: Path) -> None:
+    """The files in roots a and b are the same: the same names, the same
+    bytes, and the same sidecars apart from their times and the root's
+    path."""
+    fa, fb = files(a), files(b)
+    assert sorted(fa) == sorted(fb)
+    ra, rb = str(a.resolve()), str(b.resolve())
+    for name in fa:
+        if name.endswith(".json"):
+            ja = json.loads(fa[name].decode().replace(ra, rb))
+            jb = json.loads(fb[name].decode())
+            assert _norm(ja) == _norm(jb), name
+        else:
+            assert fa[name] == fb[name], name
+
+
+@pytest.fixture(scope="module")
+def runs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """The four commands by hand into one root, the regenerate command into
+    another, on the same input."""
+    d = tmp_path_factory.mktemp("regen")
+    inp = sphere(d / "in" / NAME)
+    by_hand(inp, d / "hand")
+    regenerate.main([str(inp), "--root", str(d / "regen"), *BLOCK])
+    return dict(inp=inp, hand=d / "hand", regen=d / "regen", dir=d)
+
+
+def test_the_command_gives_the_files_of_the_four_commands(
+    runs: dict[str, Path],
+) -> None:
+    assert_same(runs["hand"], runs["regen"])
+    # no new directory is left in the root, and no file names it
+    regen = runs["regen"]
+    assert not list(regen.glob(regenerate.STAGE_PREFIX + "*"))
+    for name, data in files(regen).items():
+        assert regenerate.STAGE_PREFIX.encode() not in data, name
+    # the sidecars name the files at their final paths
+    surf = regen / ANAT / "sub-T01_ses-S1_hemi-R_white.surf.gii"
+    side = json.loads(
+        surf.with_name(surf.name.replace(".surf.gii", ".json")).read_text()
+    )
+    assert all(Path(s).exists() for s in side["Sources"])
+
+
+def test_a_second_run_replaces_the_outputs(
+    runs: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    d = runs["dir"]
+    inp = sphere(d / "in2" / NAME, wm_radius=7.0)
+    root = d / "again"
+    regenerate.main([str(runs["inp"]), "--root", str(root), *BLOCK])
+    capsys.readouterr()
+    regenerate.main([str(inp), "--root", str(root), *BLOCK])
+    out = capsys.readouterr().out
+    assert "overrides: 0" in out
+    # the hand run of the first input into the same root, then of the second
+    hand = d / "hand2"
+    by_hand(runs["inp"], hand)
+    by_hand(inp, hand)
+    assert_same(hand, root)
+
+
+def test_a_failing_step_leaves_the_old_outputs_unchanged(
+    runs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = runs["dir"]
+    inp = sphere(d / "in3" / NAME, wm_radius=7.0)
+    before = files(runs["regen"])
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("step 4 fails")
+
+    monkeypatch.setattr(wm_sites, "write_sites", fail)
+    with pytest.raises(RuntimeError, match="step 4 fails"):
+        regenerate.regenerate(inp, None, runs["regen"], block=8)
+    assert files(runs["regen"]) == before
+    assert not list(runs["regen"].glob(regenerate.STAGE_PREFIX + "*"))
+
+
+def test_an_output_does_not_replace_the_input(tmp_path: Path) -> None:
+    # the input has the name of the dseg that step 1 writes
+    root = tmp_path / "deriv"
+    inp = sphere(root / ANAT / "sub-T01_ses-S1_desc-wmtopo_dseg.nii.gz")
+    data = inp.read_bytes()
+    with pytest.raises(ValueError, match="replace an input"):
+        regenerate.regenerate(inp, None, root, block=8)
+    assert inp.read_bytes() == data
+    assert sorted(files(root)) == [str(inp.relative_to(root))]
+
+
+def test_the_overrides_are_the_fixes_that_change_edited_voxels(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        dict(id=1, kind="handle_cut", voxels=3, i=1, j=2, k=3),
+        dict(id=2, kind="handle_fill", voxels=5, i=4, j=5, k=6, overrides=2),
+        dict(id=3, kind="manual_edit", voxels=0),
+    ]
+    table = tmp_path / "fixes.tsv"
+    write_table(table, rows)
+    over = regenerate.overrides(table)
+    assert [r["id"] for r in over] == [2]
+    assert regenerate.override_line(over[0]) == (
+        "override: fix 2 (handle_fill) at voxel 4,5,6 changes 2 edited voxels"
+    )
