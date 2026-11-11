@@ -35,9 +35,12 @@ The paint mode of the review pane (`/review/paint`) writes its strokes into
 the diff in the same way (`baillarger.label_edits.paint`); its labels are
 outside, WM and cortex of the hemisphere, and the eraser. At a queue site,
 the choice `manual-paint` is a paint whose strokes are the site's answer.
-Undo (`/review/undo`) writes the earlier entries of the last paint back
-(`baillarger.label_edits.restore`). The undo stack is in the viewer's memory
-only, for one viewer run; the diff keeps no history.
+Every write into the diff of a viewer run (a paint, and a site answer of
+any choice) pushes the earlier entries of the voxels that it changes on one
+undo stack. Undo (`/review/undo`) writes the top entries back
+(`baillarger.label_edits.restore`), so it always reverses the last write.
+The undo stack is in the viewer's memory only, for one viewer run; the diff
+keeps no history. An undo does not change the answer log.
 
 ## Files
 

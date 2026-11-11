@@ -854,3 +854,39 @@ def test_the_review_runs_with_the_edits_alone(files: dict[str, Path]) -> None:
 def test_the_menu_of_the_left_hemisphere() -> None:
     assert [m["value"] for m in VR.menu("L")] == [0, 2, 3, "input"]
     assert [m["key"] for m in VR.menu("R")] == ["outside", "wm", "cortex", "input"]
+
+
+def test_undo_reverses_the_last_write_also_a_queue_answer(server: Any) -> None:
+    """Every write into the diff goes on one undo stack: an undo after a queue
+    answer takes back the answer, not the paint under it."""
+    base, rv, files = server
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    get(base + "/review/next")
+    # the paint sets (5, 5, 5) to 0; thicken at 5,5,5 then sets it to 42
+    post(base + "/review/paint", dict(strokes=paint_strokes((0, [(5, 5, 5)]))))
+    after_paint = diff(files)
+    out = post(
+        base + "/review/answer",
+        dict(site="5,5,5", choice="thicken", params={}, reviewer_seconds=1.0),
+    )
+    assert out["undo_depth"] == 2
+    assert diff(files) == {(5, 5, 5): 42, (6, 5, 5): 41}
+    assert post(base + "/review/undo", {}) == dict(voxels=2, undo_depth=1)
+    assert diff(files) == after_paint
+    # the log keeps the undone answer
+    assert records(files)[-1]["Id"] == out["answer"]
+    assert post(base + "/review/undo", {}) == dict(voxels=1, undo_depth=0)
+    assert diff(files) == {}
+
+
+def test_accept_fix_goes_on_the_undo_stack(server: Any) -> None:
+    base, rv, files = server
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    get(base + "/review/next")
+    post(
+        base + "/review/answer",
+        dict(site="5,5,5", choice=VR.ACCEPT, reviewer_seconds=2.0),
+    )
+    assert rv.undo and diff(files) == {v: 0 for v in FIX_VOXELS}
+    post(base + "/review/undo", {})
+    assert diff(files) == {}

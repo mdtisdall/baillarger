@@ -1,6 +1,7 @@
 # Plan: label editing in the viewer
 
-Status: plan. Nothing is built.
+Status: Part 1 (core and join), the core of 4b and the core of 5 are merged. Part 2 is
+in review (PR #181). Parts 3 and 4a, the join of 4b and the join of 5 are not built.
 
 ## Goal
 
@@ -42,8 +43,8 @@ not come from that log.
   edit is painted slice by slice.
 - An edit records only the voxels whose label it changes (from the label with the
   current diff applied). Painting a voxel with its current label is not an edit.
-- Undo: a stack in the viewer, for the edits of this viewer run. It is not saved. To
-  undo an older edit, the user uses the eraser.
+- Undo: a stack in the viewer, for every write into the diff of this viewer run (paints
+  and site answers). It is not saved. To undo an older edit, the user uses the eraser.
 - The automatic correction may change an edited voxel (the rule of `white_dseg` now:
   edited voxels change last). The pane shows it in the preview, Submit is allowed, and
   the regeneration reports each override.
@@ -144,12 +145,15 @@ queue answer writes into the diff.
   pushes their earlier diff entries (a label, or none) on the undo stack. A paint that
   changes no voxel writes nothing and pushes nothing. `wm_paint.changes` was not moved:
   `label_edits.paint` already keeps only the voxels that change.
-- Undo: `POST /review/undo` writes the top entries back (`label_edits.restore`) and pops
-  them. The stack is in memory, for this viewer run. The other site answers do not go
-  on it, and an undo writes back over a later answer at the same voxels.
+- Undo: every write into the diff of this viewer run (a paint, and a site answer of any
+  choice: `accept-fix` and `manual-paint` too) pushes its earlier entries on one stack.
+  `POST /review/undo` writes the top entries back (`label_edits.restore`) and pops them,
+  so an undo always reverses the last write and never brings back labels under a later
+  answer. The stack is in memory, for this viewer run. An undo does not change the log:
+  an undone answer stays in it.
 - At a queue site, the choice `manual-paint` opens the paint mode. Its Submit is
-  `POST /review/answer` with the strokes: it writes into the diff as a paint (and goes on
-  the undo stack), and the queue's log records the answer: the voxels of the strokes
+  `POST /review/answer` with the strokes: it writes into the diff as a paint, and the
+  queue's log records the answer: the voxels of the strokes
   and the label each takes (the eraser's voxels: their input label). Its preview has no
   voxels until Part 4a.
 - The viewer can start without a queue (`--edits` alone, with no `--sites` and no
@@ -162,7 +166,9 @@ queue answer writes into the diff.
 Tests: a paint writes the painted voxels and labels into the diff; a label that is not
 in the menu is refused, and nothing is written; a voxel with its current label is not
 written; a voxel off the grid is refused; undo restores the diff exactly, also after two
-paints that overlap; the scribble route gives the same strokes as before the move.
+paints that overlap; a paint, then a queue answer on an overlapping voxel, then undo
+gives the diff after the paint; the scribble route gives the same strokes as before the
+move.
 
 ## Part 3: show the edits
 

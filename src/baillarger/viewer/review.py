@@ -53,8 +53,9 @@ Routes (Review.get, Review.post), JSON:
 - POST /review/paint {strokes: [{label, voxels}]}: the strokes written into
   the label edits (Paint, below). {voxels, undo_depth}: voxels is the number
   of voxels whose label changed.
-- POST /review/undo: the last paint of this viewer run undone (Paint).
-  {voxels, undo_depth}, or {error} if there is nothing to undo.
+- POST /review/undo: the last write into the label edits of this viewer run
+  undone (Undo, below). {voxels, undo_depth}, or {error} if there is nothing
+  to undo.
 
 Each write holds the review's lock and is flushed to the disk before the
 response (EditLog appends and fsyncs; label_edits.write replaces the files of
@@ -78,17 +79,22 @@ function as a scribble's (stroke_voxels: a voxel in two strokes keeps the
 later one). A label that is not in the menu, or a voxel off the grid, refuses
 the whole paint, and nothing is written. Only the voxels whose label changes
 are written (label_edits.paint: from the input labels with the edits
-applied). The earlier entries of those voxels go on the undo stack;
-/review/undo writes the top entries back (label_edits.restore). The stack is
-in memory only, for this viewer run; a paint that changes no voxel does not
-go on it. The other site answers do not go on it.
+applied).
+
+Undo. Every write into the edits of this viewer run (a paint, and a site
+answer of any choice: accept-fix and manual-paint too) pushes the earlier
+entries of the voxels that it changes on one undo stack. /review/undo writes
+the top entries back (label_edits.restore) and pops them, so an undo always
+reverses the last write and never brings back labels under a later one. A
+write that changes no voxel pushes nothing. The stack is in memory only, for
+this viewer run. An undo does not change the log: an undone answer stays in
+it.
 
 manual-paint (MANUAL) at a queue site: the page opens the paint mode, and its
 submit is /review/answer {site, choice: manual-paint, strokes,
-reviewer_seconds}. It writes into the edits as a paint (and goes on the undo
-stack), and the log records the answer: the voxels of the strokes and the
-label each takes (the eraser's voxels: their input label). Its preview has no
-voxels.
+reviewer_seconds}. It writes into the edits as a paint, and the log records
+the answer: the voxels of the strokes and the label each takes (the eraser's
+voxels: their input label). Its preview has no voxels.
 
 Paint only. With no queue and no log (sites and log None; the viewer's
 --edits alone), the review has the paint routes only; the hemisphere comes
@@ -398,7 +404,7 @@ class Review:
         self.seed: int | None = None
         self.order: list[dict[str, Any]] = []
         self.jobs: dict[str, Job] = {}
-        #: the undo stack of the paints: the earlier entries of each paint
+        #: the undo stack: the earlier entries of each write into the edits
         self.undo: list[label_edits.Edits] = []
         last = self._log.sessions() if self._log is not None else []
         if last:
@@ -683,10 +689,10 @@ class Review:
             n = self._paint_locked(v, lab)
             return dict(voxels=n, undo_depth=len(self.undo))
 
-    def undo_paint(self) -> dict[str, Any]:
-        """The last paint undone: its earlier entries written back
-        (label_edits.restore). {voxels, undo_depth}. Raises ValueError if the
-        stack is empty."""
+    def undo_last(self) -> dict[str, Any]:
+        """The last write into the edits undone (module docstring, Undo): its
+        earlier entries written back (label_edits.restore). {voxels,
+        undo_depth}. Raises ValueError if the stack is empty."""
         with self.lock:
             if not self.undo:
                 raise ValueError("nothing to undo in this viewer run")
@@ -838,8 +844,7 @@ class Review:
             )
             if len(undo):
                 self._write(new)
-                if choice == MANUAL:
-                    self.undo.append(undo)
+                self.undo.append(undo)
         return dict(
             answer=aid,
             kind=r["kind"],
@@ -904,7 +909,7 @@ class Review:
         if path == "/review/paint":
             return self.paint(list(req["strokes"]))
         if path == "/review/undo":
-            return self.undo_paint()
+            return self.undo_last()
         raise KeyError(path)
 
 

@@ -6,8 +6,8 @@
 // "accept the fix" (accept-fix) shows at an override site only: it writes the site's fix's labels into the edits.
 //
 // The brush has two modes. paint: the labels of the menu (outside, WM, cortex and the eraser "input label", which gives the
-// voxels their input label again); its submit writes into the edits (/review/paint), and undo (/review/undo) takes back the
-// last paint of this viewer run. scribble: the classes of the label set; its submit is a record of the log only. At a site,
+// voxels their input label again); its submit writes into the edits (/review/paint). Undo (/review/undo) takes back the last
+// write into the edits of this viewer run: a paint or a site answer. scribble: the classes of the label set; its submit is a record of the log only. At a site,
 // "manual paint" opens the paint mode, and Submit sends the strokes as the site's answer. With --edits alone the server
 // has no queue: the pane is paint only.
 //
@@ -67,13 +67,13 @@ function pane() {
     <label>label <select id="rvcls"></select></label>
     <label title="keys [ and ]">radius <select id="rvrad"><option>0</option><option selected>1</option><option>2</option><option>3</option><option>4</option></select> voxels</label>
     <button id="rvssub" title="key x">submit (x)</button><button id="rvsclr" title="Escape">clear</button>
-    <button id="rvundo" title="key u: undo the last paint of this viewer run">undo (u)</button><span id="rvsn"></span>
+    <button id="rvundo" title="key u: undo the last write into the label edits (a paint or a site answer) of this viewer run">undo (u)</button><span id="rvsn"></span>
   </div>
   <div class="pbar"><span id="rvmsg" style="color:var(--mute)"></span></div>
   <div id="rvtable" style="overflow-y:auto;flex:1;min-height:0;font-size:12px"></div>
   <div class="help" style="position:static;padding:2px 8px">keys: 1–7 choices · t thicken radius · Enter submit · s skip · n next ·
     b brush on/off · p paint/scribble · w WM · c cortex · o outside · e eraser (input label) · [ ] brush radius · x submit strokes ·
-    u undo the last paint · Esc clear strokes. Row: open that site.
+    u undo the last write into the edits · Esc clear strokes. Row: open that site.
     Preview: <span style="color:${COL.answer}">■ the answer</span> <span style="color:${COL.correction}">■ the correction</span></div>`;
   const surf = $("p-surface"); surf.style.display = "none"; surf.parentElement.insertBefore(p, surf.nextSibling);
   for (const b of p.querySelectorAll("button[data-choice]")) b.onclick = () => choose(b.dataset.choice);
@@ -173,7 +173,7 @@ async function choose(c) {
   if (c === "manual-paint") {   // the paint mode: the strokes are the answer; there is no preview of strokes yet
     R.preview = null; $("rvbon").checked = true; R.brush = true; R.api.draw();
     $("rvprev").textContent = "manual paint: paint the strokes (left drag), then Submit (Enter) writes them as this site's answer" +
-      " into the label edits and the log. Undo (u) takes them back from the edits."; $("rvprev").style.color = ""; return;
+      " into the label edits and the log. Undo (u) takes them back from the edits (the log keeps the answer)."; $("rvprev").style.color = ""; return;
   }
   $("rvprev").textContent = `${c}: computing the preview…`;
   let r; try { r = await post("/review/preview", { site: R.cur.id, choice: c, params: R.params }); } catch (e) { if (seq === R.previewSeq) say(e.message, true); return; }
@@ -206,7 +206,8 @@ async function submit() {
   if (manual) body.strokes = paintStrokes();
   let r; try { r = await post("/review/answer", body); }
   catch (e) { say(e.message, true); return; }
-  if (manual) { R.strokes = []; R.undoDepth = r.undo_depth; strokesInfo(); }
+  if (manual) R.strokes = [];
+  R.undoDepth = r.undo_depth; strokesInfo();
   const how = r.how === "random" ? "a random site" : `ranked ${r.rank ?? ""}`;
   say(`answer ${r.answer} written: ${R.choice} at site ${R.cur.id} (${r.kind}, ${how}), ${secs.toFixed(1)} s;` +
     ` ${r.edited} voxels written into the label edits`);
@@ -222,7 +223,7 @@ async function skip() {
 // ------------------------------------------------------------------ scribbles
 function strokesInfo() {
   const n = R.strokes.reduce((a, s) => a + s.voxels.size, 0);
-  $("rvsn").textContent = (R.strokes.length ? `${R.strokes.length} ${R.mode} strokes, ${n} voxels · ` : "") + `undo: ${R.undoDepth} paints`;
+  $("rvsn").textContent = (R.strokes.length ? `${R.strokes.length} ${R.mode} strokes, ${n} voxels · ` : "") + `undo: ${R.undoDepth} writes`;
   $("rvundo").disabled = !R.undoDepth;
 }
 const paintStrokes = () => R.strokes.map(s => ({ label: s.value, voxels: [...s.voxels.values()] }));
