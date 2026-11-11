@@ -17,10 +17,14 @@ The dseg command applies the diff to the input labels before the automatic
 correction. Nothing else applies edits.
 
 - An edit records only the voxels whose label it changes. The label before
-  the edit is the input label with the diff applied. To paint a voxel with
-  that label is not an edit (`baillarger.label_edits.paint`).
+  the edit is the voxel's entry in the diff if it has one, else its label in
+  the dseg (the labels that the user sees, after the automatic correction).
+  To paint a voxel with that label is not an edit
+  (`baillarger.label_edits.paint`). To paint a voxel back to its input label,
+  where the correction changed it, is an edit: the voxel gets an entry with
+  its input label.
 - The eraser removes voxels from the diff. Then they take their input label
-  again.
+  again. The eraser does not change a voxel that has no entry.
 - A voxel of the diff can have its input label. It is still an edited
   voxel: the correction changes it last (`wm-dseg/1`, Manual edits).
 - The diff applies to any input labels on its grid (`Shape`, `Affine`).

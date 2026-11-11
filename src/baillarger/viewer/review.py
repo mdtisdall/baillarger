@@ -45,7 +45,7 @@ Routes (Review.get, Review.post), JSON:
 - POST /review/answer {site, choice, params, reviewer_seconds}: the choice's
   voxels and labels at the site, appended to the log, then written into the
   label edits (label_edits.paint: only the voxels whose label changes from the
-  input labels with the edits applied). {answer, kind, how, rank, voxels,
+  dseg's label with the edits applied). {answer, kind, how, rank, voxels,
   edited}: edited is the number of voxels written into the edits.
 - POST /review/scribble {strokes: [{class, voxels}], reviewer_seconds}:
   strokes appended to the log as one scribble. A voxel in two strokes stays in
@@ -78,8 +78,9 @@ label_edits.INPUT) and its voxels. The strokes become voxels with the same
 function as a scribble's (stroke_voxels: a voxel in two strokes keeps the
 later one). A label that is not in the menu, or a voxel off the grid, refuses
 the whole paint, and nothing is written. Only the voxels whose label changes
-are written (label_edits.paint: from the input labels with the edits
-applied).
+are written (label_edits.paint: from the dseg's labels, the labels that the
+user sees, with the edits applied). A paint back to a voxel's input label,
+against the automatic correction, is an edit.
 
 Undo. Every write into the edits of this viewer run (a paint, and a site
 answer of any choice: accept-fix and manual-paint too) pushes the earlier
@@ -618,8 +619,9 @@ class Review:
     def _painted(
         self, voxels: Arr, labels: Arr
     ) -> tuple[label_edits.Edits, label_edits.Edits]:
-        """The edits with the voxels painted with the labels (label_edits.paint;
-        label_edits.INPUT for the eraser), and the undo: the earlier entries
+        """The edits with the voxels painted with the labels (label_edits.paint,
+        against the dseg's labels from labels(); label_edits.INPUT for the
+        eraser), and the undo: the earlier entries
         of the voxels whose label changes. Raises ValueError for a voxel off
         the grid or a label not in label-set/1."""
         e = self._read_edits()
@@ -628,8 +630,16 @@ class Review:
             return e, label_edits.empty()
         self._on_grid(v)
         box, lo = self._input_box(v)
+        hi = np.asarray(lo) + box.shape
+        shown = self.labels()[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]]
         return label_edits.paint(
-            e, box, v, np.asarray(labels, np.int64), offset=lo, shape=self.shape
+            e,
+            box,
+            v,
+            np.asarray(labels, np.int64),
+            dseg=shown,
+            offset=lo,
+            shape=self.shape,
         )
 
     def _on_grid(self, v: Arr) -> None:

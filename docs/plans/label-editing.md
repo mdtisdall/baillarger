@@ -41,8 +41,13 @@ not come from that log.
   eraser: it removes the voxels from the diff, so they take the input label again).
 - Brush: a 2D disc on the slice under the pointer, as the scribble brush now. A 3D
   edit is painted slice by slice.
-- An edit records only the voxels whose label it changes (from the label with the
-  current diff applied). Painting a voxel with its current label is not an edit.
+- An edit records only the voxels whose label it changes. A voxel's current label is
+  its entry in the diff if it has one, else its label in the dseg (the labels that the
+  user sees, after the correction), not its input label. Painting a voxel with its
+  current label is not an edit. Painting a voxel back to its input label, against the
+  correction, is an edit: the voxel gets an entry, so the next regeneration does not
+  make the same fix there. The eraser removes the entries of the voxels that have one
+  and changes no other voxel.
 - Undo: a stack in the viewer, for every write into the diff of this viewer run (paints
   and site answers). It is not saved. To undo an older edit, the user uses the eraser.
 - The automatic correction may change an edited voxel (the rule of `white_dseg` now:
@@ -114,10 +119,10 @@ Facts that the plan must respect:
   there. `leave` writes nothing. `Accepts`, `accepted_fixes` and the match of kept fixes
   go.
 - The answers of the review queue change the labels by a write into the diff
-  (`label_edits.paint`, then `write`): only the voxels whose label changes from the input
-  labels (the dseg's first `Sources`) with the diff applied. The answer log still records
-  them, for the queue. A scribble is a record of the log only. The viewer takes the log
-  as `--log` and the diff as `--edits`; with `--sites`, both are needed.
+  (`label_edits.paint`, then `write`): only the voxels whose label changes from the
+  current label (Decisions: the diff's entry, else the dseg's label). The answer log
+  still records them, for the queue. A scribble is a record of the log only. The viewer
+  takes the log as `--log` and the diff as `--edits`; with `--sites`, both are needed.
 - The ITK-SNAP import (`wm_paint`) was a bootstrap only. Part 2 removed it.
 - Formats edited in place (version 1): `wm-dseg.md` (`--edits`, `overrides`, `Sources`,
   the copy of the diff), `wm-sites.md` (override sites), `wm-edits.md` (the log is the
@@ -318,9 +323,12 @@ The joins use these interfaces. A core must keep them, or change this plan first
 - `label_edits.read(path) -> Edits`; `label_edits.write(path, edits, *, hemisphere,
   shape, affine)` (replaces the files, under the lock); `label_edits.empty() -> Edits`.
 - `label_edits.apply(labels, edits) -> labels` (a copy with the edits written).
-- `label_edits.paint(edits, labels, voxels, new) -> (Edits, undo)`: `labels` are the input
-  labels; `new` a label per voxel, or -1 for the eraser. It keeps only the voxels whose
-  label changes. `undo` holds the earlier entries of those voxels.
+- `label_edits.paint(edits, labels, voxels, new, *, dseg) -> (Edits, undo)`: `labels` are
+  the input labels and `dseg` the dseg's labels, of one shape (`dseg` omitted: the dseg is
+  the input labels); `new` a label per voxel, or -1 for the eraser. A paint keeps only the
+  voxels whose new label is not their current label (the diff's entry, else the dseg's
+  label); the eraser keeps only the voxels with an entry. `undo` holds the earlier entries
+  of those voxels.
 - `label_edits.restore(edits, undo) -> Edits`.
 - `label_edits.differ(a, b) -> (index, label)`: the voxels where two diffs differ, with
   the label in `a` (-1 where `a` has none: the input label).
