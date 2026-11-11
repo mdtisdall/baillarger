@@ -24,7 +24,11 @@ There are two kinds of answer:
 
 - **A site answer** is a choice at a site that the review showed
   (`docs/formats/wm-choices.md`): `remove-strand`, `thicken`, `fill-gap`,
-  `widen-gap`, `leave` or `manual-paint`.
+  `widen-gap`, `leave`, `manual-paint` or `accept-fix`. `accept-fix` is a
+  choice of an override site (`wm-sites/1`): its voxels and labels are the
+  site's fix's in the fix diff (`wm-dseg-fixes/1`), and its `Params` are
+  `{"Fix": <the fix's id>}`. The review pane writes the labels of each site
+  answer into the label edits; a scribble changes no label.
 - **A scribble** is a set of strokes, each with one class (a label of
   `label-set/1`). It can be at a site that was shown, or at no site.
 

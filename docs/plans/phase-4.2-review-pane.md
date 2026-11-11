@@ -60,9 +60,10 @@ add only the hooks. Ask the coordinator before you change more.
 
 ### Part A: the server side (`viewer/review.py`)
 
-1. New arguments for `--white` mode: `--sites` (the queue) and `--edits`
-   (the log). The log path is given. The pane never chooses a default path
-   for the real log.
+1. New arguments for `--white` mode: `--sites` (the queue), `--log` (the
+   log) and `--edits` (the label edits, `label-edits/1`, which the answers
+   write into). The paths are given. The pane never chooses a default path
+   for the real log or the edits.
 2. Routes, under `/review/`:
    - `GET /review/queue`: the ranked sites, with kind, rank and score.
    - `POST /review/session`: start a session with a random share (0 to 1,
@@ -132,9 +133,10 @@ largest preview size that the canvas draws at 60 fps.
 ## The hemisphere check
 
 1. Run the site finder of phase 1.3 on `scratch/v2/derivatives/` (or use
-   its output in `scratch/phase-1.3/`). Start the viewer with `--sites` and
-   `--edits scratch/phase-4.2/test-edits/...`. Never write the test log
-   next to the real derivatives.
+   its output in `scratch/phase-1.3/`). Start the viewer with `--sites`,
+   `--log scratch/phase-4.2/test-edits/...` and `--edits` a test diff in the
+   same directory. Never write the test log or the test edits next to the
+   real derivatives.
 2. In the built-in browser pane: start a session with a random share of
    0.2; open three sites of different kinds; preview each choice; answer
    two, skip one; make one scribble.

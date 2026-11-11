@@ -24,7 +24,9 @@ reads them.
 To accept the fix of an override site, the user writes the fix's labels
 into the label edits (`label-edits/1`). Then the edited voxels have the
 fix's labels, the next `dseg` run does not change them, and the fix is not
-an override there. The answer log (`wm-edits/1`) is not read.
+an override there. In the viewer's review pane, the choice `accept-fix` of an
+override site does this write (`wm-edits/1`). The answer log (`wm-edits/1`)
+is not read.
 
 Without a fix table next to the corrected segmentation (an output older
 than `wm-dseg-fixes/1` with its table), the file has misfacing sites only.

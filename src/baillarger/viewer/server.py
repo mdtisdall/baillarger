@@ -31,7 +31,8 @@ Requests:
 - Named volumes (baillarger.viewer.volumes: echo, echo1 to echo3, labels, wm,
   fixes):
   /volume/list, /volume/<name>/meta, /volume/<name>/bricks?level=&b=.
-- The stream 1 review (baillarger.viewer.review; with --sites and --edits):
+- The stream 1 review (baillarger.viewer.review; with --sites, --log and
+  --edits):
   GET /review/queue, /review/next, /review/preview?job=; POST /review/session,
   /review/skip, /review/preview, /review/answer, /review/scribble.
 - Surface outlines (baillarger.viewer.outlines):
