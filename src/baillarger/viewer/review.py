@@ -84,6 +84,9 @@ response (EditLog appends and fsyncs; label_edits.update replaces the files of
 the edits). A write into the edits is one label_edits.update: it holds the
 edits' file lock across the read, the change and the write, so that a
 second viewer process on the same edits does not lose this one's voxels.
+An answer's log append is the step after its write, under the same file
+lock: if the log refuses the answer, the edits are written back before
+another writer can write.
 The review keeps the edits that it last read or wrote in memory
 (label_edits.Current), so that a write reads only the sidecar while no other
 writer changed the edits. A scribble is a record of the log only: it does not change the
@@ -702,17 +705,18 @@ class Review:
     def _update(
         self,
         fn: Callable[[label_edits.Current], label_edits.Edits | None],
-        check: bool = True,
+        after: Callable[[label_edits.Current], None] | None = None,
     ) -> label_edits.Current:
         """One locked read-change-write of the edits (label_edits.update),
         with the memory copy. The labels that fn writes are checked
-        (label_edits.paint, label_edits.restore). check: first, under the
-        edits' file lock, refuse if the outputs were replaced
-        (_check_outputs). Call with the lock held."""
+        (label_edits.paint, label_edits.restore). First, under the edits'
+        file lock, refuse if the outputs were replaced (_check_outputs).
+        after: the step after the write, under the same file lock (if it
+        raises, the edits are written back; label_edits.update). Call with
+        the lock held."""
 
         def checked(cur: label_edits.Current) -> label_edits.Edits | None:
-            if check:
-                self._check_outputs()
+            self._check_outputs()
             return fn(cur)
 
         self._cur = label_edits.update(
@@ -723,6 +727,7 @@ class Review:
             affine=self.affine,
             known=self._cur,
             labels_checked=True,
+            after=after,
         )
         return self._cur
 
@@ -783,11 +788,19 @@ class Review:
         if len(v) and not np.all((v >= 0) & (v < self.shape)):
             raise ValueError("a voxel is outside the grid")
 
-    def _commit(self, voxels: Arr, labels: Arr) -> tuple[label_edits.Edits, Arr]:
+    def _commit(
+        self,
+        voxels: Arr,
+        labels: Arr,
+        after: Callable[[Arr], None] | None = None,
+    ) -> tuple[label_edits.Edits, Arr]:
         """Under the lock: the voxels painted with the labels in one locked
         read-change-write of the edits (_painted, _update), and their earlier
-        entries pushed on the undo stack. Returns the undo (no voxel: nothing
-        is written or pushed) and the input labels of the voxels."""
+        entries pushed on the undo stack. after, if given, is called with the
+        input labels of the voxels after the write, under the edits' file
+        lock; if it raises, the edits are written back, nothing is pushed,
+        and its error propagates. Returns the undo (no voxel: nothing is
+        written or pushed) and the input labels of the voxels."""
         out: dict[str, Any] = {}
 
         def fn(cur: label_edits.Current) -> label_edits.Edits | None:
@@ -795,7 +808,11 @@ class Review:
             out.update(undo=undo, inp=inp)
             return new if len(undo) else None
 
-        cur = self._update(fn)
+        def step(cur: label_edits.Current) -> None:
+            assert after is not None
+            after(out["inp"])
+
+        cur = self._update(fn, None if after is None else step)
         undo: label_edits.Edits = out["undo"]
         if len(undo):
             assert cur.sha is not None
@@ -803,13 +820,12 @@ class Review:
             self._undo_sha.append(cur.sha)
         return undo, out["inp"]
 
-    def _pop_undo(self, check: bool = True) -> int:
+    def _pop_undo(self) -> int:
         """Under the lock: the top of the undo stack written back
         (label_edits.restore) and popped. Returns its number of voxels.
         Raises ValueError, and changes nothing, if the edits on disk are not
-        the ones that the top write left, or (check) if the outputs were
-        replaced (_update). check False: the roll-back of a write of the same
-        request, which the check let through."""
+        the ones that the top write left, or if the outputs were replaced
+        (_update)."""
         u, sha = self.undo[-1], self._undo_sha[-1]
 
         def fn(cur: label_edits.Current) -> label_edits.Edits:
@@ -820,7 +836,7 @@ class Review:
                 )
             return label_edits.restore(cur.edits, u)
 
-        self._update(fn, check)
+        self._update(fn)
         self.undo.pop()
         self._undo_sha.pop()
         return len(u)
@@ -1058,9 +1074,12 @@ class Review:
         strokes. Returns the answer's Id, the site's kind and how it was
         chosen (shown to the page only now, for a random site), the number of
         voxels written into the edits, and the depth of the undo stack.
-        Nothing is written if the edits refuse the answer. If the log refuses
-        it, the edits are written back and the undo entry is popped, so the
-        edits and the undo stack are as they were."""
+        Nothing is written if the edits refuse the answer. The log append is
+        the step after the write into the edits, under the edits' file lock
+        (label_edits.update, after), so no other writer writes between the
+        two. If the log refuses the answer, the edits are written back under
+        that lock and no undo entry is pushed, so the edits and the undo
+        stack are as they were, and the error is the log's."""
         s = self._need()
         c = parse_site(site)
         r = self._find(c)
@@ -1079,12 +1098,13 @@ class Review:
         else:
             box, lo = self.window(c, params)
             a = self.choices.answer(box, lo, c, choice, params)
-        with self.lock:
-            undo, inp = self._commit(a.voxels, a.labels)
+        ids: list[int] = []
+
+        def append(inp: Arr) -> None:
             # the eraser's voxels: the log records the label they take
             logged = np.where(a.labels == label_edits.INPUT, inp, a.labels)
-            try:
-                aid = self.log.answer(
+            ids.append(
+                self.log.answer(
                     s,
                     c,
                     choice,
@@ -1094,12 +1114,12 @@ class Review:
                     float(seconds),
                     params=a.params,
                 )
-            except BaseException:
-                if len(undo):
-                    self._pop_undo(check=False)
-                raise
+            )
+
+        with self.lock:
+            undo, _ = self._commit(a.voxels, a.labels, append)
         return dict(
-            answer=aid,
+            answer=ids[0],
             kind=r["kind"],
             how=r["how"],
             rank=r["rank"],
