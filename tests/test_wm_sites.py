@@ -221,83 +221,64 @@ def test_random_sites_from_a_surface_file(surf: Path) -> None:
 
 
 def _ring_run(
-    tmp_path: Path, answers: list[str]
+    tmp_path: Path, steps: list[str]
 ) -> tuple[Path, list[dict[str, Any]], np.ndarray]:
-    """dseg on the synthetic aseg of test_white_dseg, with a log whose
-    answers are given by name ("ring": verify the ring and its hole; "move":
-    move the rod 2 voxels). Returns the dseg, its fix sites and the fix
-    diff."""
+    """dseg on the synthetic aseg of test_white_dseg, after changes to the
+    label edits, given by name: "ring" (a diff that holds the ring and its
+    hole with their input labels), "accept:<fix id>" (paint the fix's voxels
+    with the fix's labels: the choice "accept the fix" of an override site),
+    "move" (paint the rod 2 voxels lower). Returns the dseg, its fix sites
+    and the fix diff."""
     from test_white_dseg import VOX, synthetic_aseg
 
-    from baillarger import fix_diff, white_dseg
-    from baillarger import wm_edits as E
+    from baillarger import bids, fix_diff, white_dseg
+    from baillarger import label_edits as LE
 
     a = synthetic_aseg()
+    A = np.diag([*VOX, 1.0])
     src = tmp_path / "in" / "sub-T01_ses-S1_aseg.nii.gz"
     if not src.exists():
         src.parent.mkdir(parents=True)
-        nib.save(nib.nifti1.Nifti1Image(a, np.diag([*VOX, 1.0])), src)
+        nib.save(nib.nifti1.Nifti1Image(a, A), src)
     out = tmp_path / "deriv"
-    p = E.edits_paths(out, dict(sub="T01", ses="S1"))
-    log = (
-        E.EditLog(p["log"])
-        if p["log"].exists()
-        else E.EditLog.create(p["log"], src, "R")
-    )
-    rod = (27, 16, 25)
-    for name in answers:
-        s = log.start_session(0.0, None, "x", "y")
-        log.shown(s, rod, "override", 1)
+    ep = LE.bids_path(out, bids.entities(src), "R")
+    e = LE.read(ep) if ep.exists() else LE.empty()
+    for name in steps:
         if name == "ring":
             box = np.zeros(a.shape, bool)
             box[25:37, 3:33, 22:28] = True
-            log.answer(s, rod, "manual-paint", np.argwhere(box), a[box], "x", 1.0)
+            idx = np.flatnonzero(box).astype(np.int64)
+            e = LE.Edits(idx, a.reshape(-1)[idx].astype(np.int32))
         elif name == "move":
             v = [(27, 16, 25), (27, 17, 25), (27, 16, 23), (27, 17, 23)]
-            log.answer(s, rod, "manual-paint", v, [0, 0, 41, 41], "x", 1.0)
-        elif name.startswith("leave:"):
-            fix_id, sha = name.split(":")[1:]
-            log.answer(
-                s,
-                rod,
-                "leave",
-                [],
-                [],
-                "x",
-                1.0,
-                accepts=dict(FixId=int(fix_id), FixDiffSHA256=sha),
+            e, _ = LE.paint(e, a, v, [0, 0, 41, 41])
+        elif name.startswith("accept:"):
+            diff = fix_diff.read_diff(
+                out / "sub-T01/ses-S1/anat/sub-T01_ses-S1_desc-wmtopofixes_diff.npy",
+                a.shape,
             )
-    w = white_dseg.write_wm_topo(src, out, log.path)
+            idx, new = fix_diff.fix_voxels(diff, int(name.split(":")[1]))
+            ijk = np.stack(np.unravel_index(idx, a.shape), 1)
+            e, _ = LE.paint(e, a, ijk, new)
+    LE.write(ep, e, hemisphere="R", shape=a.shape, affine=A)
+    w = white_dseg.write_wm_topo(src, out, ep)
     diff = fix_diff.read_diff(w["diff"], a.shape)
     seg = np.asarray(nib.nifti1.load(w["dseg"]).dataobj)
     fx = np.asarray(nib.nifti1.load(w["fixes"]).dataobj)
-    acc = WS.accepted_fixes(log.read(), white_dseg.history_dir(w["dseg"]), a.shape)
     rows = WS.fix_sites(
-        fix_diff.read_table(w["table"]),
-        diff,
-        acc,
-        seg,
-        white_dseg.FILLED_LABELS["R"],
-        fx,
+        fix_diff.read_table(w["table"]), seg, white_dseg.FILLED_LABELS["R"], fx
     )
     return w["dseg"], rows, diff
 
 
-def test_an_override_is_a_site_until_leave_accepts_it(tmp_path: Path) -> None:
-    from baillarger import bids
-
-    dseg, rows, _ = _ring_run(tmp_path, ["ring"])
+def test_an_override_is_a_site_until_its_fix_is_in_the_edits(tmp_path: Path) -> None:
+    _, rows, _ = _ring_run(tmp_path, ["ring"])
     over = [r for r in rows if r["kind"] == "override"]
     assert len(over) == 1 and (over[0]["i"], over[0]["k"]) == (27, 25)
-    fixes = dseg.with_name(
-        dseg.name.replace("wmtopo_dseg.nii.gz", "wmtopofixes_diff.json")
-    )
-    sha = bids.read_sidecar(fixes, white_dseg.FIXES_SPEC)["DiffSHA256"]
-    # leave at the site accepts the fix: a rerun with the same input does
-    # not queue it
-    _, rows, _ = _ring_run(tmp_path, [f"leave:{over[0]['fix']}:{sha}"])
+    # the fix's labels written into the edits: the next run has no override
+    _, rows, _ = _ring_run(tmp_path, [f"accept:{over[0]['fix']}"])
     assert not [r for r in rows if r["kind"] == "override"]
-    # an answer that moves the rod moves the fix: the site is back
+    # an edit that moves the rod moves the fix: the site is back
     _, rows, _ = _ring_run(tmp_path, ["move"])
     over2 = [r for r in rows if r["kind"] == "override"]
     assert len(over2) == 1 and over2[0]["k"] == 23

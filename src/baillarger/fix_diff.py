@@ -1,9 +1,9 @@
 """The fixes of the WM topology correction as a table and a sparse diff
 (docs/formats/wm-dseg.md, wm-dseg-fixes/1).
 
-dseg reads the input labels, replays the answers over them, then corrects
-the topology. The diff is the change from the labels with the answers
-replayed ("old") to the labels that dseg writes ("new"): one row per changed
+dseg reads the input labels, applies the label edits to them, then corrects
+the topology. The diff is the change from the labels with the edits
+applied ("old") to the labels that dseg writes ("new"): one row per changed
 voxel, with the id of the fix that changed it last. Each fix has one row in
 the table. The ids are in a fixed order (baillarger.white_dseg.wm_topo), so
 the same input gives the same ids.
@@ -133,7 +133,7 @@ def read_diff(path: Path, shape: tuple[int, ...]) -> Rows:
 
 def apply_diff(old: npt.ArrayLike, rows: Rows) -> npt.NDArray[Any]:
     """The corrected labels: a copy of the labels old (the input with the
-    answers replayed) with the diff written in. Raises ValueError if a
+    label edits applied) with the diff written in. Raises ValueError if a
     voxel's label is not the row's old label."""
     a = np.asarray(old)
     flat = a.reshape(-1)
@@ -171,17 +171,6 @@ def fix_voxels(rows: Rows, fix_id: int) -> tuple[Int, Int]:
     )
 
 
-def same_fix(a: tuple[Int, Int], b: tuple[Int, Int]) -> bool:
-    """Whether two fixes (fix_voxels) are the same: the same voxels with the
-    same new labels."""
-    return bool(np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1]))
-
-
-def overlap(a: tuple[Int, Int], b: tuple[Int, Int]) -> bool:
-    """Whether two fixes (fix_voxels) share a voxel."""
-    return bool(np.intersect1d(a[0], b[0]).size)
-
-
 # ------------------------------------------------------------------ the table
 
 
@@ -190,7 +179,7 @@ class Fix:
     """One fix: its id, kind (a value of baillarger.white_dseg.FIXES), the
     linear indices of the voxels that it changed last, the size of its wall
     (voxels claimed by the other front; None if the fix has no wall) and the
-    Id of the answer that it overrides (None if none)."""
+    number of edited voxels that it changes (None if none)."""
 
     id: int
     kind: str

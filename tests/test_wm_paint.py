@@ -1,6 +1,6 @@
 """Tests for the crop of the WM labels (baillarger.wm_paint): the export, the
-changes that the import reads back, the answer that the import appends, and
-the command line."""
+changes that the import reads back, the answer that the import appends, the
+edits that it writes into the diff, and the command line."""
 
 from pathlib import Path
 
@@ -9,7 +9,8 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from baillarger import bids
+from baillarger import bids, white_dseg
+from baillarger import label_edits as LE
 from baillarger import wm_edits as E
 from baillarger import wm_paint as P
 from baillarger.wm_choices import box_round
@@ -36,9 +37,18 @@ def phantom() -> npt.NDArray[np.int16]:
 
 @pytest.fixture
 def dseg(tmp_path: Path) -> Path:
-    p = tmp_path / "sub-T01_ses-S1_desc-wmtopo_dseg.nii.gz"
-    nib.save(nib.nifti1.Nifti1Image(phantom(), AFFINE), p)
+    """The dseg of the phantom (white_dseg: no change), whose input labels are
+    the phantom."""
+    src = tmp_path / "in" / "sub-T01_ses-S1_aseg.nii.gz"
+    src.parent.mkdir()
+    nib.save(nib.nifti1.Nifti1Image(phantom(), AFFINE), src)
+    p = white_dseg.write_wm_topo(src, tmp_path / "deriv")["dseg"]
+    assert np.array_equal(np.asanyarray(load(p).dataobj), phantom())
     return p
+
+
+def edits_path(tmp_path: Path) -> Path:
+    return LE.bids_path(tmp_path / "deriv", dict(sub="T01", ses="S1"), "R")
 
 
 def echo(
@@ -90,8 +100,9 @@ def test_export_then_import_with_no_change_gives_no_voxels(
     log = make_log(tmp_path, dseg)
     s = session(log)
     out = P.export(dseg, SITE, tmp_path / "crop", (), HALF)
-    a = P.import_paint(out, log.path, s, 5.0)
+    a = P.import_paint(out, log.path, edits_path(tmp_path), s, 5.0)
     assert log.read().voxels(a)[0].shape == (0, 3)
+    assert len(LE.read(edits_path(tmp_path))) == 0
 
 
 def test_one_painted_voxel_is_one_voxel_at_its_grid_position(
@@ -105,11 +116,51 @@ def test_one_painted_voxel_is_one_voxel_at_its_grid_position(
     data = np.asanyarray(img.dataobj).copy()
     data[1, 1, 1] = 0
     nib.save(nib.nifti1.Nifti1Image(data, img.affine), labels_path)
-    a = P.import_paint(out, log.path, s, 5.0)
+    a = P.import_paint(out, log.path, edits_path(tmp_path), s, 5.0)
     vox, lab, _ = log.read().voxels(a)
     assert vox.tolist() == [[12, 7, 5]] and lab.tolist() == [0]
     # the grid voxel and the painted crop voxel are the same world point
     assert np.allclose(AFFINE @ [*vox[0].tolist(), 1], img.affine @ [1, 1, 1, 1])
+    # the queue answer is written into the diff
+    e, side, _ = LE.read_with_sidecar(edits_path(tmp_path))
+    assert e.index.tolist() == [int(np.ravel_multi_index((12, 7, 5), SHAPE))]
+    assert e.label.tolist() == [0] and side["Hemisphere"] == "R"
+    assert np.allclose(np.reshape(side["Affine"], (4, 4)), AFFINE)
+
+
+def test_import_writes_only_changes_from_the_input_into_the_diff(
+    tmp_path: Path, dseg: Path
+) -> None:
+    """The diff has edits that the dseg on the screen does not show yet. A
+    voxel painted with the label that the diff gives it is in the answer, but
+    it is not a change of the diff; the other painted voxels are written, and
+    the other entries stay."""
+    ep = edits_path(tmp_path)
+    far, same, near, new = (
+        int(np.ravel_multi_index(v, SHAPE))
+        for v in ((0, 0, 0), (12, 7, 7), (12, 7, 5), (12, 7, 6))
+    )
+    LE.write(
+        ep,
+        LE.Edits(np.array([far, near, same], np.int64), np.array([0, 0, 42], np.int32)),
+        hemisphere="R",
+        shape=SHAPE,
+        affine=AFFINE,
+    )
+    log = make_log(tmp_path, dseg)
+    s = session(log)
+    out = P.export(dseg, SITE, tmp_path / "crop", (), HALF)
+    img = load(out / P.LABELS)
+    data = np.asanyarray(img.dataobj).copy()
+    data[1, 1, 1] = 42  # (12, 7, 5): the diff has 0
+    data[1, 1, 2] = 42  # (12, 7, 6): a new edit
+    data[1, 1, 3] = 42  # (12, 7, 7): the diff has 42 already
+    nib.save(nib.nifti1.Nifti1Image(data, img.affine), out / P.LABELS)
+    a = P.import_paint(out, log.path, ep, s, 5.0)
+    assert len(log.read().voxels(a)[0]) == 3
+    e = LE.read(ep)
+    assert e.index.tolist() == [far, near, new, same]
+    assert e.label.tolist() == [0, 42, 42, 42]
 
 
 def test_an_echo_on_another_grid_is_refused(tmp_path: Path, dseg: Path) -> None:
@@ -129,7 +180,20 @@ def test_import_refuses_a_log_on_another_grid(tmp_path: Path, dseg: Path) -> Non
     log = make_log(other_dir, other)
     s = session(log)
     with pytest.raises(ValueError, match="grid"):
-        P.import_paint(out, log.path, s, 1.0)
+        P.import_paint(out, log.path, edits_path(tmp_path), s, 1.0)
+    # a diff on another grid
+    log = make_log(tmp_path, dseg)
+    s = session(log)
+    LE.write(
+        edits_path(tmp_path),
+        LE.empty(),
+        hemisphere="R",
+        shape=(SHAPE[0] - 1, *SHAPE[1:]),
+        affine=AFFINE,
+    )
+    with pytest.raises(ValueError, match="grid"):
+        P.import_paint(out, log.path, edits_path(tmp_path), s, 1.0)
+    assert log.read().answers() == []
 
 
 def test_the_command_line_runs_export_and_import(
@@ -160,6 +224,8 @@ def test_the_command_line_runs_export_and_import(
             str(crop),
             "--log",
             str(log.path),
+            "--edits",
+            str(edits_path(tmp_path)),
             "--session",
             str(s),
             "--seconds",

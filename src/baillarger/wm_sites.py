@@ -63,12 +63,10 @@ from baillarger.bids import (
 )
 from baillarger.blocks import open_volume
 from baillarger.decimate import CHUNK, normals
-from baillarger.fix_diff import fix_voxels, overlap, read_diff, read_table, same_fix
+from baillarger.fix_diff import read_table
 from baillarger.labels import OUTSIDE, TO_OUTSIDE
 from baillarger.timing import log_to_stderr
-from baillarger.white_dseg import DSEG_SPEC, history_dir
 from baillarger.white_surf import SURF_SPEC, WhiteSurface
-from baillarger.wm_edits import Log, read_log
 
 type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.int64]
@@ -252,46 +250,25 @@ def find_sites(
     return Sites(out, len(bad))
 
 
-def accepted_fixes(
-    log: Log | None, history: Path, shape: tuple[int, ...]
-) -> list[tuple[Int, Int]]:
-    """The fixes (baillarger.fix_diff.fix_voxels) that a leave answer of the
-    log accepts (its Accepts), read from the kept runs in the history
-    directory. Raises FileNotFoundError if a kept run is not there."""
-    out = []
-    for a in [] if log is None else log.answers():
-        acc = a.get("Accepts")
-        if acc is None:
-            continue
-        rows = read_diff(history / f"{acc['FixDiffSHA256']}.npy", shape)
-        out.append(fix_voxels(rows, int(acc["FixId"])))
-    return out
-
-
 def fix_sites(
     table: list[dict[str, Any]],
-    diff: npt.NDArray[np.void],
-    accepted: list[tuple[Int, Int]],
     seg: npt.NDArray[np.integer[Any]],
     filled: tuple[int, ...],
     fixes: npt.NDArray[np.integer[Any]],
     min_wall: int = MIN_WALL,
 ) -> list[dict[str, Any]]:
-    """The sites of the fix table (baillarger.fix_diff.read_table) and the
-    fix diff, with no rank: kind override for each fix that overrides an
-    answer, unless an accepted fix matches it (it overlaps the fix and has the
-    same voxels with the same new labels); kind handle-fix for each other
-    handle fix with a wall of min_wall voxels or more. The site is the fix's
-    i, j, k."""
+    """The sites of the fix table (baillarger.fix_diff.read_table), with no
+    rank: kind override for each fix that changes an edited voxel (its
+    overrides is not n/a); kind handle-fix for each other handle fix with a
+    wall of min_wall voxels or more. The site is the fix's i, j, k. To
+    accept the fix of an override site, the user writes the fix's labels into
+    the label edits: the next dseg then has no override there."""
     mask = np.isin(seg, filled)
     out = []
     for r in table:
         if r["i"] is None:
             continue
         if r["overrides"] is not None:
-            mine = fix_voxels(diff, r["id"])
-            if any(overlap(mine, a) and same_fix(mine, a) for a in accepted):
-                continue
             kind = "override"
         elif (
             r["kind"] in ("handle_cut", "handle_fill") and (r["wall"] or 0) >= min_wall
@@ -423,17 +400,11 @@ def write_sites(surf: Path, out: Path | None = None) -> dict[str, Path]:
     S = find_sites(L.v_vox, L.f, L.v_mm, L.seg, filled, L.fx)
     stem = dseg.name.removesuffix("_desc-wmtopo_dseg.nii.gz")
     table_path = dseg.with_name(f"{stem}_desc-wmtopofixes_fixes.tsv")
-    diff_path = dseg.with_name(f"{stem}_desc-wmtopofixes_diff.npy")
     extra: list[Path] = []
     fix_rows: list[dict[str, Any]] = []
     if table_path.exists():
-        dside = read_sidecar(sidecar_path(dseg), DSEG_SPEC)
-        logs = [Path(q) for q in dside["Sources"] if q.endswith(".jsonl")]
-        log = read_log(logs[0]) if logs else None
-        diff = read_diff(diff_path, L.seg.shape)
-        acc = accepted_fixes(log, history_dir(dseg), L.seg.shape)
-        fix_rows = fix_sites(read_table(table_path), diff, acc, L.seg, filled, L.fx)
-        extra = [table_path, diff_path, *logs]
+        fix_rows = fix_sites(read_table(table_path), L.seg, filled, L.fx)
+        extra = [table_path]
     rows = queue(S.rows, fix_rows)
     p = sites_paths(surf, out)
     p["table"].parent.mkdir(parents=True, exist_ok=True)

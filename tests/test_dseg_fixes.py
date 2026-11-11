@@ -13,7 +13,6 @@ from test_white_dseg import VOX, synthetic_aseg
 
 from baillarger import bids, white_dseg
 from baillarger import fix_diff as D
-from baillarger import wm_edits as E
 
 
 def two_blocks() -> npt.NDArray[np.int16]:
@@ -67,21 +66,6 @@ def test_replay_reproduces_desc_wmtopo_byte_for_byte() -> None:
     a = two_blocks()
     t = white_dseg.wm_topo(a, VOX)
     assert white_dseg.replay_dseg(a, t.diff).tobytes() == t.dseg.tobytes()
-
-
-def test_replay_with_answers(tmp_path: Path) -> None:
-    a = synthetic_aseg()
-    rod = [(27, 16, 25), (27, 17, 25)]
-    src = written(tmp_path, a)
-    log = E.EditLog.create(tmp_path / "e_edits.jsonl", src, "R")
-    s = log.start_session(0.0, None, "x", "y")
-    log.shown(s, rod[0], "misfacing", 1)
-    log.answer(s, rod[0], "remove-strand", rod, [0, 0], "x", 1.0)
-    L = log.read()
-    t = white_dseg.wm_topo(a, VOX, L)
-    assert t.fix_list[0].kind == "manual_edit" and len(t.fix_list[0].index) == 2
-    assert white_dseg.replay_dseg(a, t.diff, L).tobytes() == t.dseg.tobytes()
-    assert (t.fixes == 4).sum() == 2
 
 
 def test_revert_changes_only_that_fix() -> None:
