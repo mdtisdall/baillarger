@@ -461,9 +461,10 @@ def test_an_answer_writes_its_labels_into_the_diff(server: Any) -> None:
         base + "/review/answer",
         dict(site="5,5,5", choice="thicken", params={}, reviewer_seconds=1.0),
     )
-    # (5, 5, 5): 42 on input 41; (6, 5, 5): 41 on input 0 (the correction's)
-    assert diff(files) == {(5, 5, 5): 42, (6, 5, 5): 41}
-    assert out["edited"] == 2
+    # (5, 5, 5): 42 on dseg 41; (6, 5, 5): 41 is its dseg label (the
+    # correction's, on input 0): no edit
+    assert diff(files) == {(5, 5, 5): 42}
+    assert out["edited"] == 1
     side = json.loads(LE.edits_paths(files["edits"])["sidecar"].read_text())
     assert side["Hemisphere"] == "R" and side["Shape"] == list(SHAPE)
     assert np.allclose(np.reshape(side["Affine"], (4, 4)), A)
@@ -481,13 +482,29 @@ def test_an_answer_writes_only_the_voxels_whose_label_changes(server: Any) -> No
         base + "/review/answer",
         dict(site="5,5,5", choice="thicken", params={}, reviewer_seconds=1.0),
     )
-    # (8, 6, 7): 42 is its input label, and it has no entry: not written
+    # (9, 6, 7): 41 is its dseg label, and it has no entry: not written
     out = post(
         base + "/review/answer",
         dict(site="8,6,7", choice="thicken", params={}, reviewer_seconds=1.0),
     )
     assert out["edited"] == 1
-    assert diff(files) == {(5, 5, 5): 42, (6, 5, 5): 41, (9, 6, 7): 41}
+    assert diff(files) == {(5, 5, 5): 42, (8, 6, 7): 42}
+
+
+def test_an_answer_at_a_corrected_voxel_is_an_edit(server: Any) -> None:
+    """(8, 6, 7) is 42 in the input labels and 41 in the dseg (the
+    correction's). An answer that sets it back to 42 writes an entry 42, so
+    the next regeneration does not make the same correction there."""
+    base, rv, files = server
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    get(base + "/review/next")
+    get(base + "/review/next")
+    out = post(
+        base + "/review/answer",
+        dict(site="8,6,7", choice="thicken", params={}, reviewer_seconds=1.0),
+    )
+    assert out["edited"] > 0
+    assert diff(files) == {(8, 6, 7): 42}
 
 
 def test_a_later_answer_replaces_the_labels_of_an_earlier_one(
@@ -507,7 +524,7 @@ def test_a_later_answer_replaces_the_labels_of_an_earlier_one(
         affine=A,
     )
     rv.answer("5,5,5", "thicken", {}, 1.0)
-    assert diff(files) == {(5, 5, 5): 42, (6, 5, 5): 41}
+    assert diff(files) == {(5, 5, 5): 42}
 
 
 def test_leave_and_a_refused_answer_write_nothing(server: Any) -> None:
@@ -553,7 +570,7 @@ def test_the_input_labels_default_to_the_dseg_sources(files: dict[str, Path]) ->
     rv.start(0, None)
     rv.next()
     rv.answer("5,5,5", "thicken", {}, 1.0)
-    assert diff(files) == {(5, 5, 5): 42, (6, 5, 5): 41}
+    assert diff(files) == {(5, 5, 5): 42}
 
 
 # ------------------------------------------------------- accept the fix
@@ -687,10 +704,10 @@ def test_a_label_not_in_the_menu_is_refused_and_nothing_is_written(
 
 def test_a_voxel_with_its_current_label_is_not_written(server: Any) -> None:
     base, rv, files = server
-    # (4, 4, 4) is 41 in the input labels; (8, 6, 7) is 42 there (the dseg's 41)
+    # (4, 4, 4) is 41 in the dseg; (8, 6, 7) is 41 there (its input label: 42)
     out = post(
         base + "/review/paint",
-        dict(strokes=paint_strokes((41, [(4, 4, 4)]), (42, [(8, 6, 7)]))),
+        dict(strokes=paint_strokes((41, [(4, 4, 4)]), (41, [(8, 6, 7)]))),
     )
     assert out == dict(voxels=0, undo_depth=0)
     assert not files["edits"].exists()
@@ -870,8 +887,8 @@ def test_undo_reverses_the_last_write_also_a_queue_answer(server: Any) -> None:
         dict(site="5,5,5", choice="thicken", params={}, reviewer_seconds=1.0),
     )
     assert out["undo_depth"] == 2
-    assert diff(files) == {(5, 5, 5): 42, (6, 5, 5): 41}
-    assert post(base + "/review/undo", {}) == dict(voxels=2, undo_depth=1)
+    assert diff(files) == {(5, 5, 5): 42}
+    assert post(base + "/review/undo", {}) == dict(voxels=1, undo_depth=1)
     assert diff(files) == after_paint
     # the log keeps the undone answer
     assert records(files)[-1]["Id"] == out["answer"]

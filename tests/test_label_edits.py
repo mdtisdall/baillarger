@@ -166,6 +166,43 @@ def test_paint_keeps_only_the_voxels_whose_label_changes() -> None:
     assert same(undo3, edits({(4, 4, 4): 0}))
 
 
+def test_a_paint_against_the_correction_is_an_edit() -> None:
+    """A paint compares with the dseg (the labels that the user sees), not
+    with the input labels: a voxel that the correction changed (input 0,
+    dseg 41), painted back to 0, gets an entry 0, and the undo removes it."""
+    a = labels()
+    a[0, 0, 0] = 0
+    d = a.copy()
+    d[0, 0, 0] = 41  # the correction's fill
+    e, undo = LE.paint(LE.empty(), a, [(0, 0, 0)], [0], dseg=d)
+    assert same(e, edits({(0, 0, 0): 0}))
+    assert same(undo, edits({(0, 0, 0): -1}))
+    assert len(LE.restore(e, undo)) == 0
+    # painted 41, its dseg label, it is no edit
+    e2, undo2 = LE.paint(LE.empty(), a, [(0, 0, 0)], [41], dseg=d)
+    assert len(e2) == len(undo2) == 0
+    # the eraser changes no voxel without an entry, also where dseg != input
+    e3, undo3 = LE.paint(LE.empty(), a, [(0, 0, 0)], [-1], dseg=d)
+    assert len(e3) == len(undo3) == 0
+    with pytest.raises(ValueError, match="differ in shape"):
+        LE.paint(LE.empty(), a, [(0, 0, 0)], [0], dseg=d[:-1])
+
+
+def test_a_paint_does_not_depend_on_the_history() -> None:
+    """Paint 41 and then 0 gives the same diff as paint 0 alone, on a voxel
+    that the correction changed and on one that it did not."""
+    a = labels()
+    a[0, 0, 0] = 0
+    d = a.copy()
+    d[0, 0, 0] = 41
+    vox = [(0, 0, 0), (1, 1, 1)]
+    once, _ = LE.paint(LE.empty(), a, vox, [0, 0], dseg=d)
+    first, _ = LE.paint(LE.empty(), a, vox, [41, 41], dseg=d)
+    twice, _ = LE.paint(first, a, vox, [0, 0], dseg=d)
+    assert same(once, twice)
+    assert same(once, edits({(0, 0, 0): 0, (1, 1, 1): 0}))
+
+
 def test_the_eraser_removes_voxels_from_the_diff() -> None:
     a = labels()
     e = edits({(0, 0, 0): 41, (4, 4, 4): 41, (5, 5, 5): 0})
@@ -328,6 +365,26 @@ def test_overrides_and_manual_voxels_match_their_definition() -> None:
         n = int(np.isin(e.index, f.index).sum())
         assert f.overrides == (None if f.kind == "manual_edit" or not n else n)
         assert not np.isin(f.index, t.diff["index"]).any() or f.kind != "manual_edit"
+
+
+def test_a_paint_back_to_the_input_against_a_fix_is_verified() -> None:
+    """The cavity fill turns 8 voxels of cortex (input 42) into WM in the
+    dseg. Painted back to 42 against the dseg, they get entries 42: they are
+    verified (the fill that changes them reports overrides), and they are
+    not a manual_edit piece (their label is the input label)."""
+    a = synthetic_aseg()
+    t0 = white_dseg.wm_topo(a, VOX)
+    (fill,) = [f for f in t0.fix_list if f.kind == "cavity_fill"]
+    vox = np.stack(np.unravel_index(fill.index, a.shape), 1)
+    assert np.all(a.reshape(-1)[fill.index] == 42)
+    assert np.all(t0.dseg.reshape(-1)[fill.index] == 41)
+    e, _ = LE.paint(LE.empty(), a, vox, np.full(len(vox), 42), dseg=t0.dseg)
+    assert np.array_equal(e.index, np.sort(fill.index)) and np.all(e.label == 42)
+    t = white_dseg.wm_topo(a, VOX, e)
+    assert t.manual_voxels == 0
+    assert all(f.kind != "manual_edit" for f in t.fix_list)
+    (over,) = [f for f in t.fix_list if f.overrides is not None]
+    assert over.kind == "cavity_fill" and over.overrides == len(vox)
 
 
 def test_edits_apply_to_another_input_unchanged() -> None:

@@ -282,22 +282,33 @@ def paint(
     voxels: npt.ArrayLike,
     new: npt.ArrayLike,
     *,
+    dseg: npt.ArrayLike | None = None,
     offset: npt.ArrayLike = (0, 0, 0),
     shape: tuple[int, ...] | None = None,
 ) -> tuple[Edits, Edits]:
     """Paint voxels (N, 3) of the grid with new (a label per voxel, or INPUT
-    for the eraser). labels are the input labels: the whole grid, or a crop
-    of the grid of this shape whose voxel [0, 0, 0] is the grid voxel offset.
+    for the eraser). labels are the input labels and dseg the dseg's labels
+    (the labels that the user sees: the input labels after the automatic
+    correction), both of one shape: the whole grid, or a crop of the grid of
+    this shape whose voxel [0, 0, 0] is the grid voxel offset. dseg None
+    means that the dseg is the input labels (no correction).
 
-    Only the voxels whose label changes are written. The current label of a
-    voxel is its input label with the diff applied. A voxel whose new label
-    (the input label, for the eraser) is its current label does not change.
-    A painted voxel gets an entry with its new label; an erased voxel loses
-    its entry. Returns the new diff and the undo: the earlier entries of the
-    changed voxels (INPUT for no entry). Raises ValueError for a voxel outside
-    the grid or the labels, a voxel given twice, or a label not in
-    label-set/1."""
+    Only the voxels whose label changes are written. A paint compares with
+    the voxel's current label: its entry in the diff if it has one, else its
+    dseg label. A painted voxel whose new label is not its current label gets
+    an entry with its new label, also when the new label is its input label
+    (a paint back to the input label, against the correction). The eraser
+    removes the entry of a voxel that has one, and changes no other voxel.
+    Returns the new diff and the undo: the earlier entries of the changed
+    voxels (INPUT for no entry). Raises ValueError for a voxel outside the
+    grid or the labels, labels and dseg of different shapes, a voxel given
+    twice, or a label not in label-set/1."""
     a = np.asarray(labels)
+    d = a if dseg is None else np.asarray(dseg)
+    if d.shape != a.shape:
+        raise ValueError(
+            f"the input labels {a.shape} and the dseg {d.shape} differ in shape"
+        )
     grid = a.shape if shape is None else tuple(shape)
     off = np.asarray(offset, np.int64)
     v = np.asarray(voxels, np.int64).reshape(-1, 3)
@@ -316,12 +327,10 @@ def paint(
         idx = np.asarray(np.ravel_multi_index(tuple(v.T), grid), np.int64)
     if len(np.unique(idx)) != len(idx):
         raise ValueError("a voxel is given twice")
-    inp = a[tuple((v - off).T)].astype(np.int64) if len(v) else idx
+    shown = d[tuple((v - off).T)].astype(np.int64) if len(v) else idx
     earlier = _entries(edits, idx)
-    current = np.where(earlier == INPUT, inp, earlier)
-    target = np.where(nl == INPUT, inp, nl)
-    erase = (nl == INPUT) & (earlier != INPUT)
-    ch = (target != current) | erase
+    current = np.where(earlier == INPUT, shown, earlier)
+    ch = np.where(nl == INPUT, earlier != INPUT, nl != current)
     idx, nl, earlier = idx[ch], nl[ch], earlier[ch]
     order = np.argsort(idx)
     idx, nl, earlier = idx[order], nl[order], earlier[order]
