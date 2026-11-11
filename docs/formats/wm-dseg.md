@@ -205,7 +205,7 @@ costs a `dseg` run.
 |---|---|---|---|
 | `SpecVersion` | string | yes | `wm-dseg/1` |
 | `Description` | string | yes | What the file is |
-| `Sources` | array of strings | yes | The input segmentation, then the copy of the label edits (`_desc-wmtopo_edits.npy`) and its sidecar (absolute paths) |
+| `Sources` | array of strings | yes | The input segmentation, then the copy of the label edits (`_desc-wmtopo_edits.npy`; not its sidecar, which holds the time of the run) (absolute paths) |
 | `SourcesSHA256` | object | yes | SHA-256 of each source, by path |
 | `Provenance` | object | yes | `Created` (ISO 8601), `Function`, `Version` (baillarger), `Commit`, `Dirty` |
 | `Hemisphere` | string | yes | `R` or `L` |
