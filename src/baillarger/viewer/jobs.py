@@ -6,6 +6,11 @@ runs as a job, one job at a time, in a thread.
 - The state (status, key, label, the last LOG_LINES lines of the job's log,
   the error) is kept under a lock. The page reads it (status) and polls until
   the status is "done" or "error".
+- A failed job's error is reported one time, to the request with its key that
+  finds it (run, or wait after run). That request does not start the job
+  again. The next request with that key starts it again: a failure can be
+  transient, so it is not kept as a result. status() keeps the error for the
+  page until the next job starts.
 - The last keep_in_memory results are kept in memory. With a cache directory
   and a save and a load function, each result is also saved there, as
   <prefix>_<key><suffix>, so that a request for the same key later, or after a
@@ -52,6 +57,8 @@ class Jobs[R]:
         self.lock = threading.Lock()
         self.thread: threading.Thread | None = None
         self.state: dict[str, Any] = dict(status="idle", key=None, label=None, log=[])
+        #: whether the error in state was reported to a request (take_error)
+        self.reported = False
 
     def path(self, key: str) -> Path | None:
         """The file of the result with this key, or None without a cache."""
@@ -109,26 +116,60 @@ class Jobs[R]:
         self, key: str, label: str, work: Callable[[Log], R], wait: bool = False
     ) -> dict[str, Any]:
         """Start work (it gets the job's log function) as the job `key`, or find
-        it done. Returns {key, label, status}; status "done" when the result is
-        ready now."""
+        it done or failed. Returns {key, label, status}: status "done" when the
+        result is ready now, "running", or "error" (with "error") when the last
+        job with this key failed and its error was not reported yet (the work
+        does not run again: see the module docstring). wait: wait for the job
+        (wait)."""
         if self.has(key):
             with self.lock:
                 self.state.update(status="done", key=key, label=label)
             return dict(key=key, label=label, status="done")
         with self.lock:
-            if self.thread is not None and self.thread.is_alive():
+            err = self.take_error(key)
+            if err is not None:
+                return dict(key=key, label=label, status="error", error=err)
+            if self.state["status"] == "running":
                 raise RuntimeError(
                     f"a job is already running ({self.state['label']}): one at a time"
                 )
             self.state = dict(status="running", key=key, label=label, log=[])
+            self.reported = False
             self.thread = threading.Thread(
                 target=self._work, args=(key, work), daemon=True
             )
             self.thread.start()
-            th = self.thread
         if wait:
-            th.join()
-        return dict(key=key, label=label, status=self.status()["status"])
+            return self.wait(key, None)
+        return dict(key=key, label=label, status="running")
+
+    def wait(self, key: str, timeout: float | None) -> dict[str, Any]:
+        """Wait up to timeout s (None: until it ends) for the running job, then
+        the outcome for key, as run returns it: "done", "error" (reported now,
+        one time) or else the state's status ("running" while the job of key
+        runs)."""
+        th = self.thread
+        if th is not None:
+            th.join(timeout)
+        done = self.has(key)
+        with self.lock:
+            label = self.state["label"] if self.state["key"] == key else None
+            if done:
+                return dict(key=key, label=label, status="done")
+            err = self.take_error(key)
+            if err is not None:
+                return dict(key=key, label=label, status="error", error=err)
+            status = self.state["status"] if self.state["key"] == key else "idle"
+            return dict(key=key, label=label, status=status)
+
+    def take_error(self, key: str) -> str | None:
+        """The error of the last job if it had this key, failed, and its error
+        was not reported yet; then it is reported. Call it under the lock."""
+        st = self.state
+        if st["key"] != key or st["status"] != "error" or self.reported:
+            return None
+        self.reported = True
+        return str(st.get("error", "the job failed"))
 
     def _work(self, key: str, work: Callable[[Log], R]) -> None:
         try:

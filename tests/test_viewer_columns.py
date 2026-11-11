@@ -662,3 +662,41 @@ def test_the_page_has_no_reference_to_niivue() -> None:
         text = f.read_text().lower()
         assert "niivue" not in text, f.name
         assert "cdn.jsdelivr" not in text and "https://" not in text, f.name
+
+
+def test_a_failed_job_reaches_the_page(
+    cols: VC.Columns, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With WAIT_S = 0 every job outlasts its request: the first request answers
+    202, and the next one gives the job's error (400), not 202 for ever and
+    without a second run. The request after it runs the job again."""
+    calls: list[int] = []
+
+    def bad(req: VC.Request, log: Any = quiet) -> VC.Result:
+        calls.append(1)
+        time.sleep(0.05)
+        raise ValueError("more than the cap")
+
+    monkeypatch.setattr(cols, "compute", bad)
+    monkeypatch.setattr(VC, "WAIT_S", 0.0)
+    srv = VS.serve(None, 0, white=WhiteView.__new__(WhiteView), columns=cols)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        q = f"v={corner_vertex(cols)}&radius=0.9"  # a radius no other test asks for
+        for path in ("/columns", "/columns/profiles"):
+            calls.clear()
+            code, body = get(f"{base}{path}?{q}")
+            assert code == 202 and json.loads(body)["status"] == "running"
+            code, body = settled(f"{base}{path}?{q}")
+            assert code == 400
+            assert (
+                json.loads(body)["error"]
+                == "RuntimeError: ValueError: more than the cap"
+            )
+            assert calls == [1]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        VS.Handler.white = None
+        VS.Handler.columns = None
