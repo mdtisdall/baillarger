@@ -16,10 +16,13 @@ written specs. Phase 1.3 needs no viewer.
    (`wm-dseg-fixes/1`).
 3. `wm-edits/1` revised: answers stand on their own, in an append-only log,
    with scribbles, reviewer time, how each site was chosen, and session
-   records. `dseg` replays the answers in order. The topology guarantee wins
-   over an answer, and `dseg` marks and queues each such fix.
+   records. The log is the review queue's own record, which `dseg` does not
+   read. `white_dseg --edits` applies one current diff of (index, label)
+   records (`label-edits/1`, `docs/plans/label-editing.md`), with no edit
+   history. The topology guarantee wins over an edit, and `dseg` marks and
+   queues each such fix.
 4. The site-answer choices as published code with a written contract.
-5. The ITK-SNAP escape hatch, as a command.
+5. The ITK-SNAP bootstrap, as a command, kept until the viewer's paint works, then removed with `wm_paint`.
 
 ## Done when
 
@@ -27,8 +30,8 @@ written specs. Phase 1.3 needs no viewer.
    `docs/formats/wm-dseg.md` agree with the code. `tests/test_bids.py`
    checks each sidecar spec against its document.
 2. Each part passes the exact tests in its section below.
-3. The site finder, `dseg` with the fix table, and a replay of a test edit
-   log run on the hemisphere. The PR bodies give the diagnostics in
+3. The site finder, `dseg` with the fix table, and a test edits diff run on
+   the hemisphere. The PR bodies give the diagnostics in
    "The hemisphere runs".
 4. Phase 4.2 can write code against a stable API. Send the API (Part F) to
    the coordinator before PR 3 opens.
@@ -152,24 +155,24 @@ Follow the plan, §3c step 2, *Fixes are kept as a diff*.
    Do not add its column now.
 3. **The diff:** per changed voxel, its linear index, fix id, old label and
    new label, in Morton order of the 64³ block grid. "Old" is the label
-   after the answers are applied. Store it as a binary file with a sidecar.
+   after the edits are applied. Store it as a binary file with a sidecar.
    Choose the file format and give the reason in the spec (for example a
    NumPy `.npy` record array, or a `.tsv.gz`). It must be 12–16 bytes per
    voxel or less.
-4. **Replay and revert.** A function rebuilds `desc-wmtopo` from the input
-   labels, the answers and the diff. A function reverts one fix for
+4. **Rebuild and revert.** A function rebuilds `desc-wmtopo` from the input
+   labels, the edits diff and the fix diff. A function reverts one fix for
    inspection.
 5. **Each run's diff is kept.** The sidecar records the SHA-256 of the input
-   labels, P (none until phase 8), the edit log and the code version. A
+   labels, P (none until phase 8), the edits diff and the code version. A
    rerun checks that it reproduces the stored diff when the inputs match.
 6. Edit `docs/formats/wm-dseg.md` in place. Add the keys to `FIXES_SPEC`.
 
-Exact tests on phantoms: replay reproduces `desc-wmtopo` byte for byte;
+Exact tests on phantoms: a rebuild reproduces `desc-wmtopo` byte for byte;
 revert of one fix changes only that fix's voxels; the diff is in Morton
 order; ids are the same on two runs; the table's counts equal the fixes
 image's counts.
 
-### Part C: `wm-edits/1` revised, and `dseg` replay
+### Part C: `wm-edits/1` revised, and the edits diff
 
 Follow the plan, §3c steps 2 and 6, and §1 item 4. Edit `wm-edits.md` in
 place. Keep the name `wm-edits/1`.
@@ -197,16 +200,16 @@ place. Keep the name `wm-edits/1`.
 6. **Session records.** For each session: its id, start time, the random
    share chosen at its start, the random seed, and every site shown, with
    the sites skipped. Raw facts only. Do not compute a measure in the log.
-7. **`dseg` replays the site answers** in order, each writing its voxels
-   over the labels, before the correction. The SHA is provenance, not a
-   gate.
+7. **`white_dseg --edits` applies the edits diff** over the input labels,
+   before the correction. Each site answer writes its voxels into the diff.
+   The log is not read by `dseg`. The SHA is provenance, not a gate.
 8. **The topology guarantee wins.** Handle removal and the cavity fill rank
    verified voxels last. Where a defect can be fixed only through a
    verified voxel, `dseg` fixes it and marks the fix in the fix table as
    overriding an answer, with that answer's id. Ask the coordinator before
    you change the priority order in `handles.py`.
-9. **The way out of the queue** (§3c step 2): `leave` at an override site
-   accepts the fix, recorded as an answer. On a rerun, an answered override
+9. **The way out of the queue** (§3c step 2): the choice `accept-fix` at an override
+   site accepts the fix and writes its labels into the edits diff; `leave` writes nothing. On a rerun, an answered override
    site goes back to the queue only if its fix is new or different. Match
    fixes across runs by voxel overlap with the kept diffs. Write the
    overlap rule in the spec.
@@ -221,13 +224,13 @@ you fix it, because phase 4.2 writes this file.
 
 Exact tests on phantoms:
 
-- Replay order: two answers on the same voxel, the later wins.
+- Two answers on the same voxel: the diff keeps the later label.
 - Supersession: a correction is a new record, and the old record stays.
-- An answer applies to a different input label unchanged.
+- The diff applies to a different input label unchanged.
 - A scribble does not change `desc-wmtopo`.
 - An answer that leaves a handle: `dseg` fixes it, the fix table marks the
   override with the answer's id, and the site is in the queue.
-- `leave` at that site accepts the fix. On a rerun with the same input, the
+- The choice `accept-fix` at that site accepts the fix and writes its labels into the diff. On a rerun with the same input, the
   site is not in the queue. On a rerun where the fix moves, it is.
 - Update the seven tests in `tests/test_wm_edits.py` to the new model.
 
@@ -249,7 +252,7 @@ Exact tests on phantoms:
    correction would override the answer. The box has a halo in mm; give its
    size and the reason. Where the box cuts a handle, say what the preview
    cannot show.
-5. `manual-paint` is the escape hatch of Part E. It is not a function here.
+5. `manual-paint` is the paint of Part E. It is not a function here.
 6. Write the contract in `docs/formats/wm-choices.md`: inputs, parameters,
    outputs, units. It is code with a contract, like a sampler (plan §1).
 
@@ -259,15 +262,16 @@ else changes; a one-voxel gap is filled; a widened gap opens to two voxels;
 choice on a box gives the same voxels as on the whole phantom; the preview
 of an answer that leaves a handle shows the override.
 
-### Part E: the ITK-SNAP escape hatch
+### Part E: the ITK-SNAP bootstrap
 
 A command with two subcommands:
 
 1. `export`: write a crop of the echoes and the current `desc-wmtopo` round
    a site, as `.nii.gz`, with the crop's offset in the sidecar.
 2. `import`: read the painted crop, compare it with the exported labels,
-   and append one answer (`manual-paint`) with the changed voxels to the
-   log.
+   and write the changed voxels into the edits diff. The command is a
+   bootstrap only. It is kept until the viewer's paint works, then removed
+   with `wm_paint`.
 
 Exact tests: export then import with no change gives an answer with no
 voxels; one painted voxel gives one voxel at the right world position.
@@ -281,7 +285,7 @@ coordinator. Phase 4.2 calls these functions and writes nothing else:
 - start a session (random share, seed) and record each site shown or
   skipped;
 - run a choice and its preview at a site;
-- append a site answer or a scribble to the log;
+- write a site answer into the edits diff, and record it in the log;
 - read the log.
 
 ## The hemisphere runs
@@ -295,9 +299,9 @@ heavy job: ask the coordinator for a slot.
 2. **Part B:** `dseg` with the fix table and the diff. Counts by kind, the
    size of the diff file, a replay that reproduces `desc-wmtopo`, the time
    and the peak.
-3. **Part C:** a test log of three answers at real sites (one of each
-   choice that changes voxels), replayed by `dseg`. Report what changed. Do
-   not publish these answers as real answers. Name the file as a test.
+3. **Part C:** a test edits diff of three edits at real sites (one of each
+   choice that changes voxels), applied by `dseg`. Report what changed. Do
+   not publish these edits as real edits. Name the file as a test.
 
 ## Work breakdown
 
@@ -307,9 +311,9 @@ heavy job: ask the coordinator for a slot.
 | 2 | Part C: the spec draft for the log (send to the coordinator) | Phase session | 1, 3 |
 | 3 | Part D: the choice functions, without the preview | Sonnet sub-agent | 1, 2 |
 | 4 | Part B: fix ids, the table and the diff | Phase session | after 1.0.5's PR opens |
-| 5 | Part C: the log code and `dseg` replay, the override rule | Phase session | after 2 and 4 |
+| 5 | Part C: the log code and the edits diff, the override rule | Phase session | after 2 and 4 |
 | 6 | Part D: the preview | Phase session | after 3 and 5 |
-| 7 | Part E: the ITK-SNAP command | Haiku sub-agent, the phase session reviews | after 5 |
+| 7 | Part E: the ITK-SNAP bootstrap command | Haiku sub-agent, the phase session reviews | after 5 |
 | 8 | The hemisphere runs | Phase session | after each part |
 
 ## PRs

@@ -1,8 +1,10 @@
 # label-edits: the label edits of a hemisphere
 
 SpecVersion `label-edits/1`. Written by `baillarger.label_edits.write` (the
-ITK-SNAP import `python -m baillarger.wm_paint import`, and the copy that
-`python -m baillarger.white_dseg ASEG --edits EDITS --out DERIV` keeps). Read
+answers of the viewer's review queue, `baillarger.viewer.review` with
+`--edits`; the ITK-SNAP import `python -m baillarger.wm_paint import`; and the
+copy that `python -m baillarger.white_dseg ASEG --edits EDITS --out DERIV`
+keeps). Read
 by `baillarger.label_edits.read` and by the dseg command (`--edits`,
 `docs/formats/wm-dseg.md`). The sidecar's keys are enforced by
 `baillarger.label_edits.EDITS_SPEC`, and `tests/test_bids.py` checks that the
@@ -25,7 +27,10 @@ correction. Nothing else applies edits.
 - The diff applies to any input labels on its grid (`Shape`, `Affine`).
 
 The answer log of the review queue (`wm-edits/1`) is a separate record. The
-diff does not come from it.
+diff does not come from it: a site answer of the queue writes its labels into
+the diff (`baillarger.label_edits.paint`), and the log records the answer.
+At an override site, the choice `accept-fix` writes the fix's labels into the
+diff. A scribble is a record of the log only.
 
 ## Files
 

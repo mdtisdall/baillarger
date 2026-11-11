@@ -75,6 +75,7 @@ SITE_CHOICES = (
     "widen-gap",
     "leave",
     "manual-paint",
+    "accept-fix",
 )
 #: how a site was chosen
 HOW = ("ranked", "random", "none")

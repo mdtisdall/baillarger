@@ -1,6 +1,8 @@
 // The stream 1 review pane (phase 4.2): stream 1's queue of sites, the site answers with their previews, and scribbles,
-// written to the edit log (wm-edits/1) by the server (baillarger.viewer.review). The pane holds no stream 1 logic: the
-// server calls phase 1.3's code for the queue, the random sites, the choices, their previews and the log.
+// written to the edit log (wm-edits/1) by the server (baillarger.viewer.review). A site answer also writes its labels into
+// the label edits (label-edits/1), the diff that the dseg reads; a scribble does not. The pane holds no stream 1 logic: the
+// server calls phase 1.3's code for the queue, the random sites, the choices, their previews, the log and the edits.
+// "accept the fix" (accept-fix) shows at an override site only: it writes the site's fix's labels into the edits.
 //
 // A plug-in of the brick pane (window.BVP, as static/overlays.js): it draws the previews and the strokes on #bvo, takes the
 // pointer in brush mode, and puts its own pane in place of the surface pane when the server has a review (/review/queue).
@@ -11,6 +13,7 @@
 const CHOICES = [   // [name, key, label]
   ["remove-strand", "1", "remove strand"], ["thicken", "2", "thicken"], ["fill-gap", "3", "fill gap"],
   ["widen-gap", "4", "widen gap"], ["leave", "5", "leave"], ["manual-paint", "6", "manual paint"],
+  ["accept-fix", "7", "accept the fix"],
 ];
 const SITE_PX = 10;   // px per voxel (at least) when a site opens
 const COL = { answer: "rgba(64, 224, 255, 0.85)", correction: "rgba(255, 140, 0, 0.85)", site: "rgba(255, 255, 255, 0.9)" };
@@ -58,7 +61,7 @@ function pane() {
   </div>
   <div class="pbar"><span id="rvmsg" style="color:var(--mute)"></span></div>
   <div id="rvtable" style="overflow-y:auto;flex:1;min-height:0;font-size:12px"></div>
-  <div class="help" style="position:static;padding:2px 8px">keys: 1–6 choices · t thicken radius · Enter submit · s skip · n next ·
+  <div class="help" style="position:static;padding:2px 8px">keys: 1–7 choices · t thicken radius · Enter submit · s skip · n next ·
     b scribble on/off · w WM · c cortex · [ ] brush radius · x submit scribble · Esc clear strokes. Row: open that site.
     Preview: <span style="color:${COL.answer}">■ the answer</span> <span style="color:${COL.correction}">■ the correction</span></div>`;
   const surf = $("p-surface"); surf.style.display = "none"; surf.parentElement.insertBefore(p, surf.nextSibling);
@@ -126,7 +129,9 @@ function show(site) {   // the site is shown (the server recorded it): move ther
   BV.s = Math.max(BV.s, SITE_PX / R.vs);   // at least SITE_PX px per voxel, so that the preview squares show; a closer zoom stays
   R.api.crossHere(mm); R.api.update();
   $("rvsite").style.display = ""; $("rvsname").textContent = `site ${site.id}` + (site.kind ? ` (${site.kind})` : "");
-  for (const b of document.querySelectorAll("#rvsite button[data-choice]")) b.style.outline = "";
+  for (const b of document.querySelectorAll("#rvsite button[data-choice]")) {
+    b.style.outline = ""; if (b.dataset.choice === "accept-fix") b.style.display = site.kind === "override" ? "" : "none";
+  }
   $("rvprev").textContent = "pick a choice to see its preview"; $("rvprev").style.color = "";
   const s = R.sites.find(x => x.id === site.id); if (s && s.state === "not shown") s.state = "shown"; table();
 }
@@ -167,7 +172,8 @@ async function submit() {
   let r; try { r = await post("/review/answer", { site: R.cur.id, choice: R.choice, params: R.params, reviewer_seconds: secs }); }
   catch (e) { say(e.message, true); return; }
   const how = r.how === "random" ? "a random site" : `ranked ${r.rank ?? ""}`;
-  say(`answer ${r.answer} written: ${R.choice} at site ${R.cur.id} (${r.kind}, ${how}), ${secs.toFixed(1)} s`);
+  say(`answer ${r.answer} written: ${R.choice} at site ${R.cur.id} (${r.kind}, ${how}), ${secs.toFixed(1)} s;` +
+    ` ${r.edited} voxels written into the label edits`);
   const s = R.sites.find(x => x.id === R.cur.id); if (s) { s.state = "answered"; s.kind = r.kind; }
   R.preview = null; R.api.draw(); await refresh(); await next();
 }
@@ -254,7 +260,7 @@ function pointer(type, e, h) {   // brush mode: a left drag paints one stroke of
 // ------------------------------------------------------------------ keys
 function keys(e) {
   if (!R.on || e.metaKey || e.ctrlKey || e.altKey || ["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName)) return;
-  const c = CHOICES.find(x => x[1] === e.key);
+  const c = CHOICES.find(x => x[1] === e.key && (x[0] !== "accept-fix" || (R.cur && R.cur.kind === "override")));
   const act = c ? () => choose(c[0]) : {
     Enter: submit, s: skip, n: next, x: scribble,
     t: () => { $("rvthick").value = $("rvthick").value === "1" ? "2" : "1"; if (R.choice === "thicken") choose("thicken"); },
