@@ -317,6 +317,7 @@ BVP.push({
     if (C.pick >= 0 && disc(C.pick, "#fff", 4.5)) t.nroots++;
   },
   text(t) {
+    if (!$("ctile")) return "";   // the volume pane draws before build() makes the columns menus
     const n = shown($("ctile").value).cols.length;
     return (n ? ` · ${n} columns` : "") + (C.hl && $("chlv").checked ? ` · ${t.nroots || 0} section roots in this slice` : "");
   },
