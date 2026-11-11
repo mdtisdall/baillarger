@@ -28,14 +28,14 @@ Requests:
   the brick size, the dtype, the default window: read on first use),
   /volume/bricks?level=L&b=i,j,k;i,j,k;... (those bricks' bytes, one after another;
   gzip when the page accepts it).
-- Named volumes (baillarger.viewer.volumes: echo, echo1 to echo3, labels, wm,
-  fixes):
+- Named volumes (baillarger.viewer.volumes: echo, echo1 to echo3, labels, input,
+  wm, fixes):
   /volume/list, /volume/<name>/meta, /volume/<name>/bricks?level=&b=.
 - The stream 1 review (baillarger.viewer.review; with --sites, --log and
   --edits, or paint only with --edits alone):
-  GET /review/queue, /review/next, /review/preview?job=; POST /review/session,
-  /review/skip, /review/preview, /review/answer, /review/scribble,
-  /review/paint, /review/undo.
+  GET /review/queue, /review/next, /review/preview?job=, /review/pending;
+  POST /review/session, /review/skip, /review/preview, /review/answer,
+  /review/scribble, /review/paint, /review/undo.
 - Surface outlines (baillarger.viewer.outlines):
   /outline?axis=&mm=&box= (float32 segment ends, world mm).
 - The columns pane (baillarger.viewer.columns.route): /columns/meta,

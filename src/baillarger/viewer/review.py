@@ -70,12 +70,15 @@ Routes (Review.get, Review.post), JSON:
 - POST /review/undo: the last write into the label edits of this viewer run
   undone (Undo, below). {voxels, undo_depth}, or {error} if there is nothing
   to undo.
+- GET /review/pending: the pending edits (Pending, below). {voxels: [[i, j,
+  k], ...], labels: [...]}.
 
 Outputs replaced. At start, the review records the identity (os.stat:
-device, inode, mtime) of the dseg, the queue and the dseg's fix diff. If one
-of them changes while the viewer runs (regenerate replaced the outputs), a
-paint, an answer, an accept-fix and an undo are refused with an error that
-says to restart the viewer, and nothing is written: the review's labels, its
+device, inode, mtime) of the dseg, the queue, the dseg's fix diff and the
+dseg's copy of the edits. If one of them changes while the viewer runs
+(regenerate replaced the outputs), a paint, an answer, an accept-fix, an undo
+and /review/pending are refused with an error that says to restart the
+viewer, and nothing is written: the review's labels, its
 queue and the fix ids of its rows are those of the old outputs. The check is
 made under the edits' file lock, before each write into the edits.
 
@@ -129,6 +132,14 @@ submit is /review/answer {site, choice: manual-paint, strokes,
 reviewer_seconds}. It writes into the edits as a paint, and the log records
 the answer: the voxels of the strokes and the label each takes (the eraser's
 voxels: their input label). Its preview has no voxels.
+
+Pending. The pending edits are the edits that are not yet in the dseg on
+the screen: the voxels where the current edits and the dseg's copy of the
+edits that it used (white_dseg.output_paths: edits) differ
+(label_edits.differ), each with its label in the current edits. A voxel that
+the eraser removed from the edits takes its input label. After each paint and
+undo, the page asks for them again and draws them on the slice tiles; no
+brick volume changes. A dseg with no copy of the edits refuses the route.
 
 Paint only. With no queue and no log (sites and log None; the viewer's
 --edits alone), the review has the paint routes only; the hemisphere comes
@@ -447,10 +458,12 @@ class Review:
         self.dseg_sha = file_sha256(dseg)
         #: the outputs that the review reads, and their identities at start
         #: (_check_outputs)
-        diff_path = white_dseg.output_paths(Path(dseg))["diff"]
+        outs = white_dseg.output_paths(Path(dseg))
+        #: the dseg's copy of the edits that it used (_dseg_edits)
+        self._copy_path = outs["edits"]
+        self._copy: label_edits.Edits | None = None
         self._outputs: dict[Path, Identity] = {
-            Path(dseg): identity(Path(dseg)),
-            diff_path: identity(diff_path),
+            Path(p): identity(Path(p)) for p in (dseg, outs["diff"], outs["edits"])
         }
         if sites is not None:
             self._outputs[Path(sites)] = identity(Path(sites))
@@ -912,6 +925,38 @@ class Review:
         v = np.stack(np.unravel_index(idx, self.shape), 1).astype(np.int64)
         return fid, v, new
 
+    # -------------------------------------------------------------- pending
+    def _dseg_edits(self) -> label_edits.Edits:
+        """The dseg's copy of the edits that it used, read once (the outputs
+        check sees a new copy). Raises ValueError if the dseg has none."""
+        if self._copy is None:
+            if not label_edits.edits_paths(self._copy_path)["sidecar"].exists():
+                raise ValueError(
+                    f"{self._copy_path.name}: the dseg has no copy of the edits "
+                    f"that it used; regenerate the dseg"
+                )
+            self._copy = label_edits.read(
+                self._copy_path,
+                shape=self.shape,
+                affine=self.affine,
+                hemisphere=self.hemi,
+            )
+        return self._copy
+
+    def pending(self) -> dict[str, Any]:
+        """The pending edits (module docstring, Pending): {voxels, labels}, the
+        voxels in linear-index order. Raises ValueError if the outputs were
+        replaced or the dseg has no copy of the edits."""
+        with self.lock:
+            self._check_outputs()
+            idx, lab = label_edits.differ(self._read_edits(), self._dseg_edits())
+            v = np.stack(np.unravel_index(idx, self.shape), 1).astype(np.int64)
+            out = lab.astype(np.int64)
+            erased = out == label_edits.INPUT
+            if erased.any():
+                out[erased] = self._input_labels()[tuple(v[erased].T)]
+        return dict(voxels=v.tolist(), labels=out.tolist())
+
     # -------------------------------------------------------------- choices
     def window(self, site: Site, params: dict[str, Any]) -> tuple[Arr, Site]:
         """The labels (int64) in the box round a site that the choice with
@@ -1148,6 +1193,8 @@ class Review:
             return self.next(q.get("site"))
         if path == "/review/preview":
             return self.job(q["job"])
+        if path == "/review/pending":
+            return self.pending()
         raise KeyError(path)
 
     def post(self, path: str, req: dict[str, Any]) -> dict[str, Any]:

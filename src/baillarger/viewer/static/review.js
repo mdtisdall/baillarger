@@ -11,6 +11,12 @@
 // "manual paint" opens the paint mode, and Submit sends the strokes as the site's answer. With --edits alone the server
 // has no queue: the pane is paint only.
 //
+// Pending edits (/review/pending): the edits that are not yet in the dseg on the screen (the labels volume), each with
+// the label that it gives (an erased voxel: its input label). The pane draws them on the slice tiles with the preview
+// drawing, each square in its label's colour of the label overlay (/volume/labels/meta; outside: no fill) with an
+// outline. It asks for them at the start and after each write into the edits (a paint, an undo, a site answer); no brick
+// volume changes. The input labels are the volume "input" of the brick pane, to compare with the labels.
+//
 // A plug-in of the brick pane (window.BVP, as static/overlays.js): it draws the previews and the strokes on #bvo, takes the
 // pointer in brush mode, and puts its own pane in place of the surface pane when the server has a review (/review/queue).
 //
@@ -23,7 +29,8 @@ const CHOICES = [   // [name, key, label]
   ["accept-fix", "7", "accept the fix"],
 ];
 const SITE_PX = 10;   // px per voxel (at least) when a site opens
-const COL = { answer: "rgba(64, 224, 255, 0.85)", correction: "rgba(255, 140, 0, 0.85)", site: "rgba(255, 255, 255, 0.9)" };
+const COL = { answer: "rgba(64, 224, 255, 0.85)", correction: "rgba(255, 140, 0, 0.85)", site: "rgba(255, 255, 255, 0.9)",
+  pending: "rgba(255, 0, 255, 0.95)" };
 const STROKE_RGB = { wm: [245, 245, 245], cortex: [255, 70, 90], outside: [70, 140, 255], input: [255, 0, 255] };
 const PREVIEW_POLL_MS = 400;
 // the most preview voxels drawn on one tile; above it the tile draws the first MAX_DRAWN and says so. Measured with R.bench
@@ -31,7 +38,7 @@ const PREVIEW_POLL_MS = 400;
 const MAX_DRAWN = 50000;
 const R = window.REVIEW = {
   api: null, on: false, meta: null, sites: [], session: null, cur: null, t0: 0, choice: null, params: {}, preview: null,
-  previewSeq: 0, brush: false, mode: "paint", cls: null, radius: 1, undoDepth: 0, strokes: [], stroke: null, s0: 0, inv: null, A: null, revealed: new Map(),
+  previewSeq: 0, pending: null, pendingSeq: 0, labelRGBA: new Map(), brush: false, mode: "paint", cls: null, radius: 1, undoDepth: 0, strokes: [], stroke: null, s0: 0, inv: null, A: null, revealed: new Map(),
 };
 
 // ------------------------------------------------------------------ helpers
@@ -74,7 +81,8 @@ function pane() {
   <div class="help" style="position:static;padding:2px 8px">keys: 1–7 choices · t thicken radius · Enter submit · s skip · n next ·
     b brush on/off · p paint/scribble · w WM · c cortex · o outside · e eraser (input label) · [ ] brush radius · x submit strokes ·
     u undo the last write into the edits · Esc clear strokes. Row: open that site.
-    Preview: <span style="color:${COL.answer}">■ the answer</span> <span style="color:${COL.correction}">■ the correction</span></div>`;
+    Preview: <span style="color:${COL.answer}">■ the answer</span> <span style="color:${COL.correction}">■ the correction</span> ·
+    <span style="color:${COL.pending}">□</span> pending edits (not yet in the dseg), filled in their label's colour</div>`;
   const surf = $("p-surface"); surf.style.display = "none"; surf.parentElement.insertBefore(p, surf.nextSibling);
   for (const b of p.querySelectorAll("button[data-choice]")) b.onclick = () => choose(b.dataset.choice);
   $("rvthick").onchange = () => R.choice === "thicken" && choose("thicken");
@@ -190,13 +198,27 @@ async function choose(c) {
     ` (${(r.seconds ?? 0).toFixed(2)} s)` + w + cut;
   $("rvprev").style.color = r.overrides ? "#ffd23f" : "";
 }
-// the preview voxels by slice: for each voxel axis a, a map from the voxel's index along a to its voxels
-function index(r) {
-  const out = { overrides: r.overrides, n: r.answer.length + r.correction.length, by: [new Map(), new Map(), new Map()] };
-  for (const [kind, vs] of [["correction", r.correction], ["answer", r.answer]])
-    for (const v of vs) for (let a = 0; a < 3; a++) { const m = out.by[a]; if (!m.has(v[a])) m.set(v[a], []); m.get(v[a]).push([kind, v]); }
-  return out;
+// [kind, voxel] entries by slice: for each voxel axis a, a map from the voxel's index along a to its entries
+function bySlice(entries) {
+  const by = [new Map(), new Map(), new Map()];
+  for (const e of entries) for (let a = 0; a < 3; a++) { const m = by[a], k = e[1][a]; if (!m.has(k)) m.set(k, []); m.get(k).push(e); }
+  return by;
 }
+// the preview voxels by slice
+function index(r) {
+  const entries = [...r.correction.map(v => ["correction", v]), ...r.answer.map(v => ["answer", v])];
+  return { overrides: r.overrides, n: entries.length, by: bySlice(entries) };
+}
+// the pending edits (the module comment), asked again after each write into the edits; a newer request wins
+async function pending() {
+  const seq = ++R.pendingSeq;
+  let r; try { r = await getj("/review/pending"); } catch (e) { if (seq === R.pendingSeq) { R.pending = null; strokesInfo(); say(`pending edits: ${e.message}`, true); R.api.draw(); } return; }
+  if (seq !== R.pendingSeq) return;
+  R.pending = { n: r.voxels.length, by: bySlice(r.voxels.map((v, i) => [r.labels[i], v])) };
+  strokesInfo(); R.api.draw();
+}
+// the label overlay's colour of a label: its colour table (/volume/labels/meta); outside and a label not in it: no fill
+const labelFill = lab => { const c = R.labelRGBA.get(lab); return c ? `rgba(${c[0]}, ${c[1]}, ${c[2]}, 0.85)` : null; };
 async function submit() {
   if (!R.cur || !R.choice) { say("open a site and pick a choice first", true); return; }
   const manual = R.choice === "manual-paint";
@@ -207,7 +229,7 @@ async function submit() {
   let r; try { r = await post("/review/answer", body); }
   catch (e) { say(e.message, true); return; }
   if (manual) R.strokes = [];
-  R.undoDepth = r.undo_depth; strokesInfo();
+  R.undoDepth = r.undo_depth; strokesInfo(); pending();
   const how = r.how === "random" ? "a random site" : `ranked ${r.rank ?? ""}`;
   say(`answer ${r.answer} written: ${R.choice} at site ${R.cur.id} (${r.kind}, ${how}), ${secs.toFixed(1)} s;` +
     ` ${r.edited} voxels written into the label edits`);
@@ -223,7 +245,8 @@ async function skip() {
 // ------------------------------------------------------------------ scribbles
 function strokesInfo() {
   const n = R.strokes.reduce((a, s) => a + s.voxels.size, 0);
-  $("rvsn").textContent = (R.strokes.length ? `${R.strokes.length} ${R.mode} strokes, ${n} voxels · ` : "") + `undo: ${R.undoDepth} writes`;
+  $("rvsn").textContent = (R.strokes.length ? `${R.strokes.length} ${R.mode} strokes, ${n} voxels · ` : "") + `undo: ${R.undoDepth} writes` +
+    (R.pending ? ` · pending: ${R.pending.n} voxels` : "");
   $("rvundo").disabled = !R.undoDepth;
 }
 const paintStrokes = () => R.strokes.map(s => ({ label: s.value, voxels: [...s.voxels.values()] }));
@@ -249,13 +272,13 @@ async function submitStrokes() {
   let r; try { r = await post("/review/paint", { strokes }); } catch (e) { say(e.message, true); return; }
   R.undoDepth = r.undo_depth;
   say(`paint written: ${r.voxels} of ${strokes.reduce((a, s) => a + s.voxels.length, 0)} voxels changed their label in the label edits` +
-    " (the labels volume still shows the dseg)");
-  R.strokes = []; strokesInfo(); R.api.draw();
+    " (drawn as pending edits: the labels volume still shows the dseg)");
+  R.strokes = []; strokesInfo(); R.api.draw(); pending();
 }
 async function undo() {
   if (R.strokes.length || R.stroke) { say("submit or clear the strokes first (Esc)", true); return; }
   let r; try { r = await post("/review/undo", {}); } catch (e) { say(e.message, true); return; }
-  R.undoDepth = r.undo_depth; strokesInfo(); say(`undo: ${r.voxels} voxels of the label edits written back`);
+  R.undoDepth = r.undo_depth; strokesInfo(); say(`undo: ${r.voxels} voxels of the label edits written back`); pending();
 }
 async function scribble() {
   if (!R.strokes.length) { say("no strokes", true); return; }
@@ -267,20 +290,31 @@ async function scribble() {
 }
 
 // ------------------------------------------------------------------ drawing on #bvo
-function squares(g, t, list, colour, cap = MAX_DRAWN) {   // list: [kind, voxel] or voxels; one square per voxel in the tile's slice
+// list: [kind, voxel] or voxels; one square per voxel in the tile's slice. colour: a fill, or a function of the kind (null:
+// no fill); default COL[kind]. outline: the colour of a 1 px outline of each square, if given
+function squares(g, t, list, colour, cap = MAX_DRAWN, outline = null) {
   const px = Math.max(1, R.api.BV.s * R.vs);
   let drawn = 0;
+  if (outline) { g.strokeStyle = outline; g.lineWidth = 1; }
   for (const e of list) {
     if (drawn >= cap) return drawn;
     const [kind, v] = Array.isArray(e[1]) ? e : [null, e];
     const [x, y] = R.api.w2px(t, vox2mm(v)); if (x < -px || y < -px || x > t.w + px || y > t.h + px) continue;
-    g.fillStyle = colour || COL[kind]; g.fillRect(x - px / 2, y - px / 2, px, px); drawn++;
+    const fill = typeof colour === "function" ? colour(kind) : colour || COL[kind];
+    if (fill) { g.fillStyle = fill; g.fillRect(x - px / 2, y - px / 2, px, px); }
+    if (outline) g.strokeRect(x - px / 2 + 0.5, y - px / 2 + 0.5, px - 1, px - 1);
+    drawn++;
   }
   return drawn;
 }
 function draw2d(g, t) {
   if (!R.on || !R.A) return;
   const n = vaxis(t.n), k = mm2vox(R.api.cross)[n];
+  t.rvpcap = 0;
+  if (R.pending) {   // under the preview and the strokes
+    const list = R.pending.by[n].get(k) || [];
+    const d = squares(g, t, list, labelFill, MAX_DRAWN, COL.pending); t.rvpcap = list.length > d && d >= MAX_DRAWN ? list.length : 0;
+  }
   if (R.preview) {
     const list = R.preview.by[n].get(k) || [];
     const d = squares(g, t, list); t.rvcap = list.length > d && d >= MAX_DRAWN ? list.length : 0;
@@ -297,6 +331,7 @@ function text(t) {
   let s = "";
   if (R.brush) s += ` · ${R.mode}: ${$("rvcls").selectedOptions[0]?.textContent ?? R.cls} r ${R.radius}`;
   if (t.rvcap) s += ` · preview: ${MAX_DRAWN} of ${t.rvcap} voxels drawn`;
+  if (t.rvpcap) s += ` · pending: ${MAX_DRAWN} of ${t.rvpcap} voxels drawn`;
   return s;
 }
 function pointer(type, e, h) {   // brush mode: a left drag paints one stroke of the current label
@@ -346,6 +381,11 @@ const hooks = {
     setMode("paint", true);
     document.addEventListener("keydown", keys, true);
     await refresh();
+    try {   // the label overlay's colours, for the pending edits (no labels volume: outlines only)
+      const M = await getj("/volume/labels/meta");
+      R.labelRGBA = new Map(Object.entries(M.table || {}).map(([v, e]) => [Number(v), e.rgba]));
+    } catch { /* no labels volume */ }
+    pending();
     say(q.paint_only ? `paint only: label edits ${q.edits}` : `edit log: ${q.log} · label edits: ${q.edits}`);
   },
   draw2d, text, pointer,
