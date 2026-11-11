@@ -1,5 +1,6 @@
 """Tests of baillarger.surfcut with exact answers: brute force on small
-models, OR-Tools CP-SAT on larger ones."""
+models, dynamic programming on larger folded ones (checked against brute force
+and OR-Tools CP-SAT)."""
 
 import itertools
 from collections.abc import Callable
@@ -15,6 +16,7 @@ from baillarger.surfcut.model import (
     Int,
     Table,
     Tie,
+    floats,
     hard_terms,
     hinge_terms,
     ints,
@@ -289,6 +291,96 @@ def cpsat(M: Model, fix: tuple[np.ndarray, Int] | None = None) -> float:
     return float(sol.objective_value) / S
 
 
+def pair_costs(M: Model) -> dict[tuple[int, int], Float]:
+    """Every pairwise term of M as a cost matrix over (k_a, k_b), a < b, summed
+    per pair; inf where a hard bound is broken."""
+    x = [int(M.o[i]) + np.arange(int(K)) for i, K in enumerate(M.K)]
+    P: dict[tuple[int, int], Float] = {}
+
+    def add(a: int, b: int, C: Float) -> None:
+        key, C = ((a, b), C) if a < b else ((b, a), C.T)
+        P[key] = P.get(key, np.zeros_like(C, dtype=float)) + C
+
+    for a, b, lo, hi in zip(*hard_terms(M), strict=True):
+        d = x[b][None, :] - x[int(a)][:, None]
+        add(int(a), int(b), np.where((d < lo) | (d > hi), np.inf, 0.0))
+    for a, b, t, w in zip(*hinge_terms(M), strict=True):
+        d = x[b][None, :] - x[a][:, None] - t
+        add(int(a), int(b), w * np.abs(d))
+    for a, b, L, w in zip(*tie_terms(M), strict=True):
+        add(int(a), int(b), w * np.abs(x[a][:, None] + x[b][None, :] - L))
+    for ta, tb, T in M.table:
+        for j, (a, b) in enumerate(zip(ints(ta), ints(tb), strict=True)):
+            add(int(a), int(b), T[j, : M.K[a], : M.K[b]].astype(float))
+    return P
+
+
+def ladder_min(M: Model, stages: list[tuple[int, ...]]) -> float:
+    """The exact minimum energy by dynamic programming over stages (a partition
+    of the variables into groups, in order) when every pairwise term lies within
+    a stage or between consecutive stages: the state of a stage is the joint
+    label of its variables. Checks that the minimiser's energy() agrees."""
+    assert sorted(i for s in stages for i in s) == list(range(M.n))
+    where = {i: p for p, s in enumerate(stages) for i in s}
+    P = pair_costs(M)
+    assert all(abs(where[a] - where[b]) <= 1 for a, b in P)
+    labs = [
+        np.array(list(itertools.product(*(range(int(M.K[i])) for i in s))))
+        for s in stages
+    ]
+
+    def within(p: int) -> Float:
+        s, lab = stages[p], labs[p]
+        c = sum(floats(M.unary[i])[lab[:, q]] for q, i in enumerate(s))
+        for q, a in enumerate(s):
+            for r, b in enumerate(s):
+                if (a, b) in P:
+                    c = c + P[a, b][lab[:, q], lab[:, r]]
+        return np.asarray(c, dtype=float)
+
+    def between(p: int) -> Float:
+        C = np.zeros((len(labs[p]), len(labs[p + 1])))
+        for q, a in enumerate(stages[p]):
+            for r, b in enumerate(stages[p + 1]):
+                if (a, b) in P:
+                    C += P[a, b][labs[p][:, q][:, None], labs[p + 1][:, r][None, :]]
+                if (b, a) in P:
+                    C += P[b, a][labs[p + 1][:, r][None, :], labs[p][:, q][:, None]]
+        return C
+
+    V, back = within(0), []
+    for p in range(len(stages) - 1):
+        T = V[:, None] + between(p)
+        back.append(np.argmin(T, axis=0))
+        V = within(p + 1) + T.min(axis=0)
+    s = int(np.argmin(V))
+    best = float(V[s])
+    k = np.zeros(M.n, dtype=int)
+    for p in range(len(stages) - 1, -1, -1):
+        k[list(stages[p])] = labs[p][s]
+        if p:
+            s = int(back[p - 1][s])
+    assert abs(energy(M, k) - best) < 1e-9 or not np.isfinite(best)
+    return best
+
+
+def fold_stages(M: Model) -> list[tuple[int, ...]]:
+    """The stages of folded_model: facing columns (i, n - 1 - i)."""
+    return [(i, M.n - 1 - i) for i in range(M.n // 2)]
+
+
+def fold_min(M: Model, fix: tuple[np.ndarray, Int] | None = None) -> float:
+    """The exact optimum of a folded_model, with the labels fix[1] kept where
+    fix[0]: unary costs elsewhere set to inf."""
+    if fix is not None:
+        U = [
+            np.where(f & (np.arange(len(u)) != lab), np.inf, u)
+            for u, f, lab in zip(M.unary, fix[0], fix[1], strict=True)
+        ]
+        M = Model(M.K, M.o, U, M.hard, M.hinge, M.tie, M.table)
+    return ladder_min(M, fold_stages(M))
+
+
 def folded_model(rng: np.random.Generator, n_side: int = 12, K: int = 14) -> Model:
     """Two banks of n_side columns in one chain, joined at the fold: lateral
     hinges and hard bounds, and ties (sums) between facing columns."""
@@ -318,10 +410,24 @@ def folded_model(rng: np.random.Generator, n_side: int = 12, K: int = 14) -> Mod
     )
 
 
+@pytest.mark.parametrize("seed", range(6))
+def test_fold_min_matches_brute_force(seed: int) -> None:
+    M = folded_model(np.random.default_rng(9100 + seed), n_side=3, K=5)
+    assert abs(fold_min(M) - brute(M)[0]) < 1e-9
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_fold_min_matches_cpsat(seed: int) -> None:
+    """On folded models small enough that CP-SAT proves the optimum fast (under
+    0.1 s here; the proof takes 2 to 11 s at the full size of 24 x 14)."""
+    M = folded_model(np.random.default_rng(9200 + seed), n_side=6, K=8)
+    assert abs(fold_min(M) - cpsat(M)) < 1e-6
+
+
 @pytest.mark.parametrize("seed", range(8))
-def test_qpbo_against_cpsat_folded(seed: int) -> None:
+def test_qpbo_against_exact_folded(seed: int) -> None:
     M = folded_model(np.random.default_rng(9000 + seed))
-    check_against(M, cpsat(M), lambda cert, lab: cpsat(M, (cert, lab)))
+    check_against(M, fold_min(M), lambda cert, lab: fold_min(M, (cert, lab)))
 
 
 # ------------------------------------------------ ambiguity intervals
@@ -378,17 +484,16 @@ def test_intervals_hold_a_minimum_folded(seed: int) -> None:
     r = qpbo(M)
     fix = r.interval_lo == r.interval_hi
     assert np.array_equal(fix, r.certified)
-    assert abs(cpsat_box(M, r.interval_lo, r.interval_hi) - cpsat(M)) < 1e-6
+    assert abs(fold_box(M, r.interval_lo, r.interval_hi) - fold_min(M)) < 1e-6
 
 
-def cpsat_box(M: Model, lo: Int, hi: Int) -> float:
-    """cpsat() with lo <= k <= hi: unary costs outside the box made large."""
-    big = 1e4
+def fold_box(M: Model, lo: Int, hi: Int) -> float:
+    """fold_min() with lo <= k <= hi: unary costs outside the box set to inf."""
     U = [
-        np.where((np.arange(K) < a) | (np.arange(K) > c), big, u)
+        np.where((np.arange(K) < a) | (np.arange(K) > c), np.inf, u)
         for u, K, a, c in zip(M.unary, M.K, lo, hi, strict=True)
     ]
-    return cpsat(Model(M.K, M.o, U, M.hard, M.hinge, M.tie, M.table))
+    return fold_min(Model(M.K, M.o, U, M.hard, M.hinge, M.tie, M.table))
 
 
 def overlapping_levels(

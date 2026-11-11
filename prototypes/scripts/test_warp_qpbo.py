@@ -1,6 +1,5 @@
-"""Tests of warp_cut.qpbo with exact answers: brute force on small models, OR-Tools CP-SAT on larger
-ones. Needs ortools:
-    nix develop --command uv run --with ortools pytest -q prototypes/scripts/test_warp_qpbo.py
+"""Tests of warp_cut.qpbo with exact answers: brute force on small models, the dynamic
+programme of tests/test_surfcut.py (fold_min) on larger folded ones.
 """
 
 import itertools
@@ -58,36 +57,15 @@ def test_qpbo_without_ties_is_exact(seed):
     assert abs(WC.energy(M, r["certified_labels"]) - best) < 1e-6
 
 
-def cpsat(M, fix=None):
-    """The exact optimum by CP-SAT (costs are multiples of 0.001)."""
-    from ortools.sat.python import cp_model
+def fold_min_wc(M, fix=None):
+    """The exact optimum of a folded_model by the dynamic programme of
+    tests/test_surfcut.py (fold_min); CP-SAT took up to 10 s here to prove it."""
+    sys.path.insert(0, str(Path(__file__).parents[2] / "tests"))
+    from test_surfcut import fold_min
 
-    m = cp_model.CpModel()
-    S = 1000
-    k = [m.NewIntVar(0, int(K) - 1, f"k{i}") for i, K in enumerate(M.K)]
-    obj = []
-    for i in range(M.n):
-        u = m.NewIntVar(-10**9, 10**9, f"u{i}")
-        m.AddElement(k[i], [int(round(c * S)) for c in M.unary[i]], u)
-        obj.append(u)
-        if fix is not None and fix[0][i]:
-            m.Add(k[i] == int(fix[1][i]))
-    for a, b, lo, hi in zip(*WC._cat(M.hard, "hard")):
-        d = k[b] - k[a] + int(M.o[b] - M.o[a])
-        m.Add(d >= int(lo)); m.Add(d <= int(hi))
-    for j, (a, b, t, w) in enumerate(zip(*WC._cat(M.hinge, "hinge"))):
-        d = m.NewIntVar(-10**6, 10**6, f"d{j}"); m.Add(d == k[b] - k[a] + int(M.o[b] - M.o[a]) - int(t))
-        ab = m.NewIntVar(0, 10**6, f"ab{j}"); m.AddAbsEquality(ab, d); obj.append(int(round(w * S)) * ab)
-    for j, (a, b, L, w) in enumerate(zip(*WC._cat(M.tie, "tie"))):
-        d = m.NewIntVar(-10**6, 10**6, f"t{j}"); m.Add(d == k[a] + k[b] + int(M.o[a] + M.o[b]) - int(L))
-        ab = m.NewIntVar(0, 10**6, f"at{j}"); m.AddAbsEquality(ab, d); obj.append(int(round(w * S)) * ab)
-    m.Minimize(sum(obj))
-    sol = cp_model.CpSolver()
-    sol.parameters.max_time_in_seconds = 60
-    sol.parameters.num_workers = 4
-    st = sol.Solve(m)
-    assert st == cp_model.OPTIMAL
-    return sol.ObjectiveValue() / S
+    from baillarger.surfcut import Model
+
+    return fold_min(Model(np.asarray(M.K), np.asarray(M.o), M.unary, M.hard, M.hinge, M.tie), fix)
 
 
 def folded_model(rng, n_side=12, K=14):
@@ -111,11 +89,11 @@ def folded_model(rng, n_side=12, K=14):
 
 
 @pytest.mark.parametrize("seed", range(8))
-def test_qpbo_against_cpsat_folded(seed):
+def test_qpbo_against_exact_folded(seed):
     rng = np.random.default_rng(9000 + seed)
     M = folded_model(rng)
-    best = cpsat(M)
-    r = check_against(M, best, lambda cert, lab: cpsat(M, (cert, lab)))
+    best = fold_min_wc(M)
+    r = check_against(M, best, lambda cert, lab: fold_min_wc(M, (cert, lab)))
     print(f"seed {seed}: optimum {best:.3f}, qpbo {r['energy']:.3f}, bound {r['lower_bound']:.3f}, "
           f"certified {r['certified'].mean():.0%}")
 
