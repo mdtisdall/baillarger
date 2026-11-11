@@ -51,6 +51,9 @@ not come from that log.
   used. An older output can be made again from its input labels, its copy of the diff
   and its commit.
 - The preview is approximate; the regeneration is exact.
+- ITK-SNAP is a bootstrap only. The goal is that editing does not need it. Until the
+  paint mode works, it is the only writer of the diff, so the diff has one writer at a
+  time and needs no locked read-change-write.
 - Reuse first: each part uses the code in "What exists" where it can, and adds a
   parameter to an existing function before it adds a new function.
 
@@ -67,7 +70,7 @@ not come from that log.
 | A label image as a brick volume in the pane | `Volumes.add_nifti` in `viewer/volumes.py` | 3 |
 | The antialiased field | `antialias.thin_plate`, `antialias.signed_distance` | 4b |
 | Marching on a crop, in the mesh blocks | `blocks.EmbeddedSource`, `mesh.marching_tetrahedra_blocks` (as `white_surf` uses them) | 4b |
-| A chunked store for a whole-grid array | `baillarger.blocks` | 4b |
+| A volume read box by box (a memory map of an uncompressed `.nii`) | `blocks.open_volume` | 4b |
 | The cut of a mesh by a slice plane | `viewer.outlines.plane_cut` | 4b |
 | The steps of the regeneration | the `write_*` functions of `white_dseg`, `white_surf`, `white_overview`, `wm_sites` | 5 |
 | The radius of a local field solve | `docs/preview-radius.md` | 4b |
@@ -109,7 +112,8 @@ Facts that the plan must respect:
   `accepted_fixes` and the match of kept fixes go.
 - The answers of the review queue change the labels by a write into the diff. The answer
   log still records them, for the queue.
-- The ITK-SNAP import (`wm_paint`) writes into the diff.
+- The ITK-SNAP import (`wm_paint`) writes into the diff. It is a bootstrap only: it
+  stays until the paint mode of Part 2 works, and then Part 2 removes it.
 - Formats edited in place (version 1): `wm-dseg.md` (`--edits`, `overrides`, `Sources`,
   the copy of the diff), `wm-sites.md` (override sites), `wm-edits.md` (the log is the
   queue's record; `dseg` does not read it; `Accepts` goes).
@@ -135,6 +139,8 @@ queue answer writes into the diff.
   the diff, and the queue's log records the answer as now. At an override site, the
   choice "accept the fix" writes the fix's labels into the diff.
 - The viewer can start without a queue (`--edits` alone): paint only.
+- When the paint mode works, this part removes the ITK-SNAP path: `wm_paint`, its format
+  (`docs/formats/wm-paint.md`), its tests, and the ITK-SNAP commands of the review pane.
 
 Tests: a paint writes the painted voxels and labels into the diff; a label that is not
 in the menu is refused, and nothing is written; a voxel with its current label is not
@@ -173,9 +179,12 @@ on a flat sheet give no correction; a preview of strokes equals the preview of t
 
 ### 4b: surface preview
 
-- `white_surf` writes the antialiased field as a derivative: float32 on the box of the
-  mask, in the chunked store (`baillarger.blocks`), with a JSON sidecar and a spec in
-  `docs/formats/` (version 1). A BIDS name with `desc-antialias`.
+- `white_surf` writes the antialiased field as a derivative: an uncompressed float32
+  NIfTI (`.nii`) on the box of the mask (its affine moved to the box), with a JSON
+  sidecar and a spec in `docs/formats/` (version 1). A BIDS name with `desc-antialias`.
+  The viewer reads it with `blocks.open_volume`, which reads only the voxels of a box.
+  There is no chunked store yet: NIfTI-Zarr comes with `docs/scaling.md`, item 3, and
+  this plan does not make it.
 - `antialias.thin_plate` gets two optional parameters: a start field (default: the signed
   distance, as now) and a mask of held voxels (default: none). The local solve is this
   function on a crop; there is no second solver. (The loop of
@@ -241,7 +250,7 @@ the cores into the routes and the pane, and they meet in a few shared files.
 | Part | Core (files) | Join (files) | The join needs |
 |---|---|---|---|
 | 1 | `label_edits.py` (new), `white_dseg.py`, `wm_sites.py`, `wm_paint.py`, `docs/formats/label-edits.md`, `wm-dseg.md`, `wm-sites.md`, `wm-edits.md`, their tests | `viewer/review.py` (queue answers write into the diff) | the `label_edits` contract |
-| 2 | none (Part 1's core has the shared functions) | `viewer/review.py` (`/review/paint`, `/review/undo`, the shared strokes function, "accept the fix", `--edits` alone), `static/review.js` (paint mode, undo) | the `label_edits` contract |
+| 2 | none (Part 1's core has the shared functions) | `viewer/review.py` (`/review/paint`, `/review/undo`, the shared strokes function, "accept the fix", `--edits` alone), `static/review.js` (paint mode, undo); then the removal of `wm_paint.py`, `docs/formats/wm-paint.md`, `tests/test_wm_paint.py` and the ITK-SNAP commands | the `label_edits` contract |
 | 3 | none | `viewer/volumes.py` ("input"), `viewer/review.py` (`/review/pending`), `static/review.js` (drawing) | the copy of the diff in the dseg's output |
 | 4a | none | `viewer/review.py` (`/review/preview` takes voxels), `static/review.js` | the paint request |
 | 4b | `antialias.py` (start, held), `white_surf.py` (the field derivative, the blocks' re-march), its format doc, their tests | `viewer/review.py` (route, working field), the 3D view and the slices (blocks) | the preview contract |
@@ -304,8 +313,8 @@ The joins use these interfaces. A core must keep them, or change this plan first
   the response is the existing preview's.
 - `GET /review/pending`: `{voxels: [[i, j, k], ...], labels: [...]}`.
 - `antialias.thin_plate(mask, dev, band, eps, tol, max_iter, start=None, held=None)`.
-- The field derivative: the antialiased field on the mask's box, float32, in the chunked
-  store, with `desc-antialias` in its BIDS name and a spec in `docs/formats/` (version 1).
+- The field derivative: the antialiased field on the mask's box, an uncompressed float32
+  `.nii`, with `desc-antialias` in its BIDS name and a spec in `docs/formats/` (version 1).
   `POST /review/surface-preview {strokes}` gives the re-marched blocks' vertices and faces
   (voxel coordinates of the grid), their block ids and the radius used.
 - The command: `python -m baillarger.regenerate INPUT --edits EDITS --root ROOT`. INPUT
