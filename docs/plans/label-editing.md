@@ -107,11 +107,16 @@ Facts that the plan must respect:
   (`desc-wmtopo` with the suffix `edits`, the same format), and its sidecar lists it in
   `Sources`.
 - `wm_sites` makes an `override` site for each fix with `overrides`, as now. To accept
-  the fix, the user writes the fix's labels into the diff (a choice of the override site,
-  Part 2); then the next regeneration has no override there. `Accepts`,
-  `accepted_fixes` and the match of kept fixes go.
-- The answers of the review queue change the labels by a write into the diff. The answer
-  log still records them, for the queue.
+  the fix, the user writes the fix's labels into the diff: the choice `accept-fix` (key 7)
+  of the review pane, at override sites only. It takes the fix's voxels and labels from
+  the dseg's fix diff (`fix_diff.fix_voxels`). Then the next regeneration has no override
+  there. `leave` writes nothing. `Accepts`, `accepted_fixes` and the match of kept fixes
+  go.
+- The answers of the review queue change the labels by a write into the diff
+  (`label_edits.paint`, then `write`): only the voxels whose label changes from the input
+  labels (the dseg's first `Sources`) with the diff applied. The answer log still records
+  them, for the queue. A scribble is a record of the log only. The viewer takes the log
+  as `--log` and the diff as `--edits`; with `--sites`, both are needed.
 - The ITK-SNAP import (`wm_paint`) writes into the diff. It is a bootstrap only: it
   stays until the paint mode of Part 2 works, and then Part 2 removes it.
 - Formats edited in place (version 1): `wm-dseg.md` (`--edits`, `overrides`, `Sources`,
@@ -136,9 +141,9 @@ queue answer writes into the diff.
   label, or none) on the undo stack.
 - Undo: `POST /review/undo` pops the stack and writes the earlier entries back.
 - At a queue site, the choice `manual-paint` opens the paint mode. Its Submit writes into
-  the diff, and the queue's log records the answer as now. At an override site, the
-  choice "accept the fix" writes the fix's labels into the diff.
-- The viewer can start without a queue (`--edits` alone): paint only.
+  the diff, and the queue's log records the answer as now.
+- The viewer can start without a queue (`--edits` alone, with no `--sites` and no
+  `--log`): paint only.
 - When the paint mode works, this part removes the ITK-SNAP path: `wm_paint`, its format
   (`docs/formats/wm-paint.md`), its tests, and the ITK-SNAP commands of the review pane.
 
@@ -249,8 +254,8 @@ the cores into the routes and the pane, and they meet in a few shared files.
 
 | Part | Core (files) | Join (files) | The join needs |
 |---|---|---|---|
-| 1 | `label_edits.py` (new), `white_dseg.py`, `wm_sites.py`, `wm_paint.py`, `docs/formats/label-edits.md`, `wm-dseg.md`, `wm-sites.md`, `wm-edits.md`, their tests | `viewer/review.py` (queue answers write into the diff) | the `label_edits` contract |
-| 2 | none (Part 1's core has the shared functions) | `viewer/review.py` (`/review/paint`, `/review/undo`, the shared strokes function, "accept the fix", `--edits` alone), `static/review.js` (paint mode, undo); then the removal of `wm_paint.py`, `docs/formats/wm-paint.md`, `tests/test_wm_paint.py` and the ITK-SNAP commands | the `label_edits` contract |
+| 1 | `label_edits.py` (new), `white_dseg.py`, `wm_sites.py`, `wm_paint.py`, `docs/formats/label-edits.md`, `wm-dseg.md`, `wm-sites.md`, `wm-edits.md`, their tests | `viewer/review.py` (queue answers write into the diff; the choice `accept-fix`; `--log` and `--edits`), `static/review.js` (the `accept-fix` button) | the `label_edits` contract |
+| 2 | none (Part 1's core has the shared functions) | `viewer/review.py` (`/review/paint`, `/review/undo`, the shared strokes function, `--edits` alone), `static/review.js` (paint mode, undo); then the removal of `wm_paint.py`, `docs/formats/wm-paint.md`, `tests/test_wm_paint.py` and the ITK-SNAP commands | the `label_edits` contract |
 | 3 | none | `viewer/volumes.py` ("input"), `viewer/review.py` (`/review/pending`), `static/review.js` (drawing) | the copy of the diff in the dseg's output |
 | 4a | none | `viewer/review.py` (`/review/preview` takes voxels), `static/review.js` | the paint request |
 | 4b | `antialias.py` (start, held), `white_surf.py` (the field derivative, the blocks' re-march), its format doc, their tests | `viewer/review.py` (route, working field), the 3D view and the slices (blocks) | the preview contract |

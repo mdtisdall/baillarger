@@ -15,7 +15,8 @@ import nibabel as nib
 import numpy as np
 import pytest
 
-from baillarger import bids
+from baillarger import bids, fix_diff
+from baillarger import label_edits as LE
 from baillarger import wm_edits as E
 from baillarger import wm_sites as WS
 from baillarger.viewer import review as VR
@@ -29,11 +30,15 @@ QUEUE = [
     (3, "handle-fix", (12, 9, 4)),
 ]
 RANDOM = [(3, 12, 10), (14, 4, 9), (6, 14, 12), (9, 9, 9)]
+#: the fix of the override site, and the voxels that it changes to 0
+FIX = 1
+FIX_VOXELS = [(5, 5, 6), (5, 5, 7)]
 
 
 def row(rank: int, kind: str, c: tuple[int, int, int]) -> dict[str, Any]:
     r: dict[str, Any] = {k: 0 for k in WS.COLUMNS}
     r.update(rank=rank, kind=kind, i=c[0], j=c[1], k=c[2], tissue="grey matter")
+    r.update(fix=FIX if kind == "override" else 0)
     r.update(wm_thickness=1.0, gap_width=0.0)
     return r
 
@@ -102,7 +107,23 @@ def files(tmp_path: Path) -> dict[str, Path]:
     log = E.edits_paths(
         tmp_path / "deriv", dict(sub="T01", ses="S1"), desc="wmeditstest"
     )
-    return dict(dseg=dseg, queue=q, log=log["log"])
+    # the input labels: the dseg's, except two voxels that the correction changed
+    inp = lab.copy()
+    inp[6, 5, 5] = 0
+    inp[9, 6, 7] = 0
+    inp[8, 6, 7] = 42
+    src = tmp_path / "sub-T01_ses-S1_desc-input_dseg.nii.gz"
+    nib.save(nib.nifti1.Nifti1Image(inp, A), src)
+    # the fix diff: fix FIX sets FIX_VOXELS to 0, fix 2 sets (12, 9, 5) to 0
+    new = inp.copy()
+    fv = [*FIX_VOXELS, (12, 9, 5)]
+    for v in fv:
+        new[v] = 0
+    idx = np.ravel_multi_index(tuple(np.array(fv).T), SHAPE)
+    fd = tmp_path / "sub-T01_ses-S1_desc-wmtopofixes_diff.npy"
+    fix_diff.write_diff(fd, fix_diff.make_diff(inp, new, idx, [FIX, FIX, 2]))
+    edits = LE.bids_path(tmp_path / "deriv", dict(sub="T01", ses="S1"), "R")
+    return dict(dseg=dseg, queue=q, log=log["log"], edits=edits, input=src, fixdiff=fd)
 
 
 def randoms(n: int, seed: int) -> list[dict[str, Any]]:
@@ -116,12 +137,14 @@ def make(files: dict[str, Path], choices: Fake | None = None) -> VR.Review:
     return VR.Review(
         files["queue"],
         files["log"],
+        files["edits"],
         files["dseg"],
         lambda: lab,
         A,
         randoms,
         choices or Fake(),
         echoes=[files["dseg"]],
+        inputs=files["input"],
     )
 
 
@@ -397,7 +420,10 @@ def test_manual_paint_gives_the_commands_and_no_answer(server: Any) -> None:
     )
     assert "--site 5 5 5" in cmd[0] and f"--echo {files['dseg'].resolve()}" in cmd[0]
     assert cmd[1].startswith("itksnap -g ")
-    assert f"--log {files['log'].resolve()} --session {rv.session}" in cmd[2]
+    assert (
+        f"--log {files['log'].resolve()} --edits {files['edits'].resolve()} "
+        f"--session {rv.session}"
+    ) in cmd[2]
     with pytest.raises(urllib.error.HTTPError) as e:
         post(
             base + "/review/answer",
@@ -410,7 +436,16 @@ def test_the_real_choices_through_the_route(files: dict[str, Path]) -> None:
     from baillarger import wm_choices as wc
 
     lab = np.asarray(nib.nifti1.load(files["dseg"]).dataobj).astype(np.int64)
-    rv = VR.Review(files["queue"], files["log"], files["dseg"], lambda: lab, A, randoms)
+    rv = VR.Review(
+        files["queue"],
+        files["log"],
+        files["edits"],
+        files["dseg"],
+        lambda: lab,
+        A,
+        randoms,
+        inputs=files["input"],
+    )
     rv.start(0, None)
     rv.next()
     for choice, params in [("thicken", dict(radius=1)), ("remove-strand", {})]:
@@ -431,3 +466,182 @@ def test_the_real_choices_through_the_route(files: dict[str, Path]) -> None:
     order = np.lexsort(ch.voxels.T[::-1])
     assert v.tolist() == ch.voxels[order].tolist()
     assert labels.tolist() == ch.labels[order].tolist()
+
+
+# ------------------------------------------------------- answers into the diff
+
+
+def diff(files: dict[str, Path]) -> dict[tuple[int, ...], int]:
+    """The label edits as {voxel: label}."""
+    e = LE.read(files["edits"])
+    v = np.stack(np.unravel_index(e.index, SHAPE), 1).tolist()
+    return {tuple(x): int(y) for x, y in zip(v, e.label.tolist(), strict=True)}
+
+
+def test_an_answer_writes_its_labels_into_the_diff(server: Any) -> None:
+    base, rv, files = server
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    get(base + "/review/next")
+    out = post(
+        base + "/review/answer",
+        dict(site="5,5,5", choice="thicken", params={}, reviewer_seconds=1.0),
+    )
+    # (5, 5, 5): 42 on input 41; (6, 5, 5): 41 on input 0 (the correction's)
+    assert diff(files) == {(5, 5, 5): 42, (6, 5, 5): 41}
+    assert out["edited"] == 2
+    side = json.loads(LE.edits_paths(files["edits"])["sidecar"].read_text())
+    assert side["Hemisphere"] == "R" and side["Shape"] == list(SHAPE)
+    assert np.allclose(np.reshape(side["Affine"], (4, 4)), A)
+    # the log still records the answer, for the queue
+    a = records(files)[-1]
+    assert a["Record"] == "answer" and a["Id"] == out["answer"]
+
+
+def test_an_answer_writes_only_the_voxels_whose_label_changes(server: Any) -> None:
+    base, rv, files = server
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    get(base + "/review/next")
+    get(base + "/review/next")
+    post(
+        base + "/review/answer",
+        dict(site="5,5,5", choice="thicken", params={}, reviewer_seconds=1.0),
+    )
+    # (8, 6, 7): 42 is its input label, and it has no entry: not written
+    out = post(
+        base + "/review/answer",
+        dict(site="8,6,7", choice="thicken", params={}, reviewer_seconds=1.0),
+    )
+    assert out["edited"] == 1
+    assert diff(files) == {(5, 5, 5): 42, (6, 5, 5): 41, (9, 6, 7): 41}
+
+
+def test_a_later_answer_replaces_the_labels_of_an_earlier_one(
+    files: dict[str, Path],
+) -> None:
+    rv = make(files)
+    rv.start(0, None)
+    rv.next()
+    LE.write(
+        files["edits"],
+        LE.Edits(
+            np.array([np.ravel_multi_index((5, 5, 5), SHAPE)], np.int64),
+            np.array([0], np.int32),
+        ),
+        hemisphere="R",
+        shape=SHAPE,
+        affine=A,
+    )
+    rv.answer("5,5,5", "thicken", {}, 1.0)
+    assert diff(files) == {(5, 5, 5): 42, (6, 5, 5): 41}
+
+
+def test_leave_and_a_refused_answer_write_nothing(server: Any) -> None:
+    base, _, files = server
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    with pytest.raises(urllib.error.HTTPError):  # not shown: the log refuses it
+        post(
+            base + "/review/answer",
+            dict(site="8,6,7", choice="thicken", reviewer_seconds=1),
+        )
+    assert not files["edits"].exists()
+    get(base + "/review/next")
+    out = post(
+        base + "/review/answer", dict(site="5,5,5", choice="leave", reviewer_seconds=1)
+    )
+    assert out["edited"] == 0 and not files["edits"].exists()
+
+
+def test_a_diff_on_another_grid_is_refused(files: dict[str, Path]) -> None:
+    LE.write(files["edits"], LE.empty(), hemisphere="R", shape=(4, 4, 4), affine=A)
+    with pytest.raises(ValueError, match="grid"):
+        make(files)
+    LE.write(files["edits"], LE.empty(), hemisphere="L", shape=SHAPE, affine=A)
+    with pytest.raises(ValueError, match="hemisphere"):
+        make(files)
+
+
+def test_the_input_labels_default_to_the_dseg_sources(files: dict[str, Path]) -> None:
+    lab = np.asarray(nib.nifti1.load(files["dseg"]).dataobj)
+    s = bids.sidecar_path(files["dseg"])
+    s.write_text(json.dumps(dict(Sources=[str(files["input"])])))
+    assert VR.input_labels(files["dseg"]) == files["input"]
+    rv = VR.Review(
+        files["queue"],
+        files["log"],
+        files["edits"],
+        files["dseg"],
+        lambda: lab,
+        A,
+        randoms,
+        Fake(),
+    )
+    rv.start(0, None)
+    rv.next()
+    rv.answer("5,5,5", "thicken", {}, 1.0)
+    assert diff(files) == {(5, 5, 5): 42, (6, 5, 5): 41}
+
+
+# ------------------------------------------------------- accept the fix
+
+
+def test_accept_fix_writes_the_fix_labels_into_the_diff(server: Any) -> None:
+    base, rv, files = server
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    get(base + "/review/next")
+    p = post(base + "/review/preview", dict(site="5,5,5", choice=VR.ACCEPT))
+    assert p["status"] == "done" and p["answer"] == [list(v) for v in FIX_VOXELS]
+    assert p["correction"] == [] and p["overrides"] is False
+    out = post(
+        base + "/review/answer",
+        dict(site="5,5,5", choice=VR.ACCEPT, reviewer_seconds=2.0),
+    )
+    assert out["edited"] == 2
+    assert diff(files) == {v: 0 for v in FIX_VOXELS}
+    a = records(files)[-1]
+    assert a["Choice"] == VR.ACCEPT and a["Params"] == {"Fix": FIX}
+    v, lab, _ = E.read_log(files["log"]).voxels(a["Id"])
+    assert v.tolist() == [list(x) for x in FIX_VOXELS] and lab.tolist() == [0, 0]
+
+
+def test_accept_fix_is_only_a_choice_of_an_override_site(server: Any) -> None:
+    base, rv, files = server
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    get(base + "/review/next")
+    get(base + "/review/next")
+    for route_ in ("/review/answer", "/review/preview"):
+        with pytest.raises(urllib.error.HTTPError) as e:
+            post(
+                base + route_,
+                dict(site="8,6,7", choice=VR.ACCEPT, reviewer_seconds=1.0),
+            )
+        assert e.value.code == 400 and "override" in json.loads(e.value.read())["error"]
+    assert not files["edits"].exists()
+    assert [r["Record"] for r in records(files)][-1] == "shown"
+
+
+# ------------------------------------------------------- the command line
+
+
+def test_sites_need_the_log_and_the_edits() -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    VR.add_arguments(ap)
+    for argv in (
+        ["--sites", "q.tsv", "--log", "l.jsonl"],
+        ["--sites", "q.tsv", "--edits", "e.npy"],
+        ["--log", "l.jsonl"],
+        ["--edits", "e.npy"],
+    ):
+        a = ap.parse_args(argv)
+        with pytest.raises(ValueError):
+            VR.for_white(a, Path("s"), Path("d"), lambda: np.zeros(1), A)
+    a = ap.parse_args([])
+    assert VR.for_white(a, Path("s"), Path("d"), lambda: np.zeros(1), A) is None
+
+
+def test_the_fix_diff_path_is_the_dseg_commands() -> None:
+    ents, root = dict(sub="T01", ses="S1"), Path("/d")
+    d = bids.derivative_path(root, ents, "dseg", ".nii.gz", desc="wmtopo")
+    want = bids.derivative_path(root, ents, "diff", ".npy", desc="wmtopofixes")
+    assert VR.fix_diff_path(d) == want
