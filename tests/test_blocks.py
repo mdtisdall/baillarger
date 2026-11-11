@@ -9,6 +9,7 @@ import torch
 
 from baillarger import backend, timing
 from baillarger.blocks import (
+    CHUNK,
     ArraySource,
     BlockReader,
     ChunkedSource,
@@ -447,3 +448,18 @@ def test_a_source_made_from_a_patched_source_leaves_it_unchanged() -> None:
     want[box] = 7.0
     assert np.array_equal(view.read(whole), want)
     assert np.array_equal(work.read(whole), before)
+
+
+def test_a_patched_source_of_a_patched_source_keeps_its_block() -> None:
+    """The block of a PatchedSource of a PatchedSource is the base's: another block
+    is refused; the same block, or no block, works."""
+    a = volume().astype(np.float32)
+    box = (slice(0, 10), slice(0, 10), slice(0, 9))
+    work = PatchedSource(ArraySource(a), box, np.ones((10, 10, 9)), block=8)
+    with pytest.raises(ValueError, match="block"):
+        PatchedSource(work, block=16)
+    whole = (slice(0, 23), slice(0, 17), slice(0, 9))
+    for view in (PatchedSource(work, block=8), PatchedSource(work)):
+        assert view.block == 8
+        assert np.array_equal(view.read(whole), work.read(whole))
+    assert PatchedSource(ArraySource(a)).block == CHUNK
