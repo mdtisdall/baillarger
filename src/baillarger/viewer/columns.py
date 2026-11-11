@@ -599,7 +599,9 @@ class Columns:
 
     def get(self, req: Request) -> dict[str, Any]:
         """Start the request as a job, or find it done; wait up to WAIT_S.
-        Returns {key, status} ("done", "running" or "busy": another job runs)."""
+        Returns {key, status} ("done", "running" or "busy": another job runs).
+        RuntimeError: the job failed (now, or after an earlier request stopped
+        waiting for it); the next request starts it again (baillarger.viewer.jobs)."""
         key = req.key(self.sources)
         try:
             out = self.jobs.run(
@@ -609,14 +611,13 @@ class Columns:
             )
         except RuntimeError:
             return dict(key=key, status="busy", job=self.jobs.status())
-        if out["status"] != "done" and self.jobs.thread is not None:
-            self.jobs.thread.join(WAIT_S)
-        st = self.jobs.status()
-        if self.jobs.has(key):
+        if out["status"] == "running":
+            out = self.jobs.wait(key, WAIT_S)
+        if out["status"] == "error":
+            raise RuntimeError(out["error"])
+        if out["status"] == "done":
             return dict(key=key, status="done")
-        if st["key"] == key and st["status"] == "error":
-            raise RuntimeError(st.get("error", "the job failed"))
-        return dict(key=key, status="running", job=st)
+        return dict(key=key, status="running", job=self.jobs.status())
 
     def result(self, key: str) -> Result:
         return self.jobs.get(key)

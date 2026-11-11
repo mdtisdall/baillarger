@@ -99,8 +99,78 @@ def test_an_error_is_reported_and_the_log_is_bounded() -> None:
         raise ValueError("no data")
 
     j = jobs(None)
-    j.run("e", "bad", bad, wait=True)
+    out = j.run("e", "bad", bad, wait=True)
+    assert out["status"] == "error" and out["error"] == "ValueError: no data"
     st = j.status()
     assert st["status"] == "error" and st["error"] == "ValueError: no data"
     assert st["log"] == [str(k) for k in range(5, LOG_LINES + 5)]
     assert not j.has("e")
+
+
+def test_a_failed_job_is_reported_once_then_runs_again() -> None:
+    """The request that finds a failed job gets its error and does not start it
+    again; the error is then taken, so the next request with that key runs the
+    job again (a failure can be transient)."""
+    calls: list[int] = []
+
+    def flaky(log: Any) -> dict[str, Any]:
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError("transient")
+        return dict(x=1)
+
+    j = jobs(None)
+    gate = threading.Event()
+
+    def held(log: Any) -> dict[str, Any]:
+        gate.wait(5)
+        return flaky(log)
+
+    out = j.run("f", "flaky", held)
+    assert out["status"] == "running"
+    gate.set()
+    # the request waits for its job: the job fails, the error is reported
+    assert j.wait("f", 10) == dict(
+        key="f", label="flaky", status="error", error="ValueError: transient"
+    )
+    assert calls == [1]
+    # the state keeps the error for the page, but it was reported: the next
+    # request runs the job again
+    assert j.status()["status"] == "error"
+    assert j.run("f", "flaky", flaky, wait=True)["status"] == "done"
+    assert calls == [1, 1] and j.get("f") == dict(x=1)
+
+
+def test_the_next_request_gets_the_error_and_does_not_rerun() -> None:
+    """A job that fails after its request stopped waiting (202): the next
+    request with the same key gets the error, and the work does not run again
+    in that request; the one after it runs the job again."""
+    calls: list[int] = []
+
+    def bad(log: Any) -> dict[str, Any]:
+        calls.append(1)
+        raise ValueError("over the cap")
+
+    j = jobs(None)
+    gate = threading.Event()
+
+    def held(log: Any) -> dict[str, Any]:
+        gate.wait(5)
+        return bad(log)
+
+    assert j.run("e", "bad", held)["status"] == "running"
+    assert j.wait("e", 0)["status"] == "running"
+    gate.set()
+    assert j.thread is not None
+    j.thread.join(10)
+    out = j.run("e", "bad", bad)
+    assert out == dict(
+        key="e", label="bad", status="error", error="ValueError: over the cap"
+    )
+    assert calls == [1]
+    # an error of another key is not this key's: it runs
+    assert j.run("other", "bad", bad, wait=True)["status"] == "error"
+    assert calls == [1, 1]
+    # retry: the error of "e" was replaced and is not reported again
+    assert j.run("e", "bad", bad, wait=True)["status"] == "error"
+    assert calls == [1, 1, 1]
