@@ -32,8 +32,9 @@ seeds. A site's score is its seed's confidence, and its voxel is its seed's
 root on the segmentation's grid.
 
 The answers at these sites go to the answer log of the WM review
-(wm-edits/1), with the site's kind as SiteKind. dseg replays them as it
-replays any site answer.
+(wm-edits/1), with the site's kind as SiteKind. An answer at a column site
+is recorded in the log and writes its labels into the edits diff
+(label-edits/1), which white_dseg --edits applies.
 """
 
 import argparse

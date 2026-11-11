@@ -20,7 +20,9 @@ The answers at these sites go to the answer log of the WM review
 (`wm-edits/1`): the site's voxel is the `Site`, its `kind` is the
 `SiteKind`, its `rank` is the `Rank` and its `score` is the `Score` (null
 for `n/a`). The session records the SHA-256 of this table as its
-`QueueSHA256`. `dseg` replays the answers as it replays any site answer.
+`QueueSHA256`. An answer at a column site is recorded in the log and writes
+its labels into the edits diff (`label-edits/1`), which
+`white_dseg --edits` applies.
 
 ## Inputs
 

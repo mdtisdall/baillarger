@@ -14,6 +14,7 @@ from test_wm_sites import surf  # noqa: F401  (the fixture)
 
 from baillarger import bids
 from baillarger import column_sites as C
+from baillarger import label_edits as LE
 from baillarger import wm_edits as E
 
 NAMES = np.array(["a", "non_wm_behind_root", "c"])
@@ -251,8 +252,8 @@ def test_the_command_writes_sites_that_the_answer_log_takes(
     for r in rows:
         ijk = nib.affines.apply_affine(np.linalg.inv(img.affine), v_mm[r["vertex"]])
         assert [r["i"], r["j"], r["k"]] == np.rint(ijk).astype(int).tolist()
-    # a session on this queue, a site shown, an answer: the log takes them,
-    # and the replay applies the answer
+    # a session on this queue, a site shown, an answer: the log records them,
+    # and the answer's labels go into the edits diff, which applies
     log = E.EditLog.create(
         tmp_path / "sub-T01_ses-S1_desc-wmedits_edits.jsonl", dseg, "R"
     )
@@ -267,7 +268,13 @@ def test_the_command_writes_sites_that_the_answer_log_takes(
     assert L.answers()[0]["Rank"] == 1 and L.answers()[0]["Score"] is None
     labels = np.asarray(img.dataobj).copy()
     labels[site] = 41
-    assert E.replay(labels, L).labels[site] == 0
+    (ans,) = L.answers()
+    vox, lab, _ = L.voxels(ans["Id"])
+    diff, _ = LE.paint(LE.empty(), labels, vox, lab)
+    path = tmp_path / "sub-T01_ses-S1_hemi-R_desc-labeledits_edits.npy"
+    LE.write(path, diff, hemisphere="R", shape=labels.shape, affine=img.affine)
+    edited = LE.apply(labels, LE.read(path))
+    assert edited[site] == 0 and int((edited != labels).sum()) == 1
 
 
 def test_a_table_with_other_columns_is_refused(tmp_path: Path) -> None:

@@ -12,19 +12,21 @@ This step groups the columns into review sites and writes the sites so that
 the existing review route can use them:
 
 1. the site queue (a file that the review pane reads);
-2. the answer log (`wm-edits/1`);
-3. the dseg replay of the log.
+2. the answer log (`wm-edits/1`), the record of the review queue;
+3. the edits diff (`label-edits/1`), which `white_dseg --edits` applies.
 
-This step makes no viewer change. A later step adds the column sites to the
-review pane.
+This step makes no viewer change. A later plan adds the column sites to the
+review pane (Open items).
 
 ## Facts from the current code
 
 - `wm-edits/1` does not depend on the queue format. A `shown` record holds
   a site voxel, a free `SiteKind` string, a rank and a score. A session
   records the SHA-256 of the queue file that it shows. An answer is voxels
-  and labels on the dseg grid. dseg replays the answers. So the log can take
-  answers at column sites with no change.
+  and labels on the dseg grid. So the log can take answers at column sites
+  with no change. The log is only the record of the review queue. The
+  answer's labels go into the edits diff (`label-edits/1`), and
+  `white_dseg --edits` applies that diff.
 - `wm-sites/1` is the queue of the WM mask. `write_sites` computes it from
   the white surface, the corrected dseg and its fixes. Its table has fixed
   columns (WM measures: faces, fixes, pieces, thickness). `read_sites`
@@ -60,7 +62,8 @@ Column sites get their own files and spec, not new kinds in `wm-sites/1`:
   the WM fixes.
 - `wm_sites.write_sites` stays free of the prototype outputs.
 - The answers go to the same `wm-edits/1` log, with `SiteKind` from the
-  column queue. dseg replays them as it replays the WM answers.
+  column queue. An answer at a column site is recorded in the log and
+  writes its labels into the edits diff, which `white_dseg --edits` applies.
 
 The table starts with the same columns as `wm-sites/1`: `rank`, `kind`,
 `i`, `j`, `k`, then `score`. The review pane can then read either queue
@@ -130,7 +133,9 @@ nothing. They help the reviewer and the diagnostics.
 - The write and read of the files give the same rows. The sidecar passes
   `SidecarSpec`. `tests/test_bids.py` checks the format document.
 - A `wm-edits/1` log takes a session on the column queue, a `shown` record
-  at a column site, and an answer there. `replay` applies the answer.
+  at a column site, and an answer there. The answer's labels go into an
+  edits diff (`label_edits.paint`, `write`, `read`), and `label_edits.apply`
+  gives the answer's label at the site.
 
 ## The hemisphere run
 
@@ -215,4 +220,7 @@ top). Magenta X: a top. Faint markers are more than 1 mm from the plane.*
 
 1. The order of tied columns. All no-top columns have the confidence
    `-inf`. The stage's rank orders them by column index.
-2. The review pane does not read `column-sites/1` yet. That is a later step.
+2. The review of column sites in the pane is a later plan: the pane reading
+   `column-sites/1`, the answer for each cause, and the column view. That
+   plan is made after the user looks at a blind sample of sites. It joins
+   `viewer/review.py` after the label-editing joins.
