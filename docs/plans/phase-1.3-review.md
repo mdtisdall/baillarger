@@ -208,8 +208,8 @@ place. Keep the name `wm-edits/1`.
    verified voxel, `dseg` fixes it and marks the fix in the fix table as
    overriding an answer, with that answer's id. Ask the coordinator before
    you change the priority order in `handles.py`.
-9. **The way out of the queue** (§3c step 2): `leave` at an override site
-   accepts the fix: the fix's labels go into the edits diff. On a rerun, an answered override
+9. **The way out of the queue** (§3c step 2): the choice `accept-fix` at an override
+   site accepts the fix and writes its labels into the edits diff; `leave` writes nothing. On a rerun, an answered override
    site goes back to the queue only if its fix is new or different. Match
    fixes across runs by voxel overlap with the kept diffs. Write the
    overlap rule in the spec.
@@ -230,7 +230,7 @@ Exact tests on phantoms:
 - A scribble does not change `desc-wmtopo`.
 - An answer that leaves a handle: `dseg` fixes it, the fix table marks the
   override with the answer's id, and the site is in the queue.
-- `leave` at that site accepts the fix: the fix's labels go into the diff. On a rerun with the same input, the
+- The choice `accept-fix` at that site accepts the fix and writes its labels into the diff. On a rerun with the same input, the
   site is not in the queue. On a rerun where the fix moves, it is.
 - Update the seven tests in `tests/test_wm_edits.py` to the new model.
 
