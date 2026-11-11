@@ -11,6 +11,7 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import pytest
+from edits_helpers import write_dseg_sidecar
 
 from baillarger.labels import LUT_NAMES
 from baillarger.viewer import bricks as VB
@@ -275,3 +276,36 @@ def test_no_filled_labels_no_mask_and_no_alias_without_the_default(
     assert vs.same_as == {}
     with pytest.raises(ValueError):
         vs.alias("labels", "echo1")
+
+
+def test_the_input_labels_are_a_volume(tmp_path: Path) -> None:
+    """The input labels (the first of the dseg sidecar's Sources) are the volume
+    "input", with the colours of "labels"; when they were moved, the file of the
+    same name next to the surface; a dseg with no sidecar has no "input"."""
+    d = tmp_path / "anat"
+    d.mkdir()
+    rng = np.random.default_rng(3)
+    shape = (6, 5, 4)
+    seg = np.full(shape, 41, np.int16)
+    inp = rng.choice(np.array([0, 41, 42], np.int16), shape)
+    dseg = d / "s_desc-wmtopo_dseg.nii.gz"
+    fixes = d / "s_desc-wmtopofixes_dseg.nii.gz"
+    src = tmp_path / "excised" / "s_desc-excised_dseg.nii.gz"
+    src.parent.mkdir()
+    nib.save(nib.nifti1.Nifti1Image(seg, A0), dseg)
+    nib.save(nib.nifti1.Nifti1Image(np.zeros(shape, np.uint8), A0), fixes)
+    nib.save(nib.nifti1.Nifti1Image(inp, A0), src)
+    surf = d / "s.surf.gii"
+    assert "input" not in VV.for_white(surf, [str(dseg)], None, "").items
+    write_dseg_sidecar(dseg, src)
+    vs = VV.for_white(surf, [str(dseg)], None, "")
+    assert [v["name"] for v in vs.list()] == ["labels", "input", "fixes"]
+    meta = vs.meta("input")
+    assert meta["kind"] == "labels" and meta["table"] == VV.colour_table("labels")
+    a = vs.items["input"].volume.source().arrays[0]  # type: ignore[attr-defined]
+    assert np.array_equal(np.asarray(a), inp)
+    # moved: the file of the same name next to the surface
+    src.rename(d / src.name)
+    vs = VV.for_white(surf, [str(dseg)], None, "")
+    a = vs.items["input"].volume.source().arrays[0]  # type: ignore[attr-defined]
+    assert np.array_equal(np.asarray(a), inp)

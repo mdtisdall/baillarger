@@ -17,16 +17,21 @@ Routes (served in every mode that has the registry; see route):
 The pyramids are built on first use, one at a time (one lock for the registry), so
 two builds never hold their temporaries at the same time.
 
-With --white, the segmentation is the first entry of the white surface's `Sources`
-(white-surf/1), and the fixes image is its `desc-wmtopofixes` neighbour (wm-dseg/1).
+With --white, the segmentation ("labels") is the first entry of the white surface's
+`Sources` (white-surf/1), and the fixes image is its `desc-wmtopofixes` neighbour
+(wm-dseg/1). The input labels ("input", the colours of "labels") are the first entry of
+the segmentation's `Sources` (white_dseg.input_labels: the excised dseg), so that the
+user can compare them with the segmentation; a segmentation with no wm-dseg/1 sidecar
+has no "input".
 The WM mask ("wm") is 1 where the segmentation holds one of the surface's
 `FilledLabels` (the region whose boundary the surface is), else 0. With the fixes
 image over it, it shows the WM mask, the handle cuts, the handle fills and the cavity
 fills. The echoes "echo1" to "echo3" are the
 files of baillarger.viewer.columns.echo_files' rule in --echo-dir (the .nii, else
 the .nii.gz); the one that is the default volume ("echo") is a second name of it.
-When a source path is not a file (the derivatives were moved), the file of the same
-name next to the surface is used. --dseg and --fixes give other paths.
+When a source path (of the segmentation or of the input labels) is not a file (the
+derivatives were moved), the file of the same name next to the surface is used.
+--dseg and --fixes give other paths.
 
 Colours: the labels of label-set/1 take their FreeSurferColorLUT colours
 (LABEL_RGB). The fixes image takes FIX_RGB and the WM mask WM_RGB (our own:
@@ -44,6 +49,8 @@ from typing import Any
 
 import numpy as np
 
+from baillarger import white_dseg
+from baillarger.bids import sidecar_path
 from baillarger.labels import LUT_NAMES
 from baillarger.viewer.bricks import (
     WIRE_NAMES,
@@ -316,7 +323,8 @@ def for_white(
 ) -> Volumes:
     """The registry of --white mode: the echo (if any, at echo_path), the echoes
     1 to 3 (those in `echoes`; the one at echo_path a second name of "echo"), the
-    labels, the WM mask (if `filled` names labels) and the fixes."""
+    labels, the input labels (if the labels have a wm-dseg/1 sidecar), the WM mask
+    (if `filled` names labels) and the fixes."""
     vs = Volumes()
     if echo is not None:
         vs.add_lazy("echo", echo, echo_dtype)
@@ -331,6 +339,9 @@ def for_white(
             vs.add_nifti(f"echo{k}", Path(p), "image", None)
     d, f = white_paths(surf, sources, dseg, fixes)
     vs.add_nifti("labels", d, "labels", "labels")
+    if sidecar_path(d).is_file():
+        inp = _found(white_dseg.input_labels(d), surf)
+        vs.add_nifti("input", inp, "labels", "labels")
     if len(filled):
         fl = [int(x) for x in filled]
         vs.add("wm", lambda: wm_mask(d, fl), "labels", "wm", "uint8")

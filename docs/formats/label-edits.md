@@ -51,6 +51,12 @@ An undo is refused if the diff on disk is not the one that the top write
 left: another writer changed it since. The undo stack is in the viewer's memory only, for one viewer run; the diff
 keeps no history. An undo does not change the answer log.
 
+The pending edits are the voxels where the diff and the dseg's copy of the
+diff (below) differ (`baillarger.label_edits.differ`): the edits that are
+not yet in the dseg. The review pane gets them from `/review/pending`, each
+with the label in the diff (an erased voxel: its input label), and draws
+them on the slice tiles after each paint and undo.
+
 ## Files
 
 | File | Content |

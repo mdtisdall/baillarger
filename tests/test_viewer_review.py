@@ -16,7 +16,7 @@ from typing import Any
 import nibabel as nib
 import numpy as np
 import pytest
-from edits_helpers import as_dict, edits, write_edits
+from edits_helpers import as_dict, edits, write_dseg_sidecar, write_edits
 
 from baillarger import bids, blocks, fix_diff, white_dseg
 from baillarger import label_edits as LE
@@ -126,7 +126,18 @@ def files(tmp_path: Path) -> dict[str, Path]:
     fd = tmp_path / "sub-T01_ses-S1_desc-wmtopofixes_diff.npy"
     fix_diff.write_diff(fd, fix_diff.make_diff(inp, new, idx, [FIX, FIX, 2]))
     edits = LE.bids_path(tmp_path / "deriv", dict(sub="T01", ses="S1"), "R")
-    return dict(dseg=dseg, queue=q, log=log["log"], edits=edits, input=src, fixdiff=fd)
+    # the dseg's copy of the edits that it used: none
+    copy = white_dseg.output_paths(dseg)["edits"]
+    LE.write(copy, LE.empty(), hemisphere="R", shape=SHAPE, affine=A)
+    return dict(
+        dseg=dseg,
+        queue=q,
+        log=log["log"],
+        edits=edits,
+        input=src,
+        fixdiff=fd,
+        copy=copy,
+    )
 
 
 def randoms(n: int, seed: int) -> list[dict[str, Any]]:
@@ -951,35 +962,6 @@ def test_strokes_are_refused_with_another_choice(server: Any) -> None:
 # ------------------------------------------------------- paint only
 
 
-def write_dseg_sidecar(dseg: Path, inp: Path) -> None:
-    """A wm-dseg/1 sidecar for the dseg at dseg, with the input labels inp as
-    its first Source, of the right hemisphere."""
-    bids.write_sidecar(
-        bids.sidecar_path(dseg),
-        white_dseg.DSEG_SPEC,
-        dict(
-            SpecVersion=white_dseg.DSEG_SPEC.version,
-            Description="a test dseg",
-            **bids.sources(inp),
-            Provenance=bids.provenance("tests"),
-            Hemisphere="R",
-            ToOutside={},
-            FilledLabels=[41],
-            WMLabel=41,
-            BettiBefore=[1, 0, 0],
-            BettiAfter=[1, 0, 0],
-            CavityVoxels=0,
-            HandleFillVoxels=0,
-            HandleCutVoxels=0,
-            CutLabels={},
-            SmallPieces=0,
-            SmallPieceVoxels=0,
-            ManualVoxels=0,
-            Moves=[],
-        ),
-    )
-
-
 def paint_only(files: dict[str, Path]) -> VR.Review:
     lab = np.asarray(nib.nifti1.load(files["dseg"]).dataobj)
     write_dseg_sidecar(files["dseg"], files["input"])
@@ -1132,7 +1114,7 @@ def replace_on_disk(p: Path) -> None:
     os.replace(tmp, p)
 
 
-@pytest.mark.parametrize("which", ["dseg", "queue", "fixdiff"])
+@pytest.mark.parametrize("which", ["dseg", "queue", "fixdiff", "copy"])
 def test_writes_are_refused_after_the_outputs_are_replaced(
     files: dict[str, Path], which: str
 ) -> None:
@@ -1151,6 +1133,8 @@ def test_writes_are_refused_after_the_outputs_are_replaced(
         rv.answer("5,5,5", VR.ACCEPT, {}, 1.0)
     with pytest.raises(ValueError, match="restart the viewer"):
         rv.undo_last()
+    with pytest.raises(ValueError, match="restart the viewer"):
+        rv.pending()
     assert (files["edits"].read_bytes(), diff(files), len(rv.undo)) == before
     assert len(records(files)) == n_log
 
@@ -1298,3 +1282,66 @@ def test_a_failed_preview_is_reported_to_the_poll(review: Any) -> None:
     rv = review(Broken())
     out = poll(rv, rv.preview("5,5,5", "thicken", {}))
     assert out["status"] == "failed" and "no WM in the box" in out["error"]
+
+
+# ------------------------------------------------------- pending edits
+
+
+def pending(out: dict[str, Any]) -> dict[tuple[int, ...], int]:
+    """A /review/pending response as {voxel: label}, checked to be in
+    linear-index order."""
+    v = [tuple(x) for x in out["voxels"]]
+    assert v == sorted(v) and len(out["labels"]) == len(v)
+    return dict(zip(v, out["labels"], strict=True))
+
+
+def test_pending_gives_the_edits_not_in_the_dseg_with_their_labels(
+    files: dict[str, Path],
+) -> None:
+    """The voxels where the edits and the dseg's copy differ: a new entry, a
+    changed entry and an erased entry (its input label, not its dseg label);
+    after an undo of all paints there are none."""
+    # the copy that the dseg used; the edits start equal to it
+    used = {(5, 4, 4): 0, (6, 5, 5): 42, (9, 9, 9): 42}
+    write_edits(files["copy"], edits(used, SHAPE), SHAPE, A)
+    write_edits(files["edits"], edits(used, SHAPE), SHAPE, A)
+    rv = make(files)
+    assert pending(rv.get("/review/pending", {})) == {}
+    rv.paint(paint_strokes((42, [(7, 7, 7)])))  # new: dseg 41
+    rv.paint(paint_strokes((41, [(5, 4, 4)])))  # changed: 0 in the copy
+    rv.paint(paint_strokes(("input", [(6, 5, 5)])))  # erased: input 0, dseg 41
+    want = {(5, 4, 4): 41, (6, 5, 5): 0, (7, 7, 7): 42}
+    assert pending(rv.get("/review/pending", {})) == want
+    # the same as label_edits.differ of the two diffs, the eraser's voxel
+    # with its input label
+    idx, lab = LE.differ(LE.read(files["edits"]), LE.read(files["copy"]))
+    v = np.stack(np.unravel_index(idx, SHAPE), 1)
+    inp = np.asarray(nib.nifti1.load(files["input"]).dataobj)
+    lab = np.where(lab == LE.INPUT, inp[tuple(v.T)], lab)
+    assert dict(zip(map(tuple, v.tolist()), lab.tolist(), strict=True)) == want
+    for _ in range(3):
+        rv.undo_last()
+    assert pending(rv.get("/review/pending", {})) == {}
+    rv.close()
+
+
+def test_pending_through_the_route(server: Any) -> None:
+    base, rv, files = server
+    assert get(base + "/review/pending") == dict(voxels=[], labels=[])
+    post(
+        base + "/review/paint",
+        dict(strokes=paint_strokes((0, [(4, 5, 4), (4, 4, 4)]))),
+    )
+    out = get(base + "/review/pending")
+    assert out == dict(voxels=[[4, 4, 4], [4, 5, 4]], labels=[0, 0])
+    post(base + "/review/undo", {})
+    assert get(base + "/review/pending") == dict(voxels=[], labels=[])
+
+
+def test_pending_without_the_dseg_copy_is_refused(files: dict[str, Path]) -> None:
+    for p in LE.edits_paths(files["copy"]).values():
+        p.unlink()
+    rv = make(files)
+    with pytest.raises(ValueError, match="no copy of the edits"):
+        rv.pending()
+    rv.close()

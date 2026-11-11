@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
+from baillarger import bids, white_dseg
 from baillarger import label_edits as LE
 
 Voxel = tuple[int, int, int]
@@ -59,3 +60,32 @@ def write_edits(
     """The diff e written at path (label_edits.write). Returns path."""
     LE.write(path, e, hemisphere=hemisphere, shape=shape, affine=affine)
     return path
+
+
+def write_dseg_sidecar(dseg: Path, inp: Path) -> None:
+    """A wm-dseg/1 sidecar for the dseg at dseg, with the input labels inp as
+    its first Source, of the right hemisphere."""
+    bids.write_sidecar(
+        bids.sidecar_path(dseg),
+        white_dseg.DSEG_SPEC,
+        dict(
+            SpecVersion=white_dseg.DSEG_SPEC.version,
+            Description="a test dseg",
+            **bids.sources(inp),
+            Provenance=bids.provenance("tests"),
+            Hemisphere="R",
+            ToOutside={},
+            FilledLabels=[41],
+            WMLabel=41,
+            BettiBefore=[1, 0, 0],
+            BettiAfter=[1, 0, 0],
+            CavityVoxels=0,
+            HandleFillVoxels=0,
+            HandleCutVoxels=0,
+            CutLabels={},
+            SmallPieces=0,
+            SmallPieceVoxels=0,
+            ManualVoxels=0,
+            Moves=[],
+        ),
+    )
