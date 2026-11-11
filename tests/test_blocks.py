@@ -329,3 +329,121 @@ def test_a_patched_source_reads_the_patch_on_its_box_only() -> None:
     assert np.array_equal(a, volume())  # the base is not changed
     with pytest.raises(ValueError):
         PatchedSource(ArraySource(a), (slice(20, 26), slice(0, 5), slice(3, 9)), patch)
+
+
+class CountingSource(ArraySource):
+    """An ArraySource that counts its reads."""
+
+    def __init__(self, a: np.ndarray) -> None:
+        super().__init__(a)
+        self.reads = 0
+
+    def read(self, box: tuple[slice, ...]) -> np.ndarray:
+        self.reads += 1
+        return super().read(box)
+
+
+Paint = tuple[tuple[slice, ...], np.ndarray]
+
+
+def paints(n: int, shape: tuple[int, ...], seed: int = 0) -> list[Paint]:
+    """n random boxes in a grid of shape, each with a random patch."""
+    rng = np.random.default_rng(seed)
+    out: list[Paint] = []
+    for _ in range(n):
+        lo = [int(rng.integers(0, s - 1)) for s in shape]
+        hi = [
+            int(rng.integers(a + 1, min(s, a + 12) + 1))
+            for a, s in zip(lo, shape, strict=True)
+        ]
+        box = tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))
+        out.append((box, rng.normal(size=[b - a for a, b in zip(lo, hi, strict=True)])))
+    return out
+
+
+def blocks_of(
+    boxes: list[tuple[slice, ...]], shape: tuple[int, ...], block: int
+) -> set[tuple[int, ...]]:
+    """The blocks of the grid (block voxels a side) that meet the union of boxes."""
+    union = np.zeros(shape, bool)
+    for box in boxes:
+        union[box] = True
+    return {tuple(int(x) for x in v) for v in np.argwhere(union) // block}
+
+
+def test_repeated_paints_merge_into_one_patch_and_equal_the_stacked_reads() -> None:
+    """Paint after paint gives one PatchedSource over the base (no chain): its values
+    are those of the patches written in order (the stacked version), and a read
+    reads the base one time, after one paint as after many."""
+    shape = (40, 35, 30)
+    a = np.random.default_rng(1).normal(size=shape).astype(np.float32)
+    base = CountingSource(a)
+    work = [paints(25, shape, seed) for seed in (2, 3)]
+    for steps in work:
+        stacked = a.copy()  # the reads of a chain of one wrapper per paint
+        merged = PatchedSource(base, block=8)
+        flat = PatchedSource(base, block=8)
+        for box, patch in steps:
+            stacked[box] = patch
+            merged.write(box, patch)
+            flat = PatchedSource(flat, box, patch)  # a new source, not a chain
+            assert merged.base is base and flat.base is base
+        everything = tuple(slice(0, n) for n in shape)
+        for src in (merged, flat):
+            assert np.array_equal(src.read(everything), stacked)
+            for box, _ in steps:
+                base.reads = 0
+                assert np.array_equal(src.read(box), stacked[box])
+                assert base.reads == 1
+    assert np.array_equal(a, base.a)  # the base is not changed
+
+
+def test_where_patches_overlap_the_later_patch_wins() -> None:
+    a = np.zeros((20, 20, 20), np.float32)
+    src = PatchedSource(ArraySource(a), block=8)
+    first = (slice(2, 12), slice(2, 12), slice(2, 12))
+    later = (slice(7, 17), slice(5, 9), slice(0, 20))
+    src.write(first, np.full((10, 10, 10), 1.0))
+    src.write(later, np.full((10, 4, 20), 2.0))
+    want = a.copy()
+    want[first] = 1.0
+    want[later] = 2.0
+    got = src.read((slice(0, 20),) * 3)
+    assert np.array_equal(got, want)
+    assert got[8, 6, 6] == 2.0 and got[3, 3, 3] == 1.0 and got[8, 10, 6] == 1.0
+
+
+def test_the_patch_memory_is_the_blocks_that_meet_the_painted_boxes() -> None:
+    """The merged patch keeps one array per block of the grid that a painted box
+    meets (clipped to the grid), however many paints wrote it."""
+    shape = (40, 35, 30)
+    a = np.zeros(shape, np.float32)
+    src = PatchedSource(ArraySource(a), block=8)
+    steps = paints(30, shape, 4)
+    for box, patch in steps:
+        src.write(box, patch)
+        src.write(box, patch)  # again: no more memory
+    want = blocks_of([b for b, _ in steps], shape, 8)
+    assert set(src.blocks) == want
+    size = 0
+    for ijk in want:
+        size += int(
+            np.prod([min(8, n - 8 * i) for i, n in zip(ijk, shape, strict=True)])
+        )
+    assert src.nbytes == size * 4
+
+
+def test_a_source_made_from_a_patched_source_leaves_it_unchanged() -> None:
+    """A preview: a new PatchedSource from the working field with one more patch;
+    the working field reads as before."""
+    a = volume().astype(np.float32)
+    box0 = (slice(0, 10), slice(0, 10), slice(0, 9))
+    work = PatchedSource(ArraySource(a), box0, np.ones((10, 10, 9)))
+    whole = (slice(0, 23), slice(0, 17), slice(0, 9))
+    before = work.read(whole)
+    box = (slice(5, 15), slice(5, 15), slice(0, 9))
+    view = PatchedSource(work, box, np.full((10, 10, 9), 7.0))
+    want = before.copy()
+    want[box] = 7.0
+    assert np.array_equal(view.read(whole), want)
+    assert np.array_equal(work.read(whole), before)

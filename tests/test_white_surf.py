@@ -362,3 +362,43 @@ def test_touched_blocks_include_the_block_before_on_a_shared_face() -> None:
     got = {tuple(b) for b in white_surf.touched_blocks(pts, 8).tolist()}
     assert got == {(1, 0, 0), (0, 0, 0), (0, 2, 0), (0, 1, 0), (1, 1, 1)}
     assert len(white_surf.touched_blocks(np.zeros((0, 3), np.int64), 8)) == 0
+
+
+def test_paints_in_sequence_update_one_working_field(
+    surface: tuple[Path, Path],
+) -> None:
+    """The working field of several paints: each local solve starts from the working
+    field, its re-march is that of the field with the solve written in, and the
+    working field stays one PatchedSource over the stored field (no chain), with the
+    solves written in order."""
+    dseg, surf = surface
+    field, _ = white_surf.read_field(
+        surf.with_name(
+            surf.name.replace("_white.surf.gii", "_desc-antialias_white.nii")
+        )
+    )
+    whole = tuple(slice(0, n) for n in field.shape)
+    want = np.array(field.read(whole))
+    work = PatchedSource(field, block=8)
+    mask = wm_mask(dseg)
+    x = np.indices(mask.shape).astype(float)
+    dev = backend.device("cpu")
+    boxes = []
+    for q in ([20, 19, 29], [28, 19, 26], [20, 31, 18]):
+        bump = np.sqrt(((x - np.array(q)[:, None, None, None]) ** 2).sum(0)) <= 2.0
+        mask = mask | bump
+        local = AA.local_solve(work, ArraySource(mask), np.argwhere(bump), dev)
+        assert local is not None
+        boxes.append(local.box)
+        r = white_surf.remarch(work, local, 8)
+        after = PatchedSource(work, local.box, local.phi)
+        v, f, mb = marching_tetrahedra_blocks(after, 0.0, 8, np.float32, None, r.blocks)
+        assert np.array_equal(v, r.v) and np.array_equal(f[:, [0, 2, 1]], r.f)
+        work.write(local.box, local.phi)
+        want[local.box] = local.phi
+        assert work.base is field
+        assert np.array_equal(work.read(whole), want)
+    # the later solves overwrite part of the earlier ones
+    assert all(
+        a.start < b.stop and b.start < a.stop for a, b in zip(*boxes[:2], strict=True)
+    )
