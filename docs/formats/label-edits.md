@@ -1,9 +1,8 @@
 # label-edits: the label edits of a hemisphere
 
-SpecVersion `label-edits/1`. Written by `baillarger.label_edits.write` and
-`update` (the ITK-SNAP import `python -m baillarger.wm_paint import`, and
-the copy that `python -m baillarger.white_dseg ASEG --edits EDITS --out
-DERIV` keeps). Read
+SpecVersion `label-edits/1`. Written by `baillarger.label_edits.write` (the
+ITK-SNAP import `python -m baillarger.wm_paint import`, and the copy that
+`python -m baillarger.white_dseg ASEG --edits EDITS --out DERIV` keeps). Read
 by `baillarger.label_edits.read` and by the dseg command (`--edits`,
 `docs/formats/wm-dseg.md`). The sidecar's keys are enforced by
 `baillarger.label_edits.EDITS_SPEC`, and `tests/test_bids.py` checks that the
@@ -62,11 +61,6 @@ records, and checks the records against the sidecar's `SHA256` and `Count`.
 So a reader sees the old diff or the new diff, never a mix. A write refuses
 (ValueError, and writes nothing) a diff that is not sorted, has an index
 two times or outside the grid, or has a label that is not in `label-set/1`.
-
-A change of the diff (read, change, write) is one step under one exclusive
-lock (`baillarger.label_edits.update`). So two writers at the same time (for
-example the viewer and the ITK-SNAP import) do not lose an edit. A writer
-that changes the diff uses `update`, not `read` then `write`.
 
 ## Sidecar keys: label-edits/1
 

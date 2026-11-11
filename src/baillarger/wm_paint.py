@@ -151,9 +151,7 @@ def import_paint(
     label edits at edits_path (a .npy diff, made empty if it is not there):
     only the voxels whose label changes from the input labels with the diff
     applied. The input labels are the first of the cropped dseg's Sources.
-    The read, the paint and the write of the diff are one locked step
-    (label_edits.update). Raises ValueError if the log's or the diff's grid
-    is not the crop's grid.
+    Raises ValueError if the log's or the diff's grid is not the crop's grid.
     Returns the answer's Id."""
     side = read_sidecar(crop / SIDECAR, PAINT_SPEC)
     grid = tuple(int(n) for n in side["Shape"])
@@ -164,10 +162,11 @@ def import_paint(
     dimg = _nifti(dseg)
     hemi = str(read_sidecar(log.paths["sidecar"], EDITS_SPEC)["Hemisphere"])
     if edits_path.exists():
-        # checked before the log append; update checks again under its lock
-        _, eside, _ = label_edits.read_with_sidecar(edits_path)
+        edits, eside, _ = label_edits.read_with_sidecar(edits_path)
         if tuple(eside["Shape"]) != grid:
             raise ValueError(f"the diff's grid is not the crop's grid {grid}")
+    else:
+        edits = label_edits.empty()
     inp = _nifti(Path(_dseg_sources(dseg)[0]))
     if tuple(inp.shape[:3]) != grid:
         raise ValueError(f"the input labels are not on the crop's grid {grid}")
@@ -175,7 +174,14 @@ def import_paint(
     off = np.asarray(side["Offset"], np.int64)
     size = np.asarray(_nifti(crop / LABELS).shape[:3], np.int64)
     box = tuple(slice(int(o), int(o + n)) for o, n in zip(off, size, strict=True))
-    inp_box = np.asanyarray(inp.dataobj[box])
+    new, _ = label_edits.paint(
+        edits,
+        np.asanyarray(inp.dataobj[box]),
+        voxels,
+        labels,
+        offset=off,
+        shape=grid,
+    )
     aid = log.answer(
         session,
         [int(c) for c in side["Site"]],
@@ -186,13 +192,7 @@ def import_paint(
         reviewer_seconds=reviewer_seconds,
         params={"Crop": str(crop.resolve())},
     )
-    label_edits.update(
-        edits_path,
-        lambda e: label_edits.paint(e, inp_box, voxels, labels, offset=off, shape=grid),
-        hemisphere=hemi,
-        shape=grid,
-        affine=dimg.affine,
-    )
+    label_edits.write(edits_path, new, hemisphere=hemi, shape=grid, affine=dimg.affine)
     return aid
 
 
