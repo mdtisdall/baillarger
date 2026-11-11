@@ -44,10 +44,17 @@ Routes (Review.get, Review.post), JSON:
   /review/preview?job=... until {status: "done", ...} (or {status:
   "failed", error}). The previews of the choices are jobs of
   baillarger.viewer.jobs.Jobs, keyed by the site, the choice, the params and
-  the SHA-256 of the edits: one runs at a time (a second preview while one
-  runs is refused), and the last PREVIEWS_KEPT finished previews stay in
-  memory for polling. The previews of manual-paint and accept-fix are
-  computed in the request.
+  the SHA-256 of the edits, and the last PREVIEWS_KEPT finished previews stay
+  in memory for polling. One runs at a time, in one worker process (the
+  "spawn" context): the request reads the box round the site and sends only
+  the box and the choice's arguments. The newest request wins: a request
+  for another key while a preview runs stops the worker (terminate, join),
+  its job fails with "replaced by a newer preview", and the new preview
+  starts in a new worker. A request for the key that runs gets {status:
+  "running", job}. A worker that ends without a result (the memory cap
+  killed it) fails its job. The worker is a daemon process: it stops when
+  the viewer ends (and at Review.close). The previews of manual-paint and
+  accept-fix are computed in the request.
 - POST /review/answer {site, choice, params, reviewer_seconds}: the choice's
   voxels and labels at the site, written into the label edits
   (label_edits.paint: only the voxels whose label changes from the dseg's
@@ -128,6 +135,7 @@ from the dseg's sidecar (wm-dseg/1).
 import argparse
 import hashlib
 import json
+import multiprocessing
 import os
 import threading
 import time
@@ -370,6 +378,53 @@ def _local(site: Site, lo: Site) -> Site:
     return (site[0] - lo[0], site[1] - lo[1], site[2] - lo[2])
 
 
+# ------------------------------------------------------------------ the worker
+
+
+def _preview_worker(conn: Any) -> None:
+    """The preview worker process: for each request (choices, box, lo, site,
+    choice, params) on conn, ("ok", Preview) or ("error", message). Ends when
+    the viewer's end of conn closes."""
+    while True:
+        try:
+            choices, box, lo, site, choice, params = conn.recv()
+        except EOFError:
+            return
+        try:
+            out: tuple[str, Any] = (
+                "ok",
+                choices.preview(box, lo, site, choice, params),
+            )
+        except Exception as exc:  # reported to the viewer
+            out = ("error", f"{type(exc).__name__}: {exc}")
+        conn.send(out)
+
+
+def _preview_dict(p: Preview, t0: float) -> dict[str, Any]:
+    """A preview as the page gets it; t0: the time it started."""
+    return dict(
+        status="done",
+        answer=p.answer.tolist(),
+        correction=p.correction.tolist(),
+        overrides=p.overrides,
+        cut_by_box=p.cut_by_box,
+        seconds=time.perf_counter() - t0,
+    )
+
+
+class PreviewError(Exception):
+    """A preview that the worker did not give: it failed, it was replaced by a
+    newer preview, or the worker ended without a result."""
+
+
+@dataclass
+class _Worker:
+    proc: Any  # multiprocessing.context.SpawnProcess
+    conn: Any  # multiprocessing.connection.Connection
+    #: stopped by a newer preview (Review._stop_worker)
+    replaced: bool = False
+
+
 # ------------------------------------------------------------------ the review
 
 
@@ -455,6 +510,13 @@ class Review:
         self.jobs: Jobs[dict[str, Any]] = Jobs(
             log=lambda m: None, keep_in_memory=PREVIEWS_KEPT
         )
+        #: the preview worker process, started at the first slow preview
+        self._worker: _Worker | None = None
+        self._wlock = threading.Lock()  # self._worker
+        self._plock = threading.Lock()  # a preview request's stop and start
+        #: the number of stops: a job started before a stop does not start
+        #: a worker after it
+        self._stops = 0
         #: the undo stack: the earlier entries of each write into the edits,
         #: and the SHA-256 of the edits that the write left
         self.undo: list[label_edits.Edits] = []
@@ -864,24 +926,85 @@ class Review:
     def _preview(
         self, site: Site, choice: str, params: dict[str, Any]
     ) -> dict[str, Any]:
+        """The preview of manual-paint or accept-fix, computed here."""
         t0 = time.perf_counter()
         if choice == MANUAL:
             none = np.zeros((0, 3), np.int64)
             p = Preview(none, none, False)
-        elif choice == ACCEPT:
+        else:
             _, v, _ = self._fix(site)
             p = Preview(v, np.zeros((0, 3), np.int64), False)
-        else:
-            box, lo = self.window(site, params)
-            p = self.choices.preview(box, lo, site, choice, params)
-        return dict(
-            status="done",
-            answer=p.answer.tolist(),
-            correction=p.correction.tolist(),
-            overrides=p.overrides,
-            cut_by_box=p.cut_by_box,
-            seconds=time.perf_counter() - t0,
+        return _preview_dict(p, t0)
+
+    def _remote(
+        self,
+        box: Arr,
+        lo: Site,
+        site: Site,
+        choice: str,
+        params: dict[str, Any],
+        stops: int,
+    ) -> dict[str, Any]:
+        """The preview of a choice computed by the worker process (started if
+        there is none). stops: self._stops when the job started. Raises
+        PreviewError if it fails, if a newer preview stops the worker, or if
+        the worker ends without a result."""
+        t0 = time.perf_counter()
+        with self._wlock:
+            if self._stops != stops:
+                raise PreviewError("replaced by a newer preview")
+            w = self._worker
+            if w is None or not w.proc.is_alive():
+                if w is not None:  # ended while idle
+                    w.conn.close()
+                w = self._worker = self._start_worker()
+        try:
+            w.conn.send((self.choices, box, lo, site, choice, params))
+            tag, val = w.conn.recv()
+        except (EOFError, OSError):
+            w.proc.join()
+            with self._wlock:
+                if self._worker is w:
+                    self._worker = None
+            w.conn.close()
+            if w.replaced:
+                raise PreviewError("replaced by a newer preview") from None
+            raise PreviewError(
+                f"the preview worker ended without a result (exit code "
+                f"{w.proc.exitcode})"
+            ) from None
+        if tag != "ok":
+            raise PreviewError(val)
+        return _preview_dict(val, t0)
+
+    @staticmethod
+    def _start_worker() -> _Worker:
+        ctx = multiprocessing.get_context("spawn")
+        here, there = ctx.Pipe()
+        proc = ctx.Process(
+            target=_preview_worker, args=(there,), daemon=True, name="preview"
         )
+        proc.start()
+        there.close()  # so that recv sees the worker's end (EOFError)
+        return _Worker(proc, here)
+
+    def _stop_worker(self, replaced: bool = True) -> None:
+        """Stop the worker process (terminate, join); the job that waits on it
+        fails (_remote)."""
+        with self._wlock:
+            w, self._worker = self._worker, None
+            self._stops += 1
+        if w is not None:
+            w.replaced = replaced
+            w.proc.terminate()
+            w.proc.join()
+
+    def close(self) -> None:
+        """Stop the preview worker and wait for its job to end."""
+        self._stop_worker(replaced=False)
+        th = self.jobs.thread
+        if th is not None:
+            th.join()
 
     def preview_key(self, site: Site, choice: str, params: dict[str, Any]) -> str:
         """The job key of a preview: the SHA-256 of its site, choice, params and
@@ -891,8 +1014,8 @@ class Review:
         return hashlib.sha256(text.encode()).hexdigest()[:24]
 
     def preview(self, site: str, choice: str, params: dict[str, Any]) -> dict[str, Any]:
-        """The preview, or a job that computes it (module docstring). Raises
-        RuntimeError while the preview of another key runs."""
+        """The preview, or a job that computes it (module docstring): the
+        newest request wins."""
         self._need()
         c = parse_site(site)
         self._find(c)
@@ -900,12 +1023,21 @@ class Review:
         if choice in (MANUAL, ACCEPT):
             return self._preview(c, choice, params)
         key = self.preview_key(c, choice, params)
-        st = self.jobs.status()
-        if not (st["status"] == "running" and st["key"] == key):
+        with self._plock:
+            st = self.jobs.status()
+            if st["status"] == "running" and st["key"] == key:
+                return dict(status="running", job=key)
+            if st["status"] == "running":
+                self._stop_worker()
+                th = self.jobs.thread
+                if th is not None:
+                    th.join()
+            box, lo = self.window(c, params)
+            stops = self._stops
             out = self.jobs.run(
                 key,
                 f"preview {choice} at {site_id(c)}",
-                lambda log: self._preview(c, choice, params),
+                lambda log: self._remote(box, lo, c, choice, params, stops),
             )
             if out["status"] == "error":
                 return dict(status="failed", job=key, error=out["error"])
