@@ -147,8 +147,8 @@ from typing import Any, Protocol
 import numpy as np
 import numpy.typing as npt
 
-from baillarger import blocks, label_edits
-from baillarger.bids import file_sha256, sidecar_path
+from baillarger import blocks, label_edits, white_dseg
+from baillarger.bids import file_sha256
 from baillarger.labels import CORTEX_LABEL, LUT_NAMES, WM_LABEL
 from baillarger.viewer.jobs import Jobs
 from baillarger.wm_edits import EditLog, read_log
@@ -190,21 +190,6 @@ def parse_site(x: Any) -> Site:
     if len(v) != 3:
         raise ValueError(f"a site is 3 integers, not {x!r}")
     return (v[0], v[1], v[2])
-
-
-def input_labels(dseg: Path) -> Path:
-    """The input labels of the dseg at dseg: the first of its sidecar's
-    Sources (wm-dseg/1)."""
-    side = json.loads(sidecar_path(Path(dseg)).read_text())
-    return Path(side["Sources"][0])
-
-
-def fix_diff_path(dseg: Path) -> Path:
-    """The fix diff of the dseg at dseg (desc-wmtopo_dseg.nii.gz): its
-    desc-wmtopofixes_diff.npy, in the same directory (wm-dseg/1)."""
-    d = Path(dseg)
-    stem = d.name.split("_desc-wmtopo_")[0]
-    return d.with_name(f"{stem}_desc-wmtopofixes_diff.npy")
 
 
 def random_count(n_ranked: int, share: float) -> int:
@@ -435,7 +420,7 @@ class Review:
     paints (module docstring). labels() gives the segmentation's voxels (the
     whole grid, read once: the label pyramid's level 0); random(n, seed) the
     random sites (wm_sites.read_random_sites); inputs the input labels
-    (default: input_labels(dseg)). With sites and log None, the review is
+    (default: white_dseg.input_labels(dseg)). With sites and log None, the review is
     paint only (module docstring). Raises ValueError if the edits are on
     another grid or of the other hemisphere, or if only one of sites and log
     is given."""
@@ -459,9 +444,10 @@ class Review:
         self.dseg_sha = file_sha256(dseg)
         #: the outputs that the review reads, and their identities at start
         #: (_check_outputs)
+        diff_path = white_dseg.output_paths(Path(dseg))["diff"]
         self._outputs: dict[Path, Identity] = {
             Path(dseg): identity(Path(dseg)),
-            fix_diff_path(Path(dseg)): identity(fix_diff_path(Path(dseg))),
+            diff_path: identity(diff_path),
         }
         if sites is not None:
             self._outputs[Path(sites)] = identity(Path(sites))
@@ -477,9 +463,7 @@ class Review:
                 EditLog.create(self.log_path, dseg, self.hemi)
             self._log = EditLog(self.log_path)
         else:
-            self.hemi = str(
-                json.loads(sidecar_path(Path(dseg)).read_text())["Hemisphere"]
-            )
+            self.hemi = str(white_dseg.dseg_sidecar(Path(dseg))["Hemisphere"])
         self.labels, self.random = labels, random
         self.affine = np.asarray(affine, np.float64)
         self.shape = tuple(int(n) for n in nib.nifti1.load(dseg).shape[:3])
@@ -749,7 +733,7 @@ class Review:
         they are not on the review's grid or have a scaling."""
         if self._inputs_map is None:
             if self.inputs is None:
-                self.inputs = input_labels(self.dseg)
+                self.inputs = white_dseg.input_labels(self.dseg)
             src = blocks.open_volume(self.inputs)
             if tuple(src.shape[:3]) != self.shape:
                 raise ValueError(
@@ -781,11 +765,10 @@ class Review:
         v = np.asarray(voxels, np.int64).reshape(-1, 3)
         if not len(v):
             return edits, label_edits.empty(), np.zeros(0, np.int64)
-        self._on_grid(v)
         grid = self._input_labels()
-        inp = grid[tuple(v.T)].astype(np.int64)
         # the whole grids, unread: paint indexes only the voxels (the input
-        # labels are a memory map, the dseg's labels are in memory)
+        # labels are a memory map, the dseg's labels are in memory). paint
+        # refuses a voxel off the grid before the input labels are indexed.
         new, undo = label_edits.paint(
             edits,
             grid,
@@ -794,7 +777,7 @@ class Review:
             dseg=self.labels(),
             shape=self.shape,
         )
-        return new, undo, inp
+        return new, undo, grid[tuple(v.T)].astype(np.int64)
 
     def _on_grid(self, v: Arr) -> None:
         if len(v) and not np.all((v >= 0) & (v < self.shape)):
@@ -901,7 +884,9 @@ class Review:
         # the fix ids of the rows are those of the fix diff at start
         self._check_outputs()
         if self._fix_rows is None:
-            rows = fix_diff.read_diff(fix_diff_path(self.dseg), self.shape)
+            rows = fix_diff.read_diff(
+                white_dseg.output_paths(self.dseg)["diff"], self.shape
+            )
             self._check_outputs()  # not replaced during the read
             self._fix_rows = rows
         fid = int(r["fix"])

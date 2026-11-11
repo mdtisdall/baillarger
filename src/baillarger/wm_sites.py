@@ -66,6 +66,7 @@ from baillarger.decimate import CHUNK, normals
 from baillarger.fix_diff import read_table
 from baillarger.labels import OUTSIDE, TO_OUTSIDE
 from baillarger.timing import log_to_stderr
+from baillarger.white_dseg import output_paths, surface_dseg
 from baillarger.white_surf import SURF_SPEC, WhiteSurface
 
 type Float = npt.NDArray[np.float64]
@@ -330,8 +331,8 @@ def _load(surf: Path) -> _Loaded:
     """The surface at surf, its corrected segmentation and its fixes (named in
     its sidecar's Sources)."""
     side = read_sidecar(sidecar_path(surf), SURF_SPEC)
-    dseg = Path(side["Sources"][0])
-    fixes = dseg.with_name(dseg.name.replace("desc-wmtopo_", "desc-wmtopofixes_"))
+    dseg = surface_dseg(side)
+    fixes = output_paths(dseg)["fixes"]
     W = WhiteSurface.load(surf)
     pts = GiftiImage.from_filename(str(surf), mmap=True).agg_data("pointset")
     dv, fv = open_volume(dseg), open_volume(fixes)
@@ -398,8 +399,7 @@ def write_sites(surf: Path, out: Path | None = None) -> dict[str, Path]:
     dseg, fixes, side = L.dseg, L.fixes, L.side
     filled = L.filled
     S = find_sites(L.v_vox, L.f, L.v_mm, L.seg, filled, L.fx)
-    stem = dseg.name.removesuffix("_desc-wmtopo_dseg.nii.gz")
-    table_path = dseg.with_name(f"{stem}_desc-wmtopofixes_fixes.tsv")
+    table_path = output_paths(dseg)["table"]
     extra: list[Path] = []
     fix_rows: list[dict[str, Any]] = []
     if table_path.exists():

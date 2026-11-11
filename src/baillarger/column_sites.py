@@ -59,6 +59,7 @@ from baillarger.bids import (
     write_sidecar,
 )
 from baillarger.timing import log_to_stderr
+from baillarger.white_dseg import surface_dseg
 from baillarger.white_surf import SURF_SPEC
 
 type Float = npt.NDArray[np.float64]
@@ -335,7 +336,7 @@ def write_column_sites(
     the white surface surf (docs/formats/column-sites.md). Returns the paths
     written."""
     side = read_sidecar(sidecar_path(surf), SURF_SPEC)
-    dseg = Path(side["Sources"][0])
+    dseg = surface_dseg(side)
     z = np.load(conf_path)
     conf = {k: z[k] for k in CONF_KEYS}
     edges_v = [np.load(p)["edges_v"] for p in feat_paths]

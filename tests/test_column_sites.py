@@ -7,6 +7,7 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import pytest
+from edits_helpers import write_edits
 from nibabel.gifti.gifti import GiftiImage
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
@@ -272,7 +273,7 @@ def test_the_command_writes_sites_that_the_answer_log_takes(
     vox, lab, _ = L.voxels(ans["Id"])
     diff, _ = LE.paint(LE.empty(), labels, vox, lab)
     path = tmp_path / "sub-T01_ses-S1_hemi-R_desc-labeledits_edits.npy"
-    LE.write(path, diff, hemisphere="R", shape=labels.shape, affine=img.affine)
+    write_edits(path, diff, labels.shape, img.affine)
     edited = LE.apply(labels, LE.read(path))
     assert edited[site] == 0 and int((edited != labels).sum()) == 1
 

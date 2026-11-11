@@ -136,6 +136,36 @@ FIXES_SPEC = SidecarSpec(
 HISTORY = "wmtopofixes-history"
 
 
+def dseg_path(root: Path, ents: dict[str, str]) -> Path:
+    """The path of the dseg command's corrected segmentation
+    (desc-wmtopo_dseg.nii.gz) in the BIDS derivatives root, for the subject and
+    session of the entities ents."""
+    return derivative_path(root, ents, "dseg", ".nii.gz", desc="wmtopo")
+
+
+def output_paths(dseg: Path) -> dict[str, Path]:
+    """The outputs of the dseg command (write_wm_topo) whose corrected
+    segmentation is at dseg, by role, in the directory of dseg: dseg, fixes
+    (desc-wmtopofixes_dseg), table (the fix table), diff (the fix diff) and
+    edits (the copy of the label edits). Raises ValueError if dseg is not
+    named as dseg_path names it."""
+    d = Path(dseg)
+    ents = entities(d)
+
+    def at(suffix: str, ext: str, desc: str) -> Path:
+        return d.with_name(derivative_path(d.parent, ents, suffix, ext, desc=desc).name)
+
+    if at("dseg", ".nii.gz", "wmtopo") != d:
+        raise ValueError(f"{d.name}: not a corrected segmentation (dseg_path)")
+    return dict(
+        dseg=d,
+        fixes=at("dseg", ".nii.gz", "wmtopofixes"),
+        table=at("fixes", ".tsv", "wmtopofixes"),
+        diff=at("diff", ".npy", "wmtopofixes"),
+        edits=at("edits", ".npy", "wmtopo"),
+    )
+
+
 def history_dir(dseg: Path) -> Path:
     """The directory of the kept runs of the dseg at this path."""
     return dseg.parent.parent / HISTORY
@@ -606,13 +636,7 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
     t = wm_topo(a, vox, e)
     lap = Laps()
     dataset_description(out)
-    p = dict(
-        dseg=derivative_path(out, ents, "dseg", ".nii.gz", desc="wmtopo"),
-        fixes=derivative_path(out, ents, "dseg", ".nii.gz", desc="wmtopofixes"),
-        table=derivative_path(out, ents, "fixes", ".tsv", desc="wmtopofixes"),
-        diff=derivative_path(out, ents, "diff", ".npy", desc="wmtopofixes"),
-        edits=derivative_path(out, ents, "edits", ".npy", desc="wmtopo"),
-    )
+    p = output_paths(dseg_path(out, ents))
     if edits is not None and edits.resolve() == p["edits"].resolve():
         raise ValueError(f"{edits.name}: the diff is the output's copy of a diff")
     prov = provenance("baillarger.white_dseg.write_wm_topo")
@@ -738,11 +762,28 @@ def replay_dseg(
     return apply_diff(to_outside(a)[0], diff)
 
 
+def dseg_sidecar(dseg: Path) -> dict[str, Any]:
+    """The sidecar of a corrected segmentation (write_wm_topo), checked
+    against wm-dseg/1."""
+    return read_sidecar(sidecar_path(Path(dseg)), DSEG_SPEC)
+
+
 def filled_labels(dseg: Path) -> tuple[int, ...]:
     """The FilledLabels of a corrected segmentation (write_wm_topo), from its
     sidecar: its voxels with one of these labels are the corrected WM mask."""
-    side = read_sidecar(sidecar_path(dseg), DSEG_SPEC)
-    return tuple(int(k) for k in side["FilledLabels"])
+    return tuple(int(k) for k in dseg_sidecar(dseg)["FilledLabels"])
+
+
+def input_labels(dseg: Path) -> Path:
+    """The input labels of a corrected segmentation (write_wm_topo): the
+    first of its sidecar's Sources (wm-dseg/1)."""
+    return Path(dseg_sidecar(dseg)["Sources"][0])
+
+
+def surface_dseg(sidecar: dict[str, Any]) -> Path:
+    """The corrected segmentation of a white surface, from the surface's
+    sidecar (white-surf/1, already read): the first of its Sources."""
+    return Path(sidecar["Sources"][0])
 
 
 # ---------------------------------------------------------------- command line

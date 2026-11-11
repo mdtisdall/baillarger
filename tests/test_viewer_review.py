@@ -16,8 +16,9 @@ from typing import Any
 import nibabel as nib
 import numpy as np
 import pytest
+from edits_helpers import as_dict, edits, write_edits
 
-from baillarger import bids, blocks, fix_diff
+from baillarger import bids, blocks, fix_diff, white_dseg
 from baillarger import label_edits as LE
 from baillarger import wm_edits as E
 from baillarger import wm_sites as WS
@@ -453,9 +454,7 @@ def test_the_real_choices_through_the_route(files: dict[str, Path]) -> None:
 
 def diff(files: dict[str, Path]) -> dict[tuple[int, ...], int]:
     """The label edits as {voxel: label}."""
-    e = LE.read(files["edits"])
-    v = np.stack(np.unravel_index(e.index, SHAPE), 1).tolist()
-    return {tuple(x): int(y) for x, y in zip(v, e.label.tolist(), strict=True)}
+    return as_dict(LE.read(files["edits"]), SHAPE)
 
 
 def test_an_answer_writes_its_labels_into_the_diff(server: Any) -> None:
@@ -518,16 +517,7 @@ def test_a_later_answer_replaces_the_labels_of_an_earlier_one(
     rv = make(files)
     rv.start(0, None)
     rv.next()
-    LE.write(
-        files["edits"],
-        LE.Edits(
-            np.array([np.ravel_multi_index((5, 5, 5), SHAPE)], np.int64),
-            np.array([0], np.int32),
-        ),
-        hemisphere="R",
-        shape=SHAPE,
-        affine=A,
-    )
+    write_edits(files["edits"], edits({(5, 5, 5): 0}, SHAPE), SHAPE, A)
     rv.answer("5,5,5", "thicken", {}, 1.0)
     assert diff(files) == {(5, 5, 5): 42}
 
@@ -560,9 +550,8 @@ def test_a_diff_on_another_grid_is_refused(files: dict[str, Path]) -> None:
 
 def test_the_input_labels_default_to_the_dseg_sources(files: dict[str, Path]) -> None:
     lab = np.asarray(nib.nifti1.load(files["dseg"]).dataobj)
-    s = bids.sidecar_path(files["dseg"])
-    s.write_text(json.dumps(dict(Sources=[str(files["input"])])))
-    assert VR.input_labels(files["dseg"]) == files["input"]
+    write_dseg_sidecar(files["dseg"], files["input"])
+    assert white_dseg.input_labels(files["dseg"]) == files["input"]
     rv = VR.Review(
         files["queue"],
         files["log"],
@@ -647,7 +636,10 @@ def test_the_fix_diff_path_is_the_dseg_commands() -> None:
     ents, root = dict(sub="T01", ses="S1"), Path("/d")
     d = bids.derivative_path(root, ents, "dseg", ".nii.gz", desc="wmtopo")
     want = bids.derivative_path(root, ents, "diff", ".npy", desc="wmtopofixes")
-    assert VR.fix_diff_path(d) == want
+    assert white_dseg.dseg_path(root, ents) == d
+    assert white_dseg.output_paths(d)["diff"] == want
+    with pytest.raises(ValueError, match="not a corrected segmentation"):
+        white_dseg.output_paths(d.with_name("sub-T01_ses-S1_aseg.nii.gz"))
 
 
 # ------------------------------------------------------- paint and undo
@@ -753,16 +745,7 @@ def test_undo_restores_the_diff_exactly_after_overlapping_paints(
     server: Any,
 ) -> None:
     base, rv, files = server
-    LE.write(
-        files["edits"],
-        LE.Edits(
-            np.array([np.ravel_multi_index((4, 4, 4), SHAPE)], np.int64),
-            np.array([0], np.int32),
-        ),
-        hemisphere="R",
-        shape=SHAPE,
-        affine=A,
-    )
+    write_edits(files["edits"], edits({(4, 4, 4): 0}, SHAPE), SHAPE, A)
     d0 = diff(files)
     post(
         base + "/review/paint",
@@ -923,10 +906,38 @@ def test_strokes_are_refused_with_another_choice(server: Any) -> None:
 # ------------------------------------------------------- paint only
 
 
+def write_dseg_sidecar(dseg: Path, inp: Path) -> None:
+    """A wm-dseg/1 sidecar for the dseg at dseg, with the input labels inp as
+    its first Source, of the right hemisphere."""
+    bids.write_sidecar(
+        bids.sidecar_path(dseg),
+        white_dseg.DSEG_SPEC,
+        dict(
+            SpecVersion=white_dseg.DSEG_SPEC.version,
+            Description="a test dseg",
+            **bids.sources(inp),
+            Provenance=bids.provenance("tests"),
+            Hemisphere="R",
+            ToOutside={},
+            FilledLabels=[41],
+            WMLabel=41,
+            BettiBefore=[1, 0, 0],
+            BettiAfter=[1, 0, 0],
+            CavityVoxels=0,
+            HandleFillVoxels=0,
+            HandleCutVoxels=0,
+            CutLabels={},
+            SmallPieces=0,
+            SmallPieceVoxels=0,
+            ManualVoxels=0,
+            Moves=[],
+        ),
+    )
+
+
 def paint_only(files: dict[str, Path]) -> VR.Review:
     lab = np.asarray(nib.nifti1.load(files["dseg"]).dataobj)
-    s = bids.sidecar_path(files["dseg"])
-    s.write_text(json.dumps(dict(Hemisphere="R", Sources=[str(files["input"])])))
+    write_dseg_sidecar(files["dseg"], files["input"])
     return VR.Review(None, None, files["edits"], files["dseg"], lambda: lab, A, None)
 
 
@@ -1044,9 +1055,7 @@ def test_far_apart_strokes_read_only_their_voxels(tmp_path: Path) -> None:
     nib.save(nib.nifti1.Nifti1Image(lab, A), dseg)
     inp = tmp_path / "sub-T02_ses-S1_desc-input_dseg.nii.gz"
     nib.save(nib.nifti1.Nifti1Image(lab, A), inp)
-    bids.sidecar_path(dseg).write_text(
-        json.dumps(dict(Hemisphere="R", Sources=[str(inp)]))
-    )
+    write_dseg_sidecar(dseg, inp)
     edits = LE.bids_path(tmp_path / "deriv", dict(sub="T02", ses="S1"), "R")
     rv = VR.Review(None, None, edits, dseg, lambda: lab, A, None)
     rv.paint(paint_strokes((42, [(80, 80, 60)])))  # opens the input labels

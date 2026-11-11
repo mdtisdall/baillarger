@@ -31,7 +31,11 @@ columns of Columns.compute(Request(vertex, radius_mm)).
 Painted labels (paint): label edits on the dseg's grid (label-edits/1
 diffs, baillarger.label_edits; the viewer's paint mode writes them). Their
 voxels and labels replace the box's labels where they fall in the box, in
-the order given. Only the box's labels change. The straight rays' label
+the order given (label_edits.apply on the box). Only the box's labels
+change. This prototype applies a diff to the dseg's labels, while the dseg
+command (white_dseg --edits) applies it to the input labels and then runs
+the correction: a painted box shows the edits, not the corrected result
+that a regeneration with them would give. The straight rays' label
 intervals stay those of the dseg (the ray sampler reads the dseg itself), so
 a caller that needs the painted labels along a ray samples Box.labels. The
 sidecar of the command line lists the diffs.
@@ -210,13 +214,9 @@ def paint(
             Path(path), shape=None if shape is None else tuple(int(s) for s in shape)
         )
         grid = tuple(int(s) for s in side["Shape"])
-        pts = np.stack(np.unravel_index(e.index, grid), 1).astype(np.int64)
-        vals = e.label.astype(np.int64)
-        q = pts - np.asarray(offset, np.int64)
-        ok = np.all((q >= 0) & (q < np.asarray(out.shape)), axis=1)
-        q, v = q[ok], vals[ok]
-        n += int(np.count_nonzero(out[tuple(q.T)] != v))
-        out[tuple(q.T)] = v
+        new = label_edits.apply(out, e, offset=offset, shape=grid)
+        n += int(np.count_nonzero(new != out))
+        out = new
     return out, n
 
 

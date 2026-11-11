@@ -55,13 +55,14 @@ from scipy.sparse.csgraph import dijkstra
 from scipy.spatial import cKDTree
 
 from baillarger import rays as R
-from baillarger.bids import file_sha256
+from baillarger.bids import entities, file_sha256
 from baillarger.blocks import Source, open_volume
 from baillarger.column_volume import ColumnVolume, ColumnVolumeSampler
 from baillarger.mesh_graph import BlockIndex, LocalGraph, local_graph
 from baillarger.viewer import section as VSec
 from baillarger.viewer.jobs import Jobs
 from baillarger.viewer.tck import tck
+from baillarger.white_dseg import dseg_path, surface_dseg
 
 type Float = npt.NDArray[np.float64]
 type I64 = npt.NDArray[np.int64]
@@ -792,9 +793,8 @@ def dseg_for(surf: Path, sidecar: dict[str, Any]) -> Path:
     """The surface's segmentation: the _desc-wmtopo_dseg.nii.gz next to the
     surface (with the surface's subject and session), if there is one; else the
     first of the sidecar's Sources. The ray sampler checks its SHA-256."""
-    stem = surf.name.split("_hemi-")[0]
-    here = surf.with_name(f"{stem}_desc-wmtopo_dseg.nii.gz")
-    return here if here.exists() else Path(sidecar["Sources"][0])
+    here = surf.with_name(dseg_path(surf.parent, entities(surf)).name)
+    return here if here.exists() else surface_dseg(sidecar)
 
 
 def echo_file(k: int, directory: Path) -> Path:

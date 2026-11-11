@@ -184,6 +184,7 @@ def ring_edits(tmp_path: Path) -> tuple[Path, Path]:
     ring and its hole with their input labels (so the correction must change
     edited voxels: an override), and the rod painted 2 voxels lower
     (label_edits.paint). Returns the input labels and the diff."""
+    from edits_helpers import move_rod, ring_edits, write_edits
     from test_white_dseg import VOX, synthetic_aseg
 
     from baillarger import label_edits as LE
@@ -193,14 +194,8 @@ def ring_edits(tmp_path: Path) -> tuple[Path, Path]:
     inp = tmp_path / "in" / NAME
     inp.parent.mkdir(parents=True)
     nib.save(nib.nifti1.Nifti1Image(a, A), inp)
-    box = np.zeros(a.shape, bool)
-    box[25:37, 3:33, 22:28] = True
-    idx = np.flatnonzero(box).astype(np.int64)
-    e = LE.Edits(idx, a.reshape(-1)[idx].astype(np.int32))
-    v = [(27, 16, 25), (27, 17, 25), (27, 16, 23), (27, 17, 23)]
-    e, _ = LE.paint(e, a, v, [0, 0, 41, 41])
     edits = LE.bids_path(tmp_path / "edits", dict(sub="T01", ses="S1"), "R")
-    LE.write(edits, e, hemisphere="R", shape=a.shape, affine=A)
+    write_edits(edits, move_rod(ring_edits(a), a), a.shape, A)
     return inp, edits
 
 

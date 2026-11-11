@@ -229,6 +229,7 @@ def _ring_run(
     with the fix's labels: the choice "accept the fix" of an override site),
     "move" (paint the rod 2 voxels lower). Returns the dseg, its fix sites
     and the fix diff."""
+    from edits_helpers import move_rod, ring_edits, write_edits
     from test_white_dseg import VOX, synthetic_aseg
 
     from baillarger import bids, fix_diff, white_dseg
@@ -245,22 +246,16 @@ def _ring_run(
     e = LE.read(ep) if ep.exists() else LE.empty()
     for name in steps:
         if name == "ring":
-            box = np.zeros(a.shape, bool)
-            box[25:37, 3:33, 22:28] = True
-            idx = np.flatnonzero(box).astype(np.int64)
-            e = LE.Edits(idx, a.reshape(-1)[idx].astype(np.int32))
+            e = ring_edits(a)
         elif name == "move":
-            v = [(27, 16, 25), (27, 17, 25), (27, 16, 23), (27, 17, 23)]
-            e, _ = LE.paint(e, a, v, [0, 0, 41, 41])
+            e = move_rod(e, a)
         elif name.startswith("accept:"):
-            diff = fix_diff.read_diff(
-                out / "sub-T01/ses-S1/anat/sub-T01_ses-S1_desc-wmtopofixes_diff.npy",
-                a.shape,
-            )
+            dseg = white_dseg.dseg_path(out, bids.entities(src))
+            diff = fix_diff.read_diff(white_dseg.output_paths(dseg)["diff"], a.shape)
             idx, new = fix_diff.fix_voxels(diff, int(name.split(":")[1]))
             ijk = np.stack(np.unravel_index(idx, a.shape), 1)
             e, _ = LE.paint(e, a, ijk, new)
-    LE.write(ep, e, hemisphere="R", shape=a.shape, affine=A)
+    write_edits(ep, e, a.shape, A)
     w = white_dseg.write_wm_topo(src, out, ep)
     diff = fix_diff.read_diff(w["diff"], a.shape)
     seg = np.asarray(nib.nifti1.load(w["dseg"]).dataobj)

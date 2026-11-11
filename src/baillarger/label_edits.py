@@ -457,17 +457,32 @@ def update(
 # ------------------------------------------------------------ the changes
 
 
-def apply(labels: npt.ArrayLike, edits: Edits) -> npt.NDArray[Any]:
+def apply(
+    labels: npt.ArrayLike,
+    edits: Edits,
+    *,
+    offset: npt.ArrayLike = (0, 0, 0),
+    shape: tuple[int, ...] | None = None,
+) -> npt.NDArray[Any]:
     """A copy of the labels with the diff's labels written at its voxels.
-    Raises ValueError if a voxel is outside the labels or a label does not
-    fit the labels' type."""
+    labels are the whole grid, or a crop of the grid of this shape whose
+    voxel [0, 0, 0] is the grid voxel offset (as in paint); the diff's voxels
+    outside the crop are left out. Raises ValueError if a voxel is outside
+    the grid or a label does not fit the labels' type."""
     a = np.asarray(labels)
-    edits.check(a.shape)
+    grid = a.shape if shape is None else tuple(int(n) for n in shape)
+    off = np.asarray(offset, np.int64)
+    edits.check(grid)
     lab = edits.label.astype(np.int64)
     if np.any(lab != lab.astype(a.dtype)):
         raise ValueError(f"a label of the diff does not fit {a.dtype}")
     out = a.copy()
-    out.reshape(-1)[edits.index] = edits.label
+    if grid == a.shape and not off.any():
+        out.reshape(-1)[edits.index] = edits.label
+        return out
+    q = np.stack(np.unravel_index(edits.index, grid), 1).astype(np.int64) - off
+    ok = np.all((q >= 0) & (q < np.asarray(a.shape)), axis=1)
+    out[tuple(q[ok].T)] = edits.label[ok]
     return out
 
 
@@ -578,17 +593,3 @@ def differ(a: Edits, b: Edits) -> tuple[Int, Int32]:
     la, lb = _entries(a, idx), _entries(b, idx)
     d = la != lb
     return idx[d], la[d]
-
-
-def changed(
-    before: npt.ArrayLike, after: npt.ArrayLike, offset: npt.ArrayLike = (0, 0, 0)
-) -> tuple[Int, Int]:
-    """The voxels (N, 3, C order) where two label arrays of one shape differ,
-    plus offset (the grid voxel of their voxel [0, 0, 0], for a crop), and
-    their labels in after. Raises ValueError if the shapes differ."""
-    b, a = np.asarray(before), np.asarray(after)
-    if b.shape != a.shape:
-        raise ValueError(f"the shapes {b.shape} and {a.shape} differ")
-    mask = b != a
-    pts = np.argwhere(mask).astype(np.int64).reshape(-1, 3)
-    return pts + np.asarray(offset, np.int64), a[mask].astype(np.int64).reshape(-1)
