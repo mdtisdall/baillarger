@@ -383,6 +383,16 @@ class WMTopo:
     to_outside: dict[int, int] = field(default_factory=dict)
 
 
+def groups(ids: npt.ArrayLike, n: int) -> list[Int]:
+    """For each label k from 1 to n, the positions i with ids[i] == k, in
+    increasing order: one stable sort, O(V log V) for V ids (each id from 0
+    to n), not one pass over the ids for each label."""
+    ids = np.asarray(ids, np.int64)
+    order = np.argsort(ids, kind="stable")
+    ends = np.cumsum(np.bincount(ids, minlength=n + 1))
+    return np.split(order, ends[:-1])[1:]
+
+
 def wm_topo(
     aseg: npt.ArrayLike, voxel_mm: npt.ArrayLike, edits: Edits | None = None
 ) -> WMTopo:
@@ -492,11 +502,12 @@ def wm_topo(
     cav_lab, n_cav = ndi.label(cav, kuhn_structure())
     cav_vox = np.argwhere(cav_lab > 0)
     cav_id = cav_lab[cav_lab > 0]
-    for k in range(1, n_cav + 1):
-        steps.append(("cavity_fill", flat_of(cav_vox[cav_id == k]), None))
+    for g in groups(cav_id, n_cav):
+        steps.append(("cavity_fill", flat_of(cav_vox[g]), None))
     sp_vox = np.stack(small, axis=1)
-    for k in range(1, n_small + 1):
-        steps.append(("small_piece", flat_of(sp_vox[piece == k]), None))
+    sp_groups = groups(piece, n_small)
+    for g in sp_groups:
+        steps.append(("small_piece", flat_of(sp_vox[g]), None))
     # the fix that changed each voxel last, in the order that the steps run:
     # the answers, the cavity fill, the handle moves, the small pieces
     n_move = len(r.moves)
@@ -580,14 +591,13 @@ def wm_topo(
         )
         for mv in r.moves
     ]
-    sp = np.stack(small, axis=1) + lo
-    vox_n = np.bincount(piece, minlength=n_small + 1)[1:]
-    for k in range(1, n_small + 1):
+    sp = sp_vox + lo
+    for g in sp_groups:
         moves.append(
             dict(
                 Kind="small_piece",
-                Voxels=int(vox_n[k - 1]),
-                Centre=np.round(sp[piece == k].mean(0)).astype(int).tolist(),
+                Voxels=len(g),
+                Centre=np.round(sp[g].mean(0)).astype(int).tolist(),
             )
         )
     return WMTopo(
