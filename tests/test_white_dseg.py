@@ -374,6 +374,21 @@ def test_manual_pieces_are_the_pieces_of_ndimage_label(seed: int) -> None:
     assert all(np.array_equal(g, w) for g, w in zip(got, want, strict=True))
 
 
+@pytest.mark.parametrize("seed", range(4))
+def test_groups_are_the_positions_of_each_label(seed: int) -> None:
+    """groups gives, for each label 1..n, the positions of that label in
+    increasing order (as ids == k gives them), also for a label with no
+    position."""
+    rng = np.random.default_rng(seed)
+    n = 7
+    ids = rng.integers(1, n, 200)  # label n has no position
+    want = [np.flatnonzero(ids == k) for k in range(1, n + 1)]
+    got = white_dseg.groups(ids, n)
+    assert len(got) == n and len(got[-1]) == 0
+    assert all(np.array_equal(g, w) for g, w in zip(got, want, strict=True))
+    assert white_dseg.groups(np.zeros(0, np.intp), 0) == []
+
+
 def test_manual_pieces_of_far_apart_voxels_on_a_large_grid() -> None:
     """Two voxels at opposite corners of a grid of 1e12 voxels: no array of
     the grid or of the voxels' bounding box is made."""
