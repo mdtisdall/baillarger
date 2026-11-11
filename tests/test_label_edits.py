@@ -340,7 +340,7 @@ def test_the_dseg_command_takes_the_edits(tmp_path: Path) -> None:
         anat / "sub-T01_ses-S1_desc-wmtopo_dseg.json", white_dseg.DSEG_SPEC
     )
     copy = anat / "sub-T01_ses-S1_desc-wmtopo_edits.npy"
-    want = [str(p.resolve()) for p in (src, copy, bids.sidecar_path(copy))]
+    want = [str(p.resolve()) for p in (src, copy)]
     assert side["Sources"] == want and set(side["SourcesSHA256"]) == set(want)
     # the copy is the diff that the run used
     got, cside, sha = LE.read_with_sidecar(copy)
