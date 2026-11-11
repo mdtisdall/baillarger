@@ -1,9 +1,9 @@
 # Phase 1.3: the review's formats and code
 
-Stream 1, phase 3 of `docs/version-2-plan.md` (§3d). Read the plan's §1
-(*Data for training, and for judging success*, items 3 and 4), §2 (*Manual
-inputs*), §3c step 2 (*Answers before the correction*, *The topology
-guarantee wins over an answer*, *Fixes are kept as a diff*) and §3c step 6.
+Stream 1, phase 3 of `docs/version-2-plan.md` (§3d). Read
+`docs/plans/label-editing.md` (the edits diff), the plan's §2 (*Manual
+inputs*), §3c step 2 (*The topology guarantee wins over an edit*, *Fixes are
+kept as a diff*) and §3c step 6.
 The rules in `docs/plans/round-2.md` apply.
 
 ## Goal
@@ -14,12 +14,15 @@ written specs. Phase 1.3 needs no viewer.
 1. The site finder (`wm-sites/1`), with random sites on request.
 2. `dseg` publishes its fixes as a table and a sparse diff
    (`wm-dseg-fixes/1`).
-3. `wm-edits/1` revised: answers stand on their own, in an append-only log,
-   with scribbles, reviewer time, how each site was chosen, and session
-   records. `dseg` replays the answers in order. The topology guarantee wins
-   over an answer, and `dseg` marks and queues each such fix.
+3. `wm-edits/1` revised: the review queue's own record of answers, with
+   scribbles, reviewer time, how each site was chosen, and session records.
+   `white_dseg --edits` applies one current diff of (index, label) records
+   (`label-edits/1`, `docs/plans/label-editing.md`); there is no edit history,
+   and `dseg` does not read the answer record. The topology guarantee wins
+   over an edit, and `dseg` marks and queues each such fix.
 4. The site-answer choices as published code with a written contract.
-5. The ITK-SNAP escape hatch, as a command.
+5. The ITK-SNAP bootstrap, as a command. It stays until the viewer's paint
+   works, then it is removed with `wm_paint`.
 
 ## Done when
 
@@ -27,8 +30,8 @@ written specs. Phase 1.3 needs no viewer.
    `docs/formats/wm-dseg.md` agree with the code. `tests/test_bids.py`
    checks each sidecar spec against its document.
 2. Each part passes the exact tests in its section below.
-3. The site finder, `dseg` with the fix table, and a replay of a test edit
-   log run on the hemisphere. The PR bodies give the diagnostics in
+3. The site finder, `dseg` with the fix table, and a test edits diff run on
+   the hemisphere. The PR bodies give the diagnostics in
    "The hemisphere runs".
 4. Phase 4.2 can write code against a stable API. Send the API (Part F) to
    the coordinator before PR 3 opens.
@@ -152,24 +155,24 @@ Follow the plan, §3c step 2, *Fixes are kept as a diff*.
    Do not add its column now.
 3. **The diff:** per changed voxel, its linear index, fix id, old label and
    new label, in Morton order of the 64³ block grid. "Old" is the label
-   after the answers are applied. Store it as a binary file with a sidecar.
+   after the edits are applied. Store it as a binary file with a sidecar.
    Choose the file format and give the reason in the spec (for example a
    NumPy `.npy` record array, or a `.tsv.gz`). It must be 12–16 bytes per
    voxel or less.
-4. **Replay and revert.** A function rebuilds `desc-wmtopo` from the input
-   labels, the answers and the diff. A function reverts one fix for
+4. **Rebuild and revert.** A function rebuilds `desc-wmtopo` from the input
+   labels, the edits diff and the fix diff. A function reverts one fix for
    inspection.
 5. **Each run's diff is kept.** The sidecar records the SHA-256 of the input
-   labels, P (none until phase 8), the edit log and the code version. A
+   labels, P (none until phase 8), the edits diff and the code version. A
    rerun checks that it reproduces the stored diff when the inputs match.
 6. Edit `docs/formats/wm-dseg.md` in place. Add the keys to `FIXES_SPEC`.
 
-Exact tests on phantoms: replay reproduces `desc-wmtopo` byte for byte;
+Exact tests on phantoms: a rebuild reproduces `desc-wmtopo` byte for byte;
 revert of one fix changes only that fix's voxels; the diff is in Morton
 order; ids are the same on two runs; the table's counts equal the fixes
 image's counts.
 
-### Part C: `wm-edits/1` revised, and `dseg` replay
+### Part C: `wm-edits/1` revised, and the edits diff
 
 Follow the plan, §3c steps 2 and 6, and §1 item 4. Edit `wm-edits.md` in
 place. Keep the name `wm-edits/1`.
@@ -177,10 +180,11 @@ place. Keep the name `wm-edits/1`.
 1. **Answers stand on their own.** An answer is the verified label of each
    voxel it covers: voxels and a new label, with no `old` and no check
    against an input. It is valid for any input labels.
-2. **An append-only log.** Answers are in the order that they were made. A
-   correction is a new answer. A later answer writes over an earlier one
-   where they overlap. An answer can name the answers that it supersedes.
-   Nothing in the log is rewritten or removed. `Edits.without` goes; give
+2. **An append-only answer record.** It is the review queue's own record, in
+   the order that the answers were made. A correction is a new answer. An
+   answer can name the answers that it supersedes. Nothing in the record is
+   rewritten or removed. It is not an edit history of the dseg: `dseg` does not
+   read it, and each site answer writes its voxels into the edits diff. `Edits.without` goes; give
    revert for inspection only, as a function that returns a new log
    without changing the file.
 3. **Each answer records:** id, site (or none), choice, the class of each
@@ -190,23 +194,23 @@ place. Keep the name `wm-edits/1`.
    or ranked with its rank and score.
 4. **Two kinds of answer.** A site answer has voxels that `dseg` applies. A
    scribble has strokes, each with one class from the label set. Scribbles
-   are training labels only. `dseg` does not apply them (§2, *Manual
-   inputs*).
+   are not applied by `dseg`, and they are not training labels: editing is not
+   verification, and training labels are a separate design.
 5. **An answer with no voxels** (`leave`) is recorded, so the site counts as
    answered.
 6. **Session records.** For each session: its id, start time, the random
    share chosen at its start, the random seed, and every site shown, with
    the sites skipped. Raw facts only. Do not compute a measure in the log.
-7. **`dseg` replays the site answers** in order, each writing its voxels
-   over the labels, before the correction. The SHA is provenance, not a
-   gate.
+7. **`white_dseg --edits` applies the edits diff** over the input labels,
+   before the correction. Each site answer writes its voxels into the diff.
+   The SHA is provenance, not a gate.
 8. **The topology guarantee wins.** Handle removal and the cavity fill rank
-   verified voxels last. Where a defect can be fixed only through a
-   verified voxel, `dseg` fixes it and marks the fix in the fix table as
-   overriding an answer, with that answer's id. Ask the coordinator before
+   edited voxels last. Where a defect can be fixed only through an
+   edited voxel, `dseg` fixes it and marks the fix in the fix table as
+   overriding an edit. Ask the coordinator before
    you change the priority order in `handles.py`.
 9. **The way out of the queue** (§3c step 2): `leave` at an override site
-   accepts the fix, recorded as an answer. On a rerun, an answered override
+   accepts the fix: the fix's labels go into the edits diff. On a rerun, an answered override
    site goes back to the queue only if its fix is new or different. Match
    fixes across runs by voxel overlap with the kept diffs. Write the
    overlap rule in the spec.
@@ -221,13 +225,13 @@ you fix it, because phase 4.2 writes this file.
 
 Exact tests on phantoms:
 
-- Replay order: two answers on the same voxel, the later wins.
+- Two answers on the same voxel: the diff keeps the later label.
 - Supersession: a correction is a new record, and the old record stays.
-- An answer applies to a different input label unchanged.
+- The diff applies to a different input label unchanged.
 - A scribble does not change `desc-wmtopo`.
-- An answer that leaves a handle: `dseg` fixes it, the fix table marks the
-  override with the answer's id, and the site is in the queue.
-- `leave` at that site accepts the fix. On a rerun with the same input, the
+- An edit that leaves a handle: `dseg` fixes it, the fix table marks the
+  override, and the site is in the queue.
+- `leave` at that site accepts the fix: the fix's labels go into the diff. On a rerun with the same input, the
   site is not in the queue. On a rerun where the fix moves, it is.
 - Update the seven tests in `tests/test_wm_edits.py` to the new model.
 
@@ -249,7 +253,7 @@ Exact tests on phantoms:
    correction would override the answer. The box has a halo in mm; give its
    size and the reason. Where the box cuts a handle, say what the preview
    cannot show.
-5. `manual-paint` is the escape hatch of Part E. It is not a function here.
+5. `manual-paint` is the paint of Part E. It is not a function here.
 6. Write the contract in `docs/formats/wm-choices.md`: inputs, parameters,
    outputs, units. It is code with a contract, like a sampler (plan §1).
 
@@ -259,15 +263,16 @@ else changes; a one-voxel gap is filled; a widened gap opens to two voxels;
 choice on a box gives the same voxels as on the whole phantom; the preview
 of an answer that leaves a handle shows the override.
 
-### Part E: the ITK-SNAP escape hatch
+### Part E: the ITK-SNAP bootstrap
 
 A command with two subcommands:
 
 1. `export`: write a crop of the echoes and the current `desc-wmtopo` round
    a site, as `.nii.gz`, with the crop's offset in the sidecar.
 2. `import`: read the painted crop, compare it with the exported labels,
-   and append one answer (`manual-paint`) with the changed voxels to the
-   log.
+   and write the changed voxels into the edits diff. The command is a
+   bootstrap only. It is kept until the viewer's paint works, then removed
+   with `wm_paint`.
 
 Exact tests: export then import with no change gives an answer with no
 voxels; one painted voxel gives one voxel at the right world position.
@@ -281,8 +286,8 @@ coordinator. Phase 4.2 calls these functions and writes nothing else:
 - start a session (random share, seed) and record each site shown or
   skipped;
 - run a choice and its preview at a site;
-- append a site answer or a scribble to the log;
-- read the log.
+- write a site answer into the edits diff, and record it in the answer record;
+- read the answer record.
 
 ## The hemisphere runs
 
@@ -295,21 +300,21 @@ heavy job: ask the coordinator for a slot.
 2. **Part B:** `dseg` with the fix table and the diff. Counts by kind, the
    size of the diff file, a replay that reproduces `desc-wmtopo`, the time
    and the peak.
-3. **Part C:** a test log of three answers at real sites (one of each
-   choice that changes voxels), replayed by `dseg`. Report what changed. Do
-   not publish these answers as real answers. Name the file as a test.
+3. **Part C:** a test edits diff of three edits at real sites (one of each
+   choice that changes voxels), applied by `dseg`. Report what changed. Do
+   not publish these edits as real edits. Name the file as a test.
 
 ## Work breakdown
 
 | Step | Work | Who | Can run with |
 |---|---|---|---|
 | 1 | Part A: port #81, random sites | Sonnet sub-agent | 2, 3 |
-| 2 | Part C: the spec draft for the log (send to the coordinator) | Phase session | 1, 3 |
+| 2 | Part C: the spec draft for the answer record (send to the coordinator) | Phase session | 1, 3 |
 | 3 | Part D: the choice functions, without the preview | Sonnet sub-agent | 1, 2 |
 | 4 | Part B: fix ids, the table and the diff | Phase session | after 1.0.5's PR opens |
-| 5 | Part C: the log code and `dseg` replay, the override rule | Phase session | after 2 and 4 |
+| 5 | Part C: the record code and the edits diff, the override rule | Phase session | after 2 and 4 |
 | 6 | Part D: the preview | Phase session | after 3 and 5 |
-| 7 | Part E: the ITK-SNAP command | Haiku sub-agent, the phase session reviews | after 5 |
+| 7 | Part E: the ITK-SNAP bootstrap command | Haiku sub-agent, the phase session reviews | after 5 |
 | 8 | The hemisphere runs | Phase session | after each part |
 
 ## PRs
@@ -328,7 +333,7 @@ Tell the coordinator when each PR opens. Phase 4.2 stacks on PR 4.
 - Copy from #80 and #81, not stack on them (the user's decision).
 - The fix kind 5 is `small_piece` (shared with phase 1.0.5).
 - The choices' default radius is 1 voxel. `thicken` offers 1 and 2.
-- Scribbles are training labels only. `dseg` does not apply them. This is
-  the plan's rule (§2). The plan leaves open whether a scribble also
+- `dseg` does not apply scribbles, and they are not training labels (editing
+  is not verification). The plan leaves open whether a scribble also
   corrects the current hemisphere (§3c, Open). Phase 1.3 does not decide
   it.
