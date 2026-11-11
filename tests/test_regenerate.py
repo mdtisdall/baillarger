@@ -17,6 +17,7 @@ from baillarger import (
     white_surf,
     wm_sites,
 )
+from baillarger.bids import file_sha256
 from baillarger.fix_diff import write_table
 
 ANAT = Path("sub-T01/ses-S1/anat")
@@ -69,17 +70,28 @@ def _norm(x: Any) -> Any:
     return x
 
 
+def _sidecar_hashes(d: dict[str, Any]) -> dict[str, Any]:
+    """The sidecar d without the SHA-256 of its source sidecars (they hold a
+    time), after a check that each is the SHA-256 of the file now at its
+    path."""
+    sha = d.get("SourcesSHA256", {})
+    for k in [k for k in sha if k.endswith(".json")]:
+        assert file_sha256(Path(k)) == sha.pop(k), k
+    return d
+
+
 def assert_same(a: Path, b: Path) -> None:
     """The files in roots a and b are the same: the same names, the same
-    bytes, and the same sidecars apart from their times and the root's
-    path."""
+    bytes, and the same sidecars apart from their times, the SHA-256 of
+    their source sidecars (checked against the files) and the root's path."""
     fa, fb = files(a), files(b)
     assert sorted(fa) == sorted(fb)
     ra, rb = str(a.resolve()), str(b.resolve())
     for name in fa:
         if name.endswith(".json"):
-            ja = json.loads(fa[name].decode().replace(ra, rb))
-            jb = json.loads(fb[name].decode())
+            ja = _sidecar_hashes(json.loads(fa[name].decode()))
+            ja = json.loads(json.dumps(ja).replace(ra, rb))
+            jb = _sidecar_hashes(json.loads(fb[name].decode()))
             assert _norm(ja) == _norm(jb), name
         else:
             assert fa[name] == fb[name], name
@@ -174,3 +186,56 @@ def test_the_overrides_are_the_fixes_that_change_edited_voxels(
     assert regenerate.override_line(over[0]) == (
         "override: fix 2 (handle_fill) at voxel 4,5,6 changes 2 edited voxels"
     )
+
+
+# ------------------------------------------------------------ with label edits
+
+
+def ring_edits(tmp_path: Path) -> tuple[Path, Path]:
+    """The synthetic aseg of test_white_dseg and a label-edits/1 diff: the
+    ring and its hole with their input labels (so the correction must change
+    edited voxels: an override), and the rod painted 2 voxels lower
+    (label_edits.paint). Returns the input labels and the diff."""
+    from test_white_dseg import VOX, synthetic_aseg
+
+    from baillarger import label_edits as LE
+
+    a = synthetic_aseg()
+    A = np.diag([*VOX, 1.0])
+    inp = tmp_path / "in" / NAME
+    inp.parent.mkdir(parents=True)
+    nib.save(nib.nifti1.Nifti1Image(a, A), inp)
+    box = np.zeros(a.shape, bool)
+    box[25:37, 3:33, 22:28] = True
+    idx = np.flatnonzero(box).astype(np.int64)
+    e = LE.Edits(idx, a.reshape(-1)[idx].astype(np.int32))
+    v = [(27, 16, 25), (27, 17, 25), (27, 16, 23), (27, 17, 23)]
+    e, _ = LE.paint(e, a, v, [0, 0, 41, 41])
+    edits = LE.bids_path(tmp_path / "edits", dict(sub="T01", ses="S1"), "R")
+    LE.write(edits, e, hemisphere="R", shape=a.shape, affine=A)
+    return inp, edits
+
+
+def test_the_command_with_edits_gives_the_files_of_the_four_commands(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inp, edits = ring_edits(tmp_path)
+    hand = tmp_path / "hand"
+    white_dseg.main([str(inp), "--edits", str(edits), "--out", str(hand)])
+    dseg = hand / ANAT / "sub-T01_ses-S1_desc-wmtopo_dseg.nii.gz"
+    white_surf.main([str(dseg), "--out", str(hand), *BLOCK])
+    surf = hand / ANAT / "sub-T01_ses-S1_hemi-R_white.surf.gii"
+    white_overview.main([str(surf)])
+    wm_sites.main([str(surf)])
+    capsys.readouterr()
+    regen = tmp_path / "regen"
+    regenerate.main([str(inp), "--edits", str(edits), "--root", str(regen), *BLOCK])
+    out = capsys.readouterr().out
+    assert_same(hand, regen)
+    # the dseg's copy of the diff is among the outputs, equal to the diff
+    copy = regen / ANAT / "sub-T01_ses-S1_desc-wmtopo_edits.npy"
+    assert copy.read_bytes() == edits.read_bytes()
+    # the edit that the correction must change (the moved rod) is printed
+    lines = [x for x in out.splitlines() if x.startswith("override: ")]
+    assert len(lines) == 1 and " at voxel 27," in lines[0] and ",23 " in lines[0]
+    assert "overrides: 1" in out
