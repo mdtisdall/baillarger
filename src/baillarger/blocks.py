@@ -242,23 +242,54 @@ class EmbeddedSource:
         return out
 
 
+def _overlap(
+    box: tuple[slice, ...], other: tuple[slice, ...]
+) -> tuple[tuple[slice, ...], tuple[slice, ...]] | None:
+    """Where other meets box: (the slices of the overlap relative to box, relative
+    to other), or None if they do not meet."""
+    dst, src = [], []
+    for s, o in zip(box, other, strict=True):
+        a, b = max(int(s.start), int(o.start)), min(int(s.stop), int(o.stop))
+        if a >= b:
+            return None
+        dst.append(slice(a - int(s.start), b - int(s.start)))
+        src.append(slice(a - int(o.start), b - int(o.start)))
+    return tuple(dst), tuple(src)
+
+
 class PatchedSource:
-    """A Source with the values of patch on box (grid voxels, within the grid): e.g.
-    an earlier field with a local solve written in, read with no copy of the
-    field."""
+    """A Source with patches written in: e.g. the working field of the viewer, the
+    stored field with the local solve of each paint written in, read with no copy of
+    the field.
+
+    The patches are kept as one dict of blocks of the grid (block voxels a side
+    from voxel (0, 0, 0), clipped to the grid), the base's values with every patch
+    written in order: a later patch wins where patches overlap. write adds a patch
+    to it; PatchedSource(base, box, patch) of a PatchedSource takes the base under
+    it and a copy of its dict (the arrays are shared: write replaces a block's
+    array and never changes one in place), so the source it was made from is not
+    changed (a preview) and there is never a chain of sources. A read reads the
+    base one time and the blocks that meet its box, however many patches were
+    written. The memory is the blocks that meet the union of the patches' boxes
+    (nbytes)."""
 
     def __init__(
-        self, base: Source, box: tuple[slice, ...], patch: npt.ArrayLike
+        self,
+        base: Source,
+        box: tuple[slice, ...] | None = None,
+        patch: npt.ArrayLike | None = None,
+        block: int = CHUNK,
     ) -> None:
-        self.base = base
-        self.box = tuple(slice(int(s.start), int(s.stop)) for s in box)
-        self.patch = np.asarray(patch, base.dtype)
-        want = tuple(s.stop - s.start for s in self.box)
-        if self.patch.shape != want or not all(
-            0 <= s.start <= s.stop <= n
-            for s, n in zip(self.box, base.shape, strict=True)
-        ):
-            raise ValueError(f"patch {self.patch.shape} does not fit box {self.box}")
+        if isinstance(base, PatchedSource):
+            self.base: Source = base.base
+            self.block: int = base.block
+            self.blocks: dict[tuple[int, ...], npt.NDArray[Any]] = dict(base.blocks)
+        else:
+            self.base, self.block, self.blocks = base, int(block), {}
+        if box is not None:
+            if patch is None:
+                raise ValueError("a box needs a patch")
+            self.write(box, patch)
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -268,16 +299,53 @@ class PatchedSource:
     def dtype(self) -> np.dtype[Any]:
         return self.base.dtype
 
+    @property
+    def nbytes(self) -> int:
+        """The bytes of the patch blocks."""
+        return sum(b.nbytes for b in self.blocks.values())
+
+    def _blocks(self, box: tuple[slice, ...]) -> Iterator[tuple[int, ...]]:
+        """The indices of the blocks that meet box (grid voxels)."""
+        n = self.block
+        return itertools.product(
+            *(range(int(s.start) // n, -(-int(s.stop) // n)) for s in box)
+        )
+
+    def _box(self, ijk: tuple[int, ...]) -> tuple[slice, ...]:
+        """The voxels of block ijk, clipped to the grid."""
+        n = self.block
+        return tuple(
+            slice(i * n, min((i + 1) * n, m))
+            for i, m in zip(ijk, self.shape, strict=True)
+        )
+
+    def write(self, box: tuple[slice, ...], patch: npt.ArrayLike) -> None:
+        """Write the values of patch on box (grid voxels, within the grid)."""
+        box = tuple(slice(int(s.start), int(s.stop)) for s in box)
+        p = np.asarray(patch, self.dtype)
+        want = tuple(s.stop - s.start for s in box)
+        if p.shape != want or not all(
+            0 <= s.start <= s.stop <= n for s, n in zip(box, self.shape, strict=True)
+        ):
+            raise ValueError(f"patch {p.shape} does not fit box {box}")
+        for ijk in self._blocks(box):
+            bb = self._box(ijk)
+            hit = _overlap(bb, box)
+            if hit is None:
+                continue
+            dst, src = hit
+            old = self.blocks.get(ijk)
+            blk = np.array(self.base.read(bb) if old is None else old, self.dtype)
+            blk[dst] = p[src]
+            self.blocks[ijk] = blk
+
     def read(self, box: tuple[slice, ...]) -> npt.NDArray[Any]:
         out = np.array(self.base.read(box))
-        src, dst = [], []
-        for s, p in zip(box, self.box, strict=True):
-            a, b = max(int(s.start), p.start), min(int(s.stop), p.stop)
-            if a >= b:
-                return out
-            src.append(slice(a - p.start, b - p.start))
-            dst.append(slice(a - int(s.start), b - int(s.start)))
-        out[tuple(dst)] = self.patch[tuple(src)]
+        for ijk in self._blocks(box):
+            blk = self.blocks.get(ijk)
+            hit = None if blk is None else _overlap(box, self._box(ijk))
+            if hit is not None:
+                out[hit[0]] = blk[hit[1]]  # type: ignore[index]
         return out
 
 

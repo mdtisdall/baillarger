@@ -508,8 +508,9 @@ def remarch(
     """Re-march the blocks of cells a side (the surface's BlockCells) whose grid
     points the local solve changed: marching_tetrahedra_blocks of field with local's
     box written in (PatchedSource), on those blocks only, as write_white_surface
-    marches. field: the field that local started from. No changed value gives no
-    blocks."""
+    marches. field: the field that local started from (the stored field, or the
+    working field: a PatchedSource with the earlier paints written in, which is not
+    changed). No changed value gives no blocks."""
     box = local.box
     old = np.asarray(field.read(box), np.float32)
     diff = np.argwhere(old != local.phi) + np.array([s.start for s in box])
@@ -522,7 +523,7 @@ def remarch(
             np.zeros((0, 3), np.int64),
             MeshBlocks(cells, np.zeros((0, 3), np.int64), z, z, z, z, z),
         )
-    src = PatchedSource(field, box, local.phi)
+    src = PatchedSource(field, box, local.phi, cells)
     v, f, mb = marching_tetrahedra_blocks(src, 0.0, cells, np.float32, dev, blocks)
     return Remarch(blocks, v.astype(np.float32), f[:, [0, 2, 1]].copy(), mb)
 
