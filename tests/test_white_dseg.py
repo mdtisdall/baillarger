@@ -354,3 +354,30 @@ def test_small_pieces_counts_with_the_kuhn_adjacency() -> None:
     assert sorted(np.bincount(piece)[1:].tolist()) == [1, 1, 2]
     idx, piece = white_dseg.small_pieces(obj, (1.0, 1.0, 1.0), 1.5)
     assert len(piece) == 2 and set(piece.tolist()) == {1, 2}
+
+
+# ---------------------------------------------------------------- manual pieces
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_manual_pieces_are_the_pieces_of_ndimage_label(seed: int) -> None:
+    """The sparse labelling gives the 26-connected pieces of ndimage.label,
+    in its order, each piece sorted; also at the faces of the grid."""
+    rng = np.random.default_rng(seed)
+    shape = (9, 7, 8)
+    mask = rng.random(shape) < 0.05 * (seed + 1)
+    lab, n = ndi.label(mask, np.ones((3, 3, 3), bool))
+    flat = lab.reshape(-1)
+    want = [np.flatnonzero(flat == k) for k in range(1, n + 1)]
+    got = white_dseg.manual_pieces(np.flatnonzero(mask).astype(np.int64), shape)
+    assert len(got) == n
+    assert all(np.array_equal(g, w) for g, w in zip(got, want, strict=True))
+
+
+def test_manual_pieces_of_far_apart_voxels_on_a_large_grid() -> None:
+    """Two voxels at opposite corners of a grid of 1e12 voxels: no array of
+    the grid or of the voxels' bounding box is made."""
+    shape = (10_000, 10_000, 10_000)
+    idx = np.array([0, 1, 10_000 * 10_000 * 10_000 - 1], np.int64)
+    got = white_dseg.manual_pieces(idx, shape)
+    assert [g.tolist() for g in got] == [[0, 1], [idx[-1]]]

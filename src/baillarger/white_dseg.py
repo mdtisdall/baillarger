@@ -44,6 +44,8 @@ import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 from scipy import ndimage as ndi
+from scipy import sparse
+from scipy.sparse import csgraph
 
 from baillarger import label_edits
 from baillarger.bids import (
@@ -285,22 +287,41 @@ def relabel_small_pieces(
     return layers
 
 
-def manual_pieces(manual: Bool, index: Int) -> list[Int]:
-    """The 26-connected pieces of the voxels of manual (a mask of the grid),
-    each as sorted linear indices, in the order of ndimage.label. index holds
-    every voxel of manual (and maybe others): the labelling runs on their
-    bounding box only."""
-    if not len(index):
+#: the 13 offsets of the 26-neighbourhood that come after the voxel in C order
+FORWARD_26 = np.array(
+    [d for d in itertools.product((-1, 0, 1), repeat=3) if d > (0, 0, 0)], np.int64
+)
+
+
+def manual_pieces(index: Int, shape: tuple[int, ...]) -> list[Int]:
+    """The 26-connected pieces of the voxels at index (sorted, unique linear
+    indices of a grid of shape), each as sorted linear indices, in the order
+    of their smallest index (the order of ndimage.label). Sparse: O(E log E)
+    time and O(E) memory for E voxels, whatever their spread."""
+    index = np.asarray(index, np.int64)
+    n = len(index)
+    if not n:
         return []
-    ijk = np.stack(np.unravel_index(index, manual.shape), 1)
-    lo, hi = ijk.min(0), ijk.max(0) + 1
-    box = tuple(slice(int(p), int(q)) for p, q in zip(lo, hi, strict=True))
-    lab, n = ndi.label(manual[box], np.ones((3, 3, 3), bool))
-    loc = np.argwhere(lab)
-    piece = lab[tuple(loc.T)]
-    flat = np.ravel_multi_index(tuple((loc + lo).T), manual.shape)
-    flat = np.asarray(flat, np.int64)
-    return [np.sort(flat[piece == k]) for k in range(1, n + 1)]
+    ijk = np.stack(np.unravel_index(index, shape), 1)
+    rows, cols = [], []
+    for d in FORWARD_26:
+        q = ijk + d
+        ok = np.all((q >= 0) & (q < np.asarray(shape)), axis=1)
+        src = np.flatnonzero(ok)
+        nb = np.ravel_multi_index(tuple(q[ok].T), shape)
+        at = np.minimum(np.searchsorted(index, nb), n - 1)
+        hit = index[at] == nb
+        rows.append(src[hit])
+        cols.append(at[hit])
+    r, c = np.concatenate(rows), np.concatenate(cols)
+    g = sparse.coo_matrix((np.ones(len(r), np.int8), (r, c)), shape=(n, n))
+    _, lab = csgraph.connected_components(g.tocsr(), directed=False)
+    # number the pieces by their first voxel: index is sorted
+    _, first, inv = np.unique(lab, return_index=True, return_inverse=True)
+    piece = np.argsort(np.argsort(first))[inv]
+    order = np.argsort(piece, kind="stable")  # stable: each piece stays sorted
+    ends = np.cumsum(np.bincount(piece))[:-1]
+    return np.split(index[order], ends)
 
 
 @dataclass(frozen=True)
@@ -356,15 +377,15 @@ def wm_topo(
     differs from the input is a fix of the kind manual_edit."""
     lap = Laps()
     a_in = np.asarray(aseg)
-    a0, manual = a_in, None
+    a0 = a_in
     shape = a_in.shape
-    ver_idx = np.zeros(0, np.int64)
+    # the edited voxels, and those of them whose label differs from the input
+    ver_idx = man_idx = np.zeros(0, np.int64)
     if edits is not None:
         a0 = apply_edits(a_in, edits)
         ver_idx = edits.index
-        manual = np.zeros(shape, bool)
         flat_in, flat0 = a_in.reshape(-1), a0.reshape(-1)
-        manual.reshape(-1)[ver_idx] = flat0[ver_idx] != flat_in[ver_idx]
+        man_idx = ver_idx[flat0[ver_idx] != flat_in[ver_idx]]
         lap("edits")
     a0, outside = to_outside(a0)
     lap("to outside")
@@ -386,10 +407,12 @@ def wm_topo(
     cav = cavities(x)
     x |= cav
     lap("cavities")
-    verified = np.zeros(shape, bool)
-    verified.reshape(-1)[ver_idx] = True
-    r = remove_handles(x, verified[box])
-    del verified
+    verified = np.zeros(x.shape, bool)
+    vq = np.stack(np.unravel_index(ver_idx, shape), 1) - lo
+    vq = vq[np.all((vq >= 0) & (vq < np.asarray(x.shape)), axis=1)]
+    verified[tuple(vq.T)] = True
+    r = remove_handles(x, verified)
+    del verified, vq
     obj = r.obj
     lap("handles")
     cut, fill = x & ~obj, obj & ~x
@@ -420,12 +443,12 @@ def wm_topo(
     lap("labels")
     # the fixes, with their ids in the fixed order: the manual edits (one fix
     # a 26-connected piece of the edited voxels that differ from the input,
-    # in the order of ndimage.label), the handle moves (in the order of
+    # in the order of their smallest index), the handle moves (in the order of
     # remove_handles), the cavities (one fix a connected cavity, in the order
     # of ndimage.label), the small pieces
     steps: list[tuple[str, Int, int | None]] = []  # kind, voxels (flat), wall
-    if manual is not None:
-        for v in manual_pieces(manual, ver_idx):
+    if edits is not None:
+        for v in manual_pieces(man_idx, shape):
             steps.append(("manual_edit", v, None))
     n_manual = len(steps)
 
@@ -473,8 +496,7 @@ def wm_topo(
     lap("fix diff")
     fixes = np.zeros(shape, np.uint8)
     code = {v: k for k, v in FIXES.items()}
-    if manual is not None:
-        fixes[manual] = 4  # an edited voxel that no fix then changes
+    fixes.reshape(-1)[man_idx] = 4  # an edited voxel that no fix then changes
     kind_code = np.array([0] + [code[st[0]] for st in steps], np.uint8)
     fixes.reshape(-1)[diff["index"]] = kind_code[diff["fix"]]
     # per fix, the voxels that it changed last: the diff's rows, and for an
@@ -483,17 +505,30 @@ def wm_topo(
     np.add.at(in_diff, diff["fix"].astype(np.int64), 1)
     by_fix = np.argsort(diff["fix"], kind="stable")
     starts = np.r_[0, np.cumsum(in_diff)]
+    # per fix, the number of edited voxels that it changes: once for all
+    # fixes, O((D + E) log) for D rows of the diff and E edited voxels
+    over_n = np.bincount(
+        diff["fix"][np.isin(diff["index"], ver_idx)].astype(np.int64),
+        minlength=len(steps) + 1,
+    )
+    # the voxels of the manual pieces that are not in the diff, once for all
+    man_len = [len(st[1]) for st in steps[:n_manual]]
+    man_all = np.concatenate(
+        [np.zeros(0, np.int64)] + [st[1] for st in steps[:n_manual]]
+    )
+    keep = ~np.isin(man_all, diff["index"])
+    man_pid = np.repeat(np.arange(n_manual), man_len)
+    man_n = np.bincount(man_pid[keep], minlength=n_manual)
+    man_keep = np.split(man_all[keep], np.cumsum(man_n)[:-1])
     fix_list = []
-    for s, (kind, vox, wall) in enumerate(steps):
+    for s, (kind, _, wall) in enumerate(steps):
         if kind == "manual_edit":
-            idx = np.setdiff1d(vox, diff["index"])
+            idx = man_keep[s]
         else:
             idx = np.sort(diff["index"][by_fix[starts[s + 1] : starts[s + 2]]])
         over = None
-        if kind != "manual_edit" and len(ver_idx) and len(idx):
-            # the number of edited voxels that the fix changes
-            hit = int(np.isin(ver_idx, idx).sum())
-            over = hit or None
+        if kind != "manual_edit" and over_n[s + 1]:
+            over = int(over_n[s + 1])
         fix_list.append(Fix(s + 1, kind, idx.astype(np.int64), wall, over))
     lap("fix table")
     new, cnt = np.unique(labels[cut], return_counts=True)
@@ -533,7 +568,7 @@ def wm_topo(
         after,
         {int(k): int(c) for k, c in zip(new, cnt, strict=True)},
         moves,
-        0 if manual is None else int(manual.sum()),
+        len(man_idx),
         n_small,
         diff,
         fix_list,

@@ -312,6 +312,24 @@ def test_a_fix_that_changes_edited_voxels_gives_their_number() -> None:
     assert t.manual_voxels == 0 and t.fix_list[0].kind != "manual_edit"
 
 
+def test_overrides_and_manual_voxels_match_their_definition() -> None:
+    """Per fix, from its own voxels: overrides is the number of edited
+    voxels that it changes, and a manual piece keeps its voxels outside the
+    diff."""
+    a, e = synthetic_aseg(), ring_edits()
+    rng = np.random.default_rng(0)
+    lab = rng.choice(np.array([0, 41, 42], np.int32), len(e))
+    t = white_dseg.wm_topo(
+        a, VOX, LE.Edits(e.index, np.where(rng.random(len(e)) < 0.1, lab, e.label))
+    )
+    man = [f for f in t.fix_list if f.kind == "manual_edit"]
+    assert len(man) > 1 and any(f.overrides for f in t.fix_list)
+    for f in t.fix_list:
+        n = int(np.isin(e.index, f.index).sum())
+        assert f.overrides == (None if f.kind == "manual_edit" or not n else n)
+        assert not np.isin(f.index, t.diff["index"]).any() or f.kind != "manual_edit"
+
+
 def test_edits_apply_to_another_input_unchanged() -> None:
     a = synthetic_aseg()
     a[0, 0, 0] = 42  # another input on the same grid
