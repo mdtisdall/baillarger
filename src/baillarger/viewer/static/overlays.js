@@ -284,7 +284,7 @@ const hooks = {
     api.$("bvo").addEventListener("pointerleave", () => { OVL.cursor = null; api.draw(); });
     await choose(v);
   },
-  update() { if (!OVL.api) return; const BV = OVL.api.BV; for (const l of OVL.show) l.update(BV.tiles, BV.s); oupdate(); },
+  update() { if (!OVL.api || !(OVL.api.BV.s > 0)) return; const BV = OVL.api.BV; for (const l of OVL.show) l.update(BV.tiles, BV.s); oupdate(); },
   render(g, geoms, dpr) {
     if (!OVL.show.length || OVL.alpha <= 0) return;
     g.enable(g.BLEND); g.blendFunc(g.SRC_ALPHA, g.ONE_MINUS_SRC_ALPHA);
