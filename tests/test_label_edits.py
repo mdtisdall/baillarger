@@ -13,6 +13,8 @@ import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 import pytest
+from edits_helpers import ROD, ring_edits, write_edits
+from edits_helpers import edits as build_edits
 from test_white_dseg import FILLED, VOX, synthetic_aseg
 
 from baillarger import bids, white_dseg
@@ -26,13 +28,8 @@ AFFINE = np.diag([0.16, 0.16, 0.16, 1.0])
 def edits(
     pairs: dict[tuple[int, int, int], int], shape: tuple[int, ...] = SHAPE
 ) -> LE.Edits:
-    """A diff from {voxel: label}."""
-    idx = [int(np.ravel_multi_index(v, shape)) for v in pairs]
-    order = np.argsort(idx)
-    return LE.Edits(
-        np.asarray(idx, np.int64)[order],
-        np.asarray(list(pairs.values()), np.int32)[order],
-    )
+    """A diff from {voxel: label}, on SHAPE by default."""
+    return build_edits(pairs, shape)
 
 
 def same(a: LE.Edits, b: LE.Edits) -> bool:
@@ -40,7 +37,7 @@ def same(a: LE.Edits, b: LE.Edits) -> bool:
 
 
 def write(path: Path, e: LE.Edits, shape: tuple[int, ...] = SHAPE) -> None:
-    LE.write(path, e, hemisphere="R", shape=shape, affine=AFFINE)
+    write_edits(path, e, shape, AFFINE)
 
 
 # ------------------------------------------------------------------ the files
@@ -325,6 +322,21 @@ def test_apply_gives_the_labels() -> None:
         LE.apply(np.zeros(SHAPE, np.int8), edits({(1, 1, 1): 192}))
 
 
+def test_apply_to_a_crop_writes_only_the_voxels_in_it() -> None:
+    """A crop of the grid at offset (as in paint): the diff's voxels in the
+    crop are written at their crop voxel, the others are left out; the grid
+    check is on the grid's shape, not the crop's."""
+    a = np.arange(SHAPE[0] * SHAPE[1] * SHAPE[2], dtype=np.int32).reshape(SHAPE)
+    e = edits({(1, 1, 1): 41, (3, 4, 5): 42, (11, 9, 7): 0})
+    off, crop = (2, 3, 4), a[2:6, 3:7, 4:8]
+    out = LE.apply(crop, e, offset=off, shape=SHAPE)
+    assert np.array_equal(out, LE.apply(a, e)[2:6, 3:7, 4:8])
+    assert (out != crop).sum() == 1 and out[1, 1, 1] == 42
+    assert not np.shares_memory(out, crop)
+    with pytest.raises(ValueError, match="outside"):
+        LE.apply(crop, e, offset=off, shape=(4, 4, 4))
+
+
 def labels() -> npt.NDArray[np.int16]:
     a = np.full(SHAPE, 42, np.int16)
     a[2:8, 2:8, 2:6] = 41
@@ -438,19 +450,8 @@ def test_differ_gives_the_voxels_and_the_labels_of_a() -> None:
     assert len(i0) == len(l0) == 0
 
 
-def test_changed_gives_the_changed_voxels_on_the_grid() -> None:
-    b = np.zeros((3, 4, 5), np.int16)
-    a = b.copy()
-    a[1, 2, 3], a[0, 0, 1] = 41, 42
-    v, lab = LE.changed(b, a, (10, 20, 30))
-    assert v.tolist() == [[10, 20, 31], [11, 22, 33]] and lab.tolist() == [42, 41]
-    with pytest.raises(ValueError, match="shapes"):
-        LE.changed(b, a[:-1])
-
-
 # ------------------------------------------------------------------ with dseg
 
-ROD = [(27, 16, 25), (27, 17, 25)]  # the rod across the slit: the aseg's one cut
 DRILL = [(18, 16, z) for z in range(6, 18)]  # a 1 x 1 tunnel of cortex through WM
 ASEG_SHAPE = synthetic_aseg().shape
 
@@ -464,16 +465,6 @@ def written_aseg(tmp_path: Path) -> Path:
 
 def aseg_edits(pairs: dict[tuple[int, int, int], int]) -> LE.Edits:
     return edits(pairs, ASEG_SHAPE)
-
-
-def ring_edits() -> LE.Edits:
-    """The whole ring and its hole, rod included, with the labels that they
-    have: the handle can be fixed only through an edited voxel."""
-    a = synthetic_aseg()
-    box = np.zeros(a.shape, bool)
-    box[25:37, 3:33, 22:28] = True
-    idx = np.flatnonzero(box)
-    return LE.Edits(idx.astype(np.int64), a.reshape(-1)[idx].astype(np.int32))
 
 
 def test_an_edit_replaces_the_automatic_cut() -> None:
@@ -518,7 +509,7 @@ def test_the_correction_avoids_edited_voxels_where_it_can() -> None:
 
 
 def test_a_fix_that_changes_edited_voxels_gives_their_number() -> None:
-    t = white_dseg.wm_topo(synthetic_aseg(), VOX, ring_edits())
+    t = white_dseg.wm_topo(synthetic_aseg(), VOX, ring_edits(synthetic_aseg()))
     assert t.betti_after == (2, 0, 0)
     over = [f for f in t.fix_list if f.overrides is not None]
     assert len(over) == 1 and over[0].overrides == 1
@@ -533,7 +524,8 @@ def test_overrides_and_manual_voxels_match_their_definition() -> None:
     """Per fix, from its own voxels: overrides is the number of edited
     voxels that it changes, and a manual piece keeps its voxels outside the
     diff."""
-    a, e = synthetic_aseg(), ring_edits()
+    a = synthetic_aseg()
+    e = ring_edits(a)
     rng = np.random.default_rng(0)
     lab = rng.choice(np.array([0, 41, 42], np.int32), len(e))
     t = white_dseg.wm_topo(

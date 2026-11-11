@@ -331,12 +331,16 @@ The joins use these interfaces. A core must keep them, or change this plan first
   reader; it refuses a diff of another grid or hemisphere (each when given) and repairs
   a stopped write. `label_edits.write(path, edits, *, hemisphere, shape, affine)`
   (replaces the files, under the lock); `label_edits.empty() -> Edits`.
-- `label_edits.update(path, fn, *, hemisphere, shape, affine, known=None) -> Current`:
-  one read-change-write under the exclusive lock; `fn(current)` returns the new diff, or
-  None for no write. `known` (a `Current`: the edits, the SHA-256 and the records file
-  that the caller last wrote) skips the read of the records while it agrees with the
-  sidecar.
-- `label_edits.apply(labels, edits) -> labels` (a copy with the edits written).
+- `label_edits.update(path, fn, *, hemisphere, shape, affine, known=None,
+  labels_checked=False) -> Current`: one read-change-write under the exclusive lock;
+  `fn(current)` returns the new diff, or None for no write. `known` (a `Current`: the
+  edits, the SHA-256 and the records file that the caller last wrote) skips the read of
+  the records while it agrees with the sidecar. `labels_checked` skips the check of the
+  labels against label-set/1, for a caller that has checked them (`label_edits.paint`).
+- `label_edits.apply(labels, edits, *, offset=(0, 0, 0), shape=None) -> labels` (a copy
+  with the edits written). `labels` are the whole grid, or a crop of the
+  grid of this `shape` whose voxel [0, 0, 0] is the grid voxel `offset`; the diff's voxels
+  outside the crop are left out.
 - `label_edits.paint(edits, labels, voxels, new, *, dseg) -> (Edits, undo)`: `labels` are
   the input labels and `dseg` the dseg's labels, of one shape (`dseg` omitted: the dseg is
   the input labels); `new` a label per voxel, or -1 for the eraser. A paint keeps only the
