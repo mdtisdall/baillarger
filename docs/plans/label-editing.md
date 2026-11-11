@@ -293,6 +293,10 @@ The joins use these interfaces. A core must keep them, or change this plan first
   labels; `new` a label per voxel, or -1 for the eraser. It keeps only the voxels whose
   label changes. `undo` holds the earlier entries of those voxels.
 - `label_edits.restore(edits, undo) -> Edits`.
+- `label_edits.update(path, change, *, hemisphere, shape, affine) -> R`: reads the diff,
+  calls `change(edits) -> (Edits, R)`, and writes the result, all under one exclusive
+  lock, so that two writers (the viewer and `wm_paint import`) do not lose an update.
+  Every writer of a diff that exists uses it.
 - `label_edits.differ(a, b) -> (index, label)`: the voxels where two diffs differ, with
   the label in `a` (-1 where `a` has none: the input label).
 - `python -m baillarger.white_dseg ASEG --edits EDITS --out DERIV`; the fix table's
