@@ -43,9 +43,10 @@ Routes (Review.get, Review.post), JSON:
   WAIT_S runs on as a job: {status: "running", job}, then GET
   /review/preview?job=... until {status: "done", ...}.
 - POST /review/answer {site, choice, params, reviewer_seconds}: the choice's
-  voxels and labels at the site, appended to the log, then written into the
-  label edits (label_edits.paint: only the voxels whose label changes from the
-  dseg's label with the edits applied). {answer, kind, how, rank, voxels,
+  voxels and labels at the site, written into the label edits
+  (label_edits.paint: only the voxels whose label changes from the dseg's
+  label with the edits applied), then appended to the log. If the log refuses
+  the answer, the edits are written back as they were. {answer, kind, how, rank, voxels,
   edited}: edited is the number of voxels written into the edits.
 - POST /review/scribble {strokes: [{class, voxels}], reviewer_seconds}:
   strokes appended to the log as one scribble. A voxel in two strokes stays in
@@ -58,8 +59,13 @@ Routes (Review.get, Review.post), JSON:
   to undo.
 
 Each write holds the review's lock and is flushed to the disk before the
-response (EditLog appends and fsyncs; label_edits.write replaces the files of
-the edits). A scribble is a record of the log only: it does not change the
+response (EditLog appends and fsyncs; label_edits.update replaces the files of
+the edits). A write into the edits is one label_edits.update: it holds the
+edits' file lock across the read, the change and the write, so that a
+second viewer process on the same edits does not lose this one's voxels.
+The review keeps the edits that it last read or wrote in memory
+(label_edits.Current), so that a write reads only the sidecar while no other
+writer changed the edits. A scribble is a record of the log only: it does not change the
 edits. A choice and its preview read a box
 round the site (Choices.half), so no response scales with the volume.
 
@@ -86,8 +92,11 @@ Undo. Every write into the edits of this viewer run (a paint, and a site
 answer of any choice: accept-fix and manual-paint too) pushes the earlier
 entries of the voxels that it changes on one undo stack. /review/undo writes
 the top entries back (label_edits.restore) and pops them, so an undo always
-reverses the last write and never brings back labels under a later one. A
-write that changes no voxel pushes nothing. The stack is in memory only, for
+reverses the last write and never brings back labels under a later one. An
+undo is refused if the edits on disk are not the ones that the stack's top
+write left (another writer changed them since): it would write the earlier
+entries over the other writer's changes. A write that changes no voxel
+pushes nothing. The stack is in memory only, for
 this viewer run. An undo does not change the log: an undone answer stays in
 it.
 
@@ -392,7 +401,10 @@ class Review:
         if self._log is not None and tuple(self._log.read().shape) != self.shape:
             raise ValueError(f"{self.log_path}: the log is not on the dseg's grid")
         self.edits = Path(edits)
-        if self.edits.exists():
+        #: the edits as this review last read or wrote them (the memory copy
+        #: of label_edits.update)
+        self._cur: label_edits.Current | None = None
+        if label_edits.edits_paths(self.edits)["sidecar"].exists():
             self._read_edits()
         self.inputs = Path(inputs) if inputs is not None else None
         #: the input labels, opened once (_input_labels): the memory-mapped
@@ -410,8 +422,10 @@ class Review:
         self.seed: int | None = None
         self.order: list[dict[str, Any]] = []
         self.jobs: dict[str, Job] = {}
-        #: the undo stack: the earlier entries of each write into the edits
+        #: the undo stack: the earlier entries of each write into the edits,
+        #: and the SHA-256 of the edits that the write left
         self.undo: list[label_edits.Edits] = []
+        self._undo_sha: list[str] = []
         last = self._log.sessions() if self._log is not None else []
         if last:
             self._resume(last[-1])
@@ -587,23 +601,29 @@ class Review:
     # -------------------------------------------------------------- edits
     def _read_edits(self) -> label_edits.Edits:
         """The current edits (empty if there is no file yet), checked against
-        the review's grid, affine and hemisphere."""
-        if not self.edits.exists():
+        the review's grid, affine and hemisphere (label_edits.read)."""
+        if not label_edits.edits_paths(self.edits)["sidecar"].exists():
             return label_edits.empty()
-        e, side, _ = label_edits.read_with_sidecar(self.edits)
-        if tuple(side["Shape"]) != self.shape or not np.allclose(
-            np.reshape(side["Affine"], (4, 4)), self.affine
-        ):
-            raise ValueError(
-                f"{self.edits.name}: the edits' grid {tuple(side['Shape'])} is not "
-                f"the review's grid {self.shape}"
-            )
-        if side["Hemisphere"] != self.hemi:
-            raise ValueError(
-                f"{self.edits.name}: the edits are of hemisphere "
-                f"{side['Hemisphere']}, the review of {self.hemi}"
-            )
-        return e
+        return label_edits.read(
+            self.edits, shape=self.shape, affine=self.affine, hemisphere=self.hemi
+        )
+
+    def _update(
+        self, fn: Callable[[label_edits.Current], label_edits.Edits | None]
+    ) -> label_edits.Current:
+        """One locked read-change-write of the edits (label_edits.update),
+        with the memory copy. The labels that fn writes are checked
+        (label_edits.paint, label_edits.restore). Call with the lock held."""
+        self._cur = label_edits.update(
+            self.edits,
+            fn,
+            hemisphere=self.hemi,
+            shape=self.shape,
+            affine=self.affine,
+            known=self._cur,
+            labels_checked=True,
+        )
+        return self._cur
 
     def _input_labels(self) -> Arr:
         """The input labels of the whole grid, memory-mapped: opened once for
@@ -633,7 +653,7 @@ class Review:
         return self._inputs_map
 
     def _painted(
-        self, voxels: Arr, labels: Arr
+        self, edits: label_edits.Edits, voxels: Arr, labels: Arr
     ) -> tuple[label_edits.Edits, label_edits.Edits, Arr]:
         """The edits with the voxels painted with the labels (label_edits.paint,
         against the dseg's labels from labels(); label_edits.INPUT for the
@@ -641,17 +661,16 @@ class Review:
         changes, and the input labels of the voxels (int64). Only the voxels
         are read, not their box. Raises ValueError for a voxel off the grid
         or a label not in label-set/1."""
-        e = self._read_edits()
         v = np.asarray(voxels, np.int64).reshape(-1, 3)
         if not len(v):
-            return e, label_edits.empty(), np.zeros(0, np.int64)
+            return edits, label_edits.empty(), np.zeros(0, np.int64)
         self._on_grid(v)
         grid = self._input_labels()
         inp = grid[tuple(v.T)].astype(np.int64)
         # the whole grids, unread: paint indexes only the voxels (the input
         # labels are a memory map, the dseg's labels are in memory)
         new, undo = label_edits.paint(
-            e,
+            edits,
             grid,
             v,
             np.asarray(labels, np.int64),
@@ -664,14 +683,45 @@ class Review:
         if len(v) and not np.all((v >= 0) & (v < self.shape)):
             raise ValueError("a voxel is outside the grid")
 
-    def _write(self, edits: label_edits.Edits) -> None:
-        label_edits.write(
-            self.edits,
-            edits,
-            hemisphere=self.hemi,
-            shape=self.shape,
-            affine=self.affine,
-        )
+    def _commit(self, voxels: Arr, labels: Arr) -> tuple[label_edits.Edits, Arr]:
+        """Under the lock: the voxels painted with the labels in one locked
+        read-change-write of the edits (_painted, _update), and their earlier
+        entries pushed on the undo stack. Returns the undo (no voxel: nothing
+        is written or pushed) and the input labels of the voxels."""
+        out: dict[str, Any] = {}
+
+        def fn(cur: label_edits.Current) -> label_edits.Edits | None:
+            new, undo, inp = self._painted(cur.edits, voxels, labels)
+            out.update(undo=undo, inp=inp)
+            return new if len(undo) else None
+
+        cur = self._update(fn)
+        undo: label_edits.Edits = out["undo"]
+        if len(undo):
+            assert cur.sha is not None
+            self.undo.append(undo)
+            self._undo_sha.append(cur.sha)
+        return undo, out["inp"]
+
+    def _pop_undo(self) -> int:
+        """Under the lock: the top of the undo stack written back
+        (label_edits.restore) and popped. Returns its number of voxels.
+        Raises ValueError, and changes nothing, if the edits on disk are not
+        the ones that the top write left."""
+        u, sha = self.undo[-1], self._undo_sha[-1]
+
+        def fn(cur: label_edits.Current) -> label_edits.Edits:
+            if cur.sha != sha:
+                raise ValueError(
+                    "the edits on disk are not the ones that this viewer run last "
+                    "wrote (another writer changed them): undo refused"
+                )
+            return label_edits.restore(cur.edits, u)
+
+        self._update(fn)
+        self.undo.pop()
+        self._undo_sha.pop()
+        return len(u)
 
     # -------------------------------------------------------------- paint
     def paint_voxels(self, strokes: Sequence[dict[str, Any]]) -> tuple[Arr, Arr]:
@@ -700,34 +750,23 @@ class Review:
             np.int64
         )
 
-    def _paint_locked(self, voxels: Arr, labels: Arr) -> int:
-        """Under the lock: the voxels written into the edits, their earlier
-        entries pushed on the undo stack. Returns the number of voxels whose
-        label changed (none: nothing is written or pushed)."""
-        new, undo, _ = self._painted(voxels, labels)
-        if len(undo):
-            self._write(new)
-            self.undo.append(undo)
-        return len(undo)
-
     def paint(self, strokes: Sequence[dict[str, Any]]) -> dict[str, Any]:
         """A paint (module docstring): {voxels, undo_depth}."""
         v, lab = self.paint_voxels(strokes)
         with self.lock:
-            n = self._paint_locked(v, lab)
-            return dict(voxels=n, undo_depth=len(self.undo))
+            undo, _ = self._commit(v, lab)
+            return dict(voxels=len(undo), undo_depth=len(self.undo))
 
     def undo_last(self) -> dict[str, Any]:
         """The last write into the edits undone (module docstring, Undo): its
         earlier entries written back (label_edits.restore). {voxels,
-        undo_depth}. Raises ValueError if the stack is empty."""
+        undo_depth}. Raises ValueError if the stack is empty, or if another
+        writer changed the edits since the top write (_pop_undo)."""
         with self.lock:
             if not self.undo:
                 raise ValueError("nothing to undo in this viewer run")
-            u = self.undo[-1]
-            self._write(label_edits.restore(self._read_edits(), u))
-            self.undo.pop()
-            return dict(voxels=len(u), undo_depth=len(self.undo))
+            n = self._pop_undo()
+            return dict(voxels=n, undo_depth=len(self.undo))
 
     def _fix(self, site: Site) -> tuple[int, Arr, Arr]:
         """The fix of the override site: its id, its voxels (N, 3, sorted by
@@ -827,13 +866,15 @@ class Review:
         seconds: float,
         strokes: Sequence[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """The choice's voxels at the site, appended to the log with the reviewer
-        time, then written into the edits (module docstring). manual-paint
+        """The choice's voxels at the site, written into the edits, then
+        appended to the log with the reviewer time (module docstring). manual-paint
         takes the strokes of the paint mode, and no other choice takes
         strokes. Returns the answer's Id, the site's kind and how it was
         chosen (shown to the page only now, for a random site), the number of
         voxels written into the edits, and the depth of the undo stack.
-        Nothing is written if the log or the edits refuse the answer."""
+        Nothing is written if the edits refuse the answer. If the log refuses
+        it, the edits are written back and the undo entry is popped, so the
+        edits and the undo stack are as they were."""
         s = self._need()
         c = parse_site(site)
         r = self._find(c)
@@ -853,22 +894,24 @@ class Review:
             box, lo = self.window(c, params)
             a = self.choices.answer(box, lo, c, choice, params)
         with self.lock:
-            new, undo, inp = self._painted(a.voxels, a.labels)
+            undo, inp = self._commit(a.voxels, a.labels)
             # the eraser's voxels: the log records the label they take
             logged = np.where(a.labels == label_edits.INPUT, inp, a.labels)
-            aid = self.log.answer(
-                s,
-                c,
-                choice,
-                a.voxels,
-                logged,
-                self.dseg_sha,
-                float(seconds),
-                params=a.params,
-            )
-            if len(undo):
-                self._write(new)
-                self.undo.append(undo)
+            try:
+                aid = self.log.answer(
+                    s,
+                    c,
+                    choice,
+                    a.voxels,
+                    logged,
+                    self.dseg_sha,
+                    float(seconds),
+                    params=a.params,
+                )
+            except BaseException:
+                if len(undo):
+                    self._pop_undo()
+                raise
         return dict(
             answer=aid,
             kind=r["kind"],

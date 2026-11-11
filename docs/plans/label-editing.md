@@ -58,8 +58,9 @@ not come from that log.
   and its commit.
 - The preview is approximate; the regeneration is exact.
 - Editing does not need ITK-SNAP. It was a bootstrap only, and Part 2 removed it. The
-  writer of the diff is the viewer's review pane: its answers and paints hold the
-  review's lock for each read-change-write.
+  writer of the diff is the viewer's review pane: its answers, paints and undos are each
+  one `label_edits.update`, which holds the diff's file lock (across processes) for the
+  read-change-write.
 - Reuse first: each part uses the code in "What exists" where it can, and adds a
   parameter to an existing function before it adds a new function.
 
@@ -103,8 +104,10 @@ Facts that the plan must respect:
   (`SpecVersion`, `Description`, `Hemisphere`, `Shape`, `Affine`, `Count`, `SHA256` of
   the `.npy` file, `Provenance`). Each label is in `label-set/1`.
 - A write replaces both files: it writes new files in the same directory, then renames
-  them over the old ones, with a lock (`fcntl.flock`, as `EditLog`). A reader checks the
-  sidecar's `SHA256`.
+  them over the old ones, with a lock (`fileops.flock`, as `EditLog`). A reader checks the
+  sidecar's `SHA256`. A sidecar that does not agree with the records is older than them
+  (a write that stopped between its renames): the reader checks the records and writes a
+  new sidecar (`docs/formats/label-edits.md`, Recovery).
 - `white_dseg --edits EDITS` reads the diff in place of the answer log. The edited
   voxels are the diff's voxels: handle removal changes them last, as now. Each connected
   piece of edited voxels (26-adjacency) whose label differs from the input is a fix of the
@@ -119,9 +122,10 @@ Facts that the plan must respect:
   there. `leave` writes nothing. `Accepts`, `accepted_fixes` and the match of kept fixes
   go.
 - The answers of the review queue change the labels by a write into the diff
-  (`label_edits.paint`, then `write`): only the voxels whose label changes from the
-  current label (Decisions: the diff's entry, else the dseg's label). The answer log
-  still records them, for the queue. A scribble is a record of the log only. The viewer
+  (`label_edits.paint` in one `label_edits.update`): only the voxels whose label changes
+  from the current label (Decisions: the diff's entry, else the dseg's label). The answer
+  log still records them, for the queue: the diff is written first, then the log; if the
+  log refuses the answer, the diff is written back and its undo entry popped. A scribble is a record of the log only. The viewer
   takes the log as `--log` and the diff as `--edits`; with `--sites`, both are needed.
 - The ITK-SNAP import (`wm_paint`) was a bootstrap only. Part 2 removed it.
 - Formats edited in place (version 1): `wm-dseg.md` (`--edits`, `overrides`, `Sources`,
@@ -154,7 +158,8 @@ queue answer writes into the diff.
   choice: `accept-fix` and `manual-paint` too) pushes its earlier entries on one stack.
   `POST /review/undo` writes the top entries back (`label_edits.restore`) and pops them,
   so an undo always reverses the last write and never brings back labels under a later
-  answer. The stack is in memory, for this viewer run. An undo does not change the log:
+  answer. An undo is refused if the diff on disk is not the one that the top write left
+  (another writer changed it). The stack is in memory, for this viewer run. An undo does not change the log:
   an undone answer stays in it.
 - At a queue site, the choice `manual-paint` opens the paint mode. Its Submit is
   `POST /review/answer` with the strokes: it writes into the diff as a paint, and the
@@ -320,8 +325,15 @@ Rules:
 The joins use these interfaces. A core must keep them, or change this plan first.
 
 - `label_edits.Edits`: `index` (int64, sorted, unique) and `label` (int32) arrays.
-- `label_edits.read(path) -> Edits`; `label_edits.write(path, edits, *, hemisphere,
-  shape, affine)` (replaces the files, under the lock); `label_edits.empty() -> Edits`.
+- `label_edits.read(path, *, shape=None, affine=None, hemisphere=None) -> Edits`: the one
+  reader; it refuses a diff of another grid or hemisphere (each when given) and repairs
+  a stopped write. `label_edits.write(path, edits, *, hemisphere, shape, affine)`
+  (replaces the files, under the lock); `label_edits.empty() -> Edits`.
+- `label_edits.update(path, fn, *, hemisphere, shape, affine, known=None) -> Current`:
+  one read-change-write under the exclusive lock; `fn(current)` returns the new diff, or
+  None for no write. `known` (a `Current`: the edits, the SHA-256 and the records file
+  that the caller last wrote) skips the read of the records while it agrees with the
+  sidecar.
 - `label_edits.apply(labels, edits) -> labels` (a copy with the edits written).
 - `label_edits.paint(edits, labels, voxels, new, *, dseg) -> (Edits, undo)`: `labels` are
   the input labels and `dseg` the dseg's labels, of one shape (`dseg` omitted: the dseg is

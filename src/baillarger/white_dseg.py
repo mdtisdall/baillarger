@@ -596,23 +596,12 @@ def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str,
     grid = tuple(int(n) for n in img.shape[:3])
     e = None
     edits_sha = None
-    eside: dict[str, Any] = {}
-    if edits is not None:
-        e, eside, edits_sha = label_edits.read_with_sidecar(edits)
-        if tuple(eside["Shape"]) != grid or not np.allclose(
-            np.reshape(eside["Affine"], (4, 4)), img.affine
-        ):
-            raise ValueError(
-                f"{edits.name}: the diff's grid {tuple(eside['Shape'])} is not "
-                f"the grid {grid} of {aseg.name}"
-            )
     lap = Laps()
     a = np.asarray(img.dataobj)
     lap("read")
-    if edits is not None and eside["Hemisphere"] != hemisphere(a):
-        raise ValueError(
-            f"{edits.name}: the diff is of hemisphere {eside['Hemisphere']}, "
-            f"{aseg.name} of {hemisphere(a)}"
+    if edits is not None:
+        e, _, edits_sha = label_edits.read_with_sidecar(
+            edits, shape=grid, affine=img.affine, hemisphere=hemisphere(a)
         )
     t = wm_topo(a, vox, e)
     lap = Laps()

@@ -2,8 +2,12 @@
 the atomic replacement, apply, paint, the eraser, undo, differ, and their use
 by the dseg command (baillarger.white_dseg.wm_topo, write_wm_topo)."""
 
+import json
+import logging
 import multiprocessing as mp
+import os
 from pathlib import Path
+from typing import Any
 
 import nibabel as nib
 import numpy as np
@@ -117,7 +121,7 @@ def test_a_reader_sees_the_old_or_the_new_diff_not_a_mix(tmp_path: Path) -> None
     proc.start()
     seen: set[int] = set()
     while proc.is_alive() or not seen:
-        e = LE.read(p)  # raises on a mix: the SHA-256 does not agree
+        e = LE.read(p)  # a mix would not have the labels of one k
         k = len(e) - 1
         want = 41 if k % 2 else 42
         assert e.index.tolist() == list(range(k + 1))
@@ -126,6 +130,182 @@ def test_a_reader_sees_the_old_or_the_new_diff_not_a_mix(tmp_path: Path) -> None
     proc.join()
     assert proc.exitcode == 0 and len(LE.read(p)) == n
     assert len(seen) > 1
+
+
+def test_a_stop_between_the_two_renames_is_repaired_by_the_next_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    p = tmp_path / "e_edits.npy"
+    write(p, edits({(1, 1, 1): 41}))
+    new = edits({(1, 1, 1): 0, (2, 3, 4): 42})
+    real = os.replace
+    calls: list[Any] = []
+
+    def stop(a: Any, b: Any) -> None:
+        calls.append(b)
+        if len(calls) == 2:  # the sidecar's rename
+            raise KeyboardInterrupt("stopped")
+        real(a, b)
+
+    monkeypatch.setattr(os, "replace", stop)  # fileops.write_atomic
+    with pytest.raises(KeyboardInterrupt):
+        write(p, new)
+    monkeypatch.undo()
+    # the new records, the old sidecar: no file of the write is left
+    assert bids.file_sha256(p) != json.loads(bids.sidecar_path(p).read_text())["SHA256"]
+    assert sorted(q.name for q in tmp_path.iterdir()) == sorted(
+        [p.name, bids.sidecar_path(p).name]
+    )
+    with caplog.at_level(logging.WARNING, logger="baillarger.label_edits"):
+        got, side, sha = LE.read_with_sidecar(p, shape=SHAPE, hemisphere="R")
+    assert same(got, new) and "older than the records" in caplog.text
+    assert side["SHA256"] == sha == bids.file_sha256(p) and side["Count"] == 2
+    assert side["Shape"] == list(SHAPE) and side["Hemisphere"] == "R"
+    # the new sidecar is on disk: the next read needs no repair
+    caplog.clear()
+    assert same(LE.read(p), new) and not caplog.text
+
+
+def test_an_update_repairs_a_stopped_write_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    p = tmp_path / "e_edits.npy"
+    real = os.replace
+    calls: list[Any] = []
+
+    def stop(a: Any, b: Any) -> None:
+        calls.append(b)
+        if len(calls) == 2:
+            raise KeyboardInterrupt("stopped")
+        real(a, b)
+
+    # the first write of the diff stops: records, and no sidecar
+    monkeypatch.setattr(os, "replace", stop)  # fileops.write_atomic
+    with pytest.raises(KeyboardInterrupt):
+        write(p, edits({(1, 1, 1): 41}))
+    monkeypatch.undo()
+    assert p.exists() and not bids.sidecar_path(p).exists()
+    seen: list[LE.Edits] = []
+
+    def look(c: LE.Current) -> None:
+        seen.append(c.edits)
+
+    cur = LE.update(
+        p,
+        look,
+        hemisphere="R",
+        shape=SHAPE,
+        affine=AFFINE,
+    )
+    assert same(seen[0], edits({(1, 1, 1): 41})) and cur.sha == bids.file_sha256(p)
+    assert same(LE.read(p, shape=SHAPE, affine=AFFINE, hemisphere="R"), seen[0])
+
+
+def test_the_reader_checks_the_grid_affine_and_hemisphere(tmp_path: Path) -> None:
+    p = tmp_path / "e_edits.npy"
+    write(p, edits({(1, 1, 1): 41}))
+    LE.read(p, shape=SHAPE, affine=AFFINE, hemisphere="R")
+    with pytest.raises(ValueError, match="grid"):
+        LE.read(p, shape=(12, 10, 9))
+    with pytest.raises(ValueError, match="grid"):
+        LE.read(p, affine=np.eye(4))
+    with pytest.raises(ValueError, match="hemisphere"):
+        LE.read(p, hemisphere="L")
+    with pytest.raises(ValueError, match="grid"):
+        LE.update(p, lambda c: None, hemisphere="R", shape=(4, 4, 4), affine=AFFINE)
+
+
+def _painter(path: str, first: int, n: int) -> None:
+    """Paint the voxels first, ..., first + n - 1 (linear indices of a 64^3
+    grid) with 42, one update for each."""
+    shape = (64, 64, 64)
+    lab = np.zeros(shape, np.int16)
+    for i in range(first, first + n):
+        v = np.array([np.unravel_index(i, shape)], np.int64)
+
+        def one(c: LE.Current, v: npt.NDArray[np.int64] = v) -> LE.Edits:
+            return LE.paint(c.edits, lab, v, [42])[0]
+
+        LE.update(Path(path), one, hemisphere="R", shape=shape, affine=AFFINE)
+
+
+def test_two_processes_that_paint_keep_all_their_voxels(tmp_path: Path) -> None:
+    p = tmp_path / "e_edits.npy"
+    ctx = mp.get_context("spawn")
+    procs = [ctx.Process(target=_painter, args=(str(p), k * 1000, 100)) for k in (0, 1)]
+    for q in procs:
+        q.start()
+    for q in procs:
+        q.join()
+    assert [q.exitcode for q in procs] == [0, 0]
+    e = LE.read(p)
+    assert e.index.tolist() == [*range(100), *range(1000, 1100)]
+    assert set(e.label.tolist()) == {42}
+
+
+def test_an_update_reads_only_the_sidecar_when_its_copy_is_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    p = tmp_path / "e_edits.npy"
+    kw: dict[str, Any] = dict(hemisphere="R", shape=SHAPE, affine=AFFINE)
+    cur = LE.update(p, lambda c: edits({(1, 1, 1): 41}), **kw)
+    reads: list[Path] = []
+    real = LE._read_records
+
+    def counted(q: Path) -> bytes:
+        reads.append(q)
+        return real(q)
+
+    monkeypatch.setattr(LE, "_read_records", counted)
+    seen: list[LE.Edits] = []
+
+    def add(c: LE.Current) -> LE.Edits:
+        seen.append(c.edits)
+        return LE._set(c.edits, np.array([7], np.int64), [42])
+
+    cur = LE.update(p, add, known=cur, **kw)
+    assert reads == [] and same(seen[-1], edits({(1, 1, 1): 41}))
+    # another writer: the copy is not current, and the records are read
+    write(p, edits({(2, 2, 2): 0}))
+    LE.update(p, add, known=cur, **kw)
+    assert reads == [p] and same(seen[-1], edits({(2, 2, 2): 0}))
+
+
+def test_an_update_whose_change_raises_writes_nothing(tmp_path: Path) -> None:
+    p = tmp_path / "e_edits.npy"
+    write(p, edits({(1, 1, 1): 41}))
+    before = p.read_bytes(), bids.sidecar_path(p).read_bytes()
+
+    def fail(c: LE.Current) -> LE.Edits:
+        raise ValueError("refused")
+
+    with pytest.raises(ValueError, match="refused"):
+        LE.update(p, fail, hemisphere="R", shape=SHAPE, affine=AFFINE)
+    assert (p.read_bytes(), bids.sidecar_path(p).read_bytes()) == before
+
+
+def test_set_merges_like_a_dict() -> None:
+    rng = np.random.default_rng(3)
+    for _ in range(50):
+        old = dict(
+            zip(
+                rng.choice(200, 40, replace=False).tolist(),
+                rng.choice([0, 41, 42], 40).tolist(),
+                strict=True,
+            )
+        )
+        idx = np.sort(rng.choice(200, 30, replace=False)).astype(np.int64)
+        lab = rng.choice([LE.INPUT, 0, 41, 42], 30)
+        want = dict(old)
+        for i, v in zip(idx.tolist(), lab.tolist(), strict=True):
+            if v == LE.INPUT:
+                want.pop(i, None)
+            else:
+                want[i] = v
+        e = LE._edits(sorted(old), [old[k] for k in sorted(old)])
+        got = LE._set(e, idx, lab)
+        got.check()
+        assert dict(zip(got.index.tolist(), got.label.tolist(), strict=True)) == want
 
 
 # ------------------------------------------------------------------ the changes

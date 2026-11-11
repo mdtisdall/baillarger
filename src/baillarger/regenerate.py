@@ -28,6 +28,8 @@ directory that has no marker (a run that stopped before its moves; the old
 outputs are unchanged). Each run calls finish first. A run holds an exclusive
 lock (fcntl.flock) on ROOT, so a second run in the same ROOT stops with an
 error, and finish never touches the new directory of a running command.
+The diff (EDITS) must not be in ROOT itself: its reader locks the diff's
+directory, and that lock would wait for the run's lock on ROOT.
 This covers a stopped process (an error, a signal, the memory cap); it does
 not cover a crash of the machine or of the file system.
 
@@ -48,20 +50,20 @@ voxels that it changes.
 """
 
 import argparse
-import fcntl
 import filecmp
 import json
 import os
 import shutil
 import tempfile
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from baillarger import backend, white_dseg, white_overview, white_surf, wm_sites
 from baillarger.bids import derivative_path, entities
+from baillarger.fileops import flock, write_atomic
 from baillarger.fix_diff import read_table
 from baillarger.mesh import BLOCK
 from baillarger.timing import log, log_to_stderr
@@ -111,28 +113,17 @@ def _seed(stage: Path, root: Path, inp: Path) -> list[Path]:
 def locked(root: Path) -> Iterator[None]:
     """An exclusive lock (fcntl.flock) on the directory root, for one
     regeneration. Raises RuntimeError at once if another process holds it."""
-    fd = os.open(root, os.O_RDONLY)
-    try:
+    with ExitStack() as stack:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            stack.enter_context(flock(root, exclusive=True, wait=False))
         except BlockingIOError:
             raise RuntimeError(f"another regenerate runs in {root}") from None
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
+        yield
 
 
 def _mark(stage: Path, rel: list[Path]) -> None:
     """Write the marker: a new file, synced, then renamed to MARKER."""
-    part = stage / (MARKER + ".part")
-    with part.open("w") as fh:
-        fh.write("".join(f"{r.as_posix()}\n" for r in rel))
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(part, stage / MARKER)
+    write_atomic(stage / MARKER, "".join(f"{r.as_posix()}\n" for r in rel).encode())
 
 
 def _move(stage: Path, root: Path) -> list[Path]:
@@ -223,9 +214,15 @@ def regenerate(
     new directory in root, then move their files over the old files in root
     (the module's docstring). First finishes a stopped run (finish). If a
     step fails, the new directory is deleted, the old outputs are unchanged,
-    and the error is raised. Raises ValueError before the move if an output
-    would replace inp or edits, and RuntimeError if another regeneration
-    runs in root."""
+    and the error is raised. Raises ValueError if edits is in root itself,
+    or before the move if an output would replace inp or edits, and
+    RuntimeError if another regeneration runs in root."""
+    if edits is not None and edits.resolve().parent == root.resolve():
+        raise ValueError(
+            f"{edits.name}: the diff is in ROOT ({root}) itself; the run's lock "
+            "on ROOT would block the diff's lock. Put the diff in a "
+            "subdirectory (label_edits.bids_path puts it in anat/)"
+        )
     root.mkdir(parents=True, exist_ok=True)
     keep = {inp.resolve()} | (set() if edits is None else {edits.resolve()})
     with locked(root):

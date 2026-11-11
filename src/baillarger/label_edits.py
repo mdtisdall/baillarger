@@ -7,21 +7,24 @@ the correction changes the edited voxels last. Nothing else applies edits.
 
 Two files: the records (.npy, EDITS_DTYPE, sorted by index, each index once)
 and the sidecar (.json). write replaces both files under an exclusive lock
-(fcntl.flock on their directory); read holds a shared lock and checks the
-sidecar's SHA256. So a reader sees the old diff or the new diff, never a mix.
+(fileops.flock on their directory): the records first, then the sidecar.
+read holds a shared lock and checks the records against the sidecar's SHA256
+and Count, and the diff against the grid, affine and hemisphere that the
+caller gives. A write that stopped between its two renames leaves a sidecar
+older than the records: a reader checks the records on the sidecar's grid
+and writes a new sidecar (the repair). update holds the exclusive lock
+across one read, change and write, so that two writers do not lose each
+other's voxels.
 
 paint and restore change a diff in memory; differ compares two diffs;
 changed gives the voxels where two label arrays differ.
 """
 
-import fcntl
 import hashlib
 import io
 import json
-import os
-import tempfile
-from collections.abc import Iterator
-from contextlib import contextmanager
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,7 +40,10 @@ from baillarger.bids import (
     read_sidecar,
     sidecar_path,
 )
+from baillarger.fileops import flock, write_atomic
 from baillarger.labels import LUT_NAMES
+
+log = logging.getLogger(__name__)
 
 type Int = npt.NDArray[np.int64]
 type Int32 = npt.NDArray[np.int32]
@@ -77,10 +83,16 @@ class Edits:
     def __len__(self) -> int:
         return len(self.index)
 
-    def check(self, shape: tuple[int, ...] | None = None, undo: bool = False) -> None:
+    def check(
+        self,
+        shape: tuple[int, ...] | None = None,
+        undo: bool = False,
+        labels: bool = True,
+    ) -> None:
         """Raises ValueError unless the indices are int64, sorted and unique
         (and in a grid of this shape, if given), and the labels int32 and in
-        label-set/1 (or INPUT, for an undo)."""
+        label-set/1 (or INPUT, for an undo). labels False skips the last
+        check (the caller has checked the labels)."""
         if self.index.dtype != np.int64 or self.label.dtype != np.int32:
             raise ValueError("the index is not int64 or the label is not int32")
         if self.index.shape != self.label.shape or self.index.ndim != 1:
@@ -91,6 +103,8 @@ class Edits:
             size = int(np.prod(shape))
             if self.index[0] < 0 or self.index[-1] >= size:
                 raise ValueError("an edited voxel is outside the grid")
+        if not labels:
+            return
         allowed = set(LUT_NAMES) | ({INPUT} if undo else set())
         bad = sorted(set(np.unique(self.label).tolist()) - allowed)
         if bad:
@@ -128,40 +142,194 @@ def edits_paths(path: Path) -> dict[str, Path]:
     return dict(records=path, sidecar=sidecar_path(path))
 
 
-@contextmanager
-def _locked(directory: Path, op: int) -> Iterator[None]:
-    """A lock (fcntl.flock) on the directory: LOCK_EX for a write, LOCK_SH for
-    a read. The files are replaced by rename, so the lock is not on them."""
-    fd = os.open(directory, os.O_RDONLY)
-    try:
-        fcntl.flock(fd, op)
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
-
-
 def _npy_bytes(edits: Edits) -> bytes:
     raw = io.BytesIO()
     np.save(raw, edits.records(), allow_pickle=False)
     return raw.getvalue()
 
 
-def _write_atomic(path: Path, data: bytes) -> None:
-    """Write data to a new file in path's directory, then rename it over
-    path."""
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+def _stat(path: Path) -> tuple[int, int, int, int]:
+    st = path.stat()
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+@dataclass(frozen=True)
+class Current:
+    """A diff as one process last read or wrote it: its edits, the SHA-256
+    of its records (None: no file) and the identity of its records file
+    (device, inode, size, mtime; None: no file). update uses it as the
+    memory copy: if the sidecar's SHA256 and the records file's identity
+    agree, the records are not read again."""
+
+    edits: Edits
+    sha: str | None
+    ident: tuple[int, int, int, int] | None
+
+
+def _read_records(path: Path) -> bytes:
+    """The bytes of a records file (a function, so that a test can count
+    the reads)."""
+    return path.read_bytes()
+
+
+def _check_grid(
+    path: Path,
+    side: dict[str, Any],
+    shape: tuple[int, ...] | None,
+    affine: npt.ArrayLike | None,
+    hemisphere: str | None,
+) -> None:
+    grid = tuple(int(s) for s in side["Shape"])
+    if (shape is not None and grid != tuple(int(s) for s in shape)) or (
+        affine is not None
+        and not np.allclose(np.reshape(side["Affine"], (4, 4)), np.asarray(affine))
+    ):
+        want = "" if shape is None else f" {tuple(int(s) for s in shape)}"
+        raise ValueError(
+            f"{path.name}: the diff's grid {grid} (Shape and Affine) is not the "
+            f"grid{want} that it is used on"
+        )
+    if hemisphere is not None and side["Hemisphere"] != hemisphere:
+        raise ValueError(
+            f"{path.name}: the diff is of hemisphere {side['Hemisphere']}, "
+            f"not of hemisphere {hemisphere}"
+        )
+
+
+class _Stale(Exception):
+    """The sidecar does not agree with the records (a write that stopped
+    between its two renames): a repair needs the exclusive lock."""
+
+
+def _sidecar(
+    edits: Edits,
+    sha: str,
+    *,
+    hemisphere: str,
+    shape: tuple[int, ...],
+    affine: npt.ArrayLike,
+    description: str,
+    function: str,
+) -> dict[str, Any]:
+    if hemisphere not in ("R", "L"):
+        raise ValueError(f"hemisphere {hemisphere!r} is not R or L")
+    A = np.asarray(affine, np.float64)
+    if A.shape != (4, 4) or len(shape) != 3:
+        raise ValueError("the grid has 3 axes and a 4 x 4 affine")
+    side = dict(
+        SpecVersion=EDITS_SPEC.version,
+        Description=description,
+        Hemisphere=hemisphere,
+        Shape=[int(s) for s in shape],
+        Affine=[float(x) for x in A.ravel()],
+        Count=len(edits),
+        SHA256=sha,
+        Provenance=provenance(function),
+    )
+    EDITS_SPEC.check(side)
+    return side
+
+
+def _side_bytes(side: dict[str, Any]) -> bytes:
+    return (json.dumps(side, indent=1) + "\n").encode()
+
+
+def _repair(path: Path, side: dict[str, Any], data: bytes, sha: str) -> Edits:
+    """The records of a write that stopped between its two renames, checked
+    on the sidecar's grid (Edits.check), and a new sidecar for them: the old
+    sidecar's Description, Hemisphere, Shape and Affine, with the records'
+    Count and SHA256. Call with the exclusive lock held. Raises ValueError
+    if the records are not a valid diff on that grid."""
     try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+        rec = np.load(io.BytesIO(data), allow_pickle=False)
+        if rec.dtype != EDITS_DTYPE or rec.ndim != 1:
+            raise ValueError(f"the records are not {EDITS_DTYPE}")
+        e = _edits(rec["index"], rec["label"])
+        e.check(tuple(side["Shape"]))
+    except ValueError as err:
+        raise ValueError(
+            f"{path.name}: the records do not agree with the sidecar's SHA-256 "
+            f"or Count, and they are not a valid diff on its grid: {err}"
+        ) from err
+    new = _sidecar(
+        e,
+        sha,
+        hemisphere=side["Hemisphere"],
+        shape=tuple(side["Shape"]),
+        affine=np.reshape(side["Affine"], (4, 4)),
+        description=side["Description"],
+        function="baillarger.label_edits.repair",
+    )
+    write_atomic(sidecar_path(path), _side_bytes(new))
+    log.warning(
+        f"{path.name}: the sidecar was older than the records (a write that "
+        f"stopped between its two renames); a new sidecar is written for the "
+        f"{len(e)} records"
+    )
+    return e
+
+
+def _load(
+    path: Path, known: Current | None, repair: bool
+) -> tuple[Current, dict[str, Any]]:
+    """The diff at path and its sidecar. Call with a lock held: the
+    exclusive lock if repair, else the shared lock. If known agrees with the
+    sidecar's SHA256 and the records file's identity, the records are not
+    read. A records file that does not agree with its sidecar is repaired
+    (_repair) if repair, else _Stale is raised."""
+    p = edits_paths(path)
+    side = read_sidecar(p["sidecar"], EDITS_SPEC)
+    ident = _stat(p["records"])
+    if known is not None and known.sha == side["SHA256"] and known.ident == ident:
+        return known, side
+    data = _read_records(p["records"])
+    sha = hashlib.sha256(data).hexdigest()
+    rec = np.load(io.BytesIO(data), allow_pickle=False)
+    if sha != side["SHA256"] or rec.ndim != 1 or len(rec) != side["Count"]:
+        if not repair:
+            raise _Stale
+        e = _repair(path, side, data, sha)
+        return Current(e, sha, ident), read_sidecar(p["sidecar"], EDITS_SPEC)
+    if rec.dtype != EDITS_DTYPE:
+        raise ValueError(f"{path.name}: the records are not {EDITS_DTYPE}")
+    e = _edits(rec["index"], rec["label"])
+    try:
+        e.check(tuple(side["Shape"]))
+    except ValueError as err:
+        raise ValueError(f"{path.name}: {err}") from err
+    return Current(e, sha, ident), side
+
+
+def _write_locked(
+    path: Path,
+    edits: Edits,
+    *,
+    hemisphere: str,
+    shape: tuple[int, ...],
+    affine: npt.ArrayLike,
+    description: str,
+    labels_checked: bool = False,
+) -> Current:
+    """write, with the exclusive lock held."""
+    p = edits_paths(path)
+    edits.check(tuple(shape), labels=not labels_checked)
+    data = _npy_bytes(edits)
+    sha = hashlib.sha256(data).hexdigest()
+    side = _sidecar(
+        edits,
+        sha,
+        hemisphere=hemisphere,
+        shape=shape,
+        affine=affine,
+        description=description,
+        function="baillarger.label_edits.write",
+    )
+    write_atomic(p["records"], data)
+    write_atomic(p["sidecar"], _side_bytes(side))
+    return Current(edits, sha, _stat(p["records"]))
+
+
+DESCRIPTION = "The label edits of a hemisphere: each edited voxel and its label."
 
 
 def write(
@@ -171,69 +339,119 @@ def write(
     hemisphere: str,
     shape: tuple[int, ...],
     affine: npt.ArrayLike,
-    description: str = "The label edits of a hemisphere: each edited voxel and "
-    "its label.",
-) -> None:
+    description: str = DESCRIPTION,
+) -> Current:
     """Write the diff at path (a .npy) and its sidecar (label-edits/1). Each
     file is written as a new file in the same directory, then renamed over the
-    old one (the records first, then the sidecar), under an exclusive lock.
-    Raises ValueError for a diff that is not valid on the grid (Edits.check)
-    or a hemisphere that is not R or L."""
-    p = edits_paths(path)
-    edits.check(tuple(shape))
-    if hemisphere not in ("R", "L"):
-        raise ValueError(f"hemisphere {hemisphere!r} is not R or L")
-    A = np.asarray(affine, np.float64)
-    if A.shape != (4, 4) or len(shape) != 3:
-        raise ValueError("the grid has 3 axes and a 4 x 4 affine")
-    data = _npy_bytes(edits)
-    side = dict(
-        SpecVersion=EDITS_SPEC.version,
-        Description=description,
-        Hemisphere=hemisphere,
-        Shape=[int(s) for s in shape],
-        Affine=[float(x) for x in A.ravel()],
-        Count=len(edits),
-        SHA256=hashlib.sha256(data).hexdigest(),
-        Provenance=provenance("baillarger.label_edits.write"),
-    )
-    EDITS_SPEC.check(side)
+    old one (the records first, then the sidecar; fileops.write_atomic), under
+    an exclusive lock on the directory. Raises ValueError for a diff that is
+    not valid on the grid (Edits.check) or a hemisphere that is not R or L.
+    Returns the diff as written (Current)."""
+    edits_paths(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _locked(path.parent, fcntl.LOCK_EX):
-        _write_atomic(p["records"], data)
-        _write_atomic(p["sidecar"], (json.dumps(side, indent=1) + "\n").encode())
-
-
-def read_with_sidecar(path: Path) -> tuple[Edits, dict[str, Any], str]:
-    """The diff at path, its sidecar and the SHA-256 of its .npy file, read
-    under a shared lock. Raises ValueError if the .npy file does not have the
-    sidecar's SHA256 or Count, or is not a valid diff on the sidecar's grid
-    (Edits.check)."""
-    p = edits_paths(path)
-    with _locked(path.parent, fcntl.LOCK_SH):
-        side = read_sidecar(p["sidecar"], EDITS_SPEC)
-        data = p["records"].read_bytes()
-    sha = hashlib.sha256(data).hexdigest()
-    if sha != side["SHA256"]:
-        raise ValueError(f"{path.name}: the SHA-256 does not agree with the sidecar")
-    rec = np.load(io.BytesIO(data), allow_pickle=False)
-    if rec.dtype != EDITS_DTYPE or rec.ndim != 1:
-        raise ValueError(f"{path.name}: the records are not {EDITS_DTYPE}")
-    if len(rec) != side["Count"]:
-        raise ValueError(
-            f"{path.name}: {len(rec)} records, the sidecar has Count {side['Count']}"
+    with flock(path.parent, exclusive=True):
+        return _write_locked(
+            path,
+            edits,
+            hemisphere=hemisphere,
+            shape=shape,
+            affine=affine,
+            description=description,
         )
-    e = _edits(rec["index"], rec["label"])
+
+
+def read_with_sidecar(
+    path: Path,
+    *,
+    shape: tuple[int, ...] | None = None,
+    affine: npt.ArrayLike | None = None,
+    hemisphere: str | None = None,
+) -> tuple[Edits, dict[str, Any], str]:
+    """The diff at path, its sidecar and the SHA-256 of its .npy file, read
+    under a shared lock. If the records do not agree with the sidecar's
+    SHA256 or Count (a write that stopped between its two renames), the
+    sidecar is older than the records: the records are checked on the
+    sidecar's grid and a new sidecar is written, under the exclusive lock,
+    with a log line. Raises ValueError if the records are not a valid diff on
+    the sidecar's grid (Edits.check), or if the diff is not on the grid of
+    this shape and affine, or not of this hemisphere (each when given)."""
+    edits_paths(path)
     try:
-        e.check(tuple(side["Shape"]))
-    except ValueError as err:
-        raise ValueError(f"{path.name}: {err}") from err
-    return e, side, sha
+        with flock(path.parent, exclusive=False):
+            cur, side = _load(path, None, repair=False)
+    except _Stale:
+        with flock(path.parent, exclusive=True):
+            cur, side = _load(path, None, repair=True)
+    _check_grid(path, side, shape, affine, hemisphere)
+    assert cur.sha is not None
+    return cur.edits, side, cur.sha
 
 
-def read(path: Path) -> Edits:
-    """The diff at path (read_with_sidecar)."""
-    return read_with_sidecar(path)[0]
+def read(
+    path: Path,
+    *,
+    shape: tuple[int, ...] | None = None,
+    affine: npt.ArrayLike | None = None,
+    hemisphere: str | None = None,
+) -> Edits:
+    """The diff at path (read_with_sidecar, with its checks)."""
+    return read_with_sidecar(path, shape=shape, affine=affine, hemisphere=hemisphere)[0]
+
+
+def update(
+    path: Path,
+    fn: Callable[[Current], Edits | None],
+    *,
+    hemisphere: str,
+    shape: tuple[int, ...],
+    affine: npt.ArrayLike,
+    known: Current | None = None,
+    labels_checked: bool = False,
+) -> Current:
+    """One read-change-write of the diff at path, under the exclusive lock
+    on its directory for all of it, so that no other writer (in this or
+    another process) writes between the read and the write. Reads the diff
+    (the empty diff if there is no file; a stopped write is repaired as in
+    read_with_sidecar), checks that it is on this grid and of this
+    hemisphere, calls fn with it, and writes what fn returns (nothing if fn
+    returns None). known is the caller's memory copy: if it agrees with the
+    sidecar, only the sidecar is read. labels_checked skips the check of the
+    labels against label-set/1 (the caller, label_edits.paint, has checked
+    them). An error from fn propagates, and nothing is written. Returns the
+    diff on disk after the update."""
+    p = edits_paths(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with flock(path.parent, exclusive=True):
+        if p["sidecar"].exists():
+            cur, side = _load(path, known, repair=True)
+            _check_grid(path, side, shape, affine, hemisphere)
+        elif p["records"].exists():
+            # the first write stopped between its two renames: the grid is
+            # this update's
+            data = _read_records(p["records"])
+            stub = dict(
+                Description=DESCRIPTION,
+                Hemisphere=hemisphere,
+                Shape=[int(s) for s in shape],
+                Affine=np.asarray(affine, np.float64).ravel().tolist(),
+            )
+            sha = hashlib.sha256(data).hexdigest()
+            e = _repair(path, stub, data, sha)
+            cur = Current(e, sha, _stat(p["records"]))
+        else:
+            cur = Current(empty(), None, None)
+        new = fn(cur)
+        if new is None:
+            return cur
+        return _write_locked(
+            path,
+            new,
+            hemisphere=hemisphere,
+            shape=shape,
+            affine=affine,
+            description=DESCRIPTION,
+            labels_checked=labels_checked,
+        )
 
 
 # ------------------------------------------------------------ the changes
@@ -254,15 +472,23 @@ def apply(labels: npt.ArrayLike, edits: Edits) -> npt.NDArray[Any]:
 
 
 def _set(edits: Edits, index: Int, label: npt.ArrayLike) -> Edits:
-    """The diff with the voxels at index (unique) set to label: INPUT removes
-    the voxel's entry."""
+    """The diff with the voxels at index (sorted, unique) set to label: INPUT
+    removes the voxel's entry. A merge of two sorted arrays (searchsorted):
+    O(N log E + E) for N voxels and E entries, with no sort of the diff."""
     lab = np.asarray(label, np.int32)
-    keep = ~np.isin(edits.index, index)
+    if not len(index):
+        return edits
+    pos = np.searchsorted(edits.index, index)
+    hit = pos < len(edits)
+    hit[hit] = edits.index[pos[hit]] == index[hit]
+    keep = np.ones(len(edits), bool)
+    keep[pos[hit]] = False
+    kept_idx, kept_lab = edits.index[keep], edits.label[keep]
     add = lab != INPUT
-    idx = np.concatenate([edits.index[keep], index[add]])
-    out = np.concatenate([edits.label[keep], lab[add]])
-    order = np.argsort(idx, kind="stable")
-    return _edits(idx[order], out[order])
+    at = np.searchsorted(kept_idx, index[add])
+    return _edits(
+        np.insert(kept_idx, at, index[add]), np.insert(kept_lab, at, lab[add])
+    )
 
 
 def _entries(edits: Edits, index: Int) -> Int32:
