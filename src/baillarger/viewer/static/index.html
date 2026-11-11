@@ -389,7 +389,11 @@ async function initBricks() {
   g.pixelStorei(g.UNPACK_ALIGNMENT, 1);
   if (!CROSS) CROSS = [0, 1, 2].map(k => (BV.lo[k] + BV.hi[k]) / 2);
   bvEvents(); bvFit();
-  new ResizeObserver(() => { bvLayout(); bvUpdate(); }).observe(c.parentElement);
+  // a page loaded in a hidden pane or tab has a 0 x 0 canvas: the fit waits for the first size that is not zero (a view set
+  // meanwhile, a review site, stays)
+  new ResizeObserver(() => {
+    if (BV.fit > 0) { bvLayout(); bvUpdate(); } else if (BV.s > 0) { BV.fit = bvFitScale(); bvUpdate(); } else bvFit();
+  }).observe(c.parentElement);
   window.BVAPI = { BV, $, get, log, share, crossHere, program, affInv, affApply, VS: BVVS, px2w: bvPx2W, w2px: bvW2Px, draw: bvDraw,
                    update: bvUpdate, get cross() { return CROSS; } };
   for (const p of BVP) if (p.init) try { await p.init(window.BVAPI); } catch (e) { log(`init: ${e.message}`); }
@@ -436,14 +440,16 @@ async function bvSource(name) {
 function bvLayout() {
   const c = $("bv"), W = c.clientWidth, H = c.clientHeight, v = $("vview").value, gap = 2;
   if (v in BVT) { BV.tiles = [{ ...BVT[v], x: 0, y: 0, w: W, h: H }]; return; }
-  const w = (W - gap) / 2, h = (H - gap) / 2;
+  const w = Math.max(0, (W - gap) / 2), h = Math.max(0, (H - gap) / 2);
   BV.tiles = [["ax", 0, 0], ["cor", 1, 0], ["sag", 0, 1]].map(([k, i, j]) => ({ ...BVT[k], x: i * (w + gap), y: j * (h + gap), w, h }));
 }
-function bvFit() {
+// the scale (px per mm) that fits the volume in each tile, after a new layout; 0 while the canvas has no size
+function bvFitScale() {
   bvLayout();
-  BV.s = BV.fit = 0.95 * Math.min(...BV.tiles.map(t => Math.min(t.w / (BV.hi[t.r] - BV.lo[t.r]), t.h / (BV.hi[t.u] - BV.lo[t.u]))));
-  BV.C = [0, 1, 2].map(k => (BV.lo[k] + BV.hi[k]) / 2); bvUpdate();
+  const s = 0.95 * Math.min(...BV.tiles.map(t => Math.min(t.w / (BV.hi[t.r] - BV.lo[t.r]), t.h / (BV.hi[t.u] - BV.lo[t.u]))));
+  return s > 0 ? s : 0;
 }
+function bvFit() { BV.s = BV.fit = bvFitScale(); BV.C = [0, 1, 2].map(k => (BV.lo[k] + BV.hi[k]) / 2); bvUpdate(); }
 function bvPx2W(t, px, py) { const w = CROSS.slice(); w[t.r] = BV.C[t.r] + (px - t.w / 2) / BV.s; w[t.u] = BV.C[t.u] - (py - t.h / 2) / BV.s; return w; }
 const bvW2Px = (t, w) => [(w[t.r] - BV.C[t.r]) * BV.s + t.w / 2, t.h / 2 - (w[t.u] - BV.C[t.u]) * BV.s];
 const bvTileAt = (x, y) => BV.tiles.find(t => x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h) || null;
@@ -467,7 +473,7 @@ function bvLevelFor(t, budget) {
 }
 // after any change of the view: the bricks it wants (the coarsest level's one brick always), most recently used last, then load
 function bvUpdate() {
-  if (!BV.on || !BV.M) return;
+  if (!BV.on || !BV.M || !(BV.s > 0)) return;   // no scale yet: the canvas has had no size (a page loaded hidden)
   const budget = Math.floor((BV.nslots - 1) / Math.max(1, BV.tiles.length));
   BV.want = new Set([bkey(BV.nl - 1, [0, 0, 0])]);
   for (const t of BV.tiles) {
@@ -519,7 +525,7 @@ async function bvLoad(L, bs, keys, gen) {
 }
 function bvDraw() { if (!BV.frame) BV.frame = requestAnimationFrame(bvRender); }
 function bvRender() {
-  BV.frame = 0; const c = $("bv"), o = $("bvo"), g = BV.g, dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  BV.frame = 0; if (!(BV.s > 0)) return; const c = $("bv"), o = $("bvo"), g = BV.g, dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
   for (const cv of [c, o]) if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
   g.disable(g.SCISSOR_TEST); g.viewport(0, 0, c.width, c.height); g.clearColor(0.05, 0.055, 0.065, 1); g.clear(g.COLOR_BUFFER_BIT);
   g.useProgram(BV.prog); const u = n => g.getUniformLocation(BV.prog, n), M = BV.M, nl = BV.nl;
