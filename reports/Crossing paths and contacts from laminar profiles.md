@@ -1562,6 +1562,66 @@ V1V2's three cuts, in ITK-SNAP voxels (1-based, box):
 - The 2,047-voxel cut.
 - Whether a cut should be the smallest cross-section rather than the meeting wall, as in V1V2's third cut.
 
+### Where layers differ: isopachs, pinch-outs, facies
+
+**Why.** The joint warp gives one τ frame for the box. Areal borders are facies changes, not faults (the user's rule), so where layers thin, vanish or change their look must be shown rather than assumed away. These maps are seismic-attribute diagnostics read from the saved warps; they are not pass/fail criteria.
+
+**Code.** `layer_maps_lib.py` (pure functions) with `test_layer_maps.py` (10 tests, exact answers on synthetic traces); driver `layer_maps.py <figures> <work> <out> <site> <tag> [--bands TAG] [--k K]`. It reads `column_volume_<site>.npz`, `pia_<site>.npz` (H at the roots), `joint_<tag>.npz` (the filled warp, made monotone first: 10 % of fill steps dip) and `flat_map_<site>.npz` when it exists. It uses only traces that reach their own pia (open, crossing, to the contact).
+
+**Attributes, per trace on the white-mesh roots:**
+- *Isopachs:* the thickness in mm of each τ interval, z(τ_b) − z(τ_a) (the integral of dz/dτ). Intervals run between the solved levels (WM, the three bands, the pia) and over five fixed τ slabs.
+- *Curvature trend:* log t = m(x) + a·H for each interval separately, and removed as t·exp(−a·H). This keeps mm and keeps zeros. The slope a comes from pairs of neighbouring traces (roots within 1 mm, normals agreeing): Δlog t = a·ΔH over pairs where both thicknesses are over 0.1 mm. Unlike pia_horizon.py's plain fit of log t on H, the pair differences cancel any areal change that varies slowly along the surface. Test: when a layer's thick part sits on more convex roots, the plain fit is off by more than 0.3 and the pair fit by less than 0.05.
+- *Pinch-out:* each band interval's fraction of the whole thickness, smoothed on the roots (Gaussian, 0.5 mm, normals agreeing), and its lateral gradient. The gradient is a least-squares plane through each root's neighbours (0.5 mm) in its tangent plane. This is exact for a linear field (tested on a plane, a tilted plane, and with isolated roots).
+- *Band amplitude:* the stacked profile at each band's τ (sign flipped for dark bands, so larger means stronger), and its lateral gradient: where a band dims.
+- *Facies:* echoes 2 and 3 at constant τ (0.05–0.92, 45 levels each), stacked on the roots (0.5 mm). Then PCA to 8 components and Gaussian mixtures (full covariance) for k = 1–8, with k chosen by ICL (BIC plus twice the memberships' entropy; Biernacki et al. 2000) and BIC reported too. Two additions, each from a failed test or run:
+  - *Transitions folded.* A gradual border is a continuum of blends, and the mixture gave it a component of its own: on the synthetic border, BIC and ICL chose k = 3. A component whose mean lies within 0.25·|a − b| of the segment between two end-members a and b (blend weight 0.1–0.9) is folded into them. Each of its traces is split by its own projection onto that segment. On the synthetic border (logistic, 0.3 mm), the end-memberships follow the true blend fraction to within 0.15, cross 0.5 within 0.2 mm of the border, and are mixed (entropy > 0.3) on over 30 % of the traces within 0.5 mm of it and under 3 % beyond 1 mm.
+  - *Small end-members set aside.* On V1V2, 814 traces with odd profiles took the first principal component (47 % of the variance). End-members that hold under 5 % of the traces are reported and mapped, and the mixture is fitted again without them. Test: 2 % wild traces are set aside exactly, and the two areas are then separated exactly.
+
+**Runs** (the chain-prior band runs `joint_<site>_s0.16_bands_vchain`; 11–16 s each, peak 1.3–1.4 GB). Figures: `scratch/layer-maps/figures/layer_maps_<tag>[_k3]_{flat,plane<k>,facies}.png`. Numbers: `scratch/layer-maps/layer_maps_<tag>[_k3].json`. `_k3` maps three facies; without it, k is ICL's choice. The figures are git-ignored outputs, like the other prototype figures.
+
+| | V1V2 banks | M1S1 |
+|---|---|---|
+| Traces used (of the subsample) | 14,248 (of 23,124) | 15,638 (of 26,984) |
+| Levels τ (kinds) | 0.177 b, 0.375 d (the stria), 0.802 b | 0.146 b, 0.333 d, 0.823 b |
+| Curvature slope a, band intervals, WM → pia (per mm⁻¹) | +0.43, +0.23, −0.10, −0.04 (total +0.10) | +0.89, +0.78, −0.09, −0.32 (total +0.24) |
+| a, fixed slabs τ 0–0.2 … 0.8–1 | +0.42, +0.23, −0.20, −0.12, −0.04 | +1.08, +0.58, +0.12, −0.57, −0.29 |
+| Detrended isopachs, median (p10–p90) mm | 0.37 (0.09–0.61), 0.44 (0.24–0.68), 0.91 (0.48–1.18), 0.40 (0.19–0.64) | 0.38 (0.07–0.59), 0.54 (0.27–1.06), 1.07 (0.80–1.46), 0.46 (0.22–0.69) |
+| Traces with an interval under 0.04 mm | WM–first band 4.8 %; others ≤ 0.4 % | WM–first band 4.9 %; others ≤ 0.4 % |
+| Set aside (facies), ITK-SNAP centre, pia p10/50/90 | 540, (53, 82, 76), 1.32 / 1.80 / 4.64 mm | 474, (91, 79, 89), 2.44 / 3.36 / 4.27 mm |
+| ICL over k = 1–8 | decreasing to k = 8 (no minimum) | decreasing to k = 8 (no minimum) |
+
+- **Bok's rule in the trends.** At both sites the deep intervals thicken on convex roots (gyral crowns: a > 0) and the superficial ones thin (a < 0), with the total in between. This is the equi-volume pattern, measured here from neighbour differences with no model of it. The same rule says the warp's distance-based fill between levels (*The fallback*) is biased where curvature changes.
+- **No interval pinches out widely.** Only the interval between the WM and the first bright band falls under 0.04 mm, on about 5 % of the traces at both sites, and these lie in scattered patches, not along a line. The fraction gradients (p99 0.25–0.49 per mm) peak in rings around the set-aside patches and at the edges of the flat-map lobes, not along a front.
+- **ICL does not pick a small k.** It keeps falling to k = 8 at both sites: the stacked profiles are a continuum, and at k = 8 the maps fragment. So the three-facies maps (`_k3`) are the ones to read; the criteria curves are in `_facies.png`.
+
+**V1V2 banks, three facies** (traces with membership over 0.8) [readings by Claude; for the user's reading]:
+
+| Facies | Traces | Pia (median) | H | Stria amplitude | Mean normal | ITK-SNAP centre |
+|---|---|---|---|---|---|---|
+| 3 | 8,414 | 2.16 mm | +0.01 | **0.41** | (0.67, −0.64, −0.38) | (63, 82, 89) |
+| 1 | 2,391 | 2.20 mm | +0.22 (crowns) | 0.27 | (0.57, −0.69, −0.44) | (89, 82, 62) |
+| 2 | 1,847 (98 % open) | 1.76 mm | −0.07 | **−0.04** (none) | (−0.95, −0.32, −0.04) | (52, 90, 76) |
+
+- **The stria ends.** It is strong where the marked points are (flat map u > 40) and absent on facies 2. Facies 2 is a thinner cortex that faces another way and forms a ring around the set-aside patch. Whether facies 2 is V2 is for the user to check at (52, 90, 76).
+- Few traces are mixed: 329 of 13,705 have no membership over 0.6. In membership terms the stria/no-stria border is narrow. Its width in mm has not been measured; the stria's amplitude-gradient map shows where it lies.
+- The set-aside patch (540 traces) has a pia that varies from 1.3 to 4.6 mm, and its traces are dark through the upper half. It is either a warp failure or a local anomaly of the tissue; not diagnosed.
+
+**M1S1, three facies:**
+
+| Facies | Traces | Pia (median) | Bright τ 0.15 amplitude | Interval b0.15–d0.33: mm (fraction) | Mean normal | ITK-SNAP centre |
+|---|---|---|---|---|---|---|
+| 3 | 4,225 (86 % open) | **3.08 mm** | +0.18 | **0.86 mm (0.30)** | (−0.59, 0.42, −0.69) | (88, 48, 90) |
+| 2 | 7,458 | 2.16 mm | **−0.20** (none) | 0.41 mm (0.19) | (0.57, −0.34, 0.74) | (62, 63, 60) |
+| 1 | 1,552 | 2.68 mm | +0.02 | 0.56 mm (0.22) | (−0.06, 0.88, −0.47) | (79, 93, 56) |
+
+- **The two banks are two facies.** Facies 2 and 3 have nearly opposite mean normals; on the flat map they are the two lobes, and the points sit on facies 2. The thick bank (3.08 mm) has the deep bright band and a deep interval twice as thick. The thin bank (2.16 mm) has neither. No interval thins to zero toward either bank: the thin bank's deep interval is 0.41 mm, not 0.
+- **Layer IV is not identified.** None of the three bands has been identified as layer IV (the dark band at τ 0.33 is still open, *Bands in the τ frame*), so "layer IV thins from S1 to M1" cannot be read from these maps yet. What the maps do show is that the banks differ in their deep third (τ 0.15–0.33), both in thickness and in the bright band. Which bank is M1 is for the user (S1 is the thinner cortex, if thickness alone is the guide).
+
+**Limits.**
+- The facies use the box's one τ frame. A band that is missing at a bank is fitted at the box's τ anyway, so a facies change also shows up as warp misfit, and the warp itself may be wrong across a facies border.
+- Flat-map density follows the map's area distortion: V1V2's left region is sparse because the map stretches it, not because traces are missing there.
+- The facies stack at 0.5 mm, and the k = 3 maps are a choice, not a criterion.
+
 ### Across both faces
 
 - **The principle survives at V1V2 and fails as estimated at M1S1** (principle, roles, estimators): the same estimators with the same settings place a V1 contact within about half a voxel and miss an M1/S1 contact by 3–5 voxels, while placing open-cortex joins at both within a third of a voxel.
