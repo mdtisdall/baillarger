@@ -3,14 +3,15 @@
 SpecVersion `wm-paint/1`. Written by `python -m baillarger.wm_paint export`
 (`baillarger.wm_paint.export`). Read by `baillarger.wm_paint.changes` and by
 `python -m baillarger.wm_paint import` (`baillarger.wm_paint.import_paint`),
-which appends to the answer log (`docs/formats/wm-edits.md`). The sidecar's
+which appends to the answer log (`docs/formats/wm-edits.md`) and writes into
+the label edits (`docs/formats/label-edits.md`). The sidecar's
 keys are enforced by `baillarger.wm_paint.PAINT_SPEC`, and
 `tests/test_bids.py` checks that the table below lists the same keys, types
 and requirements.
 
 A crop is a cube of the `desc-wmtopo` segmentation round a review site. The
 reviewer paints the labels of the crop in ITK-SNAP. The painted change
-becomes one answer of the log.
+becomes one answer of the log and a write into the label edits.
 
 ## Files
 
@@ -33,9 +34,9 @@ In the crop directory that `export` is given:
 2. Open `labels.nii.gz` in ITK-SNAP, with the echoes.
 3. Paint with labels of `label-set/1`.
 4. Save `labels.nii.gz` in place.
-5. Run `import` with the crop directory, the log (`--log`), the session
-   (`--session`) and the reviewer time in seconds (`--seconds`). It prints
-   the Id of the answer.
+5. Run `import` with the crop directory, the log (`--log`), the label edits
+   (`--edits`, a `.npy`), the session (`--session`) and the reviewer time in
+   seconds (`--seconds`). It prints the Id of the answer.
 
 ## What `export` does
 
@@ -49,7 +50,10 @@ In the crop directory that `export` is given:
 
 ## What `import` does
 
-1. It refuses (ValueError) a log whose `Shape` is not the crop's `Shape`.
+1. It refuses (ValueError) a log or a label edits file whose `Shape` is not
+   the crop's `Shape`, and input labels on another grid. The input labels
+   are the first of the `Sources` of the cropped segmentation (`wm-dseg/1`).
+   If the label edits file is not there, it starts from the empty diff.
 2. It compares `labels.nii.gz` with `exported.nii.gz`. Both must have the
    same shape and affine. The voxels where they differ are the change. The
    new label of each is the label in `labels.nii.gz`.
@@ -59,6 +63,11 @@ In the crop directory that `export` is given:
    their new labels. Its `DecidedAgainst` is the crop's `DsegSHA256`. Its
    `Params` has `Crop`, the absolute path of the crop directory.
 4. An answer with no changed voxels is valid. Its `Count` is 0.
+5. It writes the changed voxels into the label edits
+   (`baillarger.label_edits.paint`, with the input labels): only the voxels
+   whose label changes from the input label with the diff applied. The
+   `Hemisphere` comes from the log, the `Affine` from the cropped
+   segmentation.
 
 The site must have been shown in the session. Otherwise the log refuses the
 answer (ValueError) and writes nothing. The log also refuses a label that is

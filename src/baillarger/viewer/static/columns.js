@@ -317,6 +317,7 @@ BVP.push({
     if (C.pick >= 0 && disc(C.pick, "#fff", 4.5)) t.nroots++;
   },
   text(t) {
+    if (!$("ctile")) return "";   // the volume pane draws before build() makes the columns menus
     const n = shown($("ctile").value).cols.length;
     return (n ? ` · ${n} columns` : "") + (C.hl && $("chlv").checked ? ` · ${t.nroots || 0} section roots in this slice` : "");
   },
@@ -411,6 +412,10 @@ function drawSection() {
   const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
   const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.fillStyle = "#000"; g.fillRect(0, 0, W, H);
+  // a cell from (x0, y0) to (x1, y1), CSS px, with its edges on whole device pixels: neighbouring cells then share
+  // their edges exactly, with no antialiased seam of the black background between them (Safari draws one)
+  const snap = v => Math.round(v * dpr) / dpr;
+  const cell = (x0, y0, x1, y1) => { const a = snap(x0), b = snap(y0); g.fillRect(a, b, Math.max(snap(x1) - a, 1 / dpr), Math.max(snap(y1) - b, 1 / dpr)); };
   const S = C.sec; if (!C.data || !S || !S.arc.length) return;
   const d = C.data, s = settings(), top = 21, bot = H - 16, ys = v => top + (v + s.e_in) / (s.e_in + s.e_out) * (bot - top);
   const nc = S.arc.length, cw = W / nc, e = +$("cecho").value, show = $("cshow").value, prof = C.prof, step = C.head.step;
@@ -437,21 +442,21 @@ function drawSection() {
       else if (!prof) continue;
       else if (!a.n) rgb = [40, 0, 0];
       else rgb = grey(a.sum / a.n);
-      g.fillStyle = `rgb(${rgb})`; g.fillRect(x * cw, ys(k * step) - dy / 2, Math.ceil(cw), Math.ceil(dy));
+      g.fillStyle = `rgb(${rgb})`; cell(x * cw, ys(k * step) - dy / 2, (x + 1) * cw, ys(k * step) + dy / 2);
     }
     if (cs.length !== 1) return;
     // the label-interval boundaries: a tick in the colour of the interval that starts there
     const c = cs[0];
     for (let q = Number(d.interval_start[c]) + 1; q < Number(d.interval_start[c + 1]); q++) {
       const v = d.interval_s0[q]; if (v < -s.e_in || v > s.e_out) continue;
-      g.fillStyle = `rgb(${ICOL[d.interval_class[q]]})`; g.fillRect(x * cw, ys(v) - 1, Math.max(1, cw), 2);
+      g.fillStyle = `rgb(${ICOL[d.interval_class[q]]})`; cell(x * cw, ys(v) - 1, (x + 1) * cw, ys(v) + 1);
     }
   });
   g.strokeStyle = "#ff2bd6"; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(0, ys(0)); g.lineTo(W, ys(0)); g.stroke(); g.setLineDash([]);
   const k0 = S.arc.findIndex(a => Math.abs(a) < 1e-9);   // the step at the picked root
   if (k0 >= 0) { g.strokeStyle = "#fff"; g.strokeRect(k0 * cw - 0.5, top - 2, cw + 1, bot - top + 4); }
   // the colours of the section's roots in the other panes, step by step, left end to right end
-  C.stepRGB.forEach((c, x) => { g.fillStyle = css(c); g.fillRect(x * cw, 0, Math.ceil(cw), 5); });
+  C.stepRGB.forEach((c, x) => { g.fillStyle = css(c); cell(x * cw, 0, (x + 1) * cw, 5); });
   g.fillStyle = "#9aa0a8"; g.font = "11px system-ui"; g.textBaseline = "top";
   g.fillText(`s = −${s.e_in} mm (inward)`, 4, 7); g.textBaseline = "bottom";
   g.fillText(`s = ${s.e_out} mm · ${nc} steps of ${S.step.toFixed(3)} mm along the surface, arc ${S.arc[0].toFixed(2)} to ${S.arc[nc - 1].toFixed(2)} mm, ` +

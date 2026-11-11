@@ -383,7 +383,8 @@ def preview(
     halo_mm: float = 1.0,
 ) -> Preview:
     """The answer at the site, then the correction on a box round it, with
-    the answer's voxels verified (as dseg does with the answer log).
+    the answer's voxels as edited voxels, which the correction changes last
+    (as dseg does with the label edits).
 
     `answer` is a key of CHOICES, or a Change (for example a manual paint,
     in the coordinates of the labels). The box is the cube of half-width
@@ -394,7 +395,7 @@ def preview(
     """
     # the import is here: white_dseg is heavy, and the choices do not need it
     from baillarger import white_dseg
-    from baillarger.wm_edits import VOXEL_DTYPE, Log
+    from baillarger.label_edits import Edits
 
     lab = np.asarray(labels)
     shape = lab.shape
@@ -438,21 +439,18 @@ def preview(
     none = Change(np.zeros((0, 3), np.int64), np.zeros(0, np.int64))
     if not wm.any():
         return Preview(ch, none, False, box, cut)
-    # the answer as a log of one site answer on the box's grid
+    # the answer as label edits on the box's grid
     bshape = a.shape
-    data = np.zeros(len(ch.voxels), VOXEL_DTYPE)
+    idx = np.zeros(0, np.int64)
     if len(ch.voxels):
-        data["index"] = np.ravel_multi_index(tuple((ch.voxels - lo).T), bshape)
-    data["label"], data["stroke"] = ch.labels, -1
-    rec = dict(
-        Record="answer",
-        Kind="site",
-        Id=1,
-        Voxels=dict(Offset=0, Count=len(data)),
+        idx = np.ravel_multi_index(tuple((ch.voxels - lo).T), bshape)
+    order = np.argsort(idx)
+    edits = Edits(
+        np.asarray(idx, np.int64)[order],
+        np.asarray(ch.labels, np.int32)[order],
     )
-    log = Log(dict(Shape=list(bshape)), (rec,), data)
     before = np.ascontiguousarray(lab[box])
-    t = white_dseg.wm_topo(before, vm, log)
+    t = white_dseg.wm_topo(before, vm, edits)
     rows = t.diff
     kinds = {f.id: f.kind for f in t.fix_list}
     keep = np.array([kinds[int(f)] != "manual_edit" for f in rows["fix"]], bool)

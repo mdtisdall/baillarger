@@ -16,16 +16,15 @@ reads them.
 
 | Kind | From | In the file |
 |---|---|---|
-| `override` | A fix that changes a verified voxel of an answer (the fix table's `overrides`, `wm-dseg-fixes/1`), unless a `leave` answer accepts it (below) | yes |
+| `override` | A fix that changes edited voxels (the fix table's `overrides` is not `n/a`, `wm-dseg-fixes/1`) | yes |
 | `misfacing` | Misfacing faces of the surface (below) | yes |
 | `handle-fix` | A handle fix (`handle_cut` or `handle_fill`) with a wall of `MinWallVoxels` or more, that is not an override | yes |
 | `random` | A random vertex of the surface, drawn for a session (Random sites) | no |
 
-An override fix is not a site if a `leave` answer of the log accepts a fix
-that matches it: the two fixes overlap (share a voxel) and have the same
-voxels with the same new labels (`docs/formats/wm-edits.md`, The way out of
-the queue). The accepted fix is read from the kept run that the answer
-names. The log is the one in the `Sources` of the corrected segmentation.
+To accept the fix of an override site, the user writes the fix's labels
+into the label edits (`label-edits/1`). Then the edited voxels have the
+fix's labels, the next `dseg` run does not change them, and the fix is not
+an override there. The answer log (`wm-edits/1`) is not read.
 
 Without a fix table next to the corrected segmentation (an output older
 than `wm-dseg-fixes/1` with its table), the file has misfacing sites only.
@@ -108,7 +107,7 @@ measures are those of a ranked site, taken at that voxel. `kind` is `random`,
 |---|---|---|---|
 | `SpecVersion` | string | yes | `wm-sites/1` |
 | `Description` | string | yes | What the files are |
-| `Sources` | array of strings | yes | The white surface's `.surf.gii` and `.dat`, the corrected segmentation and its fixes image, then (if there) the fix table, the fix diff and the answer log (absolute paths) |
+| `Sources` | array of strings | yes | The white surface's `.surf.gii` and `.dat`, the corrected segmentation and its fixes image, then (if there) the fix table (absolute paths) |
 | `SourcesSHA256` | object | yes | SHA-256 of each source, by path (the segmentation's is the `DecidedAgainst` of answers decided on these sites) |
 | `Provenance` | object | yes | `Created` (ISO 8601), `Function`, `Version` (baillarger), `Commit`, `Dirty` |
 | `Hemisphere` | string | yes | `R` or `L` |

@@ -1,0 +1,387 @@
+"""Tests for the label edits (baillarger.label_edits): the files, the lock and
+the atomic replacement, apply, paint, the eraser, undo, differ, and their use
+by the dseg command (baillarger.white_dseg.wm_topo, write_wm_topo)."""
+
+import multiprocessing as mp
+from pathlib import Path
+
+import nibabel as nib
+import numpy as np
+import numpy.typing as npt
+import pytest
+from test_white_dseg import FILLED, VOX, synthetic_aseg
+
+from baillarger import bids, white_dseg
+from baillarger import label_edits as LE
+from baillarger.handles import kuhn_betti
+
+SHAPE = (12, 10, 8)
+AFFINE = np.diag([0.16, 0.16, 0.16, 1.0])
+
+
+def edits(
+    pairs: dict[tuple[int, int, int], int], shape: tuple[int, ...] = SHAPE
+) -> LE.Edits:
+    """A diff from {voxel: label}."""
+    idx = [int(np.ravel_multi_index(v, shape)) for v in pairs]
+    order = np.argsort(idx)
+    return LE.Edits(
+        np.asarray(idx, np.int64)[order],
+        np.asarray(list(pairs.values()), np.int32)[order],
+    )
+
+
+def same(a: LE.Edits, b: LE.Edits) -> bool:
+    return bool(np.array_equal(a.index, b.index) and np.array_equal(a.label, b.label))
+
+
+def write(path: Path, e: LE.Edits, shape: tuple[int, ...] = SHAPE) -> None:
+    LE.write(path, e, hemisphere="R", shape=shape, affine=AFFINE)
+
+
+# ------------------------------------------------------------------ the files
+
+
+def test_write_and_read_give_the_same_diff(tmp_path: Path) -> None:
+    p = LE.bids_path(tmp_path, dict(sub="T01", ses="S1"), "R")
+    assert p.name == "sub-T01_ses-S1_hemi-R_desc-labeledits_edits.npy"
+    e = edits({(1, 2, 3): 41, (0, 0, 0): 0, (11, 9, 7): 42})
+    write(p, e)
+    got, side, sha = LE.read_with_sidecar(p)
+    assert same(got, e) and got.index.dtype == np.int64 and got.label.dtype == np.int32
+    assert side["SpecVersion"] == "label-edits/1" and side["Count"] == 3
+    assert side["Shape"] == list(SHAPE) and side["Hemisphere"] == "R"
+    assert side["SHA256"] == sha == bids.file_sha256(p)
+    assert np.allclose(np.reshape(side["Affine"], (4, 4)), AFFINE)
+    rec = np.load(p, allow_pickle=False)
+    assert rec.dtype == LE.EDITS_DTYPE and rec["index"].tolist() == sorted(
+        rec["index"].tolist()
+    )
+    write(p, LE.empty())
+    assert len(LE.read(p)) == 0
+    # no file of the writes is left in the directory
+    assert sorted(q.name for q in p.parent.iterdir()) == sorted(
+        [p.name, bids.sidecar_path(p).name]
+    )
+
+
+def test_a_reader_checks_the_sha256(tmp_path: Path) -> None:
+    p = tmp_path / "e_edits.npy"
+    write(p, edits({(1, 1, 1): 41}))
+    raw = bytearray(p.read_bytes())
+    raw[-1] ^= 1  # the label
+    p.write_bytes(bytes(raw))
+    with pytest.raises(ValueError, match="SHA-256"):
+        LE.read(p)
+
+
+def test_a_bad_diff_is_not_written(tmp_path: Path) -> None:
+    p = tmp_path / "e_edits.npy"
+    unsorted = LE.Edits(np.array([5, 2], np.int64), np.array([41, 41], np.int32))
+    twice = LE.Edits(np.array([2, 2], np.int64), np.array([41, 42], np.int32))
+    off = LE.Edits(np.array([int(np.prod(SHAPE))], np.int64), np.array([41], np.int32))
+    bad = LE.Edits(np.array([2], np.int64), np.array([7], np.int32))
+    for e, msg in (
+        (unsorted, "sorted"),
+        (twice, "twice"),
+        (off, "outside"),
+        (bad, "label-set"),
+    ):
+        with pytest.raises(ValueError, match=msg):
+            write(p, e)
+    with pytest.raises(ValueError, match="hemisphere"):
+        LE.write(p, LE.empty(), hemisphere="X", shape=SHAPE, affine=AFFINE)
+    assert not p.exists() and not list(tmp_path.iterdir())
+
+
+def _writer(path: str, n: int) -> None:
+    """Write n diffs in turn: the k-th has k + 1 voxels, each with label 41
+    or 42 by k's parity."""
+    for k in range(n):
+        idx = np.arange(k + 1, dtype=np.int64)
+        lab = np.full(k + 1, 41 if k % 2 else 42, np.int32)
+        LE.write(
+            Path(path),
+            LE.Edits(idx, lab),
+            hemisphere="R",
+            shape=(64, 64, 64),
+            affine=AFFINE,
+        )
+
+
+def test_a_reader_sees_the_old_or_the_new_diff_not_a_mix(tmp_path: Path) -> None:
+    p = tmp_path / "e_edits.npy"
+    _writer(str(p), 1)
+    n = 300
+    proc = mp.get_context("spawn").Process(target=_writer, args=(str(p), n))
+    proc.start()
+    seen: set[int] = set()
+    while proc.is_alive() or not seen:
+        e = LE.read(p)  # raises on a mix: the SHA-256 does not agree
+        k = len(e) - 1
+        want = 41 if k % 2 else 42
+        assert e.index.tolist() == list(range(k + 1))
+        assert set(e.label.tolist()) == {want}
+        seen.add(k)
+    proc.join()
+    assert proc.exitcode == 0 and len(LE.read(p)) == n
+    assert len(seen) > 1
+
+
+# ------------------------------------------------------------------ the changes
+
+
+def test_apply_gives_the_labels() -> None:
+    a = np.zeros(SHAPE, np.int16)
+    a[2:5, 2:5, 2:5] = 41
+    e = edits({(1, 1, 1): 41, (3, 3, 3): 42, (2, 2, 2): 41})
+    out = LE.apply(a, e)
+    assert out[1, 1, 1] == 41 and out[3, 3, 3] == 42 and out[2, 2, 2] == 41
+    assert (out != a).sum() == 2 and not np.shares_memory(out, a)
+    assert np.array_equal(LE.apply(a, LE.empty()), a)
+    with pytest.raises(ValueError, match="outside"):
+        LE.apply(np.zeros((2, 2, 2), np.int16), e)
+    with pytest.raises(ValueError, match="fit"):
+        LE.apply(np.zeros(SHAPE, np.int8), edits({(1, 1, 1): 192}))
+
+
+def labels() -> npt.NDArray[np.int16]:
+    a = np.full(SHAPE, 42, np.int16)
+    a[2:8, 2:8, 2:6] = 41
+    return a
+
+
+def test_paint_keeps_only_the_voxels_whose_label_changes() -> None:
+    a = labels()
+    e, undo = LE.paint(LE.empty(), a, [(3, 3, 3), (0, 0, 0), (4, 4, 4)], [41, 41, 0])
+    # (3, 3, 3) is WM already: painting it WM is not an edit
+    assert same(e, edits({(0, 0, 0): 41, (4, 4, 4): 0}))
+    assert same(undo, edits({(0, 0, 0): -1, (4, 4, 4): -1}))
+    # the current label counts the diff: painting (0, 0, 0) WM again is no edit
+    e2, undo2 = LE.paint(e, a, [(0, 0, 0)], [41])
+    assert same(e2, e) and len(undo2) == 0
+    # a voxel with an entry painted with its input label keeps an entry
+    e3, undo3 = LE.paint(e, a, [(4, 4, 4)], [41])
+    assert same(e3, edits({(0, 0, 0): 41, (4, 4, 4): 41}))
+    assert same(undo3, edits({(4, 4, 4): 0}))
+
+
+def test_the_eraser_removes_voxels_from_the_diff() -> None:
+    a = labels()
+    e = edits({(0, 0, 0): 41, (4, 4, 4): 41, (5, 5, 5): 0})
+    out, undo = LE.paint(e, a, [(0, 0, 0), (4, 4, 4), (1, 1, 1)], [-1, -1, -1])
+    # (4, 4, 4) has its input label: erased all the same; (1, 1, 1) had no entry
+    assert same(out, edits({(5, 5, 5): 0}))
+    assert same(undo, edits({(0, 0, 0): 41, (4, 4, 4): 41}))
+    assert np.array_equal(LE.apply(a, out)[0, 0, 0], a[0, 0, 0])
+
+
+def test_paint_refuses_bad_voxels_and_labels() -> None:
+    a = labels()
+    for vox, lab, msg in (
+        ([(12, 0, 0)], [41], "outside the grid"),
+        ([(-1, 0, 0)], [41], "outside the grid"),
+        ([(1, 1, 1), (1, 1, 1)], [41, 42], "twice"),
+        ([(1, 1, 1)], [7], "label-set"),
+        ([(1, 1, 1)], [41, 42], "length"),
+    ):
+        with pytest.raises(ValueError, match=msg):
+            LE.paint(LE.empty(), a, vox, lab)
+
+
+def test_paint_on_a_crop_of_the_input_labels() -> None:
+    a = labels()
+    e0 = edits({(9, 9, 7): 0})
+    vox = [(3, 3, 3), (6, 7, 5), (2, 2, 2)]
+    new = [42, 0, 41]
+    whole = LE.paint(e0, a, vox, new)
+    box = (slice(2, 8), slice(1, 9), slice(1, 7))
+    crop = LE.paint(e0, a[box], vox, new, offset=(2, 1, 1), shape=SHAPE)
+    assert all(same(x, y) for x, y in zip(whole, crop, strict=True))
+    with pytest.raises(ValueError, match="outside the labels"):
+        LE.paint(e0, a[box], [(0, 0, 0)], [41], offset=(2, 1, 1), shape=SHAPE)
+
+
+def test_undo_restores_the_diff_exactly_after_overlapping_paints() -> None:
+    a = labels()
+    e0 = edits({(1, 1, 1): 41, (3, 3, 3): 42})
+    e1, u1 = LE.paint(e0, a, [(1, 1, 1), (2, 2, 2), (3, 3, 3)], [0, 0, -1])
+    e2, u2 = LE.paint(e1, a, [(2, 2, 2), (3, 3, 3), (4, 4, 4)], [42, 0, 0])
+    assert same(LE.restore(e2, u2), e1)
+    assert same(LE.restore(LE.restore(e2, u2), u1), e0)
+
+
+def test_differ_gives_the_voxels_and_the_labels_of_a() -> None:
+    a = edits({(1, 1, 1): 41, (2, 2, 2): 42, (3, 3, 3): 0})
+    b = edits({(1, 1, 1): 41, (2, 2, 2): 0, (4, 4, 4): 41})
+    idx, lab = LE.differ(a, b)
+    want = {(2, 2, 2): 42, (3, 3, 3): 0, (4, 4, 4): -1}
+    assert same(LE.Edits(idx, lab), edits(want))
+    i0, l0 = LE.differ(a, a)
+    assert len(i0) == len(l0) == 0
+
+
+def test_changed_gives_the_changed_voxels_on_the_grid() -> None:
+    b = np.zeros((3, 4, 5), np.int16)
+    a = b.copy()
+    a[1, 2, 3], a[0, 0, 1] = 41, 42
+    v, lab = LE.changed(b, a, (10, 20, 30))
+    assert v.tolist() == [[10, 20, 31], [11, 22, 33]] and lab.tolist() == [42, 41]
+    with pytest.raises(ValueError, match="shapes"):
+        LE.changed(b, a[:-1])
+
+
+# ------------------------------------------------------------------ with dseg
+
+ROD = [(27, 16, 25), (27, 17, 25)]  # the rod across the slit: the aseg's one cut
+DRILL = [(18, 16, z) for z in range(6, 18)]  # a 1 x 1 tunnel of cortex through WM
+ASEG_SHAPE = synthetic_aseg().shape
+
+
+def written_aseg(tmp_path: Path) -> Path:
+    src = tmp_path / "in" / "sub-T01_ses-S1_aseg.nii.gz"
+    src.parent.mkdir(exist_ok=True)
+    nib.save(nib.nifti1.Nifti1Image(synthetic_aseg(), np.diag([*VOX, 1.0])), src)
+    return src
+
+
+def aseg_edits(pairs: dict[tuple[int, int, int], int]) -> LE.Edits:
+    return edits(pairs, ASEG_SHAPE)
+
+
+def ring_edits() -> LE.Edits:
+    """The whole ring and its hole, rod included, with the labels that they
+    have: the handle can be fixed only through an edited voxel."""
+    a = synthetic_aseg()
+    box = np.zeros(a.shape, bool)
+    box[25:37, 3:33, 22:28] = True
+    idx = np.flatnonzero(box)
+    return LE.Edits(idx.astype(np.int64), a.reshape(-1)[idx].astype(np.int32))
+
+
+def test_an_edit_replaces_the_automatic_cut() -> None:
+    """Removing the rod by hand leaves the ring without its handle: the
+    automatic correction no longer cuts it, and the fixes show the edit."""
+    t = white_dseg.wm_topo(synthetic_aseg(), VOX, aseg_edits(dict.fromkeys(ROD, 0)))
+    assert t.betti_before == (2, 1, 1) and t.betti_after == (2, 0, 0)
+    assert kuhn_betti(np.isin(t.dseg, FILLED)) == (2, 0, 0)
+    assert all(t.dseg[v] == 0 and t.fixes[v] == 4 for v in ROD)
+    assert t.manual_voxels == 2 and (t.fixes == 1).sum() == 0
+    assert t.moves[0] == dict(Kind="manual", Voxels=2, Centre=[27, 16, 25])
+    assert sorted(m["Kind"] for m in t.moves) == ["fill", "manual"]
+    assert t.fix_list[0].kind == "manual_edit" and t.fix_list[0].overrides is None
+    assert all(f.overrides is None for f in t.fix_list)
+
+
+def test_a_manual_edit_fix_is_a_26_connected_piece() -> None:
+    """Two separate pieces of edited voxels are two fixes; voxels that touch
+    at a corner are one; an edited voxel with its input label is in none."""
+    a = synthetic_aseg()
+    e = aseg_edits(
+        {ROD[0]: 0, ROD[1]: 0, (2, 2, 2): 42, (3, 3, 3): 42, (34, 30, 2): 42}
+        | {(15, 15, 10): int(a[15, 15, 10])}
+    )
+    t = white_dseg.wm_topo(a, VOX, e)
+    man = [f for f in t.fix_list if f.kind == "manual_edit"]
+    assert [f.id for f in man] == [1, 2, 3]
+    pieces = sorted(len(f.index) for f in man)
+    assert pieces == [1, 2, 2] and t.manual_voxels == 5
+
+
+def test_the_correction_avoids_edited_voxels_where_it_can() -> None:
+    """An edit that drills a tunnel through the WM makes a handle. Without
+    edits, the correction plugs such a tunnel inside it; here the tunnel is
+    edited, so the plug goes in the cortex above it, and no fix overrides
+    the edit."""
+    t = white_dseg.wm_topo(synthetic_aseg(), VOX, aseg_edits(dict.fromkeys(DRILL, 42)))
+    assert t.betti_before == (2, 3, 1) and t.betti_after == (2, 0, 0)
+    assert all(t.dseg[v] == 42 for v in DRILL)  # every edited voxel kept
+    assert all(f.overrides is None for f in t.fix_list)
+    assert t.manual_voxels == len(DRILL)
+
+
+def test_a_fix_that_changes_edited_voxels_gives_their_number() -> None:
+    t = white_dseg.wm_topo(synthetic_aseg(), VOX, ring_edits())
+    assert t.betti_after == (2, 0, 0)
+    over = [f for f in t.fix_list if f.overrides is not None]
+    assert len(over) == 1 and over[0].overrides == 1
+    assert over[0].kind == "handle_cut" and len(over[0].index) == 1
+    (v,) = np.stack(np.unravel_index(over[0].index, t.dseg.shape), 1).tolist()
+    assert tuple(v) in ROD and t.dseg[tuple(v)] == 0
+    # the edits changed no voxel, so they have no fix of their own
+    assert t.manual_voxels == 0 and t.fix_list[0].kind != "manual_edit"
+
+
+def test_edits_apply_to_another_input_unchanged() -> None:
+    a = synthetic_aseg()
+    a[0, 0, 0] = 42  # another input on the same grid
+    t = white_dseg.wm_topo(a, VOX, aseg_edits(dict.fromkeys(ROD, 0)))
+    assert all(t.dseg[v] == 0 for v in ROD) and t.dseg[0, 0, 0] == 42
+
+
+def test_replay_with_edits_reproduces_the_dseg() -> None:
+    a = synthetic_aseg()
+    e = aseg_edits(dict.fromkeys(ROD, 0))
+    t = white_dseg.wm_topo(a, VOX, e)
+    assert t.fix_list[0].kind == "manual_edit" and len(t.fix_list[0].index) == 2
+    assert white_dseg.replay_dseg(a, t.diff, e).tobytes() == t.dseg.tobytes()
+    assert (t.fixes == 4).sum() == 2
+
+
+def test_the_dseg_command_takes_the_edits(tmp_path: Path) -> None:
+    src = written_aseg(tmp_path)
+    ep = LE.bids_path(tmp_path / "edits", bids.entities(src), "R")
+    e = aseg_edits(dict.fromkeys(ROD, 0))
+    LE.write(ep, e, hemisphere="R", shape=ASEG_SHAPE, affine=np.diag([*VOX, 1.0]))
+    out = tmp_path / "deriv"
+    white_dseg.main([str(src), "--edits", str(ep), "--out", str(out)])
+    anat = out / "sub-T01" / "ses-S1" / "anat"
+    side = bids.read_sidecar(
+        anat / "sub-T01_ses-S1_desc-wmtopo_dseg.json", white_dseg.DSEG_SPEC
+    )
+    copy = anat / "sub-T01_ses-S1_desc-wmtopo_edits.npy"
+    want = [str(p.resolve()) for p in (src, copy)]
+    assert side["Sources"] == want and set(side["SourcesSHA256"]) == set(want)
+    # the copy is the diff that the run used
+    got, cside, sha = LE.read_with_sidecar(copy)
+    assert same(got, e) and sha == bids.file_sha256(ep)
+    assert cside["Hemisphere"] == "R" and cside["Shape"] == list(ASEG_SHAPE)
+    assert side["ManualVoxels"] == 2 and side["HandleCutVoxels"] == 0
+    assert side["Moves"][0] == dict(Kind="manual", Voxels=2, Centre=[27, 16, 25])
+    fimg = nib.load(anat / "sub-T01_ses-S1_desc-wmtopofixes_dseg.nii.gz")
+    assert isinstance(fimg, nib.nifti1.Nifti1Image)
+    assert (np.asarray(fimg.dataobj) == 4).sum() == 2
+    fx = bids.read_sidecar(
+        anat / "sub-T01_ses-S1_desc-wmtopofixes_fixes.json", white_dseg.FIXES_SPEC
+    )
+    assert fx["DiffInputs"]["Edits"] == bids.file_sha256(ep)
+    # without edits: ManualVoxels 0, and the copy is the empty diff
+    white_dseg.main([str(src), "--out", str(out)])
+    plain = bids.read_sidecar(
+        anat / "sub-T01_ses-S1_desc-wmtopo_dseg.json", white_dseg.DSEG_SPEC
+    )
+    assert plain["ManualVoxels"] == 0 and plain["Sources"][0] == str(src.resolve())
+    assert len(LE.read(copy)) == 0
+    # the output's copy is not an input
+    with pytest.raises(ValueError, match="copy"):
+        white_dseg.write_wm_topo(src, out, copy)
+
+
+def test_edits_on_another_grid_or_hemisphere_are_refused(tmp_path: Path) -> None:
+    src = written_aseg(tmp_path)
+    ep = tmp_path / "e_edits.npy"
+    e = aseg_edits(dict.fromkeys(ROD, 0))
+    A = np.diag([*VOX, 1.0])
+    LE.write(ep, e, hemisphere="R", shape=ASEG_SHAPE, affine=A)
+    other = tmp_path / "in" / "sub-T01_ses-S2_aseg.nii.gz"
+    nib.save(nib.nifti1.Nifti1Image(synthetic_aseg()[:-1], A), other)
+    with pytest.raises(ValueError, match="grid"):
+        white_dseg.write_wm_topo(other, tmp_path / "deriv2", ep)
+    shifted = A.copy()
+    shifted[0, 3] = 1.0
+    LE.write(ep, e, hemisphere="R", shape=ASEG_SHAPE, affine=shifted)
+    with pytest.raises(ValueError, match="grid"):
+        white_dseg.write_wm_topo(src, tmp_path / "deriv2", ep)
+    LE.write(ep, e, hemisphere="L", shape=ASEG_SHAPE, affine=A)
+    with pytest.raises(ValueError, match="hemisphere"):
+        white_dseg.write_wm_topo(src, tmp_path / "deriv2", ep)

@@ -106,8 +106,8 @@ slices of that cube, cut by the volume's edges.
 `answer` is the name of a choice (a key of `CHOICES`), or a `Change` (for
 example a manual paint, in the coordinates of `labels`). The preview makes
 the answer, then runs the correction (`baillarger.white_dseg.wm_topo`) on a
-box round the site, with the answer's voxels verified, as `dseg` does with
-an answer log (`wm-edits/1`). It returns a frozen `Preview`:
+box round the site, with the answer's voxels as label edits (edited
+voxels), as `dseg` does with the label edits (`label-edits/1`). It returns a frozen `Preview`:
 
 | Field | Meaning |
 |---|---|
@@ -131,15 +131,15 @@ a handle in the box, so the preview does not show its fix. WM that the box
 face cuts can also look like a separate piece. `cut_by_box` is true in that
 case, and the pane says that the preview is approximate there. The real
 result comes from the `dseg` run on the hemisphere with the answer in the
-log.
+label edits.
 
-The correction changes the verified voxels last (`wm-edits/1`, *What
-`dseg` does with the log*). An answer of one of the choices above changes
+The correction changes the edited voxels last (`wm-dseg/1`, *Manual
+edits*). An answer of one of the choices above changes
 voxels only near the site, so the correction can nearly always fix a handle
 that the answer makes through other voxels: the preview then shows the
 correction and no override. An override comes when every fix goes through
-verified voxels, for example a manual paint that verifies the whole loop and
-its hole.
+edited voxels, for example label edits that hold the whole loop and its
+hole.
 
 ## Tests
 
@@ -150,6 +150,6 @@ blade to four (radius 1) and to six (radius 2); `leave` returns no voxels;
 each choice on a box of `support` gives the same voxels as on the whole
 phantom; the input does not change; the preview of `fill-gap` that closes a ring
 shows a correction outside the answer and no override; the preview of a
-manual paint that verifies a whole ring with its rod (an answer that leaves
+manual paint that holds a whole ring with its rod (an answer that leaves
 a handle) shows the override, a cut of one rod voxel; a box that cuts the
 ring gives `cut_by_box` and no correction.

@@ -18,6 +18,7 @@ field values.
 
 import itertools
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -161,6 +162,7 @@ def marching_tetrahedra_blocks(
     block: int = BLOCK,
     dtype: npt.DTypeLike = np.float64,
     device: "Device | None" = None,
+    only: "npt.ArrayLike | None" = None,
 ) -> tuple[Float, Int, MeshBlocks]:
     """marching_tetrahedra and its block index.
 
@@ -189,6 +191,12 @@ def marching_tetrahedra_blocks(
     device (baillarger.backend): numpy (None, the default) or a PyTorch
     device, which works in float32 (baillarger.mesh_torch.march_block):
     the same triangles, vertices within float32 rounding of numpy's.
+
+    only (k, 3): march only these block indices (a re-march of the blocks that a local
+    change of F touches). The result is the mesh of those blocks alone, in the same
+    order: each block's faces and vertices are those of a full march, and its vertices
+    keep their edge keys, but a vertex is owned by the first of these blocks that uses
+    it. Indices off the grid of blocks are ignored.
     """
     dt = np.dtype(dtype)
     tdev = None if device is None or device.is_numpy else device.torch
@@ -205,7 +213,16 @@ def marching_tetrahedra_blocks(
     shape = reader.shape
     vkeys, verts, faces, origins = [], [], [], []
     n_verts = 0
-    for ijk in reader.indices():
+    if only is None:
+        todo: Iterable[tuple[int, ...]] = reader.indices()
+    else:
+        from baillarger.blocks import morton
+
+        q = np.unique(np.asarray(only, np.int64).reshape(-1, 3), axis=0)
+        q = q[np.all((q >= 0) & (q < np.asarray(reader.grid)), axis=1)]
+        q = q[np.argsort(morton(q), kind="stable")]
+        todo = [tuple(int(x) for x in r) for r in q]
+    for ijk in todo:
         blk, o = reader.read(ijk)
         v: npt.NDArray[np.floating[Any]]
         if isinstance(blk, torch.Tensor):

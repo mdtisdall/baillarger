@@ -8,7 +8,11 @@ three white-surface commands. Run them in this order:
 
 The command writes the white surface of the WM mask of a corrected
 segmentation (baillarger.white_dseg) as GIfTI, with its normals, edge keys
-and block index (docs/formats/white-surf.md). WhiteSurface reads it.
+and block index (docs/formats/white-surf.md). WhiteSurface reads it. It also
+writes the antialiased field that the surface is marched from
+(docs/formats/white-antialias.md; read_field), so that a preview of a label edit
+solves the field again only near the edit (baillarger.antialias.local_solve) and
+re-marches only the blocks it touches (remarch).
 """
 
 import argparse
@@ -16,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 from nibabel.gifti.gifti import GiftiImage
@@ -23,6 +28,7 @@ from nibabel.gifti.gifti import GiftiImage
 from baillarger import antialias as AA
 from baillarger import backend
 from baillarger import mesh_smoothing as S
+from baillarger.backend import Device
 from baillarger.bids import (
     COMMON_KEYS,
     Key,
@@ -37,7 +43,7 @@ from baillarger.bids import (
     sources,
     write_sidecar,
 )
-from baillarger.blocks import EmbeddedSource, open_volume
+from baillarger.blocks import EmbeddedSource, PatchedSource, Source, open_volume
 from baillarger.gifti import DataArray, write_external
 from baillarger.handles import kuhn_betti
 from baillarger.mesh import BLOCK, MeshBlocks, marching_tetrahedra_blocks, topology
@@ -112,6 +118,23 @@ SURF_SPEC = SidecarSpec(
     ),
 )
 
+#: docs/formats/white-antialias.md
+FIELD_SPEC = SidecarSpec(
+    "white-antialias/1",
+    COMMON_KEYS
+    + (
+        Key("Hemisphere", "string", True, "R or L"),
+        Key("FilledLabels", "array of integers", True, "labels of the WM mask"),
+        Key("VoxelToRAS", "array of numbers", True, "the grid's 4 x 4 affine"),
+        Key("GridShape", "array of integers", True, "the segmentation's grid"),
+        Key("BoxOrigin", "array of integers", True, "the box's first grid voxel"),
+        Key("BoxShape", "array of integers", True, "the box (voxels)"),
+        Key("Fill", "number", True, "the field outside the box"),
+        Key("SHA256", "string", True, "SHA-256 of the .nii"),
+        Key("Antialias", "object", True, "how the field was solved"),
+    ),
+)
+
 #: columns of the block index
 BLOCK_COLUMNS = (
     "block_i",
@@ -147,6 +170,10 @@ def surface_paths(out: Path, ents: dict[str, str], hemi: str) -> dict[str, Path]
         ),
         blocks=derivative_path(out, ents, "white", ".tsv", hemi=hemi, desc="blocks"),
         sidecar=derivative_path(out, ents, "white", ".json", hemi=hemi),
+        field=derivative_path(out, ents, "white", ".nii", hemi=hemi, desc="antialias"),
+        field_sidecar=derivative_path(
+            out, ents, "white", ".json", hemi=hemi, desc="antialias"
+        ),
     )
 
 
@@ -228,9 +255,33 @@ def write_white_surface(
             f"(last change {solve.last_change:.1e})"
         )
     lap("antialias")
+    paths = surface_paths(out, entities(dseg), hemi)
+    dataset_description(out)
+    aa_summary = dict(
+        Method="thin-plate",
+        Band=AA.BAND,
+        Eps=AA.EPS,
+        Tolerance=AA.TOL,
+        **solve.summary(),
+    )
+    write_field(
+        paths["field"],
+        phi,
+        lo,
+        shape,
+        np.asarray(img.affine, np.float64),
+        dict(
+            **sources(dseg),
+            Provenance=provenance("baillarger.white_surf.write_white_surface"),
+            Hemisphere=hemi,
+            FilledLabels=list(filled),
+            Antialias=aa_summary,
+        ),
+    )
+    lap("write field")
     # marching on the whole grid, so blocks and edge keys follow it; outside the box
     # the field is outside the mask
-    field = EmbeddedSource(phi, lo, shape, -(AA.BAND + 3.0))
+    field = EmbeddedSource(phi, lo, shape, FIELD_FILL)
     v64, f, blocks = marching_tetrahedra_blocks(field, 0.0, block, np.float32, dev)
     v: F32 = v64.astype(np.float32, copy=False)  # already float32: typing only
     del phi, field, v64
@@ -250,8 +301,6 @@ def write_white_surface(
     nlen = np.minimum(nlen, 1)
     lap("normals")
     v_mm = as_written(v).astype("<f4")
-    paths = surface_paths(out, entities(dseg), hemi)
-    dataset_description(out)
     surf_meta = dict(
         AnatomicalStructurePrimary=STRUCTURE[hemi],
         AnatomicalStructureSecondary="GrayWhite",
@@ -345,13 +394,7 @@ def write_white_surface(
             GridShape=[int(x) for x in img.shape[:3]],
             BlocksFile=paths["blocks"].name,
             DataSHA256={d.name: file_sha256(d) for d in (dat, ndat, kdat, ldat)},
-            Antialias=dict(
-                Method="thin-plate",
-                Band=AA.BAND,
-                Eps=AA.EPS,
-                Tolerance=AA.TOL,
-                **solve.summary(),
-            ),
+            Antialias=aa_summary,
             Device=dev.name,
         ),
     )
@@ -359,6 +402,129 @@ def write_white_surface(
     return SurfaceFiles(
         dict(paths, dat=dat, normals_dat=ndat, keys_dat=kdat, normlen_dat=ldat)
     )
+
+
+# ------------------------------------------------------- the antialiased field
+
+#: the field outside its box (outside the mask, past the band)
+FIELD_FILL = -(AA.BAND + 3.0)
+
+
+def write_field(
+    path: Path,
+    phi: F32,
+    lo: npt.ArrayLike,
+    grid: tuple[int, ...],
+    affine: Float,
+    keys: dict[str, Any],
+) -> None:
+    """The antialiased field phi, on the box at lo of a grid with affine, as an
+    uncompressed float32 NIfTI (affine moved to the box) and its white-antialias/1
+    sidecar (keys: the sources, provenance, hemisphere, labels and solve)."""
+    o = np.asarray(lo, np.int64)
+    box_aff = affine.copy()
+    box_aff[:3, 3] = affine[:3, :3] @ o + affine[:3, 3]
+    img = nib.nifti1.Nifti1Image(np.asarray(phi, np.float32), box_aff)
+    img.header.set_data_dtype(np.float32)
+    img.header.set_slope_inter(1.0, 0.0)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nib.save(img, path)
+    write_sidecar(
+        sidecar_path(path),
+        FIELD_SPEC,
+        dict(
+            SpecVersion=FIELD_SPEC.version,
+            Description="The antialiased field of the WM mask (FilledLabels) that "
+            "the white surface is marched from, on the box BoxOrigin, BoxShape of "
+            "the grid; Fill outside it.",
+            **keys,
+            VoxelToRAS=affine.ravel().tolist(),
+            GridShape=[int(n) for n in grid],
+            BoxOrigin=[int(x) for x in o],
+            BoxShape=[int(n) for n in np.shape(phi)],
+            Fill=FIELD_FILL,
+            SHA256=file_sha256(path),
+        ),
+    )
+
+
+def read_field(
+    path: Path, verify: bool = True
+) -> tuple[EmbeddedSource, dict[str, Any]]:
+    """The antialiased field that write_field wrote, on the whole grid (Fill outside
+    its box; the box read through baillarger.blocks.open_volume, memory-mapped), and
+    its sidecar. Raises ValueError if the file is not on the sidecar's box, or, with
+    verify, not the file the sidecar records (SHA256: one read of the whole file)."""
+    side = read_sidecar(sidecar_path(path), FIELD_SPEC)
+    if verify and file_sha256(path) != side["SHA256"]:
+        raise ValueError(f"{path.name}: the SHA-256 is not the sidecar's")
+    vol = open_volume(path)
+    if tuple(vol.shape) != tuple(side["BoxShape"]) or vol.dtype != np.float32:
+        raise ValueError(f"{path.name}: not a float32 field on the sidecar's box")
+    src = EmbeddedSource(
+        vol, side["BoxOrigin"], tuple(side["GridShape"]), float(side["Fill"])
+    )
+    return src, side
+
+
+def touched_blocks(points: Int, cells: int) -> Int:
+    """(k, 3) the indices of the blocks of cells a side whose grid points
+    (origin to origin + cells, the points that marching reads) include one of the
+    grid points (n, 3), sorted."""
+    p = np.asarray(points, np.int64).reshape(-1, 3)
+    if not len(p):
+        return np.zeros((0, 3), np.int64)
+    b = p // cells
+    edge = p % cells == 0  # also the last point of the block before
+    out = [b]
+    for d in range(1, 8):
+        s = np.array([(d >> 2) & 1, (d >> 1) & 1, d & 1], bool)
+        hit = np.all(edge[:, s], axis=1)
+        out.append(b[hit] - s.astype(np.int64))
+    u: Int = np.unique(np.concatenate(out), axis=0)
+    return u[np.all(u >= 0, axis=1)]
+
+
+@dataclass(frozen=True)
+class Remarch:
+    """The white surface's blocks after a local solve (remarch): blocks (k, 3), the
+    block indices whose field changed; v (float32, voxel coordinates of the grid) and
+    f, the mesh of those blocks, oriented as the surface (normals out of the WM), with
+    its block index (MeshBlocks: per block that has faces now). A block of blocks
+    with no faces in mesh.origin has no surface now."""
+
+    blocks: Int
+    v: F32
+    f: Int
+    mesh: MeshBlocks
+
+
+def remarch(
+    field: Source,
+    local: AA.LocalSolve,
+    cells: int = BLOCK,
+    dev: Device | None = None,
+) -> Remarch:
+    """Re-march the blocks of cells a side (the surface's BlockCells) whose grid
+    points the local solve changed: marching_tetrahedra_blocks of field with local's
+    box written in (PatchedSource), on those blocks only, as write_white_surface
+    marches. field: the field that local started from. No changed value gives no
+    blocks."""
+    box = local.box
+    old = np.asarray(field.read(box), np.float32)
+    diff = np.argwhere(old != local.phi) + np.array([s.start for s in box])
+    blocks = touched_blocks(diff, cells)
+    if not len(blocks):
+        z = np.zeros(0, np.int64)
+        return Remarch(
+            blocks,
+            np.zeros((0, 3), np.float32),
+            np.zeros((0, 3), np.int64),
+            MeshBlocks(cells, np.zeros((0, 3), np.int64), z, z, z, z, z),
+        )
+    src = PatchedSource(field, box, local.phi)
+    v, f, mb = marching_tetrahedra_blocks(src, 0.0, cells, np.float32, dev, blocks)
+    return Remarch(blocks, v.astype(np.float32), f[:, [0, 2, 1]].copy(), mb)
 
 
 @dataclass(frozen=True)

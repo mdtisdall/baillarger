@@ -190,14 +190,28 @@ class NiftiSource:
         return np.asarray(self.img.dataobj[box])
 
 
+def _is_source(a: object) -> bool:
+    """Whether a is a Source (it has shape, dtype and read), not an array."""
+    return not isinstance(a, np.ndarray) and all(
+        hasattr(a, k) for k in ("shape", "dtype", "read")
+    )
+
+
 class EmbeddedSource:
-    """An array placed at lo in a larger grid of shape, fill elsewhere: e.g. a field
-    solved on a crop, read on the whole grid (so blocks and keys follow the grid)."""
+    """An array or a Source placed at lo in a larger grid of shape, fill elsewhere:
+    e.g. a field solved on a crop, read on the whole grid (so blocks and keys follow
+    the grid)."""
 
     def __init__(
-        self, a: npt.ArrayLike, lo: npt.ArrayLike, shape: tuple[int, ...], fill: float
+        self,
+        a: "npt.ArrayLike | Source",
+        lo: npt.ArrayLike,
+        shape: tuple[int, ...],
+        fill: float,
     ) -> None:
-        self.a = np.asarray(a)
+        self.a: npt.NDArray[Any] | Source = (
+            a if _is_source(a) else np.asarray(a)  # type: ignore[assignment]
+        )
         self.lo = np.asarray(lo, np.int64)
         self._shape = tuple(int(n) for n in shape)
         self.fill = fill
@@ -212,7 +226,7 @@ class EmbeddedSource:
 
     def read(self, box: tuple[slice, ...]) -> npt.NDArray[Any]:
         out = np.full(
-            tuple(int(s.stop) - int(s.start) for s in box), self.fill, self.a.dtype
+            tuple(int(s.stop) - int(s.start) for s in box), self.fill, self.dtype
         )
         src, dst = [], []
         for s, lo, n in zip(box, self.lo, self.a.shape, strict=True):
@@ -221,7 +235,49 @@ class EmbeddedSource:
                 return out
             src.append(slice(a - int(lo), b - int(lo)))
             dst.append(slice(a - int(s.start), b - int(s.start)))
-        out[tuple(dst)] = self.a[tuple(src)]
+        arr = self.a
+        out[tuple(dst)] = (
+            arr[tuple(src)] if isinstance(arr, np.ndarray) else arr.read(tuple(src))
+        )
+        return out
+
+
+class PatchedSource:
+    """A Source with the values of patch on box (grid voxels, within the grid): e.g.
+    an earlier field with a local solve written in, read with no copy of the
+    field."""
+
+    def __init__(
+        self, base: Source, box: tuple[slice, ...], patch: npt.ArrayLike
+    ) -> None:
+        self.base = base
+        self.box = tuple(slice(int(s.start), int(s.stop)) for s in box)
+        self.patch = np.asarray(patch, base.dtype)
+        want = tuple(s.stop - s.start for s in self.box)
+        if self.patch.shape != want or not all(
+            0 <= s.start <= s.stop <= n
+            for s, n in zip(self.box, base.shape, strict=True)
+        ):
+            raise ValueError(f"patch {self.patch.shape} does not fit box {self.box}")
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.base.shape
+
+    @property
+    def dtype(self) -> np.dtype[Any]:
+        return self.base.dtype
+
+    def read(self, box: tuple[slice, ...]) -> npt.NDArray[Any]:
+        out = np.array(self.base.read(box))
+        src, dst = [], []
+        for s, p in zip(box, self.box, strict=True):
+            a, b = max(int(s.start), p.start), min(int(s.stop), p.stop)
+            if a >= b:
+                return out
+            src.append(slice(a - p.start, b - p.start))
+            dst.append(slice(a - int(s.start), b - int(s.start)))
+        out[tuple(dst)] = self.patch[tuple(src)]
         return out
 
 

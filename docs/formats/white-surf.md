@@ -24,6 +24,7 @@ and `ses`, hemisphere `<h>` (`R` or `L`):
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-edgekeys_white.dat` | Their data |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-blocks_white.tsv` | The block index |
 | `sub-<sub>_ses-<ses>_hemi-<h>_white.json` | Sidecar, `white-surf/1` |
+| `sub-<sub>_ses-<ses>_hemi-<h>_desc-antialias_white.nii`, `.json` | The antialiased field that the surface is marched from, and its sidecar: see `white-antialias.md` |
 
 The next command, `python -m baillarger.white_overview`, writes the surface's
 overview next to these files (`desc-overview`, `desc-overviewids`,
