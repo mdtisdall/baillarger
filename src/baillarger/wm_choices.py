@@ -383,7 +383,8 @@ def preview(
     halo_mm: float = 1.0,
 ) -> Preview:
     """The answer at the site, then the correction on a box round it, with
-    the answer's voxels verified (as dseg does with the label edits).
+    the answer's voxels as edited voxels, which the correction changes last
+    (as dseg does with the label edits).
 
     `answer` is a key of CHOICES, or a Change (for example a manual paint,
     in the coordinates of the labels). The box is the cube of half-width

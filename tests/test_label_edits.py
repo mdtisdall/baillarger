@@ -128,6 +128,67 @@ def test_a_reader_sees_the_old_or_the_new_diff_not_a_mix(tmp_path: Path) -> None
     assert len(seen) > 1
 
 
+def _painter(path: str, k0: int, n: int) -> None:
+    """Paint n voxels, one by one, each in its own locked update: the voxels
+    with linear index k0, k0 + 2, k0 + 4, ..., label 42 on an input of 0."""
+    a = np.zeros((64, 64, 64), np.int16)
+    for k in range(n):
+        v = np.unravel_index(k0 + 2 * k, a.shape)
+
+        def change(e: LE.Edits) -> tuple[LE.Edits, LE.Edits]:
+            return LE.paint(e, a, [v], [42])  # noqa: B023 (called at once)
+
+        LE.update(
+            Path(path),
+            change,
+            hemisphere="R",
+            shape=a.shape,
+            affine=AFFINE,
+        )
+
+
+def test_two_painters_at_the_same_time_lose_no_voxel(tmp_path: Path) -> None:
+    p = tmp_path / "e_edits.npy"
+    n = 150
+    ctx = mp.get_context("spawn")
+    procs = [ctx.Process(target=_painter, args=(str(p), k0, n)) for k0 in (0, 1)]
+    for q in procs:
+        q.start()
+    for q in procs:
+        q.join()
+    assert all(q.exitcode == 0 for q in procs)
+    e = LE.read(p)
+    assert e.index.tolist() == list(range(2 * n))
+    assert set(e.label.tolist()) == {42}
+
+
+def test_update_returns_the_result_and_checks_the_grid(tmp_path: Path) -> None:
+    p = tmp_path / "e_edits.npy"
+    a = labels()
+    undo = LE.update(
+        p,
+        lambda e: LE.paint(e, a, [(0, 0, 0)], [41]),
+        hemisphere="R",
+        shape=SHAPE,
+        affine=AFFINE,
+    )
+    assert same(LE.read(p), edits({(0, 0, 0): 41}))
+    assert same(undo, edits({(0, 0, 0): -1}))
+    before = p.read_bytes()
+    for kw in (
+        dict(hemisphere="R", shape=(12, 10, 9), affine=AFFINE),
+        dict(hemisphere="L", shape=SHAPE, affine=AFFINE),
+        dict(hemisphere="R", shape=SHAPE, affine=2 * AFFINE),
+    ):
+        with pytest.raises(ValueError, match="grid or hemisphere"):
+            LE.update(p, lambda e: (e, None), **kw)  # type: ignore[arg-type]
+    # a change that gives a bad diff writes nothing
+    bad = LE.Edits(np.array([0], np.int64), np.array([7], np.int32))
+    with pytest.raises(ValueError, match="label-set"):
+        LE.update(p, lambda e: (bad, None), hemisphere="R", shape=SHAPE, affine=AFFINE)
+    assert p.read_bytes() == before
+
+
 # ------------------------------------------------------------------ the changes
 
 

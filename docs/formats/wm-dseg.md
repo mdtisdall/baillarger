@@ -181,11 +181,11 @@ The diff must be on the input's grid (`Shape` and `Affine`) and of its
 hemisphere. Edits made against another input on the same grid apply
 unchanged. The answer log of the review queue (`wm-edits/1`) is not read.
 
-The edited voxels (every voxel of the diff, also a voxel whose edit is its
-input label) are verified. Handle removal changes them last
-(`remove_handles(obj, verified)`): a verified voxel joins its own front
-before the other voxels, and a wall with fewer verified voxels is claimed
-first. Where a fix still changes edited voxels, its row in the fix table
+Handle removal changes the edited voxels last. The edited voxels are every
+voxel of the diff, also a voxel whose edit is its input label. They go to
+`remove_handles(obj, verified)` as its `verified` mask: an edited voxel
+joins its own front before the other voxels, and a wall with fewer edited
+voxels is claimed first. Where a fix still changes edited voxels, its row in the fix table
 gives their number in `overrides`. To accept such a fix, the user writes the
 fix's labels into the label edits; the next run then has no override there.
 Each piece of the edited voxels whose label differs from the input

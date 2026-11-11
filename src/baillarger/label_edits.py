@@ -9,6 +9,8 @@ Two files: the records (.npy, EDITS_DTYPE, sorted by index, each index once)
 and the sidecar (.json). write replaces both files under an exclusive lock
 (fcntl.flock on their directory); read holds a shared lock and checks the
 sidecar's SHA256. So a reader sees the old diff or the new diff, never a mix.
+update reads, changes and writes the diff under one exclusive lock, so that
+two writers at the same time do not lose an edit.
 
 paint and restore change a diff in memory; differ compares two diffs;
 changed gives the voxels where two label arrays differ.
@@ -20,7 +22,7 @@ import io
 import json
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -164,22 +166,14 @@ def _write_atomic(path: Path, data: bytes) -> None:
         raise
 
 
-def write(
-    path: Path,
+def _prepare(
     edits: Edits,
-    *,
     hemisphere: str,
     shape: tuple[int, ...],
     affine: npt.ArrayLike,
-    description: str = "The label edits of a hemisphere: each edited voxel and "
-    "its label.",
-) -> None:
-    """Write the diff at path (a .npy) and its sidecar (label-edits/1). Each
-    file is written as a new file in the same directory, then renamed over the
-    old one (the records first, then the sidecar), under an exclusive lock.
-    Raises ValueError for a diff that is not valid on the grid (Edits.check)
-    or a hemisphere that is not R or L."""
-    p = edits_paths(path)
+    description: str,
+) -> tuple[bytes, bytes]:
+    """The bytes of the .npy file and of the sidecar of a diff, checked."""
     edits.check(tuple(shape))
     if hemisphere not in ("R", "L"):
         raise ValueError(f"hemisphere {hemisphere!r} is not R or L")
@@ -198,21 +192,45 @@ def write(
         Provenance=provenance("baillarger.label_edits.write"),
     )
     EDITS_SPEC.check(side)
+    return data, (json.dumps(side, indent=1) + "\n").encode()
+
+
+def _replace(path: Path, data: bytes, side: bytes) -> None:
+    """Rename new files over the diff's files (the caller holds LOCK_EX)."""
+    p = edits_paths(path)
+    _write_atomic(p["records"], data)
+    _write_atomic(p["sidecar"], side)
+
+
+DESCRIPTION = "The label edits of a hemisphere: each edited voxel and its label."
+
+
+def write(
+    path: Path,
+    edits: Edits,
+    *,
+    hemisphere: str,
+    shape: tuple[int, ...],
+    affine: npt.ArrayLike,
+    description: str = DESCRIPTION,
+) -> None:
+    """Write the diff at path (a .npy) and its sidecar (label-edits/1). Each
+    file is written as a new file in the same directory, then renamed over the
+    old one (the records first, then the sidecar), under an exclusive lock.
+    Raises ValueError for a diff that is not valid on the grid (Edits.check)
+    or a hemisphere that is not R or L."""
+    edits_paths(path)
+    data, side = _prepare(edits, hemisphere, tuple(shape), affine, description)
     path.parent.mkdir(parents=True, exist_ok=True)
     with _locked(path.parent, fcntl.LOCK_EX):
-        _write_atomic(p["records"], data)
-        _write_atomic(p["sidecar"], (json.dumps(side, indent=1) + "\n").encode())
+        _replace(path, data, side)
 
 
-def read_with_sidecar(path: Path) -> tuple[Edits, dict[str, Any], str]:
-    """The diff at path, its sidecar and the SHA-256 of its .npy file, read
-    under a shared lock. Raises ValueError if the .npy file does not have the
-    sidecar's SHA256 or Count, or is not a valid diff on the sidecar's grid
-    (Edits.check)."""
+def _read_unlocked(path: Path) -> tuple[Edits, dict[str, Any], str]:
+    """read_with_sidecar, with no lock (the caller holds one)."""
     p = edits_paths(path)
-    with _locked(path.parent, fcntl.LOCK_SH):
-        side = read_sidecar(p["sidecar"], EDITS_SPEC)
-        data = p["records"].read_bytes()
+    side = read_sidecar(p["sidecar"], EDITS_SPEC)
+    data = p["records"].read_bytes()
     sha = hashlib.sha256(data).hexdigest()
     if sha != side["SHA256"]:
         raise ValueError(f"{path.name}: the SHA-256 does not agree with the sidecar")
@@ -229,6 +247,54 @@ def read_with_sidecar(path: Path) -> tuple[Edits, dict[str, Any], str]:
     except ValueError as err:
         raise ValueError(f"{path.name}: {err}") from err
     return e, side, sha
+
+
+def read_with_sidecar(path: Path) -> tuple[Edits, dict[str, Any], str]:
+    """The diff at path, its sidecar and the SHA-256 of its .npy file, read
+    under a shared lock. Raises ValueError if the .npy file does not have the
+    sidecar's SHA256 or Count, or is not a valid diff on the sidecar's grid
+    (Edits.check)."""
+    edits_paths(path)
+    with _locked(path.parent, fcntl.LOCK_SH):
+        return _read_unlocked(path)
+
+
+def update[R](
+    path: Path,
+    change: Callable[[Edits], tuple[Edits, R]],
+    *,
+    hemisphere: str,
+    shape: tuple[int, ...],
+    affine: npt.ArrayLike,
+    description: str = DESCRIPTION,
+) -> R:
+    """Read the diff at path (the empty diff if it is not there), give it to
+    change, which returns the new diff and a result R, and write the new diff:
+    all under one exclusive lock, so that no other write comes between the
+    read and the write. Returns R. Raises ValueError if the diff on the disk
+    is not on this grid (Shape, Affine) or of this hemisphere, or if the new
+    diff is not valid (write); then nothing is written."""
+    edits_paths(path)
+    A = np.asarray(affine, np.float64)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _locked(path.parent, fcntl.LOCK_EX):
+        if path.exists():
+            old, side, _ = _read_unlocked(path)
+            if (
+                tuple(side["Shape"]) != tuple(shape)
+                or side["Hemisphere"] != hemisphere
+                or not np.allclose(np.reshape(side["Affine"], (4, 4)), A)
+            ):
+                raise ValueError(
+                    f"{path.name}: the diff's grid or hemisphere is not "
+                    f"{tuple(shape)}, {hemisphere}"
+                )
+        else:
+            old = empty()
+        new, result = change(old)
+        data, sd = _prepare(new, hemisphere, tuple(shape), A, description)
+        _replace(path, data, sd)
+    return result
 
 
 def read(path: Path) -> Edits:

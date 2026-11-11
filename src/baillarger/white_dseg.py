@@ -349,9 +349,9 @@ def wm_topo(
     segmentation's voxels with a filled label are exactly the corrected
     mask. Raises RuntimeError if that mask
     still has a handle or a cavity (b1 or b2 not 0), which a fill of one
-    piece of the mask touching another can make. The edited voxels (each
-    voxel of the diff) are verified: handle removal changes them last
-    (remove_handles, verified), and a fix that changes some records how many
+    piece of the mask touching another can make. Handle removal changes
+    the edited voxels (each voxel of the diff) last (they are the verified
+    mask of remove_handles), and a fix that changes some records how many
     (Fix.overrides). Each 26-connected piece of the edited voxels whose label
     differs from the input is a fix of the kind manual_edit."""
     lap = Laps()

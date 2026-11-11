@@ -150,6 +150,6 @@ blade to four (radius 1) and to six (radius 2); `leave` returns no voxels;
 each choice on a box of `support` gives the same voxels as on the whole
 phantom; the input does not change; the preview of `fill-gap` that closes a ring
 shows a correction outside the answer and no override; the preview of a
-manual paint that verifies a whole ring with its rod (an answer that leaves
+manual paint that holds a whole ring with its rod (an answer that leaves
 a handle) shows the override, a cut of one rod voxel; a box that cuts the
 ring gives `cut_by_box` and no correction.
