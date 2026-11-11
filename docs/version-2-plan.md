@@ -707,7 +707,8 @@ A complete ray from every white-surface vertex, from inside the WM under it to w
 1. **Roots.** One root per `white-surf/1` vertex, keyed by edge key.
 2. **Rays of bounded extent, with no field.** Each root's ray runs up to 2 mm inward (into the WM under it) and up to 8 mm outward, as far as the caller asks, along the smoothed surface normal, with each column's cross-sectional area A(s) and volume V(s) measured on the rays. None reads the image.
 3. **Record what each ray crosses.** The label intervals along it. Nothing is cut and nothing stops a ray: the cut is read from the profile in stream 3.
-4. **The ray sampler.** Stream 2's output is a spec'd sampler (§1): stream 3 and the viewer call it for a superblock and its halo. Nothing per column is stored.
+4. **The ray sampler.** The straight rays are a spec'd sampler (§1): stream 3 and the viewer call it for a superblock and its halo. Nothing per ray is stored.
+5. **The refined columns are stored.** No simple ray-casting rule gives usable columns: the straight rays are probes that collect evidence (the profile, the label intervals, the top and the bottom), and the columns are refined from them before anything downstream can use them. The refinement couples columns over the surface, so it is not local, and it is costly; the person's review of columns comes after it. So the refined columns are a stored output with a spec (§8), not a sampler. Their form is open (4c, Open).
 
 Rays that follow a field fitted to the image (T), and fronts grown from the surface, are not part of the design. On every measure that matters downstream they did no better than straight rays and often worse (4c, *Later-phase methods*). Revisiting them is later-phase work, only if something obvious was missed.
 
@@ -825,10 +826,10 @@ Measured at the marked points (CP; #47, #52, #58):
 
 *Design and lessons*
 
-- **Nothing per column is stored.** Every method in the design is per column and local: a straight ray, a 1-ring for the equivolume cross-section, labels within 8 mm. So the sampler recomputes columns for a superblock and its halo (§2) on each call, deterministically, and the same column gives the same result whichever superblock asks.
+- **Nothing per ray is stored.** Every ray method in the design is per column and local: a straight ray, a 1-ring for the equivolume cross-section, labels within 8 mm. So the sampler recomputes columns for a superblock and its halo (§2) on each call, deterministically, and the same column gives the same result whichever superblock asks.
 - At 50 µm a whole brain has about 3.5·10⁸ columns per method; stored with per-sample positions they would take hundreds of GB per method. Computing them reads only the labels along each ray, which stream 3 reads anyway to sample the echoes.
 - `ray-sampler/1` (`docs/formats/ray-sampler.md`, #100) replaces the prototype traces (a `.npz` with no spec, on a box white mesh with no edge keys). TCK stays only as the viewer's export.
-- If a later method bends rays in a way that is not local (a grown front, a fitted field), it is stored or proven local before it joins the sampler.
+- A method that bends columns in a way that is not local (a grown front, a fitted field, a refinement coupled over the surface) does not join the sampler: its columns are stored (4b, item 5). The refined columns are such a method.
 
 #### Later-phase methods: fields and fronts (not in the design)
 
@@ -880,6 +881,12 @@ Every method below followed the image through a field or grew a front from the s
 - **The scale of the equivolume cross-section.** The 1-ring is dominated by voxel-scale curvature (step 2). Which larger scale (a k-ring, or a stated mm scale) to test.
 - **The per-sample equivolume arrays** (`area`, `volume`, `past_focus`) add 56 % to the samples (§2). Whether they become optional, with readers computing A and V in closed form from `area_coef` and `focus`.
 - **Near-umbilic focal points.** A real focal point whose normals err above the float32 level is not cut, so V rises again past it: 1.8 % of the hemisphere's columns (#125). Whether a later phase needs more than the rounding bound.
+- **The form of the stored refined columns** (4b, item 5). Chosen with the refinement method. The candidates, at about 3.5·10⁸ columns for a 50 µm whole brain, with a column about 4 mm long in float32:
+  - the shear of each column off its straight ray, as a spline in s (two components per knot, knots 0.5 mm apart as in the bent-columns trial), plus its length; the root and normal come from `white-surf/1` by edge key. About 80–100 B per column, about 30 GB. The path is exact by evaluating the spline, and the knot spacing becomes part of the spec;
+  - a polyline per column at a fixed step: about 1.2 kB per column at 0.04 mm (about 400 GB), about 300 B at 0.16 mm (about 100 GB). It does not depend on the model that made it;
+  - the map itself (a diffeomorphism of the ribbon) on a grid at the scale the data support (0.3–0.6 mm), from which columns are traced. It covers the whole ribbon, but a column is then traced, not stored, and the trace must be deterministic.
+
+  Whatever the form, the spec names: the edge key of each column; the versions of the inputs it was refined from (`white-surf/1`, the labels, the echoes, the review answers); each column's provenance (refined from data, or rule-only); and the review state. Readers change with it: the column volume samples along the stored columns as well as along the rays, and z(τ) (§5c, step 3) names the columns its arc length s is measured on.
 
 ### 4d. Implementation plan
 
@@ -1360,6 +1367,7 @@ The specs in `docs/formats/` stay at version 1 until a release, edited in place.
 | Our `_dseg`, P, fold spread | The network's outputs, with the model generation in each sidecar | stream 1, phase 8 |
 | `orient` (sampler) | The structure tensor, the signed data normal and its coherence, for a superblock and its halo (§3c, step 3) | stream 1, phase 2 |
 | The ray sampler | Per column, keyed by edge key and method: samples between the requested extents, up to 2 mm inward and 8 mm outward (positions, arc length, A(s) and V(s)); label intervals over the full caps; normal length (§4c, step 4) | exists (`ray-sampler/1`, #100) |
+| The refined columns | Per column, keyed by edge key: its path in a form still open (§4c, Open), its provenance, the versions of its inputs, and its review state (§4b, item 5) | the stream 2 phase that first publishes refined columns |
 | The column volume (sampler) | Each column's echoes sampled along its ray, with 3D positions (§5c, step 1; `column-volume/1`) | exists (#103) |
 | WM distance through tissue (sampler) | §7 | stream 1, phase 1 |
 | Curvature (sampler) | §7 | with its first reader: stream 3, phase 5 |
@@ -1524,7 +1532,7 @@ A solid arrow means "needs"; a dashed arrow means "gains from", "only if", or fe
 - **Wave 3:** to be written from the wave 2.5 review. Its candidates now: 1.4, 1.7, 2.2, 3.3 and 3.4. 3.3 builds on flattening, so it waits until the columns are good enough and one flattening solve is evaluated (§1, working rules).
 - **Later:** the first generation and what follows it (1.6, 1.8–1.11), 2.3, 3.5–3.7, 4.1, 4.4, 4.5 and the scaling tracks; the outcome measures are settled with 1.9 (§1).
 
-**Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.4, 1.8, each review's answers and each generation in 1.9, and 1.11 when it moves the surface; a new version of a sampler), the stored outputs that read it rerun on it: stream 1's own, and stream 3's z(τ), bands and thickness. Samplers need no rerun: they compute from whatever is published on the next call. Nothing waits for a new version: each phase works on whatever is published.
+**Reruns are not dependencies.** When an upstream stream publishes a new version of an output (stream 1 at 1.4, 1.8, each review's answers and each generation in 1.9, and 1.11 when it moves the surface; a new version of a sampler), the stored outputs that read it rerun on it: stream 1's own, stream 2's refined columns, and stream 3's z(τ), bands and thickness. Samplers need no rerun: they compute from whatever is published on the next call. Nothing waits for a new version: each phase works on whatever is published.
 
 **The first complete pass** through all four streams: 1.0; then 2.0 and 4.0 in parallel; then 3.0, 3.1 and 3.3, with 4.3 alongside, and 3.2 written from the start. It gives a white surface, columns, the viewer, and the first depth maps with a pial edge.
 
