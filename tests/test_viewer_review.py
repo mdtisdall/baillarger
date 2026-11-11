@@ -15,7 +15,7 @@ import nibabel as nib
 import numpy as np
 import pytest
 
-from baillarger import bids, fix_diff
+from baillarger import bids, blocks, fix_diff
 from baillarger import label_edits as LE
 from baillarger import wm_edits as E
 from baillarger import wm_sites as WS
@@ -907,3 +907,80 @@ def test_accept_fix_goes_on_the_undo_stack(server: Any) -> None:
     assert rv.undo and diff(files) == {v: 0 for v in FIX_VOXELS}
     post(base + "/review/undo", {})
     assert diff(files) == {}
+
+
+# ------------------------------------------------- reads of the input labels
+
+
+def test_the_input_labels_are_opened_once_for_a_review(
+    server: Any, monkeypatch: Any
+) -> None:
+    base, rv, files = server
+    opened: list[Path] = []
+    real = blocks.open_volume
+
+    def counting(path: Path, *a: Any, **k: Any) -> Any:
+        opened.append(Path(path))
+        return real(path, *a, **k)
+
+    def no_load(*a: Any, **k: Any) -> Any:
+        raise AssertionError("the input labels are read again with nib.load")
+
+    monkeypatch.setattr(blocks, "open_volume", counting)
+    post(base + "/review/paint", dict(strokes=paint_strokes((0, [(4, 4, 4)]))))
+    # after the first open, nothing loads the input labels with nibabel again
+    monkeypatch.setattr(nib.nifti1, "load", no_load)
+    monkeypatch.setattr(nib, "load", no_load)
+    post(base + "/review/paint", dict(strokes=paint_strokes((42, [(5, 4, 4)]))))
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    get(base + "/review/next")
+    out = post(
+        base + "/review/answer",
+        dict(
+            site="5,5,5",
+            choice=VR.MANUAL,
+            strokes=paint_strokes((42, [(5, 5, 5)]), ("input", [(4, 4, 4)])),
+            reviewer_seconds=1,
+        ),
+    )
+    assert out["edited"] == 2
+    assert opened == [files["input"]]
+    # the eraser's voxel is logged with its input label, read from the same map
+    a = records(files)[-1]
+    v, lab, _ = E.read_log(files["log"]).voxels(a["Id"])
+    got = sorted(zip(map(tuple, v.tolist()), lab.tolist(), strict=True))
+    assert got == [((4, 4, 4), 41), ((5, 5, 5), 42)]
+
+
+def test_far_apart_strokes_read_only_their_voxels(tmp_path: Path) -> None:
+    import tracemalloc
+
+    # a grid whose box of two strokes on its first and last slices is all of it
+    shape = (160, 160, 120)
+    lab = np.zeros(shape, np.int16)
+    lab[20:140, 20:140, 10:110] = 41
+    dseg = tmp_path / "sub-T02_ses-S1_desc-wmtopo_dseg.nii.gz"
+    nib.save(nib.nifti1.Nifti1Image(lab, A), dseg)
+    inp = tmp_path / "sub-T02_ses-S1_desc-input_dseg.nii.gz"
+    nib.save(nib.nifti1.Nifti1Image(lab, A), inp)
+    bids.sidecar_path(dseg).write_text(
+        json.dumps(dict(Hemisphere="R", Sources=[str(inp)]))
+    )
+    edits = LE.bids_path(tmp_path / "deriv", dict(sub="T02", ses="S1"), "R")
+    rv = VR.Review(None, None, edits, dseg, lambda: lab, A, None)
+    rv.paint(paint_strokes((42, [(80, 80, 60)])))  # opens the input labels
+    a = [(i, 0, 0) for i in range(shape[0])]
+    b = [(i, shape[1] - 1, shape[2] - 1) for i in range(shape[0])]
+    box_bytes = lab.nbytes  # the box of the two strokes is the whole grid
+    tracemalloc.start()
+    try:
+        out = rv.paint(paint_strokes((42, a), (42, b)))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert out["voxels"] == 2 * shape[0]
+    # the read is of the order of the 320 voxels, not of their box (6.1 MB)
+    assert peak < box_bytes // 20, (peak, box_bytes)
+    e = LE.read(edits)
+    got = set(map(tuple, np.stack(np.unravel_index(e.index, shape), 1).tolist()))
+    assert got == {(80, 80, 60), *a, *b} and set(e.label.tolist()) == {42}

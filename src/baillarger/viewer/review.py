@@ -115,7 +115,7 @@ from typing import Any, Protocol
 import numpy as np
 import numpy.typing as npt
 
-from baillarger import label_edits
+from baillarger import blocks, label_edits
 from baillarger.bids import file_sha256, sidecar_path
 from baillarger.labels import CORTEX_LABEL, LUT_NAMES, WM_LABEL
 from baillarger.wm_edits import EditLog, read_log
@@ -395,6 +395,11 @@ class Review:
         if self.edits.exists():
             self._read_edits()
         self.inputs = Path(inputs) if inputs is not None else None
+        #: the input labels, opened once (_input_labels): the memory-mapped
+        #: grid, and its source, kept while the review runs (a temporary
+        #: decompressed copy is removed when the source is collected)
+        self._inputs_map: Arr | None = None
+        self._inputs_src: blocks.NiftiSource | None = None
         self._fix_rows: Arr | None = None
         voxel_mm = np.linalg.norm(self.affine[:3, :3], axis=0)
         self.choices: Choices = choices or WmChoices(self.hemi, voxel_mm)
@@ -600,47 +605,60 @@ class Review:
             )
         return e
 
-    def _input_box(self, voxels: Arr) -> tuple[Arr, Site]:
-        """The input labels in the box of the voxels (N >= 1, 3), and the
-        box's first voxel."""
-        import nibabel as nib
+    def _input_labels(self) -> Arr:
+        """The input labels of the whole grid, memory-mapped: opened once for
+        the review (blocks.open_volume decompresses a .nii.gz once), so that a
+        read of voxels by index reads only those voxels. Raises ValueError if
+        they are not on the review's grid or have a scaling."""
+        if self._inputs_map is None:
+            if self.inputs is None:
+                self.inputs = input_labels(self.dseg)
+            src = blocks.open_volume(self.inputs)
+            if tuple(src.shape[:3]) != self.shape:
+                raise ValueError(
+                    f"{self.inputs.name}: the input labels are not on the grid "
+                    f"{self.shape}"
+                )
+            from nibabel.arrayproxy import ArrayProxy
 
-        if self.inputs is None:
-            self.inputs = input_labels(self.dseg)
-        img = nib.nifti1.load(self.inputs)
-        if tuple(img.shape[:3]) != self.shape:
-            raise ValueError(
-                f"{self.inputs.name}: the input labels are not on the grid {self.shape}"
-            )
-        lo, hi = voxels.min(0), voxels.max(0) + 1
-        box = np.asarray(img.dataobj[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]])
-        return box, (int(lo[0]), int(lo[1]), int(lo[2]))
+            proxy = src.img.dataobj
+            if not isinstance(proxy, ArrayProxy) or (proxy.slope, proxy.inter) != (
+                1.0,
+                0.0,
+            ):
+                raise ValueError(f"{self.inputs.name}: the input labels are scaled")
+            m = np.asarray(proxy.get_unscaled())
+            self._inputs_map = m.reshape(m.shape[:3])
+            self._inputs_src = src
+        return self._inputs_map
 
     def _painted(
         self, voxels: Arr, labels: Arr
-    ) -> tuple[label_edits.Edits, label_edits.Edits]:
+    ) -> tuple[label_edits.Edits, label_edits.Edits, Arr]:
         """The edits with the voxels painted with the labels (label_edits.paint,
         against the dseg's labels from labels(); label_edits.INPUT for the
-        eraser), and the undo: the earlier entries
-        of the voxels whose label changes. Raises ValueError for a voxel off
-        the grid or a label not in label-set/1."""
+        eraser), the undo: the earlier entries of the voxels whose label
+        changes, and the input labels of the voxels (int64). Only the voxels
+        are read, not their box. Raises ValueError for a voxel off the grid
+        or a label not in label-set/1."""
         e = self._read_edits()
         v = np.asarray(voxels, np.int64).reshape(-1, 3)
         if not len(v):
-            return e, label_edits.empty()
+            return e, label_edits.empty(), np.zeros(0, np.int64)
         self._on_grid(v)
-        box, lo = self._input_box(v)
-        hi = np.asarray(lo) + box.shape
-        shown = self.labels()[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]]
-        return label_edits.paint(
+        grid = self._input_labels()
+        inp = grid[tuple(v.T)].astype(np.int64)
+        # the whole grids, unread: paint indexes only the voxels (the input
+        # labels are a memory map, the dseg's labels are in memory)
+        new, undo = label_edits.paint(
             e,
-            box,
+            grid,
             v,
             np.asarray(labels, np.int64),
-            dseg=shown,
-            offset=lo,
+            dseg=self.labels(),
             shape=self.shape,
         )
+        return new, undo, inp
 
     def _on_grid(self, v: Arr) -> None:
         if len(v) and not np.all((v >= 0) & (v < self.shape)):
@@ -686,7 +704,7 @@ class Review:
         """Under the lock: the voxels written into the edits, their earlier
         entries pushed on the undo stack. Returns the number of voxels whose
         label changed (none: nothing is written or pushed)."""
-        new, undo = self._painted(voxels, labels)
+        new, undo, _ = self._painted(voxels, labels)
         if len(undo):
             self._write(new)
             self.undo.append(undo)
@@ -835,13 +853,9 @@ class Review:
             box, lo = self.window(c, params)
             a = self.choices.answer(box, lo, c, choice, params)
         with self.lock:
-            new, undo = self._painted(a.voxels, a.labels)
-            logged = a.labels
-            if choice == MANUAL and np.any(a.labels == label_edits.INPUT):
-                # the eraser's voxels: the log records the label they take
-                box, lo = self._input_box(a.voxels)
-                inp = box[tuple((a.voxels - np.asarray(lo)).T)].astype(np.int64)
-                logged = np.where(a.labels == label_edits.INPUT, inp, a.labels)
+            new, undo, inp = self._painted(a.voxels, a.labels)
+            # the eraser's voxels: the log records the label they take
+            logged = np.where(a.labels == label_edits.INPUT, inp, a.labels)
             aid = self.log.answer(
                 s,
                 c,
