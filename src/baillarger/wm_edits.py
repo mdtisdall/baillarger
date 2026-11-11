@@ -5,17 +5,15 @@ made, and the records of each review session: when it started, its random
 share and seed, and every site shown or skipped. It holds raw facts only, and
 no measure.
 
-An answer stands on its own: it is the verified label of each voxel that it
-covers, valid for any input labels on the same grid. There are two kinds:
+The log is the review queue's own record. The dseg command does not read it:
+the labels change by a write into the label edits (baillarger.label_edits,
+one diff), and the log records the answer. There are two kinds of answer:
 
-- a site answer (a choice at a site of the queue): dseg replays its voxels
-  over the input labels, in log order, before the correction (replay);
-- a scribble (strokes, each with one class): a training label only. dseg does
-  not apply it.
+- a site answer (a choice at a site of the queue): its voxels and labels;
+- a scribble (strokes, each with one class).
 
-A correction is a new answer. Where two answers cover the same voxel, the
-later one wins. Nothing in the log is changed or removed. Log.without gives a
-log without one answer, in memory only, for inspection.
+A correction is a new answer. Nothing in the log is changed or removed.
+Log.without gives a log without one answer, in memory only, for inspection.
 
 Three files: the log (.jsonl, one JSON object per line), the voxels (.bin,
 VOXEL_DTYPE records) and the sidecar (.json, written one time). EditLog
@@ -237,8 +235,6 @@ def _check_record(r: dict[str, Any], seen: dict[str, Any]) -> None:
             raise ValueError(f"answer {r['Id']}: a site answer has a site")
         if r["Choice"] == "leave" and r["Voxels"]["Count"]:
             raise ValueError(f"answer {r['Id']}: leave has no voxels")
-        if r["Accepts"] is not None and r["Choice"] != "leave":
-            raise ValueError(f"answer {r['Id']}: only leave accepts a fix")
     elif r["Kind"] == "scribble":
         if r["Choice"] != "scribble":
             raise ValueError(f"answer {r['Id']}: a scribble has choice scribble")
@@ -522,17 +518,15 @@ class EditLog:
         reviewer_seconds: float,
         params: dict[str, Any] | None = None,
         supersedes: Sequence[int] = (),
-        accepts: dict[str, Any] | None = None,
         time: str | None = None,
     ) -> int:
         """Append a site answer: at a site shown in the session (ValueError
         if it was not), the choice (SITE_CHOICES), its voxels (N, 3) on the
         grid and their new labels, the SHA-256 of the dseg looked at, the
         reviewer time (seconds, from opening the site to submitting the
-        answer), the choice's parameters, the Ids of the answers it supersedes
-        and, for leave at an override site, the fix it accepts ({"FixId",
-        "FixDiffSHA256"}). How the site was chosen comes from its shown
-        record. Returns the answer's Id."""
+        answer), the choice's parameters and the Ids of the answers it
+        supersedes. How the site was chosen comes from its shown record.
+        Returns the answer's Id."""
         rows = self._rows(voxels, labels, np.full(len(np.asarray(labels).ravel()), -1))
         r = self._append(
             dict(
@@ -544,7 +538,6 @@ class EditLog:
                 Choice=choice,
                 Params=dict(params or {}),
                 Supersedes=[int(s) for s in supersedes],
-                Accepts=accepts,
                 DecidedAgainst=decided_against,
                 Time=time or now(),
                 ReviewerSeconds=float(reviewer_seconds),
@@ -588,7 +581,6 @@ class EditLog:
                 Choice="scribble",
                 Params={},
                 Supersedes=[int(s) for s in supersedes],
-                Accepts=None,
                 DecidedAgainst=decided_against,
                 Time=time or now(),
                 ReviewerSeconds=float(reviewer_seconds),
@@ -597,54 +589,3 @@ class EditLog:
             rows,
         )
         return int(r["Id"])
-
-
-# ---------------------------------------------------------------- the replay
-
-
-@dataclass(frozen=True)
-class Replay:
-    """The input labels with the site answers replayed, and the verified
-    voxels: their linear indices (sorted), the Id of the answer that set each
-    (the last one), and its label."""
-
-    labels: npt.NDArray[Any]
-    index: Int
-    answer: Int
-    label: Int
-
-
-def replay(labels: npt.ArrayLike, log: Log) -> Replay:
-    """A copy of the labels with the site answers of the log written over
-    them, in log order: where answers overlap, the later one wins. Scribbles
-    are not applied. Raises ValueError if the labels' shape is not the log's
-    grid, or a label does not fit the labels' type."""
-    a = np.asarray(labels)
-    if a.shape != log.shape:
-        raise ValueError(f"the labels have shape {a.shape}, the log's grid {log.shape}")
-    out = a.copy()
-    flat = out.reshape(-1)
-    idx_parts, id_parts, lab_parts = [], [], []
-    for r in log.answers():
-        if r["Kind"] != "site" or not r["Voxels"]["Count"]:
-            continue
-        rows = log.rows(r["Id"])
-        lab = rows["label"].astype(np.int64)
-        if np.any(lab != lab.astype(a.dtype)):
-            raise ValueError(f"answer {r['Id']}: a label does not fit {a.dtype}")
-        flat[rows["index"]] = lab
-        idx_parts.append(rows["index"].astype(np.int64))
-        id_parts.append(np.full(len(rows), r["Id"], np.int64))
-        lab_parts.append(lab)
-    if idx_parts:
-        idx = np.concatenate(idx_parts)
-        ids = np.concatenate(id_parts)
-        lab = np.concatenate(lab_parts)
-        # the last answer of each voxel: a stable sort keeps log order
-        order = np.argsort(idx, kind="stable")
-        idx, ids, lab = idx[order], ids[order], lab[order]
-        last = np.r_[idx[1:] != idx[:-1], True]
-        idx, ids, lab = idx[last], ids[last], lab[last]
-    else:
-        idx = ids = lab = np.zeros(0, np.int64)
-    return Replay(out, idx, ids, lab)

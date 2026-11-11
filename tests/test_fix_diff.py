@@ -60,17 +60,14 @@ def test_apply_reproduces_and_revert_changes_one_fix_only() -> None:
         D.apply_diff(new, rows)
 
 
-def test_same_fix_and_overlap() -> None:
+def test_fix_voxels() -> None:
     old = np.zeros((4, 4, 4), np.int16)
     new = old.copy()
     new.reshape(-1)[[1, 2, 3]] = 41
     rows = D.make_diff(old, new, [1, 2, 3], [1, 1, 2])
     f1, f2 = D.fix_voxels(rows, 1), D.fix_voxels(rows, 2)
     assert f1[0].tolist() == [1, 2] and f1[1].tolist() == [41, 41]
-    assert D.same_fix(f1, D.fix_voxels(rows, 1)) and not D.same_fix(f1, f2)
-    assert not D.overlap(f1, f2)
-    moved = (np.array([2, 5]), np.array([41, 41]))
-    assert D.overlap(f1, moved) and not D.same_fix(f1, moved)
+    assert f2[0].tolist() == [3] and f2[1].tolist() == [41]
 
 
 def test_the_table_round_trip(tmp_path: Path) -> None:

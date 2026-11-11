@@ -153,7 +153,10 @@ def test_the_dseg_command_writes_the_bids_files(tmp_path: Path) -> None:
     assert side["BettiBefore"] == [2, 2, 1] and side["BettiAfter"] == [2, 0, 0]
     assert side["CavityVoxels"] == 8 and side["HandleFillVoxels"] == 4
     assert side["HandleCutVoxels"] == 1 and side["CutLabels"] == {"0": 1}
-    assert side["Sources"] == [str(src.resolve())]
+    copy = anat / "sub-T01_ses-S1_desc-wmtopo_edits.npy"
+    assert side["Sources"] == [
+        str(p.resolve()) for p in (src, copy, bids.sidecar_path(copy))
+    ]
     assert side["SourcesSHA256"][str(src.resolve())] == bids.file_sha256(src)
     tsv = (anat / f"{stem}.tsv").read_text().splitlines()
     assert tsv[0] == "index\tname" and "41\tRight-Cerebral-White-Matter" in tsv

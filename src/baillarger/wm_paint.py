@@ -4,9 +4,12 @@ export cuts a cube of the segmentation round a review site. It writes the
 crop of the labels, an unchanged copy of it, and the crop of each echo.
 The reviewer paints the labels in ITK-SNAP and saves them in place.
 
-import compares the painted labels with the unchanged copy. It appends one
-answer, of the choice manual-paint, to the answer log (wm_edits). The answer
-has the voxels that changed and their new labels.
+import compares the painted labels with the unchanged copy
+(baillarger.label_edits.changed). It appends one answer, of the choice
+manual-paint, to the answer log (wm_edits): the voxels that changed and
+their new labels. Then it writes the voxels whose label changes into the
+label edits (baillarger.label_edits.paint, with the input labels of the
+dseg: the first of its sidecar's Sources).
 """
 
 import argparse
@@ -17,6 +20,7 @@ import nibabel as nib
 import numpy as np
 import numpy.typing as npt
 
+from baillarger import label_edits
 from baillarger.bids import (
     COMMON_KEYS,
     Key,
@@ -24,11 +28,12 @@ from baillarger.bids import (
     file_sha256,
     provenance,
     read_sidecar,
+    sidecar_path,
     sources,
     write_sidecar,
 )
 from baillarger.wm_choices import box_round
-from baillarger.wm_edits import EditLog
+from baillarger.wm_edits import EDITS_SPEC, EditLog
 
 type Int = npt.NDArray[np.int64]
 
@@ -131,25 +136,53 @@ def changes(crop: Path) -> tuple[Int, Int]:
         raise ValueError(f"{LABELS} and {EXPORTED} differ in shape or affine")
     painted = np.asanyarray(painted_img.dataobj)
     exported = np.asanyarray(exported_img.dataobj)
-    mask = painted != exported
-    pts = np.argwhere(mask).astype(np.int64).reshape(-1, 3)
-    labels = painted[mask].astype(np.int64).reshape(-1)
-    offset = np.asarray(side["Offset"], np.int64)
-    return (pts + offset).astype(np.int64), labels
+    return label_edits.changed(exported, painted, side["Offset"])
 
 
 def import_paint(
-    crop: Path, log_path: Path, session: int, reviewer_seconds: float
+    crop: Path,
+    log_path: Path,
+    edits_path: Path,
+    session: int,
+    reviewer_seconds: float,
 ) -> int:
     """Append the changes of the crop as one manual-paint answer to the log at
-    log_path, made in `session` at the crop's site. Raises ValueError if the
-    log's grid is not the crop's grid. Returns the answer's Id."""
+    log_path, made in `session` at the crop's site, then write them into the
+    label edits at edits_path (a .npy diff, made empty if it is not there):
+    only the voxels whose label changes from the input labels with the diff
+    applied. The input labels are the first of the cropped dseg's Sources.
+    Raises ValueError if the log's or the diff's grid is not the crop's grid.
+    Returns the answer's Id."""
     side = read_sidecar(crop / SIDECAR, PAINT_SPEC)
+    grid = tuple(int(n) for n in side["Shape"])
     log = EditLog(log_path)
-    if log.read().shape != tuple(side["Shape"]):
+    if log.read().shape != grid:
         raise ValueError(f"the log's grid is not the crop's grid {side['Shape']}")
+    dseg = Path(side["Sources"][0])
+    dimg = _nifti(dseg)
+    hemi = str(read_sidecar(log.paths["sidecar"], EDITS_SPEC)["Hemisphere"])
+    if edits_path.exists():
+        edits, eside, _ = label_edits.read_with_sidecar(edits_path)
+        if tuple(eside["Shape"]) != grid:
+            raise ValueError(f"the diff's grid is not the crop's grid {grid}")
+    else:
+        edits = label_edits.empty()
+    inp = _nifti(Path(_dseg_sources(dseg)[0]))
+    if tuple(inp.shape[:3]) != grid:
+        raise ValueError(f"the input labels are not on the crop's grid {grid}")
     voxels, labels = changes(crop)
-    return log.answer(
+    off = np.asarray(side["Offset"], np.int64)
+    size = np.asarray(_nifti(crop / LABELS).shape[:3], np.int64)
+    box = tuple(slice(int(o), int(o + n)) for o, n in zip(off, size, strict=True))
+    new, _ = label_edits.paint(
+        edits,
+        np.asanyarray(inp.dataobj[box]),
+        voxels,
+        labels,
+        offset=off,
+        shape=grid,
+    )
+    aid = log.answer(
         session,
         [int(c) for c in side["Site"]],
         "manual-paint",
@@ -159,6 +192,16 @@ def import_paint(
         reviewer_seconds=reviewer_seconds,
         params={"Crop": str(crop.resolve())},
     )
+    label_edits.write(edits_path, new, hemisphere=hemi, shape=grid, affine=dimg.affine)
+    return aid
+
+
+def _dseg_sources(dseg: Path) -> list[str]:
+    """The Sources of the dseg's sidecar (wm-dseg/1): the first is the input
+    labels."""
+    from baillarger.white_dseg import DSEG_SPEC
+
+    return list(read_sidecar(sidecar_path(dseg), DSEG_SPEC)["Sources"])
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -173,9 +216,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     ex.add_argument("--out", type=Path, required=True)
     ex.add_argument("--echo", type=Path, action="append", default=[])
     ex.add_argument("--half", type=int, default=32)
-    im = sub.add_parser("import", help="append the painted change to the log")
+    im = sub.add_parser(
+        "import", help="append the painted change to the log and the label edits"
+    )
     im.add_argument("crop", type=Path)
     im.add_argument("--log", type=Path, required=True)
+    im.add_argument("--edits", type=Path, required=True, help="the label edits (.npy)")
     im.add_argument("--session", type=int, required=True)
     im.add_argument("--seconds", type=float, required=True)
     a = ap.parse_args(argv)
@@ -183,7 +229,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         site = (int(a.site[0]), int(a.site[1]), int(a.site[2]))
         export(a.dseg, site, a.out, a.echo, a.half)
     else:
-        print(import_paint(a.crop, a.log, a.session, a.seconds))
+        print(import_paint(a.crop, a.log, a.edits, a.session, a.seconds))
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import pytest
 from baillarger import (
     bids,
     excisions,
+    label_edits,
     white_dseg,
     white_overview,
     white_surf,
@@ -101,6 +102,7 @@ def doc_keys(doc: Path, version: str) -> set[tuple[str, str, bool]]:
 @pytest.mark.parametrize(
     ("doc", "spec"),
     [
+        ("label-edits.md", label_edits.EDITS_SPEC),
         ("wm-dseg.md", white_dseg.DSEG_SPEC),
         ("wm-dseg.md", white_dseg.FIXES_SPEC),
         ("white-surf.md", white_surf.SURF_SPEC),

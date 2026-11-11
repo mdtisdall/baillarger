@@ -2,7 +2,7 @@
 
 SpecVersion `wm-dseg/1` (the corrected segmentation) and `wm-dseg-fixes/1`
 (the changes: an image, a fix table and a fix diff). Written by
-`python -m baillarger.white_dseg ASEG [--edits LOG] --out DERIV`
+`python -m baillarger.white_dseg ASEG [--edits EDITS] --out DERIV`
 (`baillarger.white_dseg.write_wm_topo`); the keys are enforced by
 `baillarger.white_dseg.DSEG_SPEC` and `FIXES_SPEC`, and `tests/test_bids.py` checks
 that the tables below list the same keys, types and requirements.
@@ -24,6 +24,8 @@ In the BIDS derivatives root `DERIV`, for an input with entities `sub` and
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_fixes.json` | Sidecar, `wm-dseg-fixes/1` (the same content) |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_diff.npy` | The fix diff: one record per changed voxel |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_diff.json` | Sidecar, `wm-dseg-fixes/1` (the same content) |
+| `sub-<sub>_ses-<ses>_desc-wmtopo_edits.npy` | The copy of the label edits that the run used (`label-edits/1`; the empty diff without `--edits`) |
+| `sub-<sub>_ses-<ses>_desc-wmtopo_edits.json` | Its sidecar, `label-edits/1` |
 
 In `sub-<sub>/ses-<ses>/wmtopofixes-history/` (next to `anat/`):
 
@@ -91,12 +93,13 @@ writes nothing if b1 or b2 is not 0.
 
 ## The fixes
 
-The change from the labels that `dseg` reads (the input with the site
-answers replayed and the labels of `TO_OUTSIDE` set to 0: the "old" labels) to the labels that it writes (the "new"
-labels) is split into fixes. Each fix has an integer id, from 1, in this
-order:
+The change from the labels that `dseg` reads (the input with the label
+edits applied and the labels of `TO_OUTSIDE` set to 0: the "old" labels) to
+the labels that it writes (the "new" labels) is split into fixes. Each fix
+has an integer id, from 1, in this order:
 
-1. each site answer that changes a voxel, in log order;
+1. each piece of the edited voxels whose label differs from the input
+   (26-adjacency), in the order of `scipy.ndimage.label`;
 2. each handle move, in the order that `remove_handles` makes them (kind
    `handle_cut` for a cut or stranded voxels, `handle_fill` for a fill);
 3. each cavity (a connected piece of the cavity fill, Kuhn adjacency), in
@@ -104,7 +107,7 @@ order:
 4. each small piece, in the order of `scipy.ndimage.label`.
 
 The same input gives the same ids. The steps run in another order: the
-answers, the cavity fill, the handle moves, the small pieces. A voxel
+edits, the cavity fill, the handle moves, the small pieces. A voxel
 belongs to the fix that changed it last in that order. A voxel whose new
 label is its old label is in no fix (for example a cavity voxel that a
 handle cut then gives back its old label).
@@ -118,12 +121,12 @@ fix, in id order. `n/a` marks a value that the fix does not have.
 |---|---|---|
 | `id` | integer | The fix's id |
 | `kind` | string | `manual_edit`, `handle_cut`, `handle_fill`, `cavity_fill` or `small_piece` (the names of the image's values) |
-| `voxels` | integer | The voxels that the fix changed last. For a fix other than `manual_edit`, its rows in the diff. For `manual_edit`, the answer's voxels that no fix then changes |
+| `voxels` | integer | The voxels that the fix changed last. For a fix other than `manual_edit`, its rows in the diff. For `manual_edit`, the piece's voxels that no fix then changes |
 | `i`, `j`, `k` | integer | The voxel of the fix that is nearest its centroid (0-based, on the grid; ties: the lowest linear index); `n/a` with no voxel |
 | `x`, `y`, `z` | number | The centroid of the voxel centres, in mm (the input's affine) |
 | `x_min` ... `z_max` | number | The bounding box of the voxel centres, in mm, per axis of mm |
 | `wall` | integer | For a handle move: the voxels of its wall that the other front claimed (the move's voxels); `n/a` for the other kinds |
-| `overrides` | integer | The `Id` of the answer whose verified voxel the fix changes; `n/a` if none |
+| `overrides` | integer | The number of edited voxels (voxels of the label edits) that the fix changes; `n/a` if none. Always `n/a` for `manual_edit` |
 
 The sum of `voxels` over the fixes of each kind is the count of that kind's
 value in the image.
@@ -137,7 +140,7 @@ one-dimensional structured records, 16 bytes each:
 |---|---|---|
 | `index` | `<i8` | The voxel's linear index on the grid (C order) |
 | `fix` | `<i4` | The id of the fix that changed it last |
-| `old` | `<i2` | Its old label (the input with the answers replayed and `TO_OUTSIDE` set to 0) |
+| `old` | `<i2` | Its old label (the input with the label edits applied and `TO_OUTSIDE` set to 0) |
 | `new` | `<i2` | Its label in `desc-wmtopo` (not `old`) |
 
 The records are in Morton order of the 64³ block grid
@@ -148,9 +151,9 @@ can be memory-mapped, its header holds the record type, and 16 bytes a
 voxel is the plan's limit (12 to 16). A `.tsv.gz` would need parsing and
 could not be read by block.
 
-`baillarger.white_dseg.replay_dseg(aseg, diff, log)` rebuilds
-`desc-wmtopo` exactly from the input, the log and the diff, with no
-correction. It replays the answers, sets the labels of `TO_OUTSIDE` to 0
+`baillarger.white_dseg.replay_dseg(aseg, diff, edits)` rebuilds
+`desc-wmtopo` exactly from the input, the label edits and the fix diff, with
+no correction. It applies the edits, sets the labels of `TO_OUTSIDE` to 0
 (`white_dseg.to_outside`), and then applies the diff. `baillarger.fix_diff.revert_fix(dseg, diff, id)` gives
 `desc-wmtopo` with one fix undone, for inspection: only that fix's voxels
 change, and the result can have a handle or a cavity.
@@ -160,7 +163,7 @@ change, and the result can have a handle or a cavity.
 Each run copies its diff, its table and its sidecar to
 `sub-<sub>/ses-<ses>/wmtopofixes-history/` (`white_dseg.history_dir`), named by the SHA-256 of the diff file.
 `DiffInputs` in the sidecar gives the SHA-256 of the input labels
-(`Labels`), of the log's `.jsonl` (`Edits`, if any) and of P (`Probability`, from
+(`Labels`), of the label edits' `.npy` (`Edits`, if any) and of P (`Probability`, from
 phase 8), and the code (`Code`: the baillarger version and commit). Before
 it writes, `dseg` reads the kept sidecars. If one has the same `DiffInputs`,
 with no uncommitted change in either run (`Provenance` `Dirty` false), and
@@ -169,21 +172,31 @@ correction did not reproduce its diff.
 
 ## Manual edits
 
-With `--edits LOG`, the site answers of the answer log (`wm-edits/1`,
-`docs/formats/wm-edits.md`) are replayed first, in log order, each writing
-its voxels over the labels. Scribbles are not applied. The labels of
-`TO_OUTSIDE` are then set to 0, and the correction above runs on the result: the filled labels, the mask and `BettiBefore` are
-those of the input with the answers replayed. The log must be on the
-input's grid; answers made against another input apply unchanged.
+With `--edits EDITS`, the label edits (`label-edits/1`,
+`docs/formats/label-edits.md`: each edited voxel and its label) are applied
+first: each edited voxel gets its label. The labels of `TO_OUTSIDE` are then
+set to 0, and the correction above runs on the result: the filled labels,
+the mask and `BettiBefore` are those of the input with the edits applied.
+The diff must be on the input's grid (`Shape` and `Affine`) and of its
+hemisphere. Edits made against another input on the same grid apply
+unchanged. The answer log of the review queue (`wm-edits/1`) is not read.
 
-The voxels that the answers set are verified. Handle removal changes them
-last (`remove_handles(obj, verified)`): a verified voxel joins its own front
-before the other voxels, and a wall with fewer verified voxels is claimed
-first. Where a fix still changes a verified voxel, its row in the fix table
-gives the answer in `overrides`. The log's three files are listed in
-`Sources`; each site answer that changes a voxel is a fix of kind
-`manual_edit` and a move of kind `manual`. The input segmentation is never
-changed, and the derivative stays written whole by the command, so an answer
+Handle removal changes the edited voxels last. The edited voxels are every
+voxel of the diff, also a voxel whose edit is its input label. They go to
+`remove_handles(obj, verified)` as its `verified` mask: an edited voxel
+joins its own front before the other voxels, and a wall with fewer edited
+voxels is claimed first. Where a fix still changes edited voxels, its row in the fix table
+gives their number in `overrides`. To accept such a fix, the user writes the
+fix's labels into the label edits; the next run then has no override there.
+Each piece of the edited voxels whose label differs from the input
+(26-adjacency) is a fix of kind `manual_edit` and a move of kind `manual`.
+
+The output keeps a copy of the diff that the run used:
+`_desc-wmtopo_edits.npy` and its sidecar (`label-edits/1`), the empty diff
+without `--edits`. `Sources` lists the copy; `DiffInputs` gives the SHA-256
+of the diff that was read. An older output can be made again from its input
+labels, its copy of the diff and its commit. The input segmentation is never
+changed, and the derivative stays written whole by the command, so an edit
 costs a `dseg` run.
 
 ## Sidecar keys: wm-dseg/1
@@ -192,7 +205,7 @@ costs a `dseg` run.
 |---|---|---|---|
 | `SpecVersion` | string | yes | `wm-dseg/1` |
 | `Description` | string | yes | What the file is |
-| `Sources` | array of strings | yes | The input segmentation, then with `--edits` the log's `.jsonl`, `.bin` and sidecar (absolute paths) |
+| `Sources` | array of strings | yes | The input segmentation, then the copy of the label edits (`_desc-wmtopo_edits.npy`) and its sidecar (absolute paths) |
 | `SourcesSHA256` | object | yes | SHA-256 of each source, by path |
 | `Provenance` | object | yes | `Created` (ISO 8601), `Function`, `Version` (baillarger), `Commit`, `Dirty` |
 | `Hemisphere` | string | yes | `R` or `L` |
@@ -207,8 +220,8 @@ costs a `dseg` run.
 | `CutLabels` | object | yes | New label of the cut voxels (as a string): number of voxels |
 | `SmallPieces` | integer | yes | Pieces removed by step 4 (small pieces) |
 | `SmallPieceVoxels` | integer | yes | Voxels of those pieces: their value is 5 in the fixes image |
-| `ManualVoxels` | integer | yes | Voxels changed by the site answers (0 without `--edits`) |
-| `Moves` | array of objects | yes | Per manual answer with rows, then per handle move, then per small piece: `Kind` (`manual`, `cut`, `fill`, `stranded` or `small_piece`), `Voxels` (count), `Centre` (0-based voxel of the grid), and for `manual` the `Answer` (its `Id`) |
+| `ManualVoxels` | integer | yes | Edited voxels whose label differs from the input (0 without `--edits`) |
+| `Moves` | array of objects | yes | Per `manual_edit` fix, then per handle move, then per small piece: `Kind` (`manual`, `cut`, `fill`, `stranded` or `small_piece`), `Voxels` (count) and `Centre` (0-based voxel of the grid) |
 
 ## Sidecar keys: wm-dseg-fixes/1
 
