@@ -72,6 +72,9 @@ Routes (Review.get, Review.post), JSON:
   to undo.
 - GET /review/pending: the pending edits (Pending, below). {voxels: [[i, j,
   k], ...], labels: [...]}.
+- POST /review/regenerate: start the regenerate command (Regenerate, below).
+  GET /review/regenerate: its state. Both give {status, log, overrides,
+  error, outputs_changed, cap_gb, viewer_gb, command, seconds}.
 
 Outputs replaced. At start, the review records the identity (os.stat:
 device, inode, mtime) of the dseg, the queue, the dseg's fix diff and the
@@ -81,6 +84,45 @@ and /review/pending are refused with an error that says to restart the
 viewer, and nothing is written: the review's labels, its
 queue and the fix ids of its rows are those of the old outputs. The check is
 made under the edits' file lock, before each write into the edits.
+
+Regenerate. POST /review/regenerate starts the command `python -m
+baillarger.regenerate INPUT [--edits EDITS] --root ROOT` (INPUT: the input
+labels; EDITS: the label edits, when there are some; ROOT: the derivatives
+root of the dseg, which must be the dseg that the command writes) as a
+subprocess under scripts/memguard, in a new process group. It does not run
+in a thread of baillarger.viewer.jobs: it is a separate process with its own
+memory cap. One run at a time; a start is refused while a run is in
+progress, and after the outputs were replaced (the identity check above).
+- The cap (regen_cap_gb): REGEN_CAP_GB (about 1.5 times the measured peak of
+  REGEN_PEAK_GB on the laptop), made smaller if the physical memory less the
+  viewer's own resident memory (the viewer process and its children, at the
+  start) less REGEN_RESERVE_GB is smaller. memguard counts only the run's
+  processes, so the viewer's memory is taken off the cap here. A start is
+  refused if the cap is then below the peak.
+- The state: idle, running, done or failed. log: the last
+  jobs.LOG_LINES lines of the command's stdout and stderr (merged).
+  overrides: the command's override lines (regenerate.override_line), each
+  {fix, kind, voxel, voxels}: a fix that changes edited voxels, its voxel,
+  and the number of edited voxels that it changes.
+- While the command runs, the review refuses each write into the label edits
+  (a paint, an answer, an accept-fix, an undo): the command reads the edits
+  once, at its start, so a later write would not be in the new outputs. The
+  page closes its paint mode.
+- When the command ends with exit code 0 (done), it has replaced the
+  outputs (the dseg, the queue, the fix diff and the dseg's copy of the
+  edits): the identity check refuses each write and /review/pending until
+  the viewer restarts.
+- A failed run (another exit code; 137: the memory cap stopped it) reports
+  the exit code and the last line of its log. The command keeps the old
+  outputs if it fails before its moves; then the writes are allowed again.
+  outputs_changed is true if the identity check finds a changed output (the
+  dseg, the queue, the fix diff or the dseg's copy of the edits) after the
+  run (it failed during its moves): the writes and /review/pending stay
+  refused, and the next
+  run (after a restart of the viewer) finishes the moves first
+  (regenerate.finish).
+- Review.close stops a run (SIGTERM to its process group). A run that stops
+  before its moves leaves the old outputs.
 
 Each write holds the review's lock and is flushed to the disk before the
 response (EditLog appends and fsyncs; label_edits.update replaces the files of
@@ -151,6 +193,10 @@ import hashlib
 import json
 import multiprocessing
 import os
+import re
+import signal
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -162,9 +208,9 @@ import numpy as np
 import numpy.typing as npt
 
 from baillarger import blocks, label_edits, white_dseg
-from baillarger.bids import file_sha256
+from baillarger.bids import derivative_path, entities, file_sha256
 from baillarger.labels import CORTEX_LABEL, LUT_NAMES, WM_LABEL
-from baillarger.viewer.jobs import Jobs
+from baillarger.viewer.jobs import LOG_LINES, Jobs
 from baillarger.wm_edits import EditLog, read_log
 from baillarger.wm_sites import read_random_sites, read_sites
 
@@ -424,6 +470,206 @@ class _Worker:
     replaced: bool = False
 
 
+# ------------------------------------------------------------------ regenerate
+
+#: the regenerate command, without its arguments
+REGENERATE = (sys.executable, "-m", "baillarger.regenerate")
+#: the script that caps the memory of the command's processes
+MEMGUARD = Path(__file__).resolve().parents[3] / "scripts" / "memguard"
+#: the peak resident memory of a regenerate run on the laptop (GB, measured)
+REGEN_PEAK_GB = 22
+#: the memory cap of a run (GB): about 1.5 times the peak
+REGEN_CAP_GB = 33
+#: the memory (GB) kept for the system and other programs: not given to the
+#: run or the viewer
+REGEN_RESERVE_GB = 8
+#: an override line of the command (regenerate.override_line)
+OVERRIDE_LINE = re.compile(
+    r"^override: fix (\d+) \((\S+)\) at voxel (\d+),(\d+),(\d+) "
+    r"changes (\d+) edited voxels$"
+)
+GB = 1024**3
+
+
+def parse_override(line: str) -> dict[str, Any] | None:
+    """An override line of the command as {fix, kind, voxel, voxels}, or None
+    for another line."""
+    m = OVERRIDE_LINE.match(line)
+    if m is None:
+        return None
+    g = m.groups()
+    return dict(
+        fix=int(g[0]),
+        kind=g[1],
+        voxel=[int(g[2]), int(g[3]), int(g[4])],
+        voxels=int(g[5]),
+    )
+
+
+def physical_bytes() -> int:
+    """The physical memory of the machine."""
+    return int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
+
+
+def tree_rss_bytes(pid: int) -> int:
+    """The resident memory of the process pid and all its descendants (ps, as
+    scripts/memguard reads it)."""
+    out = subprocess.run(
+        ["ps", "-A", "-o", "pid=,ppid=,rss="],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    rss: dict[int, int] = {}
+    kids: dict[int, list[int]] = {}
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) != 3:
+            continue
+        p, pp, kb = int(f[0]), int(f[1]), int(f[2])
+        rss[p] = kb
+        kids.setdefault(pp, []).append(p)
+    total, todo = 0, [pid]
+    while todo:
+        p = todo.pop()
+        total += rss.get(p, 0)
+        todo += kids.get(p, [])
+    return total * 1024
+
+
+def regen_cap_gb(viewer_bytes: int, total_bytes: int) -> int:
+    """The memory cap of a run (module docstring, Regenerate): REGEN_CAP_GB,
+    or less if the physical memory less the viewer's memory less
+    REGEN_RESERVE_GB is less. Raises ValueError if the cap is then below
+    REGEN_PEAK_GB."""
+    free = (total_bytes - viewer_bytes) // GB - REGEN_RESERVE_GB
+    cap = min(REGEN_CAP_GB, free)
+    if cap < REGEN_PEAK_GB:
+        raise ValueError(
+            f"regenerate needs about {REGEN_PEAK_GB} GB: the machine has "
+            f"{total_bytes / GB:.0f} GB, the viewer uses {viewer_bytes / GB:.1f} GB "
+            f"and {REGEN_RESERVE_GB} GB stay free, so only {max(cap, 0)} GB are "
+            f"left; stop the viewer and run the command in a shell"
+        )
+    return cap
+
+
+class Regeneration:
+    """One run of the regenerate command as a subprocess under memguard, and
+    its state (module docstring, Regenerate)."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()  # state and proc
+        self.proc: subprocess.Popen[str] | None = None
+        self.thread: threading.Thread | None = None
+        self.t0 = 0.0
+        self.state: dict[str, Any] = dict(
+            status="idle",
+            log=[],
+            overrides=[],
+            error=None,
+            outputs_changed=False,
+            cap_gb=None,
+            viewer_gb=None,
+            command=None,
+            seconds=None,
+        )
+        #: called when the run ends, before its state changes: True if an
+        #: output changed (Review._outputs_changed)
+        self.changed: Callable[[], bool] = lambda: False
+
+    @property
+    def running(self) -> bool:
+        with self.lock:
+            return bool(self.state["status"] == "running")
+
+    def status(self) -> dict[str, Any]:
+        with self.lock:
+            out = dict(self.state, log=list(self.state["log"]))
+            if out["status"] == "running":
+                out["seconds"] = time.monotonic() - self.t0
+            return out
+
+    def start(self, argv: Sequence[str], cap_gb: int, viewer_gb: float) -> None:
+        """Start argv under memguard with the cap. Raises RuntimeError if a
+        run is in progress."""
+        if not MEMGUARD.is_file():
+            raise ValueError(f"no memguard script at {MEMGUARD}")
+        cmd = [str(MEMGUARD), str(cap_gb), *argv]
+        with self.lock:
+            if self.state["status"] == "running":
+                raise RuntimeError("a regenerate run is in progress")
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
+                env=dict(os.environ, PYTHONUNBUFFERED="1"),
+            )
+            self.proc, self.t0 = proc, time.monotonic()
+            self.state = dict(
+                status="running",
+                log=[],
+                overrides=[],
+                error=None,
+                outputs_changed=False,
+                cap_gb=cap_gb,
+                viewer_gb=round(viewer_gb, 1),
+                command=" ".join(cmd),
+                seconds=0.0,
+            )
+            self.thread = threading.Thread(
+                target=self._read, args=(proc,), daemon=True, name="regenerate"
+            )
+            self.thread.start()
+
+    def _read(self, proc: "subprocess.Popen[str]") -> None:
+        """Read the run's lines until it ends, then set its end state."""
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.rstrip("\n")
+            o = parse_override(line)
+            with self.lock:
+                log = self.state["log"]
+                log.append(line)
+                del log[:-LOG_LINES]
+                if o is not None:
+                    self.state["overrides"].append(o)
+        code = proc.wait()
+        changed = self.changed()
+        with self.lock:
+            self.state["seconds"] = time.monotonic() - self.t0
+            if code == 0:
+                self.state["status"] = "done"
+                return
+            last = [x for x in self.state["log"] if not x.startswith("memguard:")]
+            why = (
+                f"the memory cap ({self.state['cap_gb']} GB) stopped the run"
+                if code == 137
+                else (last[-1] if last else "no output")
+            )
+            self.state.update(
+                status="failed",
+                error=f"exit code {code}: {why}",
+                outputs_changed=changed,
+            )
+
+    def stop(self) -> None:
+        """Stop a run (SIGTERM to its process group) and wait for its end."""
+        with self.lock:
+            proc, th = self.proc, self.thread
+        if proc is not None and proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        if th is not None:
+            th.join()
+
+
 # ------------------------------------------------------------------ the review
 
 
@@ -434,10 +680,11 @@ class Review:
     paints (module docstring). labels() gives the segmentation's voxels (the
     whole grid, read once: the label pyramid's level 0); random(n, seed) the
     random sites (wm_sites.read_random_sites); inputs the input labels
-    (default: white_dseg.input_labels(dseg)). With sites and log None, the review is
-    paint only (module docstring). Raises ValueError if the edits are on
-    another grid or of the other hemisphere, or if only one of sites and log
-    is given."""
+    (default: white_dseg.input_labels(dseg)). regenerate: the regenerate
+    command without its arguments (module docstring, Regenerate). With sites
+    and log None, the review is paint only (module docstring). Raises
+    ValueError if the edits are on another grid or of the other hemisphere,
+    or if only one of sites and log is given."""
 
     def __init__(
         self,
@@ -450,6 +697,7 @@ class Review:
         random: Callable[[int, int], list[dict[str, Any]]] | None,
         choices: Choices | None = None,
         inputs: Path | None = None,
+        regenerate: Sequence[str] = REGENERATE,
     ) -> None:
         import nibabel as nib
 
@@ -521,6 +769,10 @@ class Review:
         #: and the SHA-256 of the edits that the write left
         self.undo: list[label_edits.Edits] = []
         self._undo_sha: list[str] = []
+        #: the regenerate run (module docstring, Regenerate)
+        self.regenerate_command = list(regenerate)
+        self.regen = Regeneration()
+        self.regen.changed = lambda: bool(self._changed_outputs())
         last = self._log.sessions() if self._log is not None else []
         if last:
             self._resume(last[-1])
@@ -703,11 +955,16 @@ class Review:
             self.edits, shape=self.shape, affine=self.affine, hemisphere=self.hemi
         )
 
+    def _changed_outputs(self) -> list[str]:
+        """The names of the dseg, the queue, the fix diff and the dseg's copy
+        of the edits that are not the files that the review read at start."""
+        return [p.name for p, i in self._outputs.items() if identity(p) != i]
+
     def _check_outputs(self) -> None:
-        """Raises ValueError if the dseg, the queue or the fix diff is not the
-        file that the review read at start (module docstring, Outputs
-        replaced)."""
-        changed = [p.name for p, i in self._outputs.items() if identity(p) != i]
+        """Raises ValueError if the dseg, the queue, the fix diff or the dseg's
+        copy of the edits is not the file that the review read at start
+        (module docstring, Outputs replaced)."""
+        changed = self._changed_outputs()
         if changed:
             raise ValueError(
                 f"the outputs were regenerated while the viewer ran "
@@ -725,10 +982,16 @@ class Review:
         (label_edits.paint, label_edits.restore). First, under the edits'
         file lock, refuse if the outputs were replaced (_check_outputs).
         after: the step after the write, under the same file lock (if it
-        raises, the edits are written back; label_edits.update). Call with
-        the lock held."""
+        raises, the edits are written back; label_edits.update). Refused too
+        while a regenerate runs (module docstring, Regenerate). Call with the
+        lock held."""
 
         def checked(cur: label_edits.Current) -> label_edits.Edits | None:
+            if self.regen.running:
+                raise ValueError(
+                    "regenerate runs: it read the label edits at its start, so "
+                    "the paint mode is closed until it ends; nothing was written"
+                )
             self._check_outputs()
             return fn(cur)
 
@@ -1046,7 +1309,9 @@ class Review:
             w.proc.join()
 
     def close(self) -> None:
-        """Stop the preview worker and wait for its job to end."""
+        """Stop the preview worker and wait for its job to end; stop a
+        regenerate run (Regeneration.stop)."""
+        self.regen.stop()
         self._stop_worker(replaced=False)
         th = self.jobs.thread
         if th is not None:
@@ -1185,6 +1450,40 @@ class Review:
             aid = self.log.scribble(s, out, self.dseg_sha, float(seconds))
         return dict(answer=aid, strokes=len(out), voxels=sum(len(v) for _, v in out))
 
+    # -------------------------------------------------------------- regenerate
+    def regenerate_argv(self) -> list[str]:
+        """The regenerate command with its arguments (module docstring,
+        Regenerate). Raises ValueError if the dseg is not the one that the
+        command writes in the dseg's derivatives root."""
+        inp = (self.inputs or white_dseg.input_labels(self.dseg)).resolve()
+        dseg = self.dseg.resolve()
+        root = dseg.parents[3] if len(dseg.parents) > 3 else dseg.parent
+        if derivative_path(root, entities(inp), "dseg", ".nii.gz", desc="wmtopo") != (
+            dseg
+        ):
+            raise ValueError(
+                f"{dseg}: not the dseg that regenerate writes from "
+                f"{inp.name} in a derivatives root"
+            )
+        argv = [*self.regenerate_command, str(inp), "--root", str(root)]
+        if label_edits.edits_paths(self.edits)["sidecar"].exists():
+            argv += ["--edits", str(self.edits.resolve())]
+        return argv
+
+    def regenerate(self) -> dict[str, Any]:
+        """Start a regenerate run (module docstring, Regenerate): its state.
+        Raises ValueError if the outputs were replaced, if a run is in
+        progress, or if the memory is too small (regen_cap_gb)."""
+        with self.lock:  # no write into the edits is in progress
+            if self.regen.running:
+                raise ValueError("a regenerate run is in progress")
+            self._check_outputs()
+            argv = self.regenerate_argv()
+            viewer = tree_rss_bytes(os.getpid())
+            cap = regen_cap_gb(viewer, physical_bytes())
+            self.regen.start(argv, cap, viewer / GB)
+        return self.regen.status()
+
     # -------------------------------------------------------------- routes
     def get(self, path: str, q: dict[str, str]) -> dict[str, Any]:
         if path == "/review/queue":
@@ -1195,6 +1494,8 @@ class Review:
             return self.job(q["job"])
         if path == "/review/pending":
             return self.pending()
+        if path == "/review/regenerate":
+            return self.regen.status()
         raise KeyError(path)
 
     def post(self, path: str, req: dict[str, Any]) -> dict[str, Any]:
@@ -1230,6 +1531,8 @@ class Review:
             return self.paint(list(req["strokes"]))
         if path == "/review/undo":
             return self.undo_last()
+        if path == "/review/regenerate":
+            return self.regenerate()
         raise KeyError(path)
 
 
