@@ -96,7 +96,8 @@ add only the hooks. Ask the coordinator before you change more.
    `widen-gap`, `leave`, `manual-paint`. Each choice shows its preview on
    the brick tiles: the answer's voxels in one colour, the correction's
    voxels in another, and a warning if the correction overrides the answer.
-   `manual-paint` shows the ITK-SNAP export command of phase 1.3 (Part E).
+   `manual-paint` opens the paint mode (`docs/plans/label-editing.md`,
+   Part 2); its strokes are the answer.
 4. **Submit** writes the answer with the reviewer time: from opening the
    site to submitting, in seconds. The next site opens.
 5. **Scribbles:** a key picks the class (WM or cortex by default; the other

@@ -220,8 +220,12 @@ The costs, summed:
 The segmentation comes before the columns: the trial judges column
 methods only where the labels are right. At the site the user painted a
 crop of the dseg (`wm_paint export`, ITK-SNAP; 410 changed voxels, fluid
-and cortex at the end of the slot). `bent_box --paint <crop>` applies the
-changes to the box's labels. The echoes and the straight rays do not
+and cortex at the end of the slot). `wm_paint` is removed now:
+`bent_box --paint <diff>` takes label edits (a `label-edits/1` diff, as the
+viewer's paint mode writes) and applies them to the box's labels. Before the
+removal, the crop was converted once to such a diff (`wm_paint.changes`, then
+`label_edits.paint` and `write`): its 410 voxels and labels, next to the crop.
+On the site's box, the diff gives the same labels as the crop did. The echoes and the straight rays do not
 change; the rays' label intervals stay those of the dseg. The costs read
 the box's labels, so the fit at the site uses the painted labels.
 `bent_texture` applies the same changes to its grown labels.

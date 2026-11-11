@@ -16,8 +16,8 @@ document has no sidecar: the functions write no file.
 | `widen-gap` | `widen_gap` | The WM walls of that gap, to the labels round them |
 | `leave` | `leave` | Nothing. The answer records that the site was examined |
 
-`manual-paint` is not a function here. It comes from the ITK-SNAP command
-(`python -m baillarger.wm_paint`).
+`manual-paint` is not a function here. Its voxels and labels are the
+strokes of the review pane's paint mode (`baillarger.viewer.review`).
 
 `CHOICES` maps each name to its function. `run(name, labels, site, hemi,
 radius=, reach=)` calls the function and puts the name in the result.
