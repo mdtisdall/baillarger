@@ -523,7 +523,7 @@ def remarch(
             np.zeros((0, 3), np.int64),
             MeshBlocks(cells, np.zeros((0, 3), np.int64), z, z, z, z, z),
         )
-    src = PatchedSource(field, box, local.phi, cells)
+    src = PatchedSource(field, box, local.phi)
     v, f, mb = marching_tetrahedra_blocks(src, 0.0, cells, np.float32, dev, blocks)
     return Remarch(blocks, v.astype(np.float32), f[:, [0, 2, 1]].copy(), mb)
 

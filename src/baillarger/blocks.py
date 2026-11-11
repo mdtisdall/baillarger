@@ -271,21 +271,30 @@ class PatchedSource:
     changed (a preview) and there is never a chain of sources. A read reads the
     base one time and the blocks that meet its box, however many patches were
     written. The memory is the blocks that meet the union of the patches' boxes
-    (nbytes)."""
+    (nbytes).
+
+    block: the block size; None gives CHUNK, or the base's block when the base is a
+    PatchedSource. A block given with a PatchedSource base must equal its block
+    (ValueError): the dict of blocks is shared, so the block cannot change."""
 
     def __init__(
         self,
         base: Source,
         box: tuple[slice, ...] | None = None,
         patch: npt.ArrayLike | None = None,
-        block: int = CHUNK,
+        block: int | None = None,
     ) -> None:
         if isinstance(base, PatchedSource):
+            if block is not None and int(block) != base.block:
+                raise ValueError(
+                    f"block {block} differs from the base's block {base.block}"
+                )
             self.base: Source = base.base
             self.block: int = base.block
             self.blocks: dict[tuple[int, ...], npt.NDArray[Any]] = dict(base.blocks)
         else:
-            self.base, self.block, self.blocks = base, int(block), {}
+            self.base, self.blocks = base, {}
+            self.block = CHUNK if block is None else int(block)
         if box is not None:
             if patch is None:
                 raise ValueError("a box needs a patch")
