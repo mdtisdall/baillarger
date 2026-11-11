@@ -57,6 +57,13 @@ not yet in the dseg. The review pane gets them from `/review/pending`, each
 with the label in the diff (an erased voxel: its input label), and draws
 them on the slice tiles after each paint and undo.
 
+The pane's regenerate button (`/review/regenerate`) runs
+`python -m baillarger.regenerate INPUT --edits EDITS --root ROOT` as a
+subprocess under `scripts/memguard`. The command reads the diff once, at its
+start, so the viewer refuses each write into the diff while it runs. When it
+ends, it has replaced the outputs, and the viewer refuses each write into the
+diff until it restarts (`baillarger.viewer.review`, Regenerate).
+
 ## Files
 
 | File | Content |

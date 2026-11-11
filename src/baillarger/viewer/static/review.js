@@ -20,6 +20,12 @@
 // A plug-in of the brick pane (window.BVP, as static/overlays.js): it draws the previews and the strokes on #bvo, takes the
 // pointer in brush mode, and puts its own pane in place of the surface pane when the server has a review (/review/queue).
 //
+// Regenerate: the button starts the regenerate command on the server (POST /review/regenerate), a subprocess under
+// scripts/memguard. The pane polls its state (GET /review/regenerate) and shows its log lines. The paint mode is closed
+// while it runs (the command read the label edits at its start). When it ends, the pane shows the overrides (each fix that
+// changes edited voxels: the fix, its voxel, the number of edited voxels) and asks for a restart of the viewer; the server
+// refuses each write into the edits until the restart. A failed run shows its error; the old outputs stay.
+//
 // Timing: opening a site starts its reviewer time; submit sends the seconds from opening to submitting. A scribble's time
 // runs from its first stroke to its submit. A random site does not show that it is random until it is answered, so that
 // its kind does not change how the reviewer looks (a coordinator decision for review).
@@ -33,12 +39,13 @@ const COL = { answer: "rgba(64, 224, 255, 0.85)", correction: "rgba(255, 140, 0,
   pending: "rgba(255, 0, 255, 0.95)" };
 const STROKE_RGB = { wm: [245, 245, 245], cortex: [255, 70, 90], outside: [70, 140, 255], input: [255, 0, 255] };
 const PREVIEW_POLL_MS = 400;
+const REGEN_POLL_MS = 1000;
 // the most preview voxels drawn on one tile; above it the tile draws the first MAX_DRAWN and says so. Measured with R.bench
 // on the laptop (Chrome, 1200 x 800): 13,189 squares in 3.3 ms, so 50,000 take about 12.5 ms, within one frame at 60 fps
 const MAX_DRAWN = 50000;
 const R = window.REVIEW = {
   api: null, on: false, meta: null, sites: [], session: null, cur: null, t0: 0, choice: null, params: {}, preview: null,
-  previewSeq: 0, pending: null, pendingSeq: 0, labelRGBA: new Map(), brush: false, mode: "paint", cls: null, radius: 1, undoDepth: 0, strokes: [], stroke: null, s0: 0, inv: null, A: null, revealed: new Map(),
+  previewSeq: 0, regen: null, pending: null, pendingSeq: 0, labelRGBA: new Map(), brush: false, mode: "paint", cls: null, radius: 1, undoDepth: 0, strokes: [], stroke: null, s0: 0, inv: null, A: null, revealed: new Map(),
 };
 
 // ------------------------------------------------------------------ helpers
@@ -76,6 +83,10 @@ function pane() {
     <button id="rvssub" title="key x">submit (x)</button><button id="rvsclr" title="Escape">clear</button>
     <button id="rvundo" title="key u: undo the last write into the label edits (a paint or a site answer) of this viewer run">undo (u)</button><span id="rvsn"></span>
   </div>
+  <div class="pbar" id="rvregen"><button id="rvrgo" title="run the regenerate command on the label edits (about 20 min and 22 GB on the laptop)">regenerate the outputs</button>
+    <span id="rvrstate" style="white-space:pre-wrap"></span></div>
+  <pre id="rvrlog" style="display:none;max-height:120px;overflow-y:auto;margin:0 8px;font-size:11px;white-space:pre-wrap"></pre>
+  <div id="rvrover" style="display:none;max-height:160px;overflow-y:auto;font-size:12px"></div>
   <div class="pbar"><span id="rvmsg" style="color:var(--mute)"></span></div>
   <div id="rvtable" style="overflow-y:auto;flex:1;min-height:0;font-size:12px"></div>
   <div class="help" style="position:static;padding:2px 8px">keys: 1–7 choices · t thicken radius · Enter submit · s skip · n next ·
@@ -87,11 +98,15 @@ function pane() {
   for (const b of p.querySelectorAll("button[data-choice]")) b.onclick = () => choose(b.dataset.choice);
   $("rvthick").onchange = () => R.choice === "thicken" && choose("thicken");
   $("rvsubmit").onclick = submit; $("rvskip").onclick = skip;
-  $("rvbon").onchange = () => { R.brush = $("rvbon").checked; R.api.draw(); };
+  $("rvbon").onchange = () => {
+    const why = closed(); if (why && $("rvbon").checked) { $("rvbon").checked = false; say(why, true); }
+    R.brush = $("rvbon").checked; R.api.draw();
+  };
   $("rvmode").onchange = () => setMode($("rvmode").value);
   $("rvcls").onchange = () => { R.cls = $("rvcls").value; };
   $("rvrad").onchange = () => { R.radius = Number($("rvrad").value); };
   $("rvssub").onclick = submitStrokes; $("rvsclr").onclick = clearStrokes; $("rvundo").onclick = undo;
+  $("rvrgo").onclick = regenerate;
 }
 function clearStrokes() { R.strokes = []; R.stroke = null; strokesInfo(); R.api.draw(); }
 // the brush mode: paint (the menu of the paint mode) or scribble (the classes); strokes of the other mode must go first
@@ -175,6 +190,7 @@ function show(site) {   // the site is shown (the server recorded it): move ther
 function params(c) { return c === "thicken" ? { radius: Number($("rvthick").value) } : {}; }
 async function choose(c) {
   if (!R.cur) { say("open a site first", true); return; }
+  if (c === "manual-paint" && closed()) { say(closed(), true); return; }
   if (c === "manual-paint" && !setMode("paint")) return;
   R.choice = c; R.params = params(c); const seq = ++R.previewSeq;
   for (const b of document.querySelectorAll("#rvsite button[data-choice]")) b.style.outline = b.dataset.choice === c ? "2px solid var(--acc)" : "";
@@ -242,12 +258,68 @@ async function skip() {
   say(`site ${R.cur.id} skipped`); R.preview = null; await refresh(); await next();
 }
 
+// ------------------------------------------------------------------ regenerate
+// why the writes into the edits are closed (a run in progress, or a run that replaced the outputs), or "" when they are open
+function closed() {
+  const st = R.regen && R.regen.status;
+  if (st === "running") return "regenerate runs: the paint mode is closed until it ends";
+  if (st === "done" || (st === "failed" && R.regen.outputs_changed)) return "the outputs were regenerated: restart the viewer";
+  return "";
+}
+async function regenerate() {
+  if (R.strokes.length || R.stroke) { say("submit or clear the strokes first (Esc)", true); return; }
+  if (!confirm("Regenerate the dseg, the white surface, its overview and the sites from the label edits?\n" +
+    "It takes about 20 min and about 22 GB on the laptop. The paint mode is closed while it runs, " +
+    "and the viewer must restart after it.")) return;
+  let r; try { r = await post("/review/regenerate", {}); } catch (e) { say(e.message, true); return; }
+  showRegen(r); say("regenerate started"); pollRegen();
+}
+async function pollRegen() {
+  while (R.regen && R.regen.status === "running") {
+    await new Promise(ok => setTimeout(ok, REGEN_POLL_MS));
+    try { showRegen(await getj("/review/regenerate")); } catch (e) { say(e.message, true); return; }
+  }
+}
+function showRegen(r) {
+  const was = R.regen && R.regen.status; R.regen = r;
+  const st = r.status, min = r.seconds === null ? "" : ` ${(r.seconds / 60).toFixed(1)} min`, why = closed();
+  $("rvrgo").disabled = st === "running" || !!why;
+  const cap = r.cap_gb === null ? "" : ` · memory cap ${r.cap_gb} GB (the viewer used ${r.viewer_gb} GB at the start)`;
+  $("rvrstate").textContent = {
+    idle: "",
+    running: `running${min}${cap}. The paint mode is closed: the command read the label edits at its start.`,
+    done: `done in${min}. Restart the viewer to see the new outputs. Until the restart, each paint, answer, accept-fix and undo is refused.`,
+    failed: `failed after${min}: ${r.error}. ` + (r.outputs_changed
+      ? "Some outputs were replaced: restart the viewer, then run regenerate again (it finishes the moves first)."
+      : "The old outputs stay."),
+  }[st] || st;
+  $("rvrstate").style.color = st === "failed" ? "#ff6b6b" : st === "done" ? "#ffd23f" : "";
+  const log = $("rvrlog"); log.style.display = r.log.length ? "" : "none";
+  const end = log.scrollTop + log.clientHeight >= log.scrollHeight - 4; log.textContent = r.log.join("\n"); if (end) log.scrollTop = log.scrollHeight;
+  const ov = $("rvrover");
+  if (st === "done") {
+    ov.style.display = "";
+    ov.innerHTML = r.overrides.length
+      ? `<div style="padding:2px 8px"><b>${r.overrides.length} fixes change edited voxels</b> (the correction overrides these edits). Row: go to the voxel.</div>
+        <table><tr><th>fix</th><th style="text-align:left">kind</th><th>voxel</th><th>edited voxels</th></tr>${r.overrides.map((o, k) =>
+          `<tr data-k="${k}"><td>${o.fix}</td><td style="text-align:left">${esc(o.kind)}</td><td>${o.voxel.join(",")}</td><td>${o.voxels}</td></tr>`).join("")}</table>`
+      : `<div style="padding:2px 8px">No fix changes edited voxels.</div>`;
+    for (const tr of ov.querySelectorAll("tr[data-k]")) tr.onclick = () => { R.api.crossHere(vox2mm(r.overrides[Number(tr.dataset.k)].voxel)); R.api.update(); };
+  } else ov.style.display = "none";
+  if (why) {   // the paint mode is closed: the brush off, its strokes dropped
+    R.brush = false; $("rvbon").checked = false; R.strokes = []; R.stroke = null; R.preview = null; strokesInfo(); R.api.draw();
+  }
+  for (const id of ["rvbon", "rvssub", "rvsubmit"]) $(id).disabled = !!why;
+  if (why) $("rvundo").disabled = true;
+  if (was === "running" && st !== "running") { say(st === "done" ? "regenerate done: restart the viewer" : `regenerate failed: ${r.error}`, st !== "done"); refresh(); }
+}
+
 // ------------------------------------------------------------------ scribbles
 function strokesInfo() {
   const n = R.strokes.reduce((a, s) => a + s.voxels.size, 0);
   $("rvsn").textContent = (R.strokes.length ? `${R.strokes.length} ${R.mode} strokes, ${n} voxels · ` : "") + `undo: ${R.undoDepth} writes` +
     (R.pending ? ` · pending: ${R.pending.n} voxels` : "");
-  $("rvundo").disabled = !R.undoDepth;
+  $("rvundo").disabled = !R.undoDepth || !!closed();
 }
 const paintStrokes = () => R.strokes.map(s => ({ label: s.value, voxels: [...s.voxels.values()] }));
 function dab(t, x, y) {   // the voxels within the brush radius of the cursor, in the tile's slice
@@ -335,7 +407,7 @@ function text(t) {
   return s;
 }
 function pointer(type, e, h) {   // brush mode: a left drag paints one stroke of the current label
-  if (!R.on || !R.brush || e.button > 0 || e.shiftKey) return false;
+  if (!R.on || !R.brush || e.button > 0 || e.shiftKey || closed()) return false;
   if (type === "down" && h) {
     if (!R.strokes.length && !R.stroke) R.s0 = performance.now();
     const c = $("rvcls"), opt = c.options[c.selectedIndex];
@@ -386,6 +458,7 @@ const hooks = {
       R.labelRGBA = new Map(Object.entries(M.table || {}).map(([v, e]) => [Number(v), e.rgba]));
     } catch { /* no labels volume */ }
     pending();
+    try { showRegen(await getj("/review/regenerate")); pollRegen(); } catch (e) { say(e.message, true); }
     say(q.paint_only ? `paint only: label edits ${q.edits}` : `edit log: ${q.log} · label edits: ${q.edits}`);
   },
   draw2d, text, pointer,

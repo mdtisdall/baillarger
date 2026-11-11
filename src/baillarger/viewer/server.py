@@ -33,9 +33,11 @@ Requests:
   /volume/list, /volume/<name>/meta, /volume/<name>/bricks?level=&b=.
 - The stream 1 review (baillarger.viewer.review; with --sites, --log and
   --edits, or paint only with --edits alone):
-  GET /review/queue, /review/next, /review/preview?job=, /review/pending;
-  POST /review/session, /review/skip, /review/preview, /review/answer,
-  /review/scribble, /review/paint, /review/undo.
+  GET /review/queue, /review/next, /review/preview?job=, /review/pending,
+  /review/regenerate; POST /review/session, /review/skip, /review/preview,
+  /review/answer, /review/scribble, /review/paint, /review/undo,
+  /review/regenerate (the regenerate command as a subprocess under
+  scripts/memguard).
 - Surface outlines (baillarger.viewer.outlines):
   /outline?axis=&mm=&box= (float32 segment ends, world mm).
 - The columns pane (baillarger.viewer.columns.route): /columns/meta,
