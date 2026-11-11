@@ -8,6 +8,7 @@ import pytest
 
 from baillarger import (
     bids,
+    column_sites,
     excisions,
     label_edits,
     white_dseg,
@@ -112,6 +113,7 @@ def doc_keys(doc: Path, version: str) -> set[tuple[str, str, bool]]:
         ("wm-excisions.md", excisions.EXCISIONS_SPEC),
         ("wm-paint.md", wm_paint.PAINT_SPEC),
         ("wm-sites.md", wm_sites.SITES_SPEC),
+        ("column-sites.md", column_sites.COLUMN_SITES_SPEC),
     ],
 )
 def test_spec_documents_list_the_code_keys(doc: str, spec: SidecarSpec) -> None:
