@@ -17,7 +17,6 @@ from baillarger import (
     white_surf,
     wm_sites,
 )
-from baillarger.bids import file_sha256
 from baillarger.fix_diff import write_table
 
 ANAT = Path("sub-T01/ses-S1/anat")
@@ -70,28 +69,17 @@ def _norm(x: Any) -> Any:
     return x
 
 
-def _sidecar_hashes(d: dict[str, Any]) -> dict[str, Any]:
-    """The sidecar d without the SHA-256 of its source sidecars (they hold a
-    time), after a check that each is the SHA-256 of the file now at its
-    path."""
-    sha = d.get("SourcesSHA256", {})
-    for k in [k for k in sha if k.endswith(".json")]:
-        assert file_sha256(Path(k)) == sha.pop(k), k
-    return d
-
-
 def assert_same(a: Path, b: Path) -> None:
     """The files in roots a and b are the same: the same names, the same
-    bytes, and the same sidecars apart from their times, the SHA-256 of
-    their source sidecars (checked against the files) and the root's path."""
+    bytes, and the same sidecars apart from their times and the root's
+    path."""
     fa, fb = files(a), files(b)
     assert sorted(fa) == sorted(fb)
     ra, rb = str(a.resolve()), str(b.resolve())
     for name in fa:
         if name.endswith(".json"):
-            ja = _sidecar_hashes(json.loads(fa[name].decode()))
-            ja = json.loads(json.dumps(ja).replace(ra, rb))
-            jb = _sidecar_hashes(json.loads(fb[name].decode()))
+            ja = json.loads(fa[name].decode().replace(ra, rb))
+            jb = json.loads(fb[name].decode())
             assert _norm(ja) == _norm(jb), name
         else:
             assert fa[name] == fb[name], name
