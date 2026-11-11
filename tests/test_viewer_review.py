@@ -527,20 +527,21 @@ def test_a_later_answer_replaces_the_labels_of_an_earlier_one(
     assert diff(files) == {(5, 5, 5): 42}
 
 
-def test_leave_and_a_refused_answer_write_nothing(server: Any) -> None:
-    base, _, files = server
+def test_leave_and_a_refused_answer_leave_no_edit(server: Any) -> None:
+    base, rv, files = server
     post(base + "/review/session", dict(random_share=0, seed=None))
     with pytest.raises(urllib.error.HTTPError):  # not shown: the log refuses it
         post(
             base + "/review/answer",
             dict(site="8,6,7", choice="thicken", reviewer_seconds=1),
         )
-    assert not files["edits"].exists()
+    # the diff was written first, then written back: empty, with no undo
+    assert diff(files) == {} and rv.undo == []
     get(base + "/review/next")
     out = post(
         base + "/review/answer", dict(site="5,5,5", choice="leave", reviewer_seconds=1)
     )
-    assert out["edited"] == 0 and not files["edits"].exists()
+    assert out["edited"] == 0 and diff(files) == {} and rv.undo == []
 
 
 def test_a_diff_on_another_grid_is_refused(files: dict[str, Path]) -> None:
@@ -779,6 +780,81 @@ def test_undo_restores_the_diff_exactly_after_overlapping_paints(
         post(base + "/review/undo", {})
     assert e.value.code == 400 and "undo" in json.loads(e.value.read())["error"]
     assert diff(files) == d0
+
+
+def test_an_undo_after_another_writer_changed_the_diff_is_refused(
+    files: dict[str, Path],
+) -> None:
+    rv = make(files)
+    rv.paint(paint_strokes((0, [(4, 4, 4)])))
+    rv.paint(paint_strokes((0, [(5, 4, 4)])))
+    # another writer (a second viewer process) changes the diff
+    other = LE.read(files["edits"])
+    LE.write(
+        files["edits"],
+        LE._set(other, np.array([np.ravel_multi_index((6, 6, 6), SHAPE)]), [42]),
+        hemisphere="R",
+        shape=SHAPE,
+        affine=A,
+    )
+    d = diff(files)
+    with pytest.raises(ValueError, match="another writer"):
+        rv.undo_last()
+    assert diff(files) == d and len(rv.undo) == 2
+    # a new write of this run is on top of the other writer's: it can be undone
+    rv.paint(paint_strokes((0, [(7, 4, 4)])))
+    assert rv.undo_last() == dict(voxels=1, undo_depth=2) and diff(files) == d
+    # the write below it was before the other writer's: still refused
+    with pytest.raises(ValueError, match="another writer"):
+        rv.undo_last()
+    assert diff(files) == d
+
+
+def test_a_failed_log_append_leaves_the_diff_and_the_undo_stack(
+    files: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rv = make(files)
+    rv.start(0, None)
+    rv.next()
+    rv.paint(paint_strokes((0, [(4, 4, 4)])))
+    before = files["edits"].read_bytes(), len(rv.undo), diff(files)
+    n_log = len(records(files))
+
+    def full(*a: Any, **k: Any) -> str:
+        raise OSError("no space left on the device")
+
+    monkeypatch.setattr(rv.log, "answer", full)
+    with pytest.raises(OSError, match="no space"):
+        rv.answer("5,5,5", "thicken", {}, 1.0)
+    assert (files["edits"].read_bytes(), len(rv.undo), diff(files)) == before
+    assert len(records(files)) == n_log
+    # the undo stack still undoes the paint
+    rv.undo_last()
+    assert diff(files) == {} and rv.undo == []
+
+
+def test_a_write_reads_only_the_sidecar_when_its_copy_is_current(
+    files: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rv = make(files)
+    rv.paint(paint_strokes((0, [(4, 4, 4)])))
+    reads: list[Path] = []
+    real = LE._read_records
+
+    def counted(q: Path) -> bytes:
+        reads.append(q)
+        return real(q)
+
+    monkeypatch.setattr(LE, "_read_records", counted)
+    rv.paint(paint_strokes((0, [(5, 4, 4)])))
+    rv.undo_last()
+    assert reads == []
+    assert diff(files) == {(4, 4, 4): 0}  # diff() reads: not a write
+    # another writer: the next write reads the records again
+    reads.clear()
+    LE.write(files["edits"], LE.empty(), hemisphere="R", shape=SHAPE, affine=A)
+    rv.paint(paint_strokes((0, [(6, 4, 4)])))
+    assert reads == [files["edits"]] and diff(files) == {(6, 4, 4): 0}
 
 
 def test_undo_of_a_first_paint_leaves_an_empty_diff(server: Any) -> None:

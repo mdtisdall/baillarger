@@ -374,3 +374,10 @@ def test_a_second_command_in_the_same_root_stops(tmp_path: Path) -> None:
     with regenerate.locked(tmp_path):
         with pytest.raises(RuntimeError, match="another regenerate"):
             regenerate.regenerate(tmp_path / NAME, None, tmp_path, block=8)
+
+
+def test_a_diff_in_root_itself_is_refused(tmp_path: Path) -> None:
+    # its reader's lock on ROOT would wait for the run's lock on ROOT
+    with pytest.raises(ValueError, match="in ROOT"):
+        regenerate.regenerate(tmp_path / NAME, tmp_path / "x_edits.npy", tmp_path)
+    assert not any(tmp_path.glob(regenerate.STAGE_PREFIX + "*"))

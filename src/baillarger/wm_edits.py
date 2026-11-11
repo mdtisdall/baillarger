@@ -26,7 +26,6 @@ EditLog.check_log reads and checks the whole log again.
 """
 
 import datetime
-import fcntl
 import hashlib
 import json
 import os
@@ -52,6 +51,7 @@ from baillarger.bids import (
     sources,
     write_sidecar,
 )
+from baillarger.fileops import flock
 from baillarger.labels import LUT_NAMES
 
 type Int = npt.NDArray[np.int64]
@@ -354,12 +354,8 @@ def read_log(path: Path) -> Log:
 
 @contextmanager
 def _locked(path: Path) -> Iterator[None]:
-    with path.open("a") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+    with flock(path, exclusive=True):
+        yield
 
 
 class EditLog:

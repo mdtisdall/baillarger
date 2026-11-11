@@ -206,10 +206,10 @@ def paint(
     out = np.array(labels, np.int32, copy=True)
     n = 0
     for path in diffs:
-        e, side, _ = label_edits.read_with_sidecar(Path(path))
+        e, side, _ = label_edits.read_with_sidecar(
+            Path(path), shape=None if shape is None else tuple(int(s) for s in shape)
+        )
         grid = tuple(int(s) for s in side["Shape"])
-        if shape is not None and grid != tuple(int(s) for s in shape):
-            raise ValueError(f"{path}: the diff's grid {grid} is not the dseg's")
         pts = np.stack(np.unravel_index(e.index, grid), 1).astype(np.int64)
         vals = e.label.astype(np.int64)
         q = pts - np.asarray(offset, np.int64)

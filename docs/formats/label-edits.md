@@ -1,7 +1,7 @@
 # label-edits: the label edits of a hemisphere
 
-SpecVersion `label-edits/1`. Written by `baillarger.label_edits.write` (the
-viewer's review pane, `baillarger.viewer.review` with `--edits`: the answers
+SpecVersion `label-edits/1`. Written by `baillarger.label_edits.write` and
+`baillarger.label_edits.update` (the viewer's review pane, `baillarger.viewer.review` with `--edits`: the answers
 of the review queue, the paint mode and its undo; and the copy that
 `python -m baillarger.white_dseg ASEG --edits EDITS --out DERIV` keeps). Read
 by `baillarger.label_edits.read` and by the dseg command (`--edits`,
@@ -31,7 +31,8 @@ correction. Nothing else applies edits.
 
 The answer log of the review queue (`wm-edits/1`) is a separate record. The
 diff does not come from it: a site answer of the queue writes its labels into
-the diff (`baillarger.label_edits.paint`), and the log records the answer.
+the diff (`baillarger.label_edits.paint`), and then the log records the
+answer. If the log refuses the answer, the diff is written back as it was.
 At an override site, the choice `accept-fix` writes the fix's labels into the
 diff. A scribble is a record of the log only.
 
@@ -43,7 +44,8 @@ Every write into the diff of a viewer run (a paint, and a site answer of
 any choice) pushes the earlier entries of the voxels that it changes on one
 undo stack. Undo (`/review/undo`) writes the top entries back
 (`baillarger.label_edits.restore`), so it always reverses the last write.
-The undo stack is in the viewer's memory only, for one viewer run; the diff
+An undo is refused if the diff on disk is not the one that the top write
+left: another writer changed it since. The undo stack is in the viewer's memory only, for one viewer run; the diff
 keeps no history. An undo does not change the answer log.
 
 ## Files
@@ -72,14 +74,39 @@ The records are sorted by `index`, and each index is in the file one time.
 
 ## Writes and reads
 
-A write replaces both files. It writes new files in the same directory, then
-renames them over the old ones: the records first, then the sidecar. It
-holds an exclusive lock (`fcntl.flock` on the directory) while it does this.
-A read holds a shared lock on the directory, reads the sidecar and the
+A write replaces both files. It writes new files in the same directory,
+flushes each to the disk, then renames them over the old ones: the records
+first, then the sidecar. After each rename it flushes the directory
+(`baillarger.fileops.write_atomic`). It holds an exclusive lock
+(`fcntl.flock` on the directory, `baillarger.fileops.flock`) while it does
+this. A read holds a shared lock on the directory, reads the sidecar and the
 records, and checks the records against the sidecar's `SHA256` and `Count`.
 So a reader sees the old diff or the new diff, never a mix. A write refuses
 (ValueError, and writes nothing) a diff that is not sorted, has an index
 two times or outside the grid, or has a label that is not in `label-set/1`.
+
+A reader can also check the diff against a grid (`Shape` and `Affine`) and a
+hemisphere: `baillarger.label_edits.read(path, shape=, affine=,
+hemisphere=)` refuses (ValueError) a diff of another grid or hemisphere. The
+viewer, the dseg command and `bent_box` use this one reader.
+
+A change of the diff (a paint, an answer, an undo) is one
+`baillarger.label_edits.update`: it holds the exclusive lock across the
+read, the change and the write. So two writers (two viewer processes on one
+diff) do not lose each other's voxels. A writer can keep the diff that it
+last wrote in memory: if the sidecar's `SHA256` and the records file are
+the ones that it wrote, the update reads only the sidecar.
+
+Recovery. A writer that stops between the two renames (a signal, the memory
+cap, a power loss) leaves the new records with the old sidecar. A reader
+that finds a `SHA256` or `Count` that does not agree with the records takes
+the sidecar as older than the records. It checks the records on the
+sidecar's `Shape` (sorted, each index once, inside the grid, labels in
+`label-set/1`), then writes a new sidecar with the records' `Count` and
+`SHA256` and the old sidecar's other facts, under the exclusive lock, and
+logs a warning. Records that are not a valid diff are refused (ValueError).
+A first write that stops between the renames leaves records with no
+sidecar: an update writes the sidecar from its own grid and hemisphere.
 
 ## Sidecar keys: label-edits/1
 
