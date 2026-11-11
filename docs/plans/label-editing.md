@@ -51,6 +51,9 @@ not come from that log.
   used. An older output can be made again from its input labels, its copy of the diff
   and its commit.
 - The preview is approximate; the regeneration is exact.
+- ITK-SNAP is a bootstrap only. The goal is that editing does not need it. Until the
+  paint mode works, it is the only writer of the diff, so the diff has one writer at a
+  time and needs no locked read-change-write.
 - Reuse first: each part uses the code in "What exists" where it can, and adds a
   parameter to an existing function before it adds a new function.
 
@@ -109,7 +112,8 @@ Facts that the plan must respect:
   `accepted_fixes` and the match of kept fixes go.
 - The answers of the review queue change the labels by a write into the diff. The answer
   log still records them, for the queue.
-- The ITK-SNAP import (`wm_paint`) writes into the diff.
+- The ITK-SNAP import (`wm_paint`) writes into the diff. It is a bootstrap only: it
+  stays until the paint mode of Part 2 works, and then Part 2 removes it.
 - Formats edited in place (version 1): `wm-dseg.md` (`--edits`, `overrides`, `Sources`,
   the copy of the diff), `wm-sites.md` (override sites), `wm-edits.md` (the log is the
   queue's record; `dseg` does not read it; `Accepts` goes).
@@ -135,6 +139,8 @@ queue answer writes into the diff.
   the diff, and the queue's log records the answer as now. At an override site, the
   choice "accept the fix" writes the fix's labels into the diff.
 - The viewer can start without a queue (`--edits` alone): paint only.
+- When the paint mode works, this part removes the ITK-SNAP path: `wm_paint`, its format
+  (`docs/formats/wm-paint.md`), its tests, and the ITK-SNAP commands of the review pane.
 
 Tests: a paint writes the painted voxels and labels into the diff; a label that is not
 in the menu is refused, and nothing is written; a voxel with its current label is not
@@ -244,7 +250,7 @@ the cores into the routes and the pane, and they meet in a few shared files.
 | Part | Core (files) | Join (files) | The join needs |
 |---|---|---|---|
 | 1 | `label_edits.py` (new), `white_dseg.py`, `wm_sites.py`, `wm_paint.py`, `docs/formats/label-edits.md`, `wm-dseg.md`, `wm-sites.md`, `wm-edits.md`, their tests | `viewer/review.py` (queue answers write into the diff) | the `label_edits` contract |
-| 2 | none (Part 1's core has the shared functions) | `viewer/review.py` (`/review/paint`, `/review/undo`, the shared strokes function, "accept the fix", `--edits` alone), `static/review.js` (paint mode, undo) | the `label_edits` contract |
+| 2 | none (Part 1's core has the shared functions) | `viewer/review.py` (`/review/paint`, `/review/undo`, the shared strokes function, "accept the fix", `--edits` alone), `static/review.js` (paint mode, undo); then the removal of `wm_paint.py`, `docs/formats/wm-paint.md`, `tests/test_wm_paint.py` and the ITK-SNAP commands | the `label_edits` contract |
 | 3 | none | `viewer/volumes.py` ("input"), `viewer/review.py` (`/review/pending`), `static/review.js` (drawing) | the copy of the diff in the dseg's output |
 | 4a | none | `viewer/review.py` (`/review/preview` takes voxels), `static/review.js` | the paint request |
 | 4b | `antialias.py` (start, held), `white_surf.py` (the field derivative, the blocks' re-march), its format doc, their tests | `viewer/review.py` (route, working field), the 3D view and the slices (blocks) | the preview contract |
@@ -293,10 +299,6 @@ The joins use these interfaces. A core must keep them, or change this plan first
   labels; `new` a label per voxel, or -1 for the eraser. It keeps only the voxels whose
   label changes. `undo` holds the earlier entries of those voxels.
 - `label_edits.restore(edits, undo) -> Edits`.
-- `label_edits.update(path, change, *, hemisphere, shape, affine) -> R`: reads the diff,
-  calls `change(edits) -> (Edits, R)`, and writes the result, all under one exclusive
-  lock, so that two writers (the viewer and `wm_paint import`) do not lose an update.
-  Every writer of a diff that exists uses it.
 - `label_edits.differ(a, b) -> (index, label)`: the voxels where two diffs differ, with
   the label in `a` (-1 where `a` has none: the input label).
 - `python -m baillarger.white_dseg ASEG --edits EDITS --out DERIV`; the fix table's
