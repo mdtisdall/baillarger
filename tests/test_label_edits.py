@@ -3,6 +3,7 @@ the atomic replacement, apply, paint, the eraser, undo, differ, and their use
 by the dseg command (baillarger.white_dseg.wm_topo, write_wm_topo)."""
 
 import hashlib
+import itertools
 import json
 import logging
 import multiprocessing as mp
@@ -215,32 +216,93 @@ def test_the_reader_checks_the_grid_affine_and_hemisphere(tmp_path: Path) -> Non
         LE.update(p, lambda c: None, hemisphere="R", shape=(4, 4, 4), affine=AFFINE)
 
 
-def _painter(path: str, first: int, n: int) -> None:
-    """Paint the voxels first, ..., first + n - 1 (linear indices of a 64^3
-    grid) with 42, one update for each."""
+class _NoLock:
+    """A stand-in for fileops.flock that takes no lock."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def _painter(
+    path: str, k: int, n: int, start: Any, order: Any, count: Any, lock: bool
+) -> None:
+    """Process k paints the voxels 1000 k, ..., 1000 k + n - 1 (linear indices
+    of a 64^3 grid) with 42, one update for each. It waits at the barrier
+    start after its imports, so that the updates of the two processes start
+    together. Inside each update (under the lock, if there is one) it puts k
+    in the next entry of the shared array order (count is the next index).
+    With lock False, update takes no lock (label_edits.flock is a no-op)."""
+    if not lock:
+        pytest.MonkeyPatch().setattr(LE, "flock", _NoLock)
     shape = (64, 64, 64)
     lab = np.zeros(shape, np.int16)
-    for i in range(first, first + n):
+    start.wait()
+    for i in range(1000 * k, 1000 * k + n):
         v = np.array([np.unravel_index(i, shape)], np.int64)
 
         def one(c: LE.Current, v: npt.NDArray[np.int64] = v) -> LE.Edits:
+            with count.get_lock():
+                order[count.value] = k
+                count.value += 1
             return LE.paint(c.edits, lab, v, [42])[0]
 
         LE.update(Path(path), one, hemisphere="R", shape=shape, affine=AFFINE)
 
 
-def test_two_processes_that_paint_keep_all_their_voxels(tmp_path: Path) -> None:
-    p = tmp_path / "e_edits.npy"
+def _paint_in_two_processes(p: Path, lock: bool, n: int = 100) -> list[int]:
+    """Run _painter in two "spawn" processes, each with n updates, and
+    return the order of the updates (the process of each)."""
     ctx = mp.get_context("spawn")
-    procs = [ctx.Process(target=_painter, args=(str(p), k * 1000, 100)) for k in (0, 1)]
+    # the timeout stops a process that waits for one that failed to start
+    start = ctx.Barrier(2, timeout=120)
+    order = ctx.Array("b", 2 * n)
+    count = ctx.Value("i", 0)
+    procs = [
+        ctx.Process(target=_painter, args=(str(p), k, n, start, order, count, lock))
+        for k in (0, 1)
+    ]
     for q in procs:
         q.start()
     for q in procs:
         q.join()
     assert [q.exitcode for q in procs] == [0, 0]
+    assert count.value == 2 * n
+    return list(order[:])
+
+
+def _switches(order: list[int]) -> int:
+    """The number of times that the process changes from one update to the
+    next."""
+    return sum(a != b for a, b in itertools.pairwise(order))
+
+
+def test_two_processes_that_paint_keep_all_their_voxels(tmp_path: Path) -> None:
+    p = tmp_path / "e_edits.npy"
+    order = _paint_in_two_processes(p, lock=True)
+    s = _switches(order)
+    assert s >= 10, f"the updates of the two processes did not overlap ({s} switches)"
     e = LE.read(p)
     assert e.index.tolist() == [*range(100), *range(1000, 1100)]
     assert set(e.label.tolist()) == {42}
+
+
+def test_two_processes_that_paint_without_the_lock_lose_voxels(
+    tmp_path: Path,
+) -> None:
+    """The control for the test above: the same scenario with no lock loses
+    voxels, so the test above can see a missing lock."""
+    p = tmp_path / "e_edits.npy"
+    order = _paint_in_two_processes(p, lock=False)
+    s = _switches(order)
+    assert s >= 10, f"the updates of the two processes did not overlap ({s} switches)"
+    e = LE.read(p)
+    assert len(e.index) < 200, "with no lock, no update was lost"
 
 
 def test_an_update_reads_only_the_sidecar_when_its_copy_is_current(
