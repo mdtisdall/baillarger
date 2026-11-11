@@ -13,15 +13,30 @@ edits. The command calls, in this order:
 4. baillarger.wm_sites.write_sites (the surface of step 2).
 
 The steps write into a new directory in ROOT (a derivatives root of its own,
-STAGE_PREFIX + a random name). If all the steps succeed, the command moves
-each file that they wrote to the same path in ROOT, over the old file. The
-old outputs are not kept. If a step fails, the command deletes the new
-directory, and the old outputs are unchanged.
+STAGE_PREFIX + a random name). If a step fails, the command deletes the new
+directory, and the old outputs are unchanged. If all the steps succeed, the
+command writes the list of the files to move (MARKER) into the new directory,
+then moves each file to the same path in ROOT, over the old file, one at a
+time (os.replace), then deletes the new directory. The old outputs are not
+kept.
+
+The move of all the files is not atomic: a process that stops during the
+moves leaves some new files and some old files in ROOT. The marker makes this
+state recoverable (roll forward): finish(ROOT) moves the files that the
+marker lists and that are still in the new directory, and deletes a new
+directory that has no marker (a run that stopped before its moves; the old
+outputs are unchanged). Each run calls finish first. A run holds an exclusive
+lock (fcntl.flock) on ROOT, so a second run in the same ROOT stops with an
+error, and finish never touches the new directory of a running command.
+This covers a stopped process (an error, a signal, the memory cap); it does
+not cover a crash of the machine or of the file system.
 
 Before the steps, the command copies into the new directory the files of ROOT
-that the steps read: dataset_description.json, and the history of the fix
-diffs (baillarger.white_dseg.history_dir), so that the check of a reproduced
-fix diff sees the kept runs.
+that the steps read: dataset_description.json, and the sidecars (.json) of the
+kept fix diffs (baillarger.white_dseg.history_dir), so that the check of a
+reproduced fix diff (white_dseg.check_reproduced) sees the kept runs. The
+kept diffs and tables (.npy, .tsv) are not read, so they are not copied. A
+copied file that the steps leave the same is not moved back.
 
 The sidecars name their Sources by absolute path. Before the move, the command
 changes the path of the new directory in each sidecar to the path of ROOT, so
@@ -33,10 +48,14 @@ voxels that it changes.
 """
 
 import argparse
+import fcntl
+import filecmp
 import json
 import os
 import shutil
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,6 +71,10 @@ STAGE_PREFIX = ".regenerate-"
 
 #: the file that baillarger.bids.dataset_description writes in a root
 DESCRIPTION = "dataset_description.json"
+
+#: the list of the files to move (one path relative to the root on each
+#: line), in the new directory: written when all the steps have succeeded
+MARKER = "moves.txt"
 
 
 @dataclass(frozen=True)
@@ -70,14 +93,85 @@ def _history(root: Path, inp: Path) -> Path:
     return white_dseg.history_dir(dseg)
 
 
-def _seed(stage: Path, root: Path, inp: Path) -> None:
-    """Copy into stage the files of root that the steps read."""
-    desc = root / DESCRIPTION
-    if desc.is_file():
-        shutil.copyfile(desc, stage / DESCRIPTION)
+def _seed(stage: Path, root: Path, inp: Path) -> list[Path]:
+    """Copy into stage the files of root that the steps read. Returns their
+    paths relative to root."""
+    found = [root / DESCRIPTION] if (root / DESCRIPTION).is_file() else []
     old = _history(root, inp)
     if old.is_dir():
-        shutil.copytree(old, _history(stage, inp))
+        found += sorted(old.glob("*.json"))
+    rel = [p.relative_to(root) for p in found]
+    for r in rel:
+        (stage / r).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / r, stage / r)
+    return rel
+
+
+@contextmanager
+def locked(root: Path) -> Iterator[None]:
+    """An exclusive lock (fcntl.flock) on the directory root, for one
+    regeneration. Raises RuntimeError at once if another process holds it."""
+    fd = os.open(root, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError(f"another regenerate runs in {root}") from None
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _mark(stage: Path, rel: list[Path]) -> None:
+    """Write the marker: a new file, synced, then renamed to MARKER."""
+    part = stage / (MARKER + ".part")
+    with part.open("w") as fh:
+        fh.write("".join(f"{r.as_posix()}\n" for r in rel))
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(part, stage / MARKER)
+
+
+def _move(stage: Path, root: Path) -> list[Path]:
+    """Move the files that the marker of stage lists, and that are still in
+    stage, to the same paths in root; then delete stage. Returns the final
+    paths of all the files that the marker lists."""
+    rel = [Path(x) for x in (stage / MARKER).read_text().splitlines()]
+    log.info(f"regenerate: move {len(rel)} files into {root}")
+    for r in rel:
+        if (stage / r).is_file():
+            (root / r).parent.mkdir(parents=True, exist_ok=True)
+            os.replace(stage / r, root / r)
+    shutil.rmtree(stage)
+    return [root / r for r in rel]
+
+
+def _finish(root: Path) -> list[Path]:
+    """finish, with the lock held."""
+    moved: list[Path] = []
+    for stage in sorted(root.glob(STAGE_PREFIX + "*")):
+        if not stage.is_dir():
+            continue
+        if (stage / MARKER).is_file():
+            log.info(f"regenerate: finish the moves of {stage.name}")
+            moved += _move(stage, root)
+        else:
+            log.info(f"regenerate: delete {stage.name}, a run without its moves")
+            shutil.rmtree(stage)
+    return moved
+
+
+def finish(root: Path) -> list[Path]:
+    """Finish the moves of a run in root that stopped during its moves (a new
+    directory with the marker), and delete each new directory without the
+    marker (a run that stopped before its moves). Returns the final paths of
+    the files that the finished runs move. Raises RuntimeError if a
+    regeneration runs in root."""
+    with locked(root):
+        return _finish(root)
 
 
 def _relocate(stage: Path, root: Path) -> None:
@@ -127,30 +221,35 @@ def regenerate(
 ) -> Regenerated:
     """Run the four steps on the input labels inp with the diff edits into a
     new directory in root, then move their files over the old files in root
-    (the module's docstring). If a step fails, the new directory is deleted,
-    the old outputs are unchanged, and the error is raised. Raises ValueError
-    before the move if an output would replace inp or edits."""
+    (the module's docstring). First finishes a stopped run (finish). If a
+    step fails, the new directory is deleted, the old outputs are unchanged,
+    and the error is raised. Raises ValueError before the move if an output
+    would replace inp or edits, and RuntimeError if another regeneration
+    runs in root."""
     root.mkdir(parents=True, exist_ok=True)
     keep = {inp.resolve()} | (set() if edits is None else {edits.resolve()})
-    stage = Path(tempfile.mkdtemp(prefix=STAGE_PREFIX, dir=root))
-    try:
-        _seed(stage, root, inp)
-        table = _steps(inp, edits, stage, block, device, workers)
-        _relocate(stage, root)
-        rel = sorted(p.relative_to(stage) for p in stage.rglob("*") if p.is_file())
-        clash = [r for r in rel if (root / r).resolve() in keep]
-        if clash:
-            raise ValueError(f"an output would replace an input: {clash[0]}")
-    except BaseException:
-        shutil.rmtree(stage, ignore_errors=True)
-        raise
-    log.info(f"regenerate: move {len(rel)} files into {root}")
-    for r in rel:
-        (root / r).parent.mkdir(parents=True, exist_ok=True)
-        os.replace(stage / r, root / r)
-    shutil.rmtree(stage)
+    with locked(root):
+        _finish(root)
+        stage = Path(tempfile.mkdtemp(prefix=STAGE_PREFIX, dir=root))
+        try:
+            seeded = _seed(stage, root, inp)
+            table = _steps(inp, edits, stage, block, device, workers)
+            _relocate(stage, root)
+            rel = sorted(
+                r
+                for r in (p.relative_to(stage) for p in stage.rglob("*") if p.is_file())
+                if not (r in seeded and filecmp.cmp(stage / r, root / r, shallow=False))
+            )
+            clash = [r for r in rel if (root / r).resolve() in keep]
+            if clash:
+                raise ValueError(f"an output would replace an input: {clash[0]}")
+            _mark(stage, rel)
+        except BaseException:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+        written = _move(stage, root)
     final = root / table.relative_to(stage)
-    return Regenerated([root / r for r in rel], overrides(final))
+    return Regenerated(written, overrides(final))
 
 
 def override_line(row: dict[str, Any]) -> str:

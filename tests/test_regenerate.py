@@ -227,3 +227,150 @@ def test_the_command_with_edits_gives_the_files_of_the_four_commands(
     lines = [x for x in out.splitlines() if x.startswith("override: ")]
     assert len(lines) == 1 and " at voxel 27," in lines[0] and ",23 " in lines[0]
     assert "overrides: 1" in out
+
+
+# ------------------------------------------- a stopped move, the kept fix diffs
+
+
+#: the name of a kept run of another fix diff
+OTHER = "0" * 64
+
+#: the move into the root that fails in the stopped run (1 = the first)
+STOP_AT = 8
+
+
+def _stat(p: Path) -> tuple[int, int]:
+    """The inode and the modification time of a file."""
+    s = p.stat()
+    return s.st_ino, s.st_mtime_ns
+
+
+@pytest.fixture(scope="module")
+def second(
+    runs: dict[str, Path], tmp_path_factory: pytest.TempPathFactory
+) -> dict[str, Any]:
+    """Two copies of the root of the first input's run: the second input
+    regenerated into one (ref), and into the other with the STOP_AT-th move
+    into the root failing (stopped). With the stats and bytes of the files
+    before the runs."""
+    import os
+    import shutil
+
+    d = tmp_path_factory.mktemp("second")
+    inp = sphere(d / "in" / NAME, wm_radius=7.0)
+    ref, stopped = d / "ref", d / "stopped"
+    shutil.copytree(runs["regen"], ref)
+    shutil.copytree(runs["regen"], stopped)
+    # a kept run of another fix diff (the sphere has no fixes, so both inputs
+    # give the same, empty diff): a copy of the kept run under another name
+    for root in (ref, stopped):
+        hist = root / "sub-T01/ses-S1" / white_dseg.HISTORY
+        for p in sorted(hist.iterdir()):
+            shutil.copyfile(p, hist / (OTHER + p.suffix))
+    before = files(stopped)
+    stats = {str(p.relative_to(ref)): _stat(p) for p in ref.rglob("*") if p.is_file()}
+    regenerate.regenerate(inp, None, ref, block=8)
+
+    real = os.replace
+    moves = [0]
+
+    def replace(src: Any, dst: Any) -> None:
+        # count only the moves into the root (not the steps' renames in the
+        # new directory or in a temporary directory)
+        if str(dst).startswith(str(stopped)) and regenerate.STAGE_PREFIX not in str(
+            dst
+        ):
+            moves[0] += 1
+            if moves[0] == STOP_AT:
+                raise KeyboardInterrupt("stopped between two moves")
+        real(src, dst)
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(os, "replace", replace)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            regenerate.regenerate(inp, None, stopped, block=8)
+    finally:
+        mp.undo()
+    return dict(ref=ref, stopped=stopped, before=before, stats=stats)
+
+
+def test_a_stop_between_two_moves_leaves_old_and_new_files_mixed(
+    second: dict[str, Any],
+) -> None:
+    # the window that the swap cannot close: some outputs are new, others old
+    now, ref, before = files(second["stopped"]), files(second["ref"]), second["before"]
+    # (the images, surfaces and tables: the sidecars hold their root and time)
+    data = [n for n in before if not n.endswith(".json")]
+    new = [n for n in data if now.get(n) == ref.get(n) != before[n]]
+    old = [n for n in data if now.get(n) == before[n] != ref.get(n)]
+    assert new and old
+
+
+def test_finish_completes_a_stopped_swap(second: dict[str, Any]) -> None:
+    stopped = second["stopped"]
+    assert len(list(stopped.glob(regenerate.STAGE_PREFIX + "*"))) == 1
+    regenerate.finish(stopped)
+    assert_same(stopped, second["ref"])
+    assert not list(stopped.glob(regenerate.STAGE_PREFIX + "*"))
+
+
+def test_a_run_does_not_rewrite_the_files_that_it_only_reads(
+    second: dict[str, Any],
+) -> None:
+    # the kept run of another fix diff and dataset_description.json are read,
+    # not written: they are the same files after the second run
+    ref, stats = second["ref"], second["stats"]
+    kept = [n for n in stats if OTHER in n] + [regenerate.DESCRIPTION]
+    assert len(kept) == 4
+    for n in kept:
+        assert _stat(ref / n) == stats[n], n
+
+
+def _stage(root: Path, done: bool) -> Path:
+    """A new directory in root with one file, a/x.txt; with the marker of a
+    finished run if done."""
+    stage = root / (regenerate.STAGE_PREFIX + "test")
+    (stage / "a").mkdir(parents=True)
+    (stage / "a" / "x.txt").write_text("new\n")
+    if done:
+        (stage / regenerate.MARKER).write_text("a/x.txt\n")
+    return stage
+
+
+def test_finish_moves_the_files_of_a_finished_run(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "x.txt").write_text("old\n")
+    _stage(tmp_path, done=True)
+    assert regenerate.finish(tmp_path) == [tmp_path / "a" / "x.txt"]
+    assert (tmp_path / "a" / "x.txt").read_text() == "new\n"
+    assert sorted(files(tmp_path)) == ["a/x.txt"]
+
+
+def test_finish_deletes_an_unfinished_run(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "x.txt").write_text("old\n")
+    _stage(tmp_path, done=False)
+    assert regenerate.finish(tmp_path) == []
+    assert sorted(files(tmp_path)) == ["a/x.txt"]
+    assert (tmp_path / "a" / "x.txt").read_text() == "old\n"
+
+
+def test_a_run_first_finishes_a_stopped_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stage(tmp_path, done=True)
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("step 1 fails")
+
+    monkeypatch.setattr(regenerate, "_steps", fail)
+    with pytest.raises(RuntimeError, match="step 1 fails"):
+        regenerate.regenerate(tmp_path / NAME, None, tmp_path, block=8)
+    assert sorted(files(tmp_path)) == ["a/x.txt"]
+
+
+def test_a_second_command_in_the_same_root_stops(tmp_path: Path) -> None:
+    with regenerate.locked(tmp_path):
+        with pytest.raises(RuntimeError, match="another regenerate"):
+            regenerate.regenerate(tmp_path / NAME, None, tmp_path, block=8)
