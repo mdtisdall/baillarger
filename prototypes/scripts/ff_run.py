@@ -14,7 +14,9 @@ Usage:
         --out OUT_DIR --truth TRUTH_DIR --features FEATURES_JSON
         [--site V1V2_banks] [--seed 0] [--shape X,Y,Z] [--profile-dtype float32]
         [--tau-prior] [--origin {top,anchor}] [--anchor-node ID]
-        [--set name=value ...] [--quiet]
+        [--start {root,start}] [--set name=value ...] [--quiet]
+    python ff_run.py remeasure RUN_DIR --truth TRUTH_DIR --features FEATURES_JSON
+        [--site SITE] [--start {root,start}]
 
 TRUTH_DIR holds TRUTH_DIR/<phantom>/truth.npz, as `ff_truth.py` writes it (a path to one
 truth.npz also works). `--shape` builds a box that is not the plan's; the truth must
@@ -192,6 +194,7 @@ MAX_PNG_BYTES = 900_000  # below the 1 MB of the plan
 DPIS = (110, 80, 60, 45)
 
 LogFn = Callable[[str], None]
+COLUMNS_FROM = ("root", "start")
 
 
 # ---------------------------------------------------------------- inputs and grid
@@ -484,6 +487,11 @@ def measure_stops(
     sd = np.full(len(cols.end), np.nan)
     if stopped.any():
         sd[stopped] = geo.stop_sdf(geo.to_local(cols.stops[stopped]))
+    to_true = np.full(len(sd), np.nan)
+    if stopped.any():
+        to_true[stopped] = (
+            np.linalg.norm(cols.stops[stopped] - truth.stops[stopped], axis=1) * H
+        )
     by_kind = {
         k.name: stats(np.abs(sd[truth.stop_kind == int(k)]))
         for k in T.StopKind
@@ -494,9 +502,11 @@ def measure_stops(
         n_stopped=int(stopped.sum()),
         abs_mm=stats(np.abs(sd)),
         signed_mm=stats(sd),
+        to_true_stop_mm=stats(to_true),
         by_kind=by_kind,
         end_reasons=dict(info["ends"]),
         _array=sd,
+        _array_to_true=to_true,
     )
 
 
@@ -1153,6 +1163,7 @@ def measure_all(
     report = FC.topology(field, cols, info, geo, settings)
     jumps = measure_jumps(cols, truth)
     sd = stops.pop("_array")
+    to_true = stops.pop("_array_to_true")
     emax, emean, eend = paths.pop("_arrays")
     ratio = spacing.pop("_array")
     conditions = dict(noise_zero=bool(phantom.noise == 0.0), oracle=source == "oracle")
@@ -1181,6 +1192,7 @@ def measure_all(
         arrays=dict(
             stop_signed_mm=sd,
             stop_abs_mm=np.abs(sd),
+            stop_to_true_stop_mm=to_true,
             path_max_mm=emax,
             path_mean_mm=emean,
             path_end_mm=eend,
@@ -1190,6 +1202,54 @@ def measure_all(
         ),
     )
     return measures, internals
+
+
+def _measure_write(
+    phantom: T.Phantom,
+    truth: T.Truth,
+    field: T.Field,
+    extras: Mapping[str, Any],
+    out_dir: Path,
+    rec: T.RunRecord,
+    *,
+    source: T.InputSource,
+    settings: T.SolverSettings,
+    columns_from: str,
+) -> tuple[float, float]:
+    """The part of a run that follows the solve: integrate the columns, measure, write
+    columns.npz and column_errors.npz, and set the measures and the views in `rec`
+    (`run` and `remeasure` both call it). columns_from: "root" starts each column at
+    its root on the white surface (the plan's *The integrator*); "start" at the
+    truth's start point behind it. Returns (integrate_s, measure_s)."""
+    geo = phantom.geometry
+    assert geo is not None
+    if columns_from not in COLUMNS_FROM:
+        raise ValueError(f"columns_from must be one of {COLUMNS_FROM}")
+    X0 = truth.roots if columns_from == "root" else truth.starts
+    t0 = time.perf_counter()
+    cols, info = FI.integrate(
+        field, X0, truth.roots, settings,
+        levels=(np.asarray(LEVEL_PHI) - 1.0) * phantom.tau_scale,
+    )  # fmt: skip
+    t_integrate = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    measures, internals = measure_all(
+        phantom, field, extras, cols, info, truth, settings, source=source
+    )
+    t_measure = time.perf_counter() - t0
+    cols.to_npz(out_dir / "columns.npz")
+    np.savez_compressed(out_dir / "column_errors.npz", **internals["arrays"])
+    rec.measures.update(measures)
+    rec.measures["columns_from"] = columns_from
+    pd, g, lev = internals["pd"], internals["g"], internals["lev"]
+    views: list[tuple[str, Callable[[Path], int]]] = [
+        ("section.png", lambda p: view_section(p, phantom, field, cols, truth, geo)),
+        ("levels.png", lambda p: view_levels(p, pd, g, lev, phantom.name)),
+        ("errors.png", lambda p: view_errors(p, internals["arrays"], phantom.name)),
+        ("free_energy.png", lambda p: view_free_energy(p, rec, phantom.name)),
+    ]  # fmt: skip
+    rec.measures["views"] = {name: fn(out_dir / name) for name, fn in views}
+    return t_integrate, t_measure
 
 
 def run(
@@ -1212,6 +1272,7 @@ def run(
     log_fn: LogFn | None = None,
     recentre_at_edge: bool = False,
     recentre_every_sweep: bool = False,
+    columns_from: str = "root",
 ) -> T.RunRecord:
     """One run into `out_dir` (the module docstring). Returns the record that it
     wrote. init, origin, anchor_node, recentre_at_edge and recentre_every_sweep go to
@@ -1247,20 +1308,7 @@ def run(
         recentre_every_sweep=recentre_every_sweep,
     )  # fmt: skip
     t_solve = time.perf_counter() - t0
-    t0 = time.perf_counter()
-    cols, info = FI.integrate(
-        field, truth.starts, truth.roots, settings,
-        levels=(np.asarray(LEVEL_PHI) - 1.0) * phantom.tau_scale,
-    )  # fmt: skip
-    t_integrate = time.perf_counter() - t0
-    t0 = time.perf_counter()
-    measures, internals = measure_all(
-        phantom, field, extras, cols, info, truth, settings, source=source
-    )
-    t_measure = time.perf_counter() - t0
     field.to_npz(out_dir / "field.npz", extras)
-    cols.to_npz(out_dir / "columns.npz")
-    np.savez_compressed(out_dir / "column_errors.npz", **internals["arrays"])
     rec = T.RunRecord(
         phantom=phantom.record(),
         source=source,
@@ -1274,7 +1322,7 @@ def run(
         free_energy_rises=log["free_energy_rises"],
         pruning=log["pruning"],
         defects=list(log["defects"]),
-        measures=measures,
+        measures={},
     )
     rec.measures["inference"] = dict(
         sweeps_per_width=rec.sweeps,
@@ -1296,15 +1344,10 @@ def run(
         **inputs.record(),
         **(inputs.stop.record() if hasattr(inputs.stop, "record") else {}),
     }
-    pd, g, lev = internals["pd"], internals["g"], internals["lev"]
-    views: list[tuple[str, Callable[[Path], int]]] = [
-        ("section.png", lambda p: view_section(p, phantom, field, cols, truth, geo)),
-        ("levels.png", lambda p: view_levels(p, pd, g, lev, phantom.name)),
-        ("errors.png", lambda p: view_errors(p, internals["arrays"], phantom.name)),
-        ("free_energy.png", lambda p: view_free_energy(p, rec, phantom.name)),
-    ]  # fmt: skip
-    sizes: dict[str, int] = {name: fn(out_dir / name) for name, fn in views}
-    rec.measures["views"] = sizes
+    t_integrate, t_measure = _measure_write(
+        phantom, truth, field, extras, out_dir, rec,
+        source=source, settings=settings, columns_from=columns_from,
+    )  # fmt: skip
     rec.time_s = time.perf_counter() - t_start
     rec.peak_mem_bytes = _peak_rss_bytes()
     rec.measures["cost"] = dict(
@@ -1321,6 +1364,131 @@ def run(
     return rec
 
 
+# ---------------------------------------------------------------- remeasure
+
+_FIELD_KEYS = frozenset(
+    "tau direction q q_stop n_kept tau_mean direction_mean tau_map nodes".split()
+)
+
+
+def settings_from_record(rec: Mapping[str, Any]) -> T.SolverSettings:
+    """The SolverSettings of a run.json `settings` entry (lists become tuples)."""
+    kw: dict[str, Any] = {}
+    for f in dataclasses.fields(T.SolverSettings):
+        if f.name in rec:
+            v = rec[f.name]
+            kw[f.name] = (
+                tuple(v) if isinstance(getattr(T.DEFAULTS, f.name), tuple) else v
+            )
+    return dataclasses.replace(T.DEFAULTS, **kw)
+
+
+def load_field(path: Path, grid: T.Grid) -> tuple[T.Field, dict[str, Any]]:
+    """The Field and the extras of a field.npz, on the grid rebuilt from the run's
+    grid spec. The nodes and the grid arrays in the file must equal the grid's."""
+    z = np.load(path, allow_pickle=False)
+    if z["nodes"].shape != grid.nodes.shape or not np.array_equal(
+        z["nodes"], grid.nodes
+    ):
+        raise ValueError("the nodes in field.npz differ from the rebuilt grid")
+    for k, v in grid.arrays().items():
+        if k in z.files and not np.array_equal(z[k], v):
+            raise ValueError(f"{k} in field.npz differs from the rebuilt grid")
+    field = T.Field(
+        grid=grid,
+        tau=z["tau"],
+        direction=z["direction"],
+        q=z["q"],
+        q_stop=z["q_stop"],
+        n_kept=z["n_kept"],
+    )
+    extras = {
+        k: z[k] for k in z.files if k not in _FIELD_KEYS and not k.startswith("grid_")
+    }
+    return field, extras
+
+
+def remeasure(
+    run_dir: Path,
+    truth_arg: Path,
+    features: Path,
+    *,
+    site: str | None = None,
+    columns_from: str = "root",
+) -> T.RunRecord:
+    """Integrate again and repeat the measures and the views of an existing run, with no
+    new solve. It reads `run_dir`/run.json and field.npz. It rebuilds the phantom (name,
+    noise, seed and shape from run.json; `site` defaults to the run's) and the grid
+    (from the run's grid spec). It replaces columns.npz, column_errors.npz, the views
+    and the measures that depend on the columns and on the field. It keeps the solve's
+    record: the free energy, sweeps, pruning, defects, settings, versions, time_s,
+    peak_mem_bytes and the measures `inference`, `origin`, `inputs` and `cost` (it adds
+    `cost["remeasure"]`). It sets measures["remeasured"] = True and, in `versions`,
+    remeasured = "true", remeasure_git_commit, remeasure_git_dirty and the hashes of
+    the truth and the features that it used (remeasure_truth_sha256,
+    remeasure_features_sha256). run.json is written again in place."""
+    t_start = time.perf_counter()
+    rec = T.RunRecord.from_json(run_dir / "run.json")
+    ph = rec.phantom
+    name = str(ph["name"])
+    feats = FP.features(site or str(ph["site"]), str(features))  # type: ignore[no-untyped-call]
+    phantom = FTR.build_phantom(
+        name,
+        feats,
+        site=site or str(ph["site"]),
+        noise=float(ph["noise"]),
+        seed=int(ph["seed"]),
+        shape=tuple(int(v) for v in ph["shape"]),  # type: ignore[arg-type]
+    )
+    geo = phantom.geometry
+    if geo is None:
+        raise ValueError(f"phantom {name!r} has no geometry, so no truth")
+    tpath = _truth_path(truth_arg, name)
+    truth = T.Truth.from_npz(tpath)
+    if truth.phantom != name or truth.n == 0:
+        raise ValueError("the truth does not belong to this run's phantom")
+    if not np.abs(geo.phi(geo.to_local(truth.roots))).max() < 1e-6:
+        raise ValueError("the truth's roots are not on phi = 0 of this phantom")
+    grid = make_grid(str(rec.grid["spec"]), phantom.shape)
+    field, extras = load_field(run_dir / "field.npz", grid)
+    settings = settings_from_record(rec.settings)
+    t_integrate, t_measure = _measure_write(
+        phantom, truth, field, extras, run_dir, rec,
+        source=rec.source, settings=settings, columns_from=columns_from,
+    )  # fmt: skip
+    rec.measures["remeasured"] = True
+    dirty = _git("status", "--porcelain", "--untracked-files=no")
+    rec.versions.update(
+        remeasured="true",
+        remeasure_git_commit=_git("rev-parse", "HEAD") or "unknown",
+        remeasure_git_dirty="unknown" if dirty is None else str(bool(dirty)).lower(),
+        remeasure_truth_sha256=_sha256(tpath),
+        remeasure_features_sha256=_sha256(features),
+    )
+    rec.measures.setdefault("cost", {})["remeasure"] = dict(
+        time_s=time.perf_counter() - t_start,
+        integrate_s=t_integrate,
+        measure_s=t_measure,
+        peak_mem_bytes=_peak_rss_bytes(),
+    )
+    rec.to_json(run_dir / "run.json")
+    return rec
+
+
+def remeasure_main(argv: Sequence[str]) -> T.RunRecord:
+    ap = argparse.ArgumentParser(
+        prog="ff_run.py remeasure",
+        description="integrate, measure and draw an existing run again, with no solve",
+    )
+    ap.add_argument("run_dir", type=Path)
+    ap.add_argument("--truth", type=Path, required=True)
+    ap.add_argument("--features", type=Path, required=True)
+    ap.add_argument("--site", default=None, help="default: the run's site")
+    ap.add_argument("--start", choices=COLUMNS_FROM, default="root")
+    a = ap.parse_args(argv)
+    return remeasure(a.run_dir, a.truth, a.features, site=a.site, columns_from=a.start)
+
+
 # ---------------------------------------------------------------- the CLI
 
 
@@ -1329,6 +1497,9 @@ def _truth_path(arg: Path, name: str) -> Path:
 
 
 def main(argv: Sequence[str] | None = None) -> T.RunRecord:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "remeasure":
+        return remeasure_main(args[1:])
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     ap.add_argument("phantom", choices=[n for n in FTR.PHANTOMS if n != "noise"])
     ap.add_argument("--source", choices=("oracle", "image"), required=True)
@@ -1361,8 +1532,14 @@ def main(argv: Sequence[str] | None = None) -> T.RunRecord:
         action="store_true",
         help="the provisional change for R11 of ff_meanfield.solve (default off)",
     )
+    ap.add_argument(
+        "--start",
+        choices=COLUMNS_FROM,
+        default="root",
+        help="where the columns start: the root (default) or the truth's start point",
+    )
     ap.add_argument("--quiet", action="store_true")
-    a = ap.parse_args(argv)
+    a = ap.parse_args(args)
 
     settings, changed = parse_settings(a.sets)
     shape = tuple(int(s) for s in a.shape.split(",")) if a.shape else None
@@ -1408,7 +1585,7 @@ def main(argv: Sequence[str] | None = None) -> T.RunRecord:
         source=a.source, grid_spec=a.grid, settings=settings, changed_settings=changed,
         tau_prior=a.tau_prior, profile_dtype=np.dtype(a.profile_dtype).type,
         origin=a.origin, anchor_node=a.anchor_node, versions=versions, log_fn=log_fn,
-        recentre_at_edge=a.recentre_at_edge,
+        recentre_at_edge=a.recentre_at_edge, columns_from=a.start,
         recentre_every_sweep=a.recentre_every_sweep,
     )  # fmt: skip
     if not a.quiet:
