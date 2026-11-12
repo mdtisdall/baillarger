@@ -80,6 +80,7 @@ testpaths = [
   "prototypes/scripts/test_ff_meanfield.py",
   "prototypes/scripts/test_ff_octree.py",
   "prototypes/scripts/test_ff_octree_fem.py",
+  "prototypes/scripts/test_ff_octree_r9.py",
   "prototypes/scripts/test_ff_run.py",
   "prototypes/scripts/test_ff_terms.py",
   "prototypes/scripts/test_ff_simple.py",
