@@ -40,6 +40,8 @@ Table 1. The PR 4 matrix and the state of each run (0.32 mm stand-in stage).
 - The solver uses the plan's schedule: widths 4, 2, 1, at most 200 sweeps for each width.
   No setting was changed. The re-centring option of CD-13 is off. The contrast term uses
   one profile line per direction (CD-7).
+- The columns start at the roots (the plan's rule). The stand-ins were re-measured from
+  their saved fields after PR 3's fix 88bc488. No new solve was made.
 - The views and numbers come from `prototypes/scripts/ff_kiss_views.py`.
 
 Table 2. Cost and inference (0.32 mm stand-in). Each run has 156,065 nodes.
@@ -69,12 +71,12 @@ the true stop.
 
 | run | bank | abs stop error (mm) | signed stop error (mm) | stopped / ended at an unresolved cell | own side of the slot plane |
 |---|---|---|---|---|---|
-| ckiss_smooth top | A | 0.272 / 0.431 / 0.552 | −0.272 / −0.133 / 0.077 | 445 / 25 | 1.000 |
-| ckiss_smooth top | B | 0.170 / 0.292 / 0.478 | −0.170 / −0.061 / 0.118 | 576 / 47 | 0.998 |
-| ckiss_sharp top | A | 0.290 / 0.459 / 0.584 | −0.290 / −0.142 / 0.179 | 548 / 22 | 1.000 |
-| ckiss_sharp top | B | 0.178 / 0.325 / 0.510 | −0.178 / −0.051 / 0.170 | 630 / 19 | 0.998 |
-| ckiss_smooth shiftB | A | 0.292 / 0.437 / 0.552 | −0.292 / −0.169 / 0.030 | 429 / 41 | 1.000 |
-| ckiss_smooth shiftB | B | 0.121 / 0.214 / 0.390 | −0.121 / −0.029 / 0.075 | 563 / 60 | 0.991 |
+| ckiss_smooth top | A | 0.272 / 0.431 / 0.553 | −0.272 / −0.133 / 0.074 | 445 / 25 | 1.000 |
+| ckiss_smooth top | B | 0.170 / 0.293 / 0.483 | −0.170 / −0.060 / 0.121 | 577 / 46 | 0.998 |
+| ckiss_sharp top | A | 0.290 / 0.459 / 0.588 | −0.290 / −0.142 / 0.165 | 548 / 22 | 1.000 |
+| ckiss_sharp top | B | 0.181 / 0.325 / 0.505 | −0.181 / −0.065 / 0.029 | 629 / 20 | 0.998 |
+| ckiss_smooth shiftB | A | 0.292 / 0.437 / 0.552 | −0.292 / −0.169 / 0.028 | 429 / 41 | 1.000 |
+| ckiss_smooth shiftB | B | 0.123 / 0.215 / 0.391 | −0.123 / −0.030 / 0.075 | 561 / 62 | 0.991 |
 
 - The CONTACT stops are early. The median error is 0.12–0.29 mm. Bank A has the larger
   error. At the open pia (PIA) the median error is 0.08–0.09 mm.
@@ -98,9 +100,9 @@ stand-in.
 
 | run | open part | window | fused part | unresolved cells: window / elsewhere | moving cortex nodes: window / elsewhere |
 |---|---|---|---|---|---|
-| ckiss_smooth top | 0.078 / 0.161 / 0.240 | 0.114 / 0.238 / 0.425 | 0.238 / 0.428 / 0.584 | 139 / 135 | 6056 / 19334 |
-| ckiss_sharp top | 0.079 / 0.160 / 0.240 | 0.100 / 0.307 / 0.577 | 0.253 / 0.434 / 0.584 | 9 / 156 | 1165 / 24027 |
-| ckiss_smooth shiftB | 0.082 / 0.164 / 0.392 | 0.093 / 0.198 / 0.359 | 0.208 / 0.405 / 0.552 | 154 / 170 | 6105 / 19436 |
+| ckiss_smooth top | 0.078 / 0.161 / 0.240 | 0.115 / 0.238 / 0.425 | 0.236 / 0.428 / 0.602 | 139 / 135 | 6056 / 19334 |
+| ckiss_sharp top | 0.079 / 0.161 / 0.240 | 0.079 / 0.169 / 0.331 | 0.252 / 0.432 / 0.602 | 9 / 156 | 1165 / 24027 |
+| ckiss_smooth shiftB | 0.082 / 0.165 / 0.391 | 0.094 / 0.194 / 0.358 | 0.207 / 0.403 / 0.552 | 154 / 170 | 6105 / 19436 |
 
 - The stop error is small in the open part and larger in the fused part. In the fused
   part the error increases with z (figure).
@@ -148,18 +150,20 @@ max).
 
 | run | bank | solved speed | true speed | solved / true | τ arrival at CONTACT (true 0) |
 |---|---|---|---|---|---|
-| ckiss_smooth top | A | 1.04 / 1.09 / 1.80 | 1.35 (all nodes) | 0.771 / 0.839 / 1.33 | −0.561 / −0.419 / −0.131 |
-| ckiss_smooth top | B | 1.06 / 1.18 / 1.66 | 0.649 / 0.679 / 0.989 | 1.61 / 1.80 / 2.56 | −0.511 / −0.398 / −0.108 |
-| ckiss_sharp top | A | 1.04 / 1.11 / 1.86 | 1.35 (all nodes) | 0.774 / 0.854 / 5.00 | −0.572 / −0.434 / −0.021 |
-| ckiss_sharp top | B | 1.07 / 1.19 / 1.77 | 0.649 / 0.680 / 0.989 | 1.62 / 1.83 / 8.76 | −0.523 / −0.401 / −0.080 |
+| ckiss_smooth top | A | 1.04 / 1.09 / 1.80 | 1.35 (all nodes) | 0.771 / 0.839 / 1.33 | −0.559 / −0.418 / −0.128 |
+| ckiss_smooth top | B | 1.06 / 1.18 / 1.66 | 0.649 / 0.679 / 0.989 | 1.61 / 1.80 / 2.56 | −0.511 / −0.396 / −0.105 |
+| ckiss_sharp top | A | 1.04 / 1.11 / 1.86 | 1.35 (all nodes) | 0.774 / 0.854 / 5.00 | −0.573 / −0.435 / −0.021 |
+| ckiss_sharp top | B | 1.07 / 1.19 / 1.77 | 0.649 / 0.680 / 0.989 | 1.62 / 1.83 / 8.76 | −0.526 / −0.414 / −0.008 |
 
 - The solved speed is about 1.05 in both banks. The solved bank ratio A/B is 0.98 (run.json:
   0.983 smooth, 0.975 sharp), against 2.08.
 - One possible cause is the speed prior: log v near 0, SD 0.3. log 2.08 = 0.73, about
   2.4 SD. The prior was not changed.
 - The levels: in bank A the median signed deviation is near 0 at φ = 0.1–0.3 and 0.06–0.46
-  mm at φ = 0.4–0.9. In bank B the levels are deep: −1.2 mm at φ = 0.1, −0.87 mm at
-  φ = 0.3, −0.08 to −0.30 mm at φ = 0.4–0.9. Both runs give these values.
+  mm at φ = 0.4–0.9. In bank B the levels are deep: −0.24 to −0.31 mm at φ = 0.2–0.5 and
+  −0.08 to −0.18 mm at φ = 0.6–0.9. No bank-B column has a level at φ = 0.1. Both runs
+  give these values. The abs level deviation in bank B is 0.19 / 0.32–0.33 / 0.60–0.69 mm
+  (median / p90 / max).
 
 **At 0.16 mm.** Look for the same speed ratio. A ratio near 1 at 0.16 mm also points at
 the speed prior, not at the grid.
@@ -215,10 +219,10 @@ Evidence for every row: 0.32 mm stand-in only; 0.16 mm pending. R8–R10 are not
 | # | supports | does not support | failure signature (plan) seen |
 |---|---|---|---|
 | R1 stop as a node state | stops on the own side of the slot plane (≥ 0.991); no cortex node stopped at the open slot | CONTACT stops early by 0.12–0.29 mm (median); PIA 0.08–0.09 mm | not decided: the stop error and the sheet are at the scale of the spacing; no image run |
-| R2 speed to zero at the stop, τ jumps to τ_top | — | the integrator's jump −τ_arrival is positive at 2669 of 2670 stops (smooth; median 0.32), 2992 of 2992 (sharp), also at the pia | seen, with a caveat: τ at the q_stop = 0.5 crossing comes from the last moving nodes, up to one spacing below the stop (masked interpolation). It can measure the integrator, not the solver's jump state. A likely cause is that of CD-12. The provisional change for R2 (#208) failed again; its diagnosis agrees: the column jump is −τ_arrival from the masked interpolation, and the stop boundary sits beyond the pia because of the entropy of the moving candidates |
+| R2 speed to zero at the stop, τ jumps to τ_top | — | the integrator's jump −τ_arrival is positive at all stops: 2672 of 2672 (smooth; median 0.33), 2994 of 2994 (sharp), 2581 of 2581 (shiftB), also at the pia | seen, with a caveat: τ at the q_stop = 0.5 crossing comes from the last moving nodes, up to one spacing below the stop (masked interpolation). It can measure the integrator, not the solver's jump state. A likely cause is that of CD-12. The provisional change for R2 (#208) failed again; its diagnosis agrees: the column jump is −τ_arrival from the masked interpolation, and the stop boundary sits beyond the pia because of the entropy of the moving candidates |
 | R3 jump prior near zero | — | as R2 | seen, with the caveat of R2 |
 | R4 τ_top = 0 as origin | — | — | not decided: Q6 pending |
-| R5 no overlap | overlap 0; contact crossings 0 on the true paths | contact crossings 1, 1, 3, all bank B. Each crossing column starts in bank B's WM far from the fundus (local y 4.2–6.4 mm): not a start effect. Each ends STOPPED 0.000–0.010 mm past the far face of the fused slot (g = 0.02 mm), so it overshoots the contact by less than 1/16 voxel and does not run on into bank A | seen (count above zero), small |
+| R5 no overlap | overlap 0; contact crossings 0 on the true paths | contact crossings 1, 1, 3, all bank B. Each crossing column starts at its root in bank B, far from the fundus (local y 4.2–6.4 mm): not a start effect. Four of the five end STOPPED 0.000–0.010 mm past the far face of the fused slot (g = 0.02 mm): they overshoot the contact by less than 1/16 voxel. The fifth (shiftB) ends STOPPED inside the slot at local z = 0.74 mm, where g = 0.092 mm (the window of the gap's end): 0.024 mm past the slot plane, 0.068 mm before the far face. No crossing column runs on into bank A | seen (count above zero), small |
 | R6 no interpolation across the stop boundary | bank A changes less than bank B | bank A changes when only bank B changes (Table 7) | seen |
 | R7 non-crossing, sinks checked | sinks 0, sink columns 0, focal points 0, overlap 0 | reversed edges 3, 3, 13 (their places against the stop set are not checked here) | not seen for sinks, focal points and overlap at this grid |
 | R11 direction tied to ∇τ | direction against ∇τ: median 1.9–2.5° | — | not seen |
