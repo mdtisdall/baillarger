@@ -74,6 +74,21 @@ Routes (Review.get, Review.post), JSON:
   to undo.
 - GET /review/pending: the pending edits (Pending, below). {voxels: [[i, j,
   k], ...], labels: [...]}.
+- POST /review/surface-preview {strokes, since}: a job (Surface preview,
+  below) that brings the working field to the edits and gives the preview
+  of the strokes not yet submitted. {status: "running", job}, or the done
+  state: {status, job, revision, since, cells, blocks, working, radius,
+  solves, kept, seconds}. GET /review/surface-preview?job=&since=: the
+  job's state. since (default -1): the working blocks of a revision of
+  since or less are not sent again.
+- GET /review/surface-preview/mesh?job=&since=: the blocks of a done job
+  as binary (baillarger.viewer.columns.encode): the header {revision,
+  cells, blocks: [[i, j, k, nv, nf, kind], ...]} (kind 0: working, 1:
+  preview), then the float32 vertices (voxels) and the int32 faces of
+  each block, one after another.
+- GET /review/surface-preview/cut?job=&axis=&mm=: the plane cut of the
+  shown blocks (viewer.outlines.plane_cut; the same float32 segment ends,
+  world mm, as /outline).
 - POST /review/regenerate: start the regenerate command (Regenerate, below).
   GET /review/regenerate: its state. Both give {status, log, overrides,
   error, outputs_changed, cap_gb, viewer_gb, command, seconds}.
@@ -201,6 +216,44 @@ the eraser removed from the edits takes its input label. After each paint and
 undo, the page asks for them again and draws them on the slice tiles; no
 brick volume changes. A dseg with no copy of the edits refuses the route.
 
+Surface preview. With a white surface (for_white; Review(surface=)), the
+review keeps a working field in memory: the stored antialiased field
+(white_surf.field_path, read with antialias.read_field; its sources must
+include the dseg) as a blocks.PatchedSource, and the label edits that it
+holds (applied). At the first request it starts from the dseg's copy of the
+edits; the first job then brings it to the pending edits. The field's mask
+is the dseg's WM mask (white_surf filled labels) with an overlay of label
+edits: the pending edits and their corrections (as the Preview of strokes
+computes them, wm_choices.preview), less the entries equal to the dseg
+(surface_preview.WorkingMask).
+
+A job of POST /review/surface-preview does two changes
+(surface_preview.SurfacePreview.change). First it brings the working field
+to the current edits ("kept"), and keeps that. Then it copies the working
+state (the copy shares the patches; it does not copy the field) and brings
+the copy to the edits after a paint of the strokes; the preview does not
+change the working field. A change takes the voxels where the two edits
+differ, in groups (surface_preview.groups: 26-connected cells of
+2 PREVIEW_MIN_RADIUS voxels). For each group: the region round the group
+(Choices.window) gives the overlay's entries (the edits and the
+correction); antialias.local_solve solves the field again on the box of
+the voxels whose mask changes plus R (docs/preview-radius.md), with the
+voxels farther than R held; white_surf.remarch re-marches the mesh blocks
+that the solved box touches. A group with no change of the mask changes
+the overlay only. The working blocks are the re-marched blocks of the
+working field (each with the revision that made it); the preview blocks
+are those of the copy that differ. The page hides those blocks of the
+overview mesh in the 3D view (level 0) and draws the shown blocks there,
+and their plane cut on the slices, in a second colour.
+
+The jobs run in one thread (Review.sjobs, baillarger.viewer.jobs.Jobs), on
+the backend device (the GPU when there is one): the working field is in the
+viewer's memory, so it cannot go to a worker process, and the solve of a
+group is small (docs/formats/white-antialias.md). The newest request wins:
+a request for another key stops the running job at its next group
+(surface_preview.Stopped). Each group is atomic, so the state that a
+stopped job leaves is valid, and the next job continues from it.
+
 Paint only. With no queue and no log (sites and log None; the viewer's
 --edits alone), the review has the paint routes only; the hemisphere comes
 from the dseg's sidecar (wm-dseg/1).
@@ -228,6 +281,7 @@ import numpy.typing as npt
 from baillarger import blocks, label_edits, white_dseg
 from baillarger.bids import derivative_path, entities, file_sha256
 from baillarger.labels import CORTEX_LABEL, LUT_NAMES, WM_LABEL
+from baillarger.viewer import surface_preview as SP
 from baillarger.viewer.jobs import LOG_LINES, Jobs
 from baillarger.wm_edits import EditLog, read_log
 from baillarger.wm_sites import read_random_sites, read_sites
@@ -359,12 +413,14 @@ class Preview:
     """A choice's preview on the grid: the voxels the answer changes, the voxels
     the correction then changes, whether the correction overrides the answer,
     and whether a face of the preview's box has WM on it (then the preview is
-    approximate)."""
+    approximate). correction_labels: the label that the correction gives each
+    voxel of correction (None: not given; the surface preview needs them)."""
 
     answer: npt.NDArray[np.int64]
     correction: npt.NDArray[np.int64]
     overrides: bool
     cut_by_box: bool = False
+    correction_labels: npt.NDArray[np.int64] | None = None
 
 
 class Choices(Protocol):
@@ -454,6 +510,7 @@ class WmChoices:
             np.asarray(p.correction.voxels, np.int64).reshape(-1, 3) + off,
             bool(p.overrides),
             cut_by_box=bool(p.cut_by_box),
+            correction_labels=np.asarray(p.correction.labels, np.int64).ravel(),
         )
 
 
@@ -736,6 +793,8 @@ class Review:
         choices: Choices | None = None,
         inputs: Path | None = None,
         regenerate: Sequence[str] = REGENERATE,
+        surface: Path | None = None,
+        device: str | None = None,
     ) -> None:
         import nibabel as nib
 
@@ -753,6 +812,20 @@ class Review:
         }
         if sites is not None:
             self._outputs[Path(sites)] = identity(Path(sites))
+        #: the white surface and its antialiased field (module docstring,
+        #: Surface preview); the field is an output that regenerate replaces
+        self.surface = None if surface is None else Path(surface)
+        self.field_path: Path | None = None
+        if self.surface is not None:
+            from baillarger.white_surf import field_path
+
+            try:
+                self.field_path = field_path(self.surface)
+            except ValueError:  # not a BIDS name: no field, the preview refuses
+                self.field_path = None
+            if self.field_path is not None:
+                self._outputs[self.field_path] = identity(self.field_path)
+        self.device = device
         self.rows: list[dict[str, Any]] = []
         self.log_path: Path | None = None
         self._log: EditLog | None = None
@@ -807,6 +880,15 @@ class Review:
         #: and the SHA-256 of the edits that the write left
         self.undo: list[label_edits.Edits] = []
         self._undo_sha: list[str] = []
+        #: the surface previews (module docstring, Surface preview): their
+        #: jobs, the working state (made by the first job), and the number of
+        #: stops (a job stops at its next group when it changes)
+        self.sjobs: Jobs[dict[str, Any]] = Jobs(
+            log=lambda m: None, keep_in_memory=PREVIEWS_KEPT
+        )
+        self._sp: SP.SurfacePreview | None = None
+        self._sstops = 0
+        self._splock = threading.Lock()  # a surface preview request's stop and start
         #: the regenerate run (module docstring, Regenerate)
         self.regenerate_command = list(regenerate)
         self.regen = Regeneration()
@@ -1391,9 +1473,11 @@ class Review:
         regenerate run (Regeneration.stop)."""
         self.regen.stop()
         self._stop_worker(replaced=False)
-        th = self.jobs.thread
-        if th is not None:
-            th.join()
+        self._sstops += 1
+        for jobs in (self.jobs, self.sjobs):
+            th = jobs.thread
+            if th is not None:
+                th.join()
 
     def preview_key(
         self,
@@ -1593,6 +1677,245 @@ class Review:
             self.regen.start(argv, cap, viewer / GB)
         return self.regen.status()
 
+    # -------------------------------------------------------------- surface preview
+    def _surface(self) -> SP.SurfacePreview:
+        """The working state (module docstring, Surface preview), made at the
+        first call, in a job: the stored field (white_surf.read_field, its
+        SHA-256 checked: one read of the file), the surface's BlockCells and
+        the field's FilledLabels; the edits that the stored field follows are
+        the dseg's copy of the edits. Raises ValueError if the viewer has no
+        white surface or no field, or if the field is not the dseg's."""
+        if self._sp is None:
+            from baillarger import backend, white_surf
+            from baillarger.bids import read_sidecar, sidecar_path
+
+            if self.surface is None or self.field_path is None:
+                raise ValueError("no white surface: the surface preview needs --white")
+            if not self.field_path.exists():
+                raise ValueError(
+                    f"{self.field_path.name}: the white surface has no antialiased "
+                    f"field; regenerate the white surface (white_surf writes it)"
+                )
+            field, side = white_surf.read_field(self.field_path)
+            if self.dseg_sha not in side["SourcesSHA256"].values():
+                raise ValueError(
+                    f"{self.field_path.name}: the field is not the dseg's; "
+                    f"regenerate the white surface"
+                )
+            if tuple(field.shape) != self.shape:
+                raise ValueError(f"{self.field_path.name}: not on the dseg's grid")
+            surf = read_sidecar(sidecar_path(self.surface), white_surf.SURF_SPEC)
+            with self.lock:
+                start = self._dseg_edits()
+            self._sp = SP.SurfacePreview(
+                field,
+                int(surf["BlockCells"]),
+                side["FilledLabels"],
+                self.labels,
+                start,
+                backend.device(self.device),
+            )
+        return self._sp
+
+    def _surface_pending(self, edits: label_edits.Edits) -> tuple[Arr, Arr]:
+        with self.lock:
+            return self._pending(edits)
+
+    def _surface_region(
+        self, group: Arr, pv: Arr, plab: Arr
+    ) -> tuple[SP.Box, Arr, Arr]:
+        """The region of a group of changed voxels (surface_preview.Region): the
+        pending edits within Choices.half({}) voxels of the group that change
+        a dseg label are the change of the correction (as a manual-paint
+        preview: Choices.preview, with a site in the group); the region is the
+        box that the correction reads (window); its entries are the pending
+        edits in it that change a dseg label, then the labels of the
+        correction, which win. Raises ValueError if the choices give no labels
+        of a correction."""
+        lab = self.labels()
+        half = self.choices.half({})
+        near = np.all((pv >= group.min(0) - half) & (pv <= group.max(0) + half), axis=1)
+        cv, cl = pv[near], plab[near]
+        keep = cl != np.asarray(lab[tuple(cv.T)], np.int64)
+        change = Answer(cv[keep], cl[keep], {})
+        site = (int(group[0, 0]), int(group[0, 1]), int(group[0, 2]))
+        box, lo = self.window(site, {}, np.concatenate([group, change.voxels]))
+        region: SP.Box = (
+            slice(lo[0], lo[0] + box.shape[0]),
+            slice(lo[1], lo[1] + box.shape[1]),
+            slice(lo[2], lo[2] + box.shape[2]),
+        )
+        inr = SP.in_box(pv, region)
+        nv, nl = pv[inr], plab[inr]
+        if len(change.voxels):
+            p = self.choices.preview(box, lo, site, MANUAL, {}, change)
+            if len(p.correction):
+                if p.correction_labels is None:
+                    raise ValueError(
+                        "the choices give no labels of the correction: no "
+                        "surface preview"
+                    )
+                nv = np.concatenate([nv, p.correction])
+                nl = np.concatenate([nl, p.correction_labels])
+        # a voxel given twice keeps its later label (the correction's)
+        idx = np.ravel_multi_index(tuple(nv.T), self.shape) if len(nv) else nv[:, 0]
+        _, last = np.unique(idx[::-1], return_index=True)
+        pick = len(nv) - 1 - last
+        nv, nl = nv[pick], nl[pick]
+        keep = nl != np.asarray(lab[tuple(nv.T)], np.int64)
+        return region, nv[keep], nl[keep]
+
+    def surface_preview(
+        self, strokes: Sequence[dict[str, Any]], since: int = -1
+    ) -> dict[str, Any]:
+        """The surface preview of the edits and the strokes not yet submitted
+        (module docstring, Surface preview), or a job that computes it; the
+        newest request wins. since: the revision of the working blocks that
+        the page has (-1: none). Raises ValueError as a paint does for the
+        strokes (paint_voxels), and if the outputs were replaced."""
+        v = lab = None
+        if strokes:
+            v, lab = self.paint_voxels(strokes)
+        if self.surface is None:
+            raise ValueError("no white surface: the surface preview needs --white")
+        with self.lock:
+            self._check_outputs()
+            edits = self._read_edits()
+            after = edits
+            if v is not None and lab is not None:
+                after, _, _ = self._painted(edits, v, lab)
+        rev = 0 if self._sp is None else self._sp.state.revision
+        h = hashlib.sha256()
+        for a in (edits.index, edits.label, after.index, after.label):
+            h.update(np.ascontiguousarray(a).tobytes())
+            h.update(b"|")
+        h.update(str(rev).encode())
+        key = h.hexdigest()[:24]
+        with self._splock:
+            st = self.sjobs.status()
+            if st["status"] == "running" and st["key"] == key:
+                return dict(status="running", job=key)
+            if st["status"] == "running":
+                self._sstops += 1  # the running job stops at its next group
+                th = self.sjobs.thread
+                if th is not None:
+                    th.join()
+            stops = self._sstops
+            out = self.sjobs.run(
+                key,
+                "surface preview",
+                lambda log: self._surface_work(edits, after, stops),
+            )
+            if out["status"] == "error":
+                return dict(status="failed", job=key, error=out["error"])
+        return self._soutcome(key, self.sjobs.wait(key, WAIT_S), since)
+
+    def _surface_work(
+        self, edits: label_edits.Edits, after: label_edits.Edits, stops: int
+    ) -> dict[str, Any]:
+        """The job of a surface preview: the working state taken to edits (kept),
+        then a copy of it taken to after (the preview, dropped). Raises
+        Stopped when a newer request stops it."""
+        t0 = time.perf_counter()
+        sp = self._surface()
+
+        def stop() -> bool:
+            return self._sstops != stops
+
+        st = sp.state
+        kept = sp.change(st, edits, self._surface_pending, self._surface_region, stop)
+        pv = st.copy()
+        solves = sp.change(pv, after, self._surface_pending, self._surface_region, stop)
+        return dict(
+            revision=st.revision,
+            cells=sp.cells,
+            working=dict(st.blocks),
+            preview={b: m for b, m in pv.blocks.items() if m.revision > st.revision},
+            solves=[s.summary() for s in solves],
+            kept=[s.summary() for s in kept],
+            field=pv.field,
+            seconds=time.perf_counter() - t0,
+        )
+
+    def _sresult(self, key: str) -> dict[str, Any]:
+        try:
+            return self.sjobs.get(key)
+        except KeyError:
+            raise ValueError(f"no surface preview job {key}") from None
+
+    def _soutcome(self, key: str, out: dict[str, Any], since: int) -> dict[str, Any]:
+        """A surface preview job's state as the page gets it: when it is done,
+        the revision of the working blocks, the preview's block ids and the
+        working blocks that changed after since, the radius used (the largest
+        of the preview's solves; None: no solve), and each solve."""
+        if out["status"] == "error":
+            return dict(status="failed", job=key, error=out["error"])
+        if out["status"] == "running":
+            return dict(status="running", job=key)
+        if out["status"] != "done":
+            raise ValueError(f"no surface preview job {key}")
+        r = self._sresult(key)
+        radii = [s["radius"] for s in r["solves"]]
+        return dict(
+            status="done",
+            job=key,
+            revision=r["revision"],
+            since=since,
+            cells=r["cells"],
+            blocks=[list(b) for b in r["preview"]],
+            working=[list(b) for b, m in r["working"].items() if m.revision > since],
+            radius=max(radii) if radii else None,
+            solves=r["solves"],
+            kept=r["kept"],
+            seconds=r["seconds"],
+        )
+
+    def surface_job(self, key: str, since: int = -1) -> dict[str, Any]:
+        """The state of the surface preview job key (_soutcome)."""
+        return self._soutcome(key, self.sjobs.wait(key, 0), since)
+
+    def surface_mesh(self, key: str, since: int = -1) -> bytes:
+        """The meshes of a finished surface preview (viewer.columns.encode):
+        the header's blocks are rows [i, j, k, nv, nf, kind], kind 0 a working
+        block that changed after since, kind 1 a block of the preview; the
+        arrays v (float32, voxel coordinates of the grid) and f (int32, each
+        block's faces into its own vertices), block after block."""
+        from baillarger.viewer.columns import encode
+
+        r = self._sresult(key)
+        rows, arrays = SP.block_payload(
+            [(b, m, 0) for b, m in r["working"].items() if m.revision > since]
+            + [(b, m, 1) for b, m in r["preview"].items()]
+        )
+        return encode(
+            dict(revision=r["revision"], cells=r["cells"], blocks=rows), arrays
+        )
+
+    def surface_cut(self, key: str, axis: int, mm: float) -> bytes:
+        """The cut (viewer.outlines.plane_cut) of the blocks that a finished
+        surface preview shows in place of the surface's (the working blocks
+        with the preview's over them) by the plane of world axis axis at mm:
+        float32 segment ends in world mm, as /outline gives them
+        (outlines.encode)."""
+        from baillarger.viewer.outlines import Outline, encode, plane_cut
+
+        if axis not in (0, 1, 2):
+            raise ValueError(f"axis {axis} is not 0, 1 or 2")
+        r = self._sresult(key)
+        A = self.affine
+        segs = [np.zeros((0, 2, 3), np.float64)]
+        faces = 0
+        for m in SP.shown(r["working"], r["preview"]).values():
+            if not len(m.f):
+                continue
+            w = m.v.astype(np.float64) @ A[:3, :3].T + A[:3, 3]
+            if not w[:, axis].min() <= mm <= w[:, axis].max():
+                continue
+            faces += len(m.f)
+            segs.append(plane_cut(w, m.f.astype(np.int64), axis, mm))
+        seg = np.concatenate(segs).astype(np.float32)
+        return encode(Outline(seg, "preview", faces, faces))
+
     # -------------------------------------------------------------- routes
     def get(self, path: str, q: dict[str, str]) -> dict[str, Any]:
         if path == "/review/queue":
@@ -1605,7 +1928,18 @@ class Review:
             return self.pending()
         if path == "/review/regenerate":
             return self.regen.status()
+        if path == "/review/surface-preview":
+            return self.surface_job(q["job"], int(q.get("since", -1)))
         raise KeyError(path)
+
+    def get_bytes(self, path: str, q: dict[str, str]) -> bytes | None:
+        """The binary GET routes (the surface preview's mesh and cut), or None
+        for a path that is not one of them."""
+        if path == "/review/surface-preview/mesh":
+            return self.surface_mesh(q["job"], int(q.get("since", -1)))
+        if path == "/review/surface-preview/cut":
+            return self.surface_cut(q["job"], int(q["axis"]), float(q["mm"]))
+        return None
 
     def post(self, path: str, req: dict[str, Any]) -> dict[str, Any]:
         if path == "/review/session":
@@ -1646,6 +1980,10 @@ class Review:
             return self.undo_last()
         if path == "/review/regenerate":
             return self.regenerate()
+        if path == "/review/surface-preview":
+            return self.surface_preview(
+                list(req.get("strokes") or []), int(req.get("since", -1))
+            )
         raise KeyError(path)
 
 
@@ -1662,7 +2000,11 @@ def route(
         return True
 
     try:
-        out = rv.get(path, q) if method == "GET" else rv.post(path, req)
+        out: dict[str, Any] | bytes | None = None
+        if method == "GET":
+            out = rv.get_bytes(path, q)
+        if out is None:
+            out = rv.get(path, q) if method == "GET" else rv.post(path, req)
     except KeyError as exc:
         if exc.args and exc.args[0] == path:
             h.send_error(404)
@@ -1671,6 +2013,9 @@ def route(
         return True
     except Exception as exc:  # reported to the page; the server keeps serving
         _error(h, f"{type(exc).__name__}: {exc}")
+        return True
+    if isinstance(out, bytes):
+        h.send(out, "application/octet-stream")
         return True
     h.send(json.dumps(out, default=float).encode(), "application/json")
     return True
@@ -1716,7 +2061,7 @@ def for_white(
             raise ValueError("--log needs --sites")
         if a.edits is None:
             return None
-        return Review(None, None, a.edits, dseg, labels, affine, None)
+        return Review(None, None, a.edits, dseg, labels, affine, None, surface=surf)
     if a.log is None:
         raise ValueError("--sites needs --log: the log's path (there is no default)")
     if a.edits is None:
@@ -1731,6 +2076,7 @@ def for_white(
         labels,
         affine,
         lambda n, seed: read_random_sites(surf, n, seed),
+        surface=surf,
     )
 
 

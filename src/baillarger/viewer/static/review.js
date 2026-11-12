@@ -32,6 +32,16 @@
 // changes edited voxels: the fix, its voxel, the number of edited voxels) and asks for a restart of the viewer; the server
 // refuses each write into the edits until the restart. A failed run shows its error; the old outputs stay.
 //
+// Surface preview (/review/surface-preview): after each stroke in paint mode, clear, paint, site answer and undo, and at
+// the start, the pane asks the server for the white surface after the label edits and the paint strokes not yet submitted
+// (a newer request wins). The server keeps a working antialiased field: the stored field with a local solve of each change
+// of the edits written in (the radius of docs/preview-radius.md). It answers with the mesh blocks that the solves
+// re-marched: the blocks of the edits (working blocks; the pane asks only for those that changed after its revision) and
+// the blocks of the strokes (preview blocks). The 3D view shows them in place of the surface's blocks at the level "true
+// surface" (VIEWER.hide hides the surface there): working blocks blue, preview blocks green. The slices draw their cut
+// (/review/surface-preview/cut, viewer.outlines.plane_cut) in green over the surface's yellow outline. The preview is
+// approximate; regenerate is exact. Key v (or the button) shows the 3D view in place of this pane, and back.
+//
 // Timing: opening a site starts its reviewer time; submit sends the seconds from opening to submitting. A scribble's time
 // runs from its first stroke to its submit. A random site does not show that it is random until it is answered, so that
 // its kind does not change how the reviewer looks (a coordinator decision for review).
@@ -45,13 +55,15 @@ const COL = { answer: "rgba(64, 224, 255, 0.85)", correction: "rgba(255, 140, 0,
   pending: "rgba(255, 0, 255, 0.95)" };
 const STROKE_RGB = { wm: [245, 245, 245], cortex: [255, 70, 90], outside: [70, 140, 255], input: [255, 0, 255] };
 const PREVIEW_POLL_MS = 400;
+const SURF_COL = { cut: "rgba(64, 255, 128, 0.95)", working: [0.45, 0.7, 1.0], preview: [0.3, 1.0, 0.5] };
 const REGEN_POLL_MS = 1000;
 // the most preview voxels drawn on one tile; above it the tile draws the first MAX_DRAWN and says so. Measured with R.bench
 // on the laptop (Chrome, 1200 x 800): 13,189 squares in 3.3 ms, so 50,000 take about 12.5 ms, within one frame at 60 fps
 const MAX_DRAWN = 50000;
 const R = window.REVIEW = {
   api: null, on: false, meta: null, sites: [], session: null, cur: null, t0: 0, choice: null, params: {}, preview: null,
-  previewSeq: 0, regen: null, pending: null, pendingSeq: 0, labelRGBA: new Map(), brush: false, mode: "paint", cls: null, radius: 1, undoDepth: 0, strokes: [], stroke: null, s0: 0, inv: null, A: null, revealed: new Map(),
+  previewSeq: 0, sp: { on: true, off: "", seq: 0, rev: -1, job: null, cells: 0, working: new Map(), preview: new Map(), cuts: new Map(), gl: null, show3d: false },
+  regen: null, pending: null, pendingSeq: 0, labelRGBA: new Map(), brush: false, mode: "paint", cls: null, radius: 1, undoDepth: 0, strokes: [], stroke: null, s0: 0, inv: null, A: null, revealed: new Map(),
 };
 
 // ------------------------------------------------------------------ helpers
@@ -89,6 +101,9 @@ function pane() {
     <button id="rvssub" title="key x">submit (x)</button><button id="rvsclr" title="Escape">clear</button>
     <button id="rvundo" title="key u: undo the last write into the label edits (a paint or a site answer) of this viewer run">undo (u)</button><span id="rvsn"></span>
   </div>
+  <div class="pbar" id="rvsurf"><label title="the white surface after the edits and the strokes: a local solve of the antialiased field, approximate">
+    <input type="checkbox" id="rvspon" checked> surface preview</label>
+    <button id="rv3d" title="key v: the 3D view in place of this pane, and back">3D view (v)</button><span id="rvsps" style="white-space:pre-wrap"></span></div>
   <div class="pbar" id="rvregen"><button id="rvrgo" title="run the regenerate command on the label edits (about 20 min and 22 GB on the laptop)">regenerate the outputs</button>
     <span id="rvrstate" style="white-space:pre-wrap"></span></div>
   <pre id="rvrlog" style="display:none;max-height:120px;overflow-y:auto;margin:0 8px;font-size:11px;white-space:pre-wrap"></pre>
@@ -97,9 +112,10 @@ function pane() {
   <div id="rvtable" style="overflow-y:auto;flex:1;min-height:0;font-size:12px"></div>
   <div class="help" style="position:static;padding:2px 8px">keys: 1–7 choices · t thicken radius · Enter submit · s skip · n next ·
     b brush on/off · p paint/scribble · w WM · c cortex · o outside · e eraser (input label) · [ ] brush radius · x submit strokes ·
-    u undo the last write into the edits · Esc clear strokes. Row: open that site.
+    u undo the last write into the edits · Esc clear strokes · v 3D view. Row: open that site.
     Preview: <span style="color:${COL.answer}">■ the answer</span> <span style="color:${COL.correction}">■ the correction</span> ·
-    <span style="color:${COL.pending}">□</span> pending edits (not yet in the dseg), filled in their label's colour</div>`;
+    <span style="color:${COL.pending}">□</span> pending edits (not yet in the dseg), filled in their label's colour ·
+    <span style="color:${SURF_COL.cut}">—</span> the surface preview's cut</div>`;
   const surf = $("p-surface"); surf.style.display = "none"; surf.parentElement.insertBefore(p, surf.nextSibling);
   for (const b of p.querySelectorAll("button[data-choice]")) b.onclick = () => choose(b.dataset.choice);
   $("rvthick").onchange = () => R.choice === "thicken" && choose("thicken");
@@ -113,8 +129,10 @@ function pane() {
   $("rvrad").onchange = () => { R.radius = Number($("rvrad").value); };
   $("rvssub").onclick = submitStrokes; $("rvsclr").onclick = clearStrokes; $("rvundo").onclick = undo;
   $("rvrgo").onclick = regenerate;
+  $("rvspon").onchange = () => { R.sp.on = $("rvspon").checked; if (R.sp.on) surfacePreview(); else { R.sp.seq++; showSurface(); } };
+  $("rv3d").onclick = () => show3d(!R.sp.show3d);
 }
-function clearStrokes() { R.strokes = []; R.stroke = null; strokesInfo(); R.api.draw(); strokesPreview(); }
+function clearStrokes() { R.strokes = []; R.stroke = null; strokesInfo(); R.api.draw(); strokesPreview(); surfacePreview(); }
 // the brush mode: paint (the menu of the paint mode) or scribble (the classes); strokes of the other mode must go first
 function setMode(m, quiet) {
   if (m === "scribble" && R.meta.paint_only) m = "paint";
@@ -267,7 +285,7 @@ async function submit() {
   let r; try { r = await post("/review/answer", body); }
   catch (e) { say(e.message, true); return; }
   if (manual) R.strokes = [];
-  R.undoDepth = r.undo_depth; strokesInfo(); pending();
+  R.undoDepth = r.undo_depth; strokesInfo(); pending(); surfacePreview();
   const how = r.how === "random" ? "a random site" : `ranked ${r.rank ?? ""}`;
   say(`answer ${r.answer} written: ${R.choice} at site ${R.cur.id} (${r.kind}, ${how}), ${secs.toFixed(1)} s;` +
     ` ${r.edited} voxels written into the label edits`);
@@ -367,12 +385,12 @@ async function submitStrokes() {
   R.undoDepth = r.undo_depth;
   say(`paint written: ${r.voxels} of ${strokes.reduce((a, s) => a + s.voxels.length, 0)} voxels changed their label in the label edits` +
     " (drawn as pending edits: the labels volume still shows the dseg)");
-  R.strokes = []; strokesInfo(); R.api.draw(); pending();
+  R.strokes = []; strokesInfo(); R.api.draw(); pending(); surfacePreview();
 }
 async function undo() {
   if (R.strokes.length || R.stroke) { say("submit or clear the strokes first (Esc)", true); return; }
   let r; try { r = await post("/review/undo", {}); } catch (e) { say(e.message, true); return; }
-  R.undoDepth = r.undo_depth; strokesInfo(); say(`undo: ${r.voxels} voxels of the label edits written back`); pending(); strokesPreview();
+  R.undoDepth = r.undo_depth; strokesInfo(); say(`undo: ${r.voxels} voxels of the label edits written back`); pending(); strokesPreview(); surfacePreview();
 }
 async function scribble() {
   if (!R.strokes.length) { say("no strokes", true); return; }
@@ -381,6 +399,136 @@ async function scribble() {
   let r; try { r = await post("/review/scribble", { strokes, reviewer_seconds: secs }); } catch (e) { say(e.message, true); return; }
   say(`scribble ${r.answer} written: ${strokes.length} strokes, ${strokes.reduce((a, s) => a + s.voxels.length, 0)} voxels, ${secs.toFixed(1)} s`);
   R.strokes = []; strokesInfo(); R.api.draw();
+}
+
+// ------------------------------------------------------------------ the surface preview (the module comment)
+// the binary answers of the server (baillarger.viewer.columns.encode: a JSON header, then the arrays)
+const TYPES = { int32: Int32Array, float32: Float32Array };
+function decode(buf) {
+  const n = new Uint32Array(buf, 0, 1)[0], head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n))), out = {};
+  for (const t of head.arrays) out[t.name] = new TYPES[t.dtype](buf, 4 + n + t.offset, t.shape.reduce((a, b) => a * b, 1));
+  return [head, out];
+}
+const sps = (m, bad) => { const el = $("rvsps"); el.textContent = m ? " " + m : ""; el.style.color = bad ? "#ff6b6b" : "var(--mute)"; if (bad) R.api.log("surface preview: " + m); };
+async function surfacePreview() {
+  const S = R.sp; if (!R.on || !S.on || S.off || closed()) return;
+  const seq = ++S.seq, strokes = R.mode === "paint" ? paintStrokes() : [], t0 = performance.now();
+  sps(`computing the surface after the edits${strokes.length ? ` and ${strokes.length} strokes` : ""}…`);
+  let r; try { r = await post("/review/surface-preview", { strokes, since: S.rev }); } catch (e) { if (seq === S.seq) sps(e.message, true); return; }
+  while (r.status === "running") {
+    await new Promise(ok => setTimeout(ok, PREVIEW_POLL_MS)); if (seq !== S.seq) return;
+    try { r = await getj(`/review/surface-preview?job=${encodeURIComponent(r.job)}&since=${S.rev}`); } catch (e) { if (seq === S.seq) sps(e.message, true); return; }
+  }
+  if (seq !== S.seq) return;
+  if (r.status !== "done") {
+    sps(r.error || r.status, true);
+    if (/no antialiased field|no white surface|not the dseg's/.test(r.error || "")) S.off = r.error;   // asking again does not help
+    return;
+  }
+  let buf; try { const q = await fetch(`/review/surface-preview/mesh?job=${encodeURIComponent(r.job)}&since=${r.since}`); if (!q.ok) throw new Error(`${q.status}`); buf = await q.arrayBuffer(); }
+  catch (e) { if (seq === S.seq) sps(`mesh: ${e.message}`, true); return; }
+  if (seq !== S.seq) return;
+  const [head, a] = decode(buf), preview = new Map(); let kv = 0, kf = 0;
+  for (const [i, j, k, nv, nf, kind] of head.blocks) {
+    const m = { id: [i, j, k], kind, v: a.v.subarray(3 * kv, 3 * (kv + nv)), f: a.f.subarray(3 * kf, 3 * (kf + nf)) };
+    (kind ? preview : S.working).set(`${i},${j},${k}`, m); kv += nv; kf += nf;
+  }
+  S.preview = preview; S.rev = r.revision; S.job = r.job; S.cells = r.cells; S.cuts.clear(); S.last = r;
+  showSurface();
+  const sec = ((performance.now() - t0) / 1000).toFixed(2);
+  sps(`${S.working.size} blocks changed by the edits` + (r.radius === null ? "; the strokes change no block" :
+    `; the strokes re-march ${r.blocks.length} blocks (R ${r.radius} voxels, ${r.solves.length} solves)`) + ` · ${sec} s · approximate`);
+}
+// the blocks shown in place of the surface's: the working blocks, the preview's over them
+const shownBlocks = () => new Map([...R.sp.working, ...R.sp.preview]);
+// the meshes in the 3D view (box mm: voxel coordinates times the voxel size), and the surface's blocks under them hidden
+const SVS = `#version 300 es
+in vec3 pos; in vec3 nrm; in vec3 col; uniform mat4 mvp; uniform mat3 rot; out vec3 vcol; out float vlit;
+void main() { gl_Position = mvp * vec4(pos, 1.0); vlit = abs((rot * nrm).z); vcol = col; }`;
+const SFS = `#version 300 es
+precision mediump float; in vec3 vcol; in float vlit; out vec4 o;
+void main() { o = vec4(vcol * (0.35 + 0.65 * vlit), 1.0); }`;
+function showSurface() {
+  R.api.draw();
+  const V = window.VIEWER, g = V && V.GL.g, S = R.sp; if (!g) return;
+  const shown = R.sp.on ? shownBlocks() : new Map(), vox = [0, 1, 2].map(k => Math.hypot(R.A[0][k], R.A[1][k], R.A[2][k]));
+  if (!S.gl) {
+    const prog = V.program(g, SVS, SFS), vao = g.createVertexArray(); g.bindVertexArray(vao);
+    const bufs = {}; for (const [name, k] of [["pos", 3], ["nrm", 3], ["col", 3]]) {
+      const b = bufs[name] = g.createBuffer(), loc = g.getAttribLocation(prog, name);
+      g.bindBuffer(g.ARRAY_BUFFER, b); g.enableVertexAttribArray(loc); g.vertexAttribPointer(loc, k, g.FLOAT, false, 0, 0);
+    }
+    const ib = g.createBuffer(); g.bindBuffer(g.ELEMENT_ARRAY_BUFFER, ib); g.bindVertexArray(null);
+    S.gl = { prog, vao, bufs, ib, n: 0 };
+  }
+  let nv = 0, nf = 0; for (const m of shown.values()) { nv += m.v.length / 3; nf += m.f.length / 3; }
+  const pos = new Float32Array(3 * nv), nrm = new Float32Array(3 * nv), col = new Float32Array(3 * nv), idx = new Uint32Array(3 * nf);
+  let o = 0, q = 0; const top = [0, 0, 0];
+  for (const m of shown.values()) {
+    const n = m.v.length / 3, c = m.kind ? SURF_COL.preview : SURF_COL.working;
+    for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) { pos[3 * (o + i) + k] = m.v[3 * i + k] * vox[k]; col[3 * (o + i) + k] = c[k]; }
+    for (let t = 0; t < m.f.length; t += 3) {   // vertex normals: the sum of the faces' normals (area-weighted)
+      const a = o + m.f[t], b = o + m.f[t + 1], d = o + m.f[t + 2]; idx[q++] = a; idx[q++] = b; idx[q++] = d;
+      const u = [0, 1, 2].map(k => pos[3 * b + k] - pos[3 * a + k]), w = [0, 1, 2].map(k => pos[3 * d + k] - pos[3 * a + k]);
+      const x = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+      for (const p of [a, b, d]) for (let k = 0; k < 3; k++) nrm[3 * p + k] += x[k];
+    }
+    for (let k = 0; k < 3; k++) top[k] = Math.max(top[k], m.id[k] + 1);
+    o += n;
+  }
+  for (const [name, arr] of [["pos", pos], ["nrm", nrm], ["col", col]]) { g.bindBuffer(g.ARRAY_BUFFER, S.gl.bufs[name]); g.bufferData(g.ARRAY_BUFFER, arr, g.DYNAMIC_DRAW); }
+  g.bindVertexArray(S.gl.vao); g.bindBuffer(g.ELEMENT_ARRAY_BUFFER, S.gl.ib); g.bufferData(g.ELEMENT_ARRAY_BUFFER, idx, g.DYNAMIC_DRAW); g.bindVertexArray(null);
+  S.gl.n = idx.length;
+  // the surface's blocks under the shown blocks are not drawn
+  const flags = new Uint8Array(Math.max(1, top[0] * top[1] * top[2]));
+  for (const m of shown.values()) flags[(m.id[2] * top[1] + m.id[1]) * top[0] + m.id[0]] = 1;
+  V.hide(shown.size ? { n: top, step: vox.map(x => x * S.cells), flags } : null);   // it draws the 3D view again
+}
+function draw3d(g, M) {
+  const S = R.sp, V = window.VIEWER; if (!S.gl || !S.gl.n || !S.on || V.GL.level !== 0) return;
+  const Q = V.GL.R; g.useProgram(S.gl.prog); g.bindVertexArray(S.gl.vao);
+  g.uniformMatrix4fv(g.getUniformLocation(S.gl.prog, "mvp"), false, M);
+  g.uniformMatrix3fv(g.getUniformLocation(S.gl.prog, "rot"), false, new Float32Array([Q[0], Q[3], Q[6], Q[1], Q[4], Q[7], Q[2], Q[5], Q[8]]));
+  g.drawElements(g.TRIANGLES, S.gl.n, g.UNSIGNED_INT, 0); g.bindVertexArray(null);
+}
+// the 3D view in place of the review pane (on), at the level "true surface" (where the preview's blocks are), turned to
+// the last re-marched blocks; or the review pane again
+async function show3d(on) {
+  const V = window.VIEWER, surf = $("p-surface"); if (!V || !V.GL.g) { say("no 3D view on this page", true); return; }
+  R.sp.show3d = on; $("p-review").style.display = on ? "none" : ""; surf.style.display = on ? "" : "none";
+  let back = $("rvback");
+  if (!back) { back = document.createElement("button"); back.id = "rvback"; back.textContent = "review pane (v)"; back.onclick = () => show3d(false); $("sbar").appendChild(back); }
+  back.style.display = on ? "" : "none";
+  if (!on) return;
+  if ($("level").value !== "0") { $("level").value = "0"; await $("level").onchange(); }
+  const S = R.sp, ids = [...(S.preview.size ? S.preview : S.working).values()].map(m => m.id);
+  if (ids.length) {   // the centre of those blocks, box mm
+    const vox = [0, 1, 2].map(k => Math.hypot(R.A[0][k], R.A[1][k], R.A[2][k]));
+    V.GL.target = [0, 1, 2].map(k => (ids.reduce((a, b) => a + b[k], 0) / ids.length + 0.5) * S.cells * vox[k]);
+    V.GL.dist = Math.min(V.GL.dist, 3 * S.cells * Math.max(...vox));
+  }
+  V.draw3d();
+}
+// the cut of the shown blocks by the tile's plane, from the server (asked once per plane and preview); drawn in SURF_COL.cut
+function surfaceCut(g, t) {
+  const S = R.sp; if (!S.on || !S.job || !(S.working.size || S.preview.size)) return;
+  const mm = R.api.cross[t.n], key = `${S.job}|${t.n}|${mm.toFixed(4)}`;
+  let c = S.cuts.get(key);
+  if (!c) {
+    c = { seg: null }; S.cuts.set(key, c); const job = S.job;
+    fetch(`/review/surface-preview/cut?job=${encodeURIComponent(job)}&axis=${t.n}&mm=${mm}`)
+      .then(r => { if (!r.ok) throw new Error(`${r.status}`); return r.arrayBuffer(); })
+      .then(b => { c.seg = new Float32Array(b); if (S.job === job) R.api.draw(); })
+      .catch(e => { S.cuts.delete(key); R.api.log(`surface preview cut: ${e.message}`); });
+    return;
+  }
+  if (!c.seg || !c.seg.length) return;
+  const s = c.seg, a = [0, 0, 0], b = [0, 0, 0]; g.strokeStyle = SURF_COL.cut; g.lineWidth = 1.5; g.beginPath();
+  for (let i = 0; i < s.length; i += 6) {
+    a[0] = s[i]; a[1] = s[i + 1]; a[2] = s[i + 2]; b[0] = s[i + 3]; b[1] = s[i + 4]; b[2] = s[i + 5];
+    const p = R.api.w2px(t, a), q = R.api.w2px(t, b); g.moveTo(p[0], p[1]); g.lineTo(q[0], q[1]);
+  }
+  g.stroke();
 }
 
 // ------------------------------------------------------------------ drawing on #bvo
@@ -417,6 +565,7 @@ function draw2d(g, t) {
     const rgb = STROKE_RGB[s.key] || [255, 210, 63], vs = [...s.voxels.values()].filter(v => v[n] === k);
     squares(g, t, vs, `rgba(${rgb.join(",")}, 0.6)`);
   }
+  surfaceCut(g, t);
   if (R.cur) {   // the site: a ring round its centre
     const [x, y] = R.api.w2px(t, R.cur.mm); g.strokeStyle = COL.site; g.lineWidth = 1.5; g.beginPath(); g.arc(x, y, 9, 0, 2 * Math.PI); g.stroke();
   }
@@ -441,7 +590,7 @@ function pointer(type, e, h) {   // brush mode: a left drag paints one stroke of
   if (type === "move") { paint(t, x, y); R.api.draw(); return true; }
   if (type === "up") {
     const added = R.stroke.voxels.size > 0; if (added) R.strokes.push(R.stroke);
-    R.stroke = null; strokesInfo(); R.api.draw(); if (added) strokesPreview(); return true;
+    R.stroke = null; strokesInfo(); R.api.draw(); if (added) { strokesPreview(); surfacePreview(); } return true;
   }
   return false;
 }
@@ -456,6 +605,7 @@ function keys(e) {
     o: () => pick("outside"), e: () => pick("input"),
     t: () => { $("rvthick").value = $("rvthick").value === "1" ? "2" : "1"; if (R.choice === "thicken") choose("thicken"); },
     b: () => { $("rvbon").checked = !$("rvbon").checked; $("rvbon").onchange(); },
+    v: () => show3d(!R.sp.show3d),
     w: () => pick("wm"), c: () => pick("cortex"),
     "[": () => { $("rvrad").value = String(Math.max(0, R.radius - 1)); $("rvrad").onchange(); },
     "]": () => { $("rvrad").value = String(Math.min(4, R.radius + 1)); $("rvrad").onchange(); },
@@ -484,6 +634,8 @@ const hooks = {
     } catch { /* no labels volume */ }
     pending();
     try { showRegen(await getj("/review/regenerate")); pollRegen(); } catch (e) { say(e.message, true); }
+    if (window.VIEWER) window.VIEWER.hooks.draw3d.push(draw3d);
+    surfacePreview();   // the working field: the stored field and the pending edits
     say(q.paint_only ? `paint only: label edits ${q.edits}` : `edit log: ${q.log} · label edits: ${q.edits}`);
   },
   draw2d, text, pointer,

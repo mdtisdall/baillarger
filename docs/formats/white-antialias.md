@@ -15,6 +15,11 @@ radius of `docs/preview-radius.md`), starting from this field, and re-marches on
 mesh blocks that the solve changes (`baillarger.white_surf.remarch`). Thus the preview
 does not solve the whole field again.
 
+The viewer's review (`baillarger.viewer.review`, Surface preview) keeps a working field
+in memory: this field, with the patches of the local solves of each paint and undo
+(`baillarger.viewer.surface_preview`). The file is read (memory-mapped), not changed;
+the regenerate command writes a new field.
+
 ## Files
 
 In the BIDS derivatives root `DERIV`, for a segmentation with entities `sub` and `ses`,
