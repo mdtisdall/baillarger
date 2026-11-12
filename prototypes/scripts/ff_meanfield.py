@@ -773,7 +773,11 @@ def p_jump(st: FT.TermState, ga: FT.GridArrays, tw: FT.TermWeights) -> Array:
             ee = np.where(ok, e, 0)
             j = np.where(ok, ga.inc_edge_nbr[ids, k], 0)
             delta = ga.inc_edge_sign[ids, k][:, None] * ga.edge_vec_mm[ee]
-            _, J = FT.jump_energy(tau, d, st.s_ref[ids][:, None], delta[:, None, :], tw)
+            fr, _ = FT.edge_fracs(st, tw, ids, j)
+            _, J = FT.jump_energy(
+                tau, d, st.s_ref[ids][:, None], delta[:, None, :], tw,
+                None if fr is None else fr[:, None],
+            )  # fmt: skip
             qs = np.where(ok, st.q_stop[j], 0.0)
             none *= 1.0 - qs[:, None] * (J > 0.0)
         out[ids] = (q * (1.0 - none)).sum(1)
@@ -955,6 +959,7 @@ def solve(
     profile_dtype: Any = np.float64,
     log_fn: LogFn | None = None,
     recentre_at_edge: bool = False,
+    jump_at: str = "node",
 ) -> tuple[T.Field, dict[str, npt.NDArray[Any]], dict[str, Any]]:
     """Solve the field on a grid by the mean field (module docstring).
 
@@ -970,7 +975,11 @@ def solve(
     text per sweep. recentre_at_edge: the provisional option CD-13 (default False: the
     plan's schedule). True: a width does more passes while a final choice is at the
     edge, up to max_sweeps sweeps in total (module docstring, *Re-centring at the
-    edge*).
+    edge*). jump_at: where the jump term measures the jump on an edge from a moving
+    node to a stopped node (ff_terms.jump_energy): "node" (PR 3, the default: the level
+    that the step reaches at the stopped node) or "crossing" (the provisional design
+    change for R2: the level reached at the 0.5 crossing of the input stop field on the
+    edge, ff_terms.stop_crossing). p_jump in extras uses the same rule.
 
     The anchor origin: the anchor node is a moving node with τ = 0, and every other τ
     is free. In detail:
@@ -1004,6 +1013,8 @@ def solve(
         raise ValueError("noise_sd must hold 2 positive values")
     if origin not in ("top", "anchor"):
         raise ValueError(f'origin must be "top" or "anchor", not {origin!r}')
+    if jump_at not in FT.JUMP_AT:
+        raise ValueError(f"jump_at must be one of {FT.JUMP_AT}, not {jump_at!r}")
     if (origin == "anchor") != (anchor_node is not None):
         raise ValueError('origin "anchor" needs anchor_node, and only it takes one')
 
@@ -1053,6 +1064,7 @@ def solve(
     log["run"]["tensor_not_finite"] = n_bad_tensor
     log["run"]["origin"] = origin
     log["run"]["recentre_at_edge"] = bool(recentre_at_edge)
+    log["run"]["jump_at"] = jump_at
     log["run"]["anchor_node"] = anchor
     log["run"]["anchor_position_vox"] = (
         None if anchor is None else [float(v) for v in nodes[anchor]]
@@ -1070,8 +1082,9 @@ def solve(
     for w in settings.widths:
         t0 = time.perf_counter()
         tw = FT.term_weights(
-            spacing, noise_sd, w, settings, tau_prior, jump=anchor is None
-        )
+            spacing, noise_sd, w, settings, tau_prior, jump=anchor is None,
+            jump_at=jump_at,
+        )  # fmt: skip
         used = 0  # the sweeps of this width, over all its passes
         rep = 0  # the pass of this width: 0 is the plan's pass, 1, 2, ... repeats
         fl: list[float] = []

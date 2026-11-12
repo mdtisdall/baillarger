@@ -302,6 +302,7 @@ class TermWeights:
     jump_p_zero: float = T.DEFAULTS.jump_p_zero
     jump_mean: float = T.DEFAULTS.jump_mean
     jump: bool = True
+    jump_at: str = "node"
 
 
 def term_weights(
@@ -311,9 +312,14 @@ def term_weights(
     settings: T.SolverSettings = T.DEFAULTS,
     tau_prior: bool = False,
     jump: bool = True,
+    jump_at: str = "node",
 ) -> TermWeights:
     """The weights of the spec: σ_c = Δτ / h, σ_e = contrast_sigma, σ_a = sin 15°,
-    λ_d = 1 / (sin² 15° · ℓ). jump: the switch of the jump term."""
+    λ_d = 1 / (sin² 15° · ℓ). jump: the switch of the jump term. jump_at: where the
+    jump is measured on an edge (`jump_energy`): "node" (PR 3, the default) or
+    "crossing" (the provisional design change for R2)."""
+    if jump_at not in JUMP_AT:
+        raise ValueError(f"jump_at must be one of {JUMP_AT}, not {jump_at!r}")
     sa = math.sin(math.radians(settings.dir_cone_deg))
     se = contrast_sigma(noise_sd, settings.band_scale_vox)
     return TermWeights(
@@ -326,6 +332,7 @@ def term_weights(
         jump_p_zero=settings.jump_p_zero,
         jump_mean=settings.jump_mean,
         jump=jump,
+        jump_at=jump_at,
     )
 
 
@@ -530,8 +537,33 @@ def profile_lines(
 # ---------------------------------------------------------------- the jump
 
 
+JUMP_AT = ("node", "crossing")
+
+
+def stop_crossing(lo_from: Array, lo_to: Array) -> Array:
+    """The fraction t* in [0, 1] of an edge, from a moving node to a stopped node, at
+    which the stop field's probability is 0.5 (the provisional design change for R2).
+
+    lo_from, lo_to: the input stop field's log-odds at the two nodes. The probability p
+    = sigmoid(lo) is linear along the edge (the rule of the integrator's stop: the 0.5
+    crossing of an interpolated probability). t* = (0.5 − p_from) / (p_to − p_from) if
+    p_from < 0.5 ≤ p_to; t* = 0 if p_from ≥ 0.5 (the crossing is at or behind the
+    moving node); t* = 1 if p_to < 0.5 (no crossing on the edge: the PR 3 rule)."""
+    pf = 1.0 / (1.0 + np.exp(-np.asarray(lo_from, float)))
+    pt = 1.0 / (1.0 + np.exp(-np.asarray(lo_to, float)))
+    inner = (pf < 0.5) & (pt >= 0.5)
+    t = np.where(inner, (0.5 - pf) / np.where(inner, pt - pf, 1.0), 0.0)
+    t = np.where(pt < 0.5, 1.0, t)
+    return np.asarray(np.where(pf >= 0.5, 0.0, t), float)
+
+
 def jump_energy(
-    tau: Array, dir: Array, s_ref: Array, delta_mm: Array, settings: Any = T.DEFAULTS
+    tau: Array,
+    dir: Array,
+    s_ref: Array,
+    delta_mm: Array,
+    settings: Any = T.DEFAULTS,
+    frac: Array | None = None,
 ) -> tuple[Array, Array]:
     """(energy, J) of the jump (spec item 8), broadcast over the leading axes.
 
@@ -539,16 +571,36 @@ def jump_energy(
     moving node to the stopped node in mm. reach = τ + s_ref · max(d · δ, 0); J = max(0,
     −reach). Energy: −log p0 if J = 0, else −log(1 − p0) + log(jump_mean) + J /
     jump_mean. `settings` is a SolverSettings or a TermWeights (fields jump_p_zero and
-    jump_mean). Not scaled by face_w."""
+    jump_mean). Not scaled by face_w.
+
+    frac (...), optional: the fraction of the edge to the stop crossing
+    (`stop_crossing`, TermWeights.jump_at "crossing"). Then reach = τ + s_ref · max(d ·
+    δ, 0) · frac: the level that the moving node's τ reaches at the crossing, with its
+    speed and direction. None (the default, jump_at "node"): the full edge, as PR 3."""
     p0 = float(settings.jump_p_zero)
     mean = float(settings.jump_mean)
     dd = np.sum(np.asarray(dir) * np.asarray(delta_mm), axis=-1)
-    reach = np.asarray(tau) + np.asarray(s_ref) * np.maximum(dd, 0.0)
+    adv = np.asarray(s_ref) * np.maximum(dd, 0.0)
+    if frac is not None:
+        adv = adv * np.asarray(frac)
+    reach = np.asarray(tau) + adv
     J = np.maximum(0.0, -reach)
     e0 = -math.log(p0)
     e1 = -math.log(1.0 - p0) + math.log(mean)
     E = np.where(J > 0.0, e1 + J / mean, e0)
     return np.asarray(E, float), np.asarray(J, float)
+
+
+def edge_fracs(
+    st: "TermState", tw: "TermWeights", i: IntArray, j: IntArray
+) -> tuple[Array | None, Array | None]:
+    """(frac_ij, frac_ji): the fractions of the edges (i, j) to the stop crossing for
+    a moving i next to a stopped j, and for a moving j next to a stopped i. (None,
+    None) with jump_at "node"."""
+    if tw.jump_at == "node":
+        return None, None
+    lo = st.stop_log_odds
+    return stop_crossing(lo[i], lo[j]), stop_crossing(lo[j], lo[i])
 
 
 # ---------------------------------------------------------------- moments
@@ -911,12 +963,17 @@ def messages(
             if not tw.jump:
                 continue
             delta = ga.inc_edge_sign[i, k][:, None] * ga.edge_vec_mm[e]
+            fij, fji = edge_fracs(st, tw, i, j)
             Ei, _ = jump_energy(
-                tau[sub], d[sub], st.s_ref[i][:, None], delta[:, None, :], tw
-            )
+                tau[sub], d[sub], st.s_ref[i][:, None], delta[:, None, :], tw,
+                None if fij is None else fij[:, None],
+            )  # fmt: skip
             out[sub] += (ga.face_w[e] * st.q_stop[j])[:, None] * Ei
             tj, dj, qj = _cand(st, j)
-            Ej, _ = jump_energy(tj, dj, st.s_ref[j][:, None], -delta[:, None, :], tw)
+            Ej, _ = jump_energy(
+                tj, dj, st.s_ref[j][:, None], -delta[:, None, :], tw,
+                None if fji is None else fji[:, None],
+            )  # fmt: skip
             out_s[sub] += ga.face_w[e] * (qj * Ej).sum(1)
         # 5. the FEM prior on the direction
         for k in range(ga.inc_pair.shape[1]):
@@ -1011,8 +1068,15 @@ def expected_energy(
         ti, di, qi = _cand(st, i)
         tj, dj, qj = _cand(st, j)
         delta = ga.edge_vec_mm[es][:, None, :]
-        Ei, _ = jump_energy(ti, di, st.s_ref[i][:, None], delta, tw)
-        Ej, _ = jump_energy(tj, dj, st.s_ref[j][:, None], -delta, tw)
+        fij, fji = edge_fracs(st, tw, i, j)
+        Ei, _ = jump_energy(
+            ti, di, st.s_ref[i][:, None], delta, tw,
+            None if fij is None else fij[:, None],
+        )  # fmt: skip
+        Ej, _ = jump_energy(
+            tj, dj, st.s_ref[j][:, None], -delta, tw,
+            None if fji is None else fji[:, None],
+        )  # fmt: skip
         jump += float(
             (
                 ga.face_w[es]
@@ -1119,8 +1183,15 @@ def state_energy(
         out["tau_prior"] = np.zeros(B)
     # 8. jump
     delta = ga.edge_vec_mm[None, :, :]
-    Ei, _ = jump_energy(tau[:, i], d[:, i], st.s_ref[i][None, :], delta, tw)
-    Ej, _ = jump_energy(tau[:, j], d[:, j], st.s_ref[j][None, :], -delta, tw)
+    fij, fji = edge_fracs(st, tw, i, j)
+    Ei, _ = jump_energy(
+        tau[:, i], d[:, i], st.s_ref[i][None, :], delta, tw,
+        None if fij is None else fij[None, :],
+    )  # fmt: skip
+    Ej, _ = jump_energy(
+        tau[:, j], d[:, j], st.s_ref[j][None, :], -delta, tw,
+        None if fji is None else fji[None, :],
+    )  # fmt: skip
     out["jump"] = (
         ga.face_w * (mov[:, i] * ~mov[:, j] * Ei + mov[:, j] * ~mov[:, i] * Ej)
     ).sum(1)

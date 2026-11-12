@@ -1211,6 +1211,7 @@ def run(
     versions: Mapping[str, str] | None = None,
     log_fn: LogFn | None = None,
     recentre_at_edge: bool = False,
+    jump_at: str = "node",
 ) -> T.RunRecord:
     """One run into `out_dir` (the module docstring). Returns the record that it
     wrote. init, origin, anchor_node and recentre_at_edge go to `ff_meanfield.solve`
@@ -1219,7 +1220,11 @@ def run(
     the option off). run.json records the origin in RunRecord.origin, and
     measures["origin"] holds the origin, the anchor node, its position (voxel) and
     whether an init field was given. The run directory does not depend on the origin:
-    give an anchor run its own `out_dir`."""
+    give an anchor run its own `out_dir`. jump_at: "node" (PR 3, the default) or
+    "crossing" (the provisional design change for R2): it goes to `ff_meanfield.solve`
+    (the jump term) and to `ff_integrate.integrate` (tau_arrival and the jump, with the
+    solver's u), so the jumps, tau_arrival and the spacing measures use the same rule
+    as the energy. measures["inference"]["run"]["jump_at"] records it."""
     geo = phantom.geometry
     if geo is None:
         raise ValueError(f"phantom {phantom.name!r} has no geometry, so no truth")
@@ -1241,12 +1246,13 @@ def run(
     field, extras, log = MF.solve(
         grid, inputs, noise_sd, settings, tau_prior=tau_prior, init=init,
         origin=origin, anchor_node=anchor_node, profile_dtype=profile_dtype,
-        log_fn=log_fn, recentre_at_edge=recentre_at_edge,
+        log_fn=log_fn, recentre_at_edge=recentre_at_edge, jump_at=jump_at,
     )  # fmt: skip
     t_solve = time.perf_counter() - t0
     t0 = time.perf_counter()
     cols, info = FI.integrate(
-        field, truth.starts, truth.roots, settings,
+        field, truth.starts, truth.roots, settings, jump_at=jump_at,
+        u=extras["u"] if jump_at == "crossing" else None,
         levels=(np.asarray(LEVEL_PHI) - 1.0) * phantom.tau_scale,
     )  # fmt: skip
     t_integrate = time.perf_counter() - t0
@@ -1352,6 +1358,12 @@ def main(argv: Sequence[str] | None = None) -> T.RunRecord:
         action="store_true",
         help="the provisional option CD-13 of ff_meanfield.solve (default off)",
     )
+    ap.add_argument(
+        "--jump-at",
+        choices=("node", "crossing"),
+        default="node",
+        help="where the jump is measured: node (PR 3) or crossing (the R2 change)",
+    )
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
 
@@ -1399,7 +1411,7 @@ def main(argv: Sequence[str] | None = None) -> T.RunRecord:
         source=a.source, grid_spec=a.grid, settings=settings, changed_settings=changed,
         tau_prior=a.tau_prior, profile_dtype=np.dtype(a.profile_dtype).type,
         origin=a.origin, anchor_node=a.anchor_node, versions=versions, log_fn=log_fn,
-        recentre_at_edge=a.recentre_at_edge,
+        recentre_at_edge=a.recentre_at_edge, jump_at=a.jump_at,
     )  # fmt: skip
     if not a.quiet:
         print(
