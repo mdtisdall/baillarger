@@ -5,6 +5,7 @@ description = ""
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "mfem>=4.10.0.1",
     "nibabel>=5.4.2",
     "numba>=0.68.0",
     "numpy>=2.5.4",
@@ -78,6 +79,8 @@ testpaths = [
   "prototypes/scripts/test_ff_simple.py",
   "prototypes/scripts/test_ff_tau.py",
   "prototypes/scripts/test_ff_truth.py",
+  "prototypes/scripts/test_ffc_contact1d.py",
+  "prototypes/scripts/test_ffc_slab1d.py",
   "prototypes/scripts/test_ff_types.py",
   "prototypes/scripts/test_fold_phantoms.py",
   "prototypes/scripts/test_joint_levels.py",

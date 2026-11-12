@@ -91,6 +91,7 @@ name = "baillarger"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "mfem" },
     { name = "nibabel" },
     { name = "numba" },
     { name = "numpy" },
@@ -117,6 +118,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "mfem", specifier = ">=4.10.0.1" },
     { name = "nibabel", specifier = ">=5.4.2" },
     { name = "numba", specifier = ">=0.68.0" },
     { name = "numpy", specifier = ">=2.5.4" },
@@ -957,6 +959,25 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/7b/30/687ccce22f66a57fed85942450e88062773bcbf1a42914e70c7148ec71dc/matplotlib-3.11.2-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:75b6d88402770e181b5d06a67dda4129c31da7d05004d63a21c310ec78d1b83c", size = 10824960, upload-time = "2026-09-11T19:05:13.9Z" },
     { url = "https://files.pythonhosted.org/packages/d3/34/117fe35a8d05054b4b34d2d29287099927c24c3841d36e06d9fa2f20c1cf/matplotlib-3.11.2-cp315-cp315t-win_amd64.whl", hash = "sha256:a6939df7567114b6bac7f4c5e06c84a67f197c1b2f2e4b234d4eecb3bfec9482", size = 9551204, upload-time = "2026-09-11T19:05:16.48Z" },
     { url = "https://files.pythonhosted.org/packages/63/5a/9f440e7bec8b80d0af2a65d1165b2f4e718982dad785531f62255d9ff19b/matplotlib-3.11.2-cp315-cp315t-win_arm64.whl", hash = "sha256:d480038c83691532ed52ff3147db51fa902fc78cb2d8349993a1cdb684435bff", size = 9233946, upload-time = "2026-09-11T19:05:19.063Z" },
+]
+
+[[package]]
+name = "mfem"
+version = "4.10.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numba" },
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9a/30/6d5b64b12d514c71b96187c8b30500a0f3f5c5f7aa75879942d0fe481491/mfem-4.10.0.1.tar.gz", hash = "sha256:45ebfc4fd76b906db07c8d99f60482a0b7318cd294eba047c0a852de054ae40f", size = 457538, upload-time = "2026-10-27T11:22:33.448Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7e/7f/650a4d6894847b286ff759cd2e8f4c67b7b2b33f967f4ca969848258bdac/mfem-4.10.0.1-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:f9d43b6562f93b379b4b3c84a876f5aa0b267b18864585d8c7ebe91cfd9e389a", size = 34927732, upload-time = "2026-10-27T12:28:23.452Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/d2/fc5fdbb22d14b275ffcd2b8e28d6d8cf5bb1f190b6fcba7dcc8fa24c49fb/mfem-4.10.0.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e7fe115926d4cf8689d5f86f13cbdf837858aa0d93c6fcb65317ecc70b3f6e45", size = 102002870, upload-time = "2026-10-27T12:42:10.824Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/96/d6103e5ba52ab1154d7530460e1ae36c473a1a6c9b730b89f25b396637f4/mfem-4.10.0.1-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:792107ec5a28c525219703cc5d86089a5a30f86b1198eb55269c2ad8d2c90e23", size = 34771581, upload-time = "2026-10-27T12:28:26.266Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/32/892eb397730499e9e045183fd76963716ecc74492c9ba62ef55c2f508f22/mfem-4.10.0.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:682e977880a5beb34f560862ec3467a9e9d220397fb571d5041c2dbf54de13b4", size = 102134304, upload-time = "2026-10-27T12:22:57.095Z" },
+    { url = "https://files.pythonhosted.org/packages/55/d2/cb630fe432ee25188461fa254de12aff98b7f5ae5558b96c746130b953ee/mfem-4.10.0.1-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:780986c4ec1bdaa4eecacec4c6b0220e040b6c332c79c2908db2086076bad92b", size = 34775984, upload-time = "2026-10-27T12:28:29.214Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/2a/d2863736c4de6540f89150b46ab1fda000a09a8929dd8d0777c108e3c937/mfem-4.10.0.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:de8ba1ea5c028a62a5ad6b3684788680466503815ee6cc7795ce7b54499a5a10", size = 101989368, upload-time = "2026-10-27T12:58:19.865Z" },
 ]
 
 [[package]]
