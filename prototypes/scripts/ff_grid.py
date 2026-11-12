@@ -5,7 +5,7 @@ implements the `ff_types.Grid` protocol. PR 5 puts an octree behind the same pro
 
 The helpers below `UniformGrid` use only the `Grid` protocol, so that the octree can use
 them: `axis_neighbours`, `edge_vectors_mm`, `fem_matrices`, `fem_precision`,
-`node_weights_vox`, `edge_weights_vox`, `face_weights_vox`.
+`node_weights_vox`, `edge_weights_vox`, `edge_cell_counts`, `face_weights_vox`.
 
 The FEM prior. Q1 (trilinear) elements on the cells, in mm. K is the stiffness matrix
 (∫ ∇φ_a · ∇φ_b), M the mass matrix (∫ φ_a φ_b). The precision is λ (K + M / ℓ²) with
@@ -402,8 +402,35 @@ def edge_weights_vox(grid: Grid) -> Array:
     return w
 
 
+def edge_cell_counts(grid: Grid) -> IntArray:
+    """(E,) for each edge of grid.edges: the number of cells that hold it as one of
+    their 12 edges. On a uniform grid: 4 inside the box, 2 on a box face, 1 on a box
+    edge. Raises ValueError if a cell edge is not in grid.edges."""
+    e = grid.edges
+    n = np.int64(grid.n_nodes)
+    key = e[:, 0] * n + e[:, 1]
+    cells = grid.cells
+    count = np.zeros(len(e), np.int64)
+    for a, b in _cell_edge_pairs():
+        lo = np.minimum(cells[:, a], cells[:, b])
+        hi = np.maximum(cells[:, a], cells[:, b])
+        k = lo * n + hi
+        pos = np.searchsorted(key, k)
+        pos_c = np.minimum(pos, len(key) - 1)
+        if np.any(key[pos_c] != k):
+            raise ValueError("a cell edge is not in grid.edges")
+        count += np.bincount(pos_c, minlength=len(e))
+    return count
+
+
 def face_weights_vox(grid: Grid) -> Array:
-    """(E,) (edge length / VOXEL_MM)²: the area that an edge stands for, in voxel
-    faces."""
+    """(E,) the area of the dual face of each edge, in voxel faces: (edge length /
+    VOXEL_MM)² times (the number of cells that hold the edge) / 4. Each cell that holds
+    an edge adds one quarter of the full face (its side is the edge length). So the
+    weight is the full face inside the box, ½ on a box face and ¼ on a box edge, as the
+    node and edge weights are. Inside the box the factor is exactly 1, so the value is
+    the same, to the last bit, as (edge length / VOXEL_MM)²."""
     length = np.linalg.norm(edge_vectors_mm(grid), axis=1)
-    return np.asarray((length / VOXEL_MM) ** 2)
+    full = (length / VOXEL_MM) ** 2
+    count = edge_cell_counts(grid)
+    return np.asarray(np.where(count == 4, full, full * (count / 4.0)))

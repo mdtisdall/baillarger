@@ -19,8 +19,8 @@ The loop
    first width the initial field, after it `recentre`); the moving candidates around
    them (ff_terms.moving_candidates); q carried over from the previous state with a
    Gaussian kernel of Δτ in τ and of settings.dir_cone_deg in angle (`carry_over`),
-   q_stop kept; s_ref = exp(−u); the profiles of the candidates (computed one time per
-   width).
+   q_stop kept; s_ref = exp(−u); the profile lines of the candidates (computed one
+   time per width).
 3. One sweep: for each colour c = 0 .. n_colours − 1 in order, q_i ∝ exp(−(unary +
    messages)) over the valid states of the nodes of colour c, then the moments of these
    nodes. Then u by colour (ff_terms.update_u). Then the free energy F = Σ
@@ -32,6 +32,29 @@ The loop
 6. A rise of F in a sweep above 1e-9 · |F| is a defect: the log keeps it, and the
    loop continues. F is compared only within one width (the energy changes with w,
    the candidates and the profiles).
+7. Only with `solve(recentre_at_edge=True)` (the provisional option CD-13; default
+   off): see *Re-centring at the edge* below.
+
+Re-centring at the edge (CD-13, provisional)
+--------------------------------------------
+
+A finding: a solve reaches only the minimum of F over its last candidate sets, and
+the predictions move only at the re-centrings between widths. The option
+recentre_at_edge (default False) adds re-centrings inside a width. At the end of
+each pass of a width, `edge_counts` gives the final choices at the edge. A final
+choice is at the edge if tau_at_kept_edge counts it or dir_at_ring counts it. A node
+that kept one τ index only (tau_single) is at both τ edges, and tau_at_kept_edge
+counts it, so it is at the edge too: a re-centring moves its window. If a final
+choice is at the edge and the width has used fewer than max_sweeps sweeps over its
+passes, the width does a new pass: `recentre`, new candidates round the new
+predictions, the carry-over as at a width change, the pruning after the first sweep,
+the same stop rules, and at most max_sweeps minus the sweeps used. The width ends
+when no final choice is at the edge or when its passes used max_sweeps sweeps in
+total. F is compared only within one pass (the rise rule above). The option adds no
+constant. With the option off, the loop is the plan's schedule, with the same bits.
+
+The origin of τ is the top (τ_top = 0, the default) or an anchor node (the comparison
+run of the plan's question 6; see `solve`).
 
 Every coupling term is multilinear in the node distributions, and no two nodes of one
 colour share a term. So each colour update is the exact minimiser of F over the q of
@@ -52,94 +75,108 @@ conditional mean τ and d̄_j the normalised posterior-mean direction of j. Wher
 neighbour is moving: τ̄_i if the node has moving mass, else TAU_TOP. d_pred_i = the
 node's posterior-mean direction (the previous prediction where it is zero).
 
+Profiles (CD-7): the state holds the profile lines of ff_terms.profile_lines, one line
+of L + n_tau − 1 = 17 levels per direction, 7 per node, computed one time per width.
+Each slot reads its 9 levels from its line (ff_terms.line_slots: line = m, first line
+index n_tau − 1 − a). After the pruning, the kept slots keep their line and first index
+(`prune` compacts prof_line and prof_off, not the lines). The map is exact; the two
+forms differ only by rounding (ff_terms.profile_lines). On the slab run below, F of the
+two forms agreed to 5e-15 of |F| in every sweep.
+
+Memory per node (the state that the loop holds):
+
+- the grid arrays (GridArrays, Q_u, the edge and pair tables): about 1.3 kB;
+- the candidates at K slots: cand_tau, q (8 K bytes each), cand_dir (24 K), valid (K),
+  the candidate index (2 K), prof_line and prof_off (K each): 44 K bytes, so 2.8 kB at
+  K = 63;
+- the profile lines: 238 · b bytes (b = 8 in float64, 4 in float32): 1.9 kB in
+  float64, 0.95 kB in float32;
+- the moments (Moments): about 0.35 kB.
+
+The pruning compacts every (n, K) array of the state in place (`_compact`): it does not
+allocate a second state, but the buffers of 63 slots stay allocated until the next
+width frees them. So the sweep-1 size is the peak of a width. At the next width the
+profile lines are freed first; the other old arrays are freed after the carry-over,
+before the new lines are allocated. The colour update, the moments, the free energy
+(ff_terms.expected_energy and `entropy`), update_u, the pruning rule, the posterior
+means and `edge_counts` work in node chunks, so no full (n, K) temporary occurs. The
+output Field (K = prune_max) is allocated after the lines are freed.
+
+The macOS allocator keeps freed large blocks resident (they count in the RSS that
+scripts/memguard reads) and reuses them only for requests of the same size. So the
+RSS peak is above the live peak.
+
+Measured (this machine, CPU, float32 profiles, oracle inputs with noise 0,
+OMP_NUM_THREADS=4, scripts/memguard; max_sweeps and widths set only for the
+measurement; "before" = the form of 63 profiles of 9 levels, run in the same session):
+
+- the slab, 64 × 64 × 48 voxels at 0.16 mm (1.97·10⁵ nodes), widths (4, 2, 1),
+  max_sweeps 4: peak 2482 MiB, 249 s, 13.5 to 14.2 s per sweep at K = 32, 38 to 40 s
+  from the end of one width to the end of sweep 1 of the next. Before: 3232 MiB, 272 s,
+  13.1 to 13.9 s per sweep, 44 to 46 s.
+- crown_w1.28, 81³ voxels at 0.16 mm (5.3·10⁵ nodes), width 4 only, max_sweeps 2:
+  peak 4876 MiB, 139 s, 36.2 s for sweep 2 (K = 32), 91 s to the end of sweep 1.
+  Before: 6443 MiB, 161 s, 36.2 s for sweep 2, 110 s to the end of sweep 1.
+- a profile (cProfile) of the slab, width 4, 4 sweeps (76 s): the colour updates 46 s
+  (ff_terms.messages 42 s), expected_energy 19 s (6 calls), update_u 6 s. Inside them:
+  the own octants 18 s, the octants of the neighbours 16 s, jump_energy 10 s, the
+  masked gathers of the candidates (ff_terms._cand) 8 s, the gathers of the profiles
+  from the lines 3 s.
+
 NumPy or Torch (the plan's *NumPy or Torch*)
 --------------------------------------------
 
 Symbols: n nodes, K candidate slots (63 in the first sweep of a width, then
-prune_max = 32), L = 9 levels, 2 echoes. Sizes: PR 3 runs up to 5.3·10⁵ nodes (the
-crown of 81³ voxels at 0.16 mm), PR 4 1.2·10⁶ nodes, the target 4·10⁶ to 4·10⁷ nodes.
+prune_max = 32). Sizes: PR 3 runs up to 5.3·10⁵ nodes, PR 4 1.2·10⁶ nodes, the target
+4·10⁶ to 4·10⁷ nodes.
 
 Operations per sweep (estimates from the loop structure, not measured): 8 calls of
 ff_terms.messages on n / 8 nodes each (about 2.4·10³ · K flops per node, from the
 analysis in ff_terms.py), 8 calls of update_u (the own octants, 8 · K · 40 flops, and a
 search of about 350 values of a 4-term function: about 3·10³ flops per node), one
-expected_energy (the own octants and the edges once: by estimate less than half of
-the messages) and the entropy (n · K). In total about 4·10³ · K flops per node: about
-7·10¹⁰ flops per sweep at 5.3·10⁵ nodes and K = 32, 1.5·10¹¹ at 1.2·10⁶ nodes,
-5·10¹¹ to 5·10¹² at the target size. A run has up to 3 · 200 sweeps.
+expected_energy (the own octants and the edges once) and the entropy (n · K). In total
+about 4·10³ · K flops per node: about 7·10¹⁰ flops per sweep at 5.3·10⁵ nodes and K =
+32, 1.5·10¹¹ at 1.2·10⁶ nodes, 5·10¹¹ to 5·10¹² at the target size. A run has up to
+3 · 200 sweeps. At the measured rate (14 s per sweep at 1.97·10⁵ nodes, about 70 µs per
+node and sweep), 600 sweeps take about 2.3 h on the slab, 6 h on the crown and about
+20 days at 4·10⁷ nodes.
 
-Memory traffic per sweep: the profiles dominate. ff_terms.messages reads the profiles
-of a chunk once and then the squared and plain profiles once per edge slot (6 slots);
-refresh_moments and expected_energy read them once each. That is about 14 · n · K ·
-18 · b bytes per sweep (b = 8 in float64, 4 in float32): about 34 GB at 5.3·10⁵ nodes,
-K = 32 and float64. By estimate this traffic and the NumPy temporaries, not the flops,
-set the time of a sweep.
+Memory traffic per sweep: by estimate the octant temporaries of ff_terms (about 10
+(m, K) arrays per octant combination) and the gathered chunk profiles, not the stored
+lines (2 · n · 238 · b bytes per sweep), set the time of a sweep.
 
-Memory per node (the state that the loop holds):
+Loop structure: Python loops over the widths, the sweeps, the 8 colours, the chunks
+and fixed small sets (octants, edge and pair slots). Each kernel inside is whole-array
+element-wise arithmetic, gathers by fixed padded tables and small dense contractions.
+The work is regular and data-parallel, and a Torch version could be the same
+algorithm (the CSR products with Q_u and Q_tau would become padded tables of up to 27
+neighbours).
 
-- the grid arrays (GridArrays, Q_u, the edge and pair tables): about 1.3 kB;
-- the candidates at K slots: cand_tau, q (8 K bytes each), cand_dir (24 K), valid,
-  the candidate index (K each): 42 K bytes, so 2.6 kB at K = 63;
-- the profiles: 18 · K · b bytes: 9.1 kB at K = 63 in float64, 4.5 kB in float32;
-- the moments (Moments): about 0.35 kB.
+The measurement (a line-for-line Torch port of ff_terms._own_octants, the largest
+kernel, on one colour; 4 CPU threads; the port is not part of this module):
 
-At 5.3·10⁵ nodes and K = 63 this is about 7.0 GB in float64 and 4.6 GB with float32
-profiles. The pruning compacts every (n, K) array of the state in place (`_compact`):
-it does not allocate a second state, but the buffers of 63 slots stay allocated until
-the next width frees them. So the sweep-1 size is the peak of a width. At the next
-width the profile buffer is freed first; the other old arrays are freed after the
-carry-over, before the new profiles are allocated. The colour update, the moments,
-the free energy (ff_terms.expected_energy and `entropy`), update_u, the pruning rule,
-the posterior means and `edge_counts` work in node chunks, so no full (n, K)
-temporary occurs. The output Field (K = prune_max) is allocated after the profile
-buffer is freed.
+- 1.97·10⁵ nodes, K = 32, one colour: NumPy float64 0.17 s; Torch CPU float64 0.13 s;
+  Torch CPU float32 0.06 s; MPS float32 0.036 s (chunk 32768; 0.14 s at chunk 4096).
+- 1.05·10⁶ nodes, K = 32, one colour: NumPy float64 0.90 to 0.99 s; Torch CPU float64
+  0.62 s; Torch CPU float32 0.30 s; MPS float32 0.16 s (chunk 131072).
 
-The macOS allocator keeps freed large blocks resident (they count in the RSS that
-scripts/memguard reads) and reuses them only for requests of the same size. So the
-RSS peak is above the live peak. The environment setting MallocLargeCache=0 gives the
-live peak, but it made the runs below about 1.5 times slower (each new large block
-is mapped again).
+The free energy in float32 (every float array of the solved slab state at width 4,
+sweep 3, cast to float32, NumPy): |F32 − F64| = 0.22, with |F| = 3.66·10⁵; 0.21 of it
+from the consistency term, which is a difference of large terms (F0 − 2 s F1 +
+s² F2). The stop rule needs |ΔF| < 1e-7 · |F| = 0.037, and the rise test
+1e-9 · |F| = 3.7·10⁻⁴.
 
-Measured (CPU, float32 profiles, oracle inputs with noise 0, OMP_NUM_THREADS=4,
-scripts/memguard; max_sweeps and widths set only for the measurement; earlier code =
-before the chunks and the in-place pruning):
-
-- the slab, 64 × 64 × 48 voxels at 0.16 mm (1.97·10⁵ nodes), widths (4, 2, 1),
-  max_sweeps 4: peak 3193 MiB, 265 s, 13.1 s per sweep at K = 32, about 45 s from
-  the end of one width to the end of sweep 1 of the next (the candidates, the
-  profiles, the first F and the sweep at K = 63). Earlier code: 4536 MiB, 309 s,
-  about 16 s per sweep, about 51 s.
-- crown_w1.28, 81³ voxels at 0.16 mm (5.3·10⁵ nodes), width 4 only, max_sweeps 2:
-  peak 6426 MiB (with MallocLargeCache=0: 5421 MiB), 159 s; 35 s for sweep 2 (K =
-  32); 110 s to the end of sweep 1 (grid arrays 3.6 s, candidates and profiles
-  29.6 s, the first F and the sweep at K = 63). Earlier code: memguard stopped it
-  at 8742 MiB (cap 8 GB), before the end of sweep 1.
-- a profile (cProfile) of 5 sweeps of width 4 on 32³ nodes: about 50 % of the time
-  in ff_terms.messages and 20 % in ff_terms.expected_energy.
-
-So the PR 3 runs at 0.16 mm are still above the 4 GB goal: the 63-slot state of the
-first sweep of a width (about 7.2 kB per node with float32 profiles) and the grid
-arrays (1.3 kB per node, measured 668 MiB at 5.3·10⁵ nodes) set the live peak. The
-profiles of one direction m and its 9 τ values sample one line at levels shifted by
-the τ index (to rounding);
-a store of 7 lines of 17 levels per node instead of 63 profiles of 9 levels would
-take about a fifth of the space, but it is a change of the state's layout, not done
-here. At the target size the state cannot be stored (the profiles alone: 92 GB in
-float32 at 4·10⁷ nodes and K = 32).
-
-Loop structure: Python loops over the widths, the sweeps, the 8 colours and the
-chunks; every kernel inside is a whole-array NumPy operation of ff_terms or of this
-module (the carry-over, the pruning and the compaction are chunked gathers and
-element-wise operations). The work is regular and data-parallel.
-
-Choice: NumPy. Reasons: (1) the loop calls the kernels of ff_terms, which are NumPy
-(the choice of task 3.2); a Torch loop would need the terms in Torch on the same
-device, else each colour moves the state between devices; (2) the exact tests need
-float64 on the CPU, where NumPy already runs whole-array kernels; (3) at the target
-size the state does not fit in memory on any device, so the design must change first
-(the profiles computed per chunk from the image, or the coarse level and superblocks
-with a halo of column-solver.md, *Coarse to fine*). `profile_dtype=np.float32` halves
-the largest array for the runs; the tests use float64.
+Choice: NumPy. Reasons: (1) on the CPU in float64 (the exact path) Torch gives 1.3 to
+1.6 times on the largest kernel with 4 threads: not a large gain. (2) MPS gives about
+5 to 6 times, but only in float32 (MPS has no float64). In float32 the error of F is
+about 6 times the stop threshold of the free energy and 600 times the rise test, so an
+MPS run would not keep the stop rules and would log false rises. (3) At the target
+size neither backend makes a run possible here: the state does not fit in memory
+(ff_terms.py, *NumPy or Torch*), and a run takes days even with the MPS gain. The
+target needs blocks with a halo first (column-solver.md, *Coarse to fine*); a CUDA
+device with float64 is the place to compare the backends again.
+`profile_dtype=np.float32` halves the profile lines for the runs; the tests use
+float64.
 
 Determinism: the loop has no random numbers, every sort is stable or has an explicit
 tie rule, and every sum is over a fixed order. The same input gives the same bits on
@@ -298,14 +335,17 @@ def initial_field(
 
 
 def initial_from_field(
-    init: T.Field, nodes: Array, settings: T.SolverSettings = T.DEFAULTS
+    init: T.Field,
+    nodes: Array,
+    settings: T.SolverSettings = T.DEFAULTS,
+    tau_max: float | None = T.TAU_TOP,
 ) -> tuple[Array, Array, Array, BoolArray]:
     """(τ (n,), d (n, 3), q_stop (n,), has (n,)) of a solved Field on another grid,
     interpolated to the nodes (voxel positions). The nodes are clipped to the box of
     init's nodes. q_stop: the trilinear interpolation over the 8 corners. τ and d: the
     trilinear weights times the corners' moving probability, renormalised (d then
     normalised). has = False where no corner has moving mass or the mean direction is
-    zero; there τ and d have no meaning."""
+    zero; there τ and d have no meaning. τ is clipped to tau_max (no clip if None)."""
     g = init.grid
     lo = g.nodes.min(0)
     hi = g.nodes.max(0)
@@ -321,7 +361,8 @@ def initial_from_field(
     dm = init.direction_mean()[corners]
     sw = pm.sum(1)
     tau = np.where(sw > 0, (pm * tm).sum(1) / np.maximum(sw, 1e-300), T.TAU_TOP)
-    tau = np.minimum(tau, T.TAU_TOP)
+    if tau_max is not None:
+        tau = np.minimum(tau, tau_max)
     D = np.einsum("nk,nkc->nc", pm, dm)
     nr = np.linalg.norm(D, axis=1)
     has = (sw > 0) & (nr > 0)
@@ -560,7 +601,14 @@ def prune(
     cand_dir = _compact(st.cand_dir, idx, chunk)
     valid = _compact(st.valid, idx, chunk, keep_valid)
     ci = _compact(cand_index, idx, chunk, index_or_none)
-    prof = _compact(st.profiles, idx, chunk)
+    if st.prof_line is None:  # direct form: one profile per slot
+        prof = _compact(st.profiles, idx, chunk)
+        pl, po = None, None
+    else:  # line form: the kept slots keep reading their lines
+        assert st.prof_off is not None
+        prof = st.profiles
+        pl = _compact(st.prof_line, idx, chunk)
+        po = _compact(st.prof_off, idx, chunk)
     new = FT.TermState(
         cand_tau=cand_tau,
         cand_dir=cand_dir,
@@ -574,6 +622,9 @@ def prune(
         stop_log_odds=st.stop_log_odds,
         tensor_dir=st.tensor_dir,
         coherence=st.coherence,
+        prof_line=pl,
+        prof_off=po,
+        n_levels=st.n_levels,
     )
     return new, ci, res
 
@@ -620,15 +671,18 @@ def _update_colour(
     sel: IntArray,
     mom: FT.Moments,
     chunk: int = FT.CHUNK,
+    no_stop: BoolArray | None = None,
 ) -> float:
     """q_i ∝ exp(−(unary + messages)) over the valid states of the nodes sel; refresh
     their moments. Returns max |Δq| of these nodes. The nodes go in chunks of `chunk`.
     No two nodes of one colour share a term, so the messages of a chunk do not use the
-    moments of the other chunks of sel, and the result is the same as in one step."""
+    moments of the other chunks of sel, and the result is the same as in one step.
+    no_stop (n,): the nodes that have no stopped state (the anchor); None: no such
+    node."""
     dq = 0.0
     for s0 in range(0, len(sel), chunk):
         c = sel[s0 : s0 + chunk]
-        dq = max(dq, _update_rows(st, ga, tw, c, mom))
+        dq = max(dq, _update_rows(st, ga, tw, c, mom, no_stop))
     return dq
 
 
@@ -638,6 +692,7 @@ def _update_rows(
     tw: FT.TermWeights,
     sel: IntArray,
     mom: FT.Moments,
+    no_stop: BoolArray | None = None,
 ) -> float:
     """_update_colour for one chunk of nodes."""
     M, Ms = FT.messages(st, ga, tw, sel, mom)
@@ -645,6 +700,8 @@ def _update_rows(
     v = st.valid[sel]
     lm = np.where(v, -(e_move + M), -np.inf)
     ls = -(e_stop + Ms)
+    if no_stop is not None:
+        ls = np.where(no_stop[sel], -np.inf, ls)
     mx = np.maximum(lm.max(1), ls)
     wm = np.where(v, np.exp(lm - mx[:, None]), 0.0)
     ws = np.exp(ls - mx)
@@ -668,10 +725,10 @@ def _update_rows(
 # ---------------------------------------------------------------- profiles
 
 
-def _profiles(
+def _profile_lines(
     ga: FT.GridArrays,
-    cand_tau: Array,
-    cand_dir: Array,
+    c: Array,
+    dirs: Array,
     s_ref: Array,
     lb: IntArray,
     volumes: Sequence[Array],
@@ -679,21 +736,23 @@ def _profiles(
     dtype: Any,
     chunk: int = CHUNK,
 ) -> npt.NDArray[Any]:
-    """(n, K, L, 2) of ff_terms.candidate_profiles, computed by node chunks into an
-    array of `dtype` (so a float32 run never holds the float64 array of all nodes)."""
-    n, K = cand_tau.shape
+    """(n, n_dir, L + n_tau − 1, 2) of ff_terms.profile_lines, computed by node chunks
+    into an array of `dtype` (so a float32 run never holds the float64 array of all
+    nodes)."""
+    n, M = dirs.shape[:2]
     L = FT.N_LEVELS
-    out = np.empty((n, K, L, len(volumes)), dtype=dtype)
+    out = np.empty((n, M, L + settings.n_tau - 1, len(volumes)), dtype=dtype)
     for a in range(0, n, chunk):
         b = min(a + chunk, n)
-        out[a:b] = FT.candidate_profiles(
+        out[a:b] = FT.profile_lines(
             ga.nodes[a:b],
-            cand_tau[a:b],
-            cand_dir[a:b],
+            c[a:b],
+            dirs[a:b],
             s_ref[a:b],
             lb[a:b],
             volumes,
             L,
+            settings.n_tau,
             settings.dtau,
         )
     return out
@@ -795,12 +854,21 @@ def _new_state(
     volumes: Sequence[Array],
     settings: T.SolverSettings,
     profile_dtype: Any,
+    tau_max: float | None = T.TAU_TOP,
+    anchor_node: int | None = None,
 ) -> tuple[FT.TermState, npt.NDArray[np.int16]]:
     """The state of a new width: candidates round the predictions, q carried over from
     `old` = [τ, d, q, valid], q_stop kept, s_ref = exp(−u), the profiles. The list `old`
     is emptied after the carry-over, so that the old arrays can be freed before the
-    profiles are allocated."""
-    cand_tau, cand_dir, valid = FT.moving_candidates(tau_pred, dir_pred, settings)
+    profiles are allocated. tau_max: the upper bound of τ (None: no bound). anchor_node:
+    only the candidates of the centre τ index (τ = τ_pred = 0 there) are valid at this
+    node."""
+    cand_tau, cand_dir, valid = FT.moving_candidates(
+        tau_pred, dir_pred, settings, tau_max
+    )
+    if anchor_node is not None:
+        a_idx = np.arange(cand_tau.shape[1]) // settings.n_dir
+        valid[anchor_node] = a_idx == (settings.n_tau - 1) // 2
     q = carry_over(
         old[0],
         old[1],
@@ -815,12 +883,25 @@ def _new_state(
     old.clear()
     q = np.where(valid, q, 0.0)
     s_ref = np.exp(-u)
-    lb = FT.level_base(tau_pred, settings, FT.N_LEVELS)
-    prof = _profiles(
-        ga, cand_tau, cand_dir, s_ref, lb, volumes, settings, profile_dtype
+    lb = FT.level_base(tau_pred, settings, FT.N_LEVELS, tau_max)
+    c = np.asarray(tau_pred, np.float64)
+    if tau_max is not None:
+        c = np.minimum(c, tau_max)
+    # the directions of the candidates a = 0: m = 0 .. n_dir − 1
+    prof = _profile_lines(
+        ga,
+        c,
+        cand_dir[:, : settings.n_dir],
+        s_ref,
+        lb,
+        volumes,
+        settings,
+        profile_dtype,
     )
     K = cand_tau.shape[1]
-    ci = np.broadcast_to(np.arange(K, dtype=np.int16), (len(q), K)).copy()
+    n = len(q)
+    ci = np.broadcast_to(np.arange(K, dtype=np.int16), (n, K)).copy()
+    line, off = FT.line_slots(settings.n_tau, settings.n_dir)
     st = FT.TermState(
         cand_tau=cand_tau,
         cand_dir=cand_dir,
@@ -834,6 +915,9 @@ def _new_state(
         stop_log_odds=lo,
         tensor_dir=tdir,
         coherence=coh,
+        prof_line=np.broadcast_to(line, (n, K)).copy(),
+        prof_off=np.broadcast_to(off, (n, K)).copy(),
+        n_levels=FT.N_LEVELS,
     )
     return st, ci
 
@@ -873,8 +957,11 @@ def solve(
     *,
     tau_prior: bool = False,
     init: T.Field | None = None,
+    origin: str = "top",
+    anchor_node: int | None = None,
     profile_dtype: Any = np.float64,
     log_fn: LogFn | None = None,
+    recentre_at_edge: bool = False,
 ) -> tuple[T.Field, dict[str, npt.NDArray[Any]], dict[str, Any]]:
     """Solve the field on a grid by the mean field (module docstring).
 
@@ -882,9 +969,37 @@ def solve(
     the contrast (the detrended echoes {1: echo 2, 2: echo 3}). noise_sd: the matched
     noise SD of the two echoes (the image's "noise_sd"); both must be positive.
     tau_prior: the switch of the FEM prior on τ. init: a solved Field on another grid
-    that replaces the initial field. profile_dtype: the dtype of the stored profiles
-    (np.float32 halves their memory; the arithmetic stays float64). log_fn: called with
-    one line of text per sweep.
+    that replaces the initial field (a start field only, not a prior). origin: "top"
+    (τ_top = 0, the default) or "anchor" (the comparison run of the plan's question 6:
+    see *The anchor origin* below); anchor_node: the node id of the anchor (only with
+    origin "anchor"). profile_dtype: the dtype of the stored profile lines (np.float32
+    halves their memory; the arithmetic stays float64). log_fn: called with one line of
+    text per sweep. recentre_at_edge: the provisional option CD-13 (default False: the
+    plan's schedule). True: a width does more passes while a final choice is at the
+    edge, up to max_sweeps sweeps in total (module docstring, *Re-centring at the
+    edge*).
+
+    The anchor origin: the anchor node is a moving node with τ = 0, and every other τ
+    is free. In detail:
+
+    - The jump term is off (TermWeights.jump = False): the stopped state gives no τ
+      value to its moving neighbours.
+    - No upper bound on τ: τ can be positive away from the anchor. The candidates are
+      τ_pred + (a − 4) Δτ (ff_terms.moving_candidates, tau_max None), and the profiles
+      use c = τ_pred.
+    - The anchor node: τ_pred = 0 at every width, only the 7 candidates of the centre
+      τ index (τ = 0) are valid, and it has no stopped state (q_stop = 0). So its τ is
+      a point mass at 0 and it is moving. The stop field must give it log-odds < 0 (a
+      moving node of the initial field); else solve raises ValueError.
+    - The initial τ (from the stop field, or from init) is shifted by one constant so
+      that the anchor's τ is 0. init's τ is not clipped.
+    - All else is as with the top origin. p_jump in extras is nan (no jump term).
+
+    The energy with the anchor origin changes by no constant shift of every τ, except
+    for two parts: the contrast term samples the profiles at the absolute levels ℓ Δτ,
+    so only a shift by an integer multiple of Δτ keeps it (with the levels shifted by
+    the same integer); and the FEM prior on τ (tau_prior) has a mass term that no
+    shift keeps.
 
     Returns (field, extras, log). field: K = settings.prune_max slots. extras (n,)
     arrays: u, speed (= exp(u)), p_jump, tau_pred and the (n, 3) dir_pred of the last
@@ -894,6 +1009,10 @@ def solve(
     t_all = time.perf_counter()
     if len(noise_sd) != 2 or not all(float(s) > 0 for s in noise_sd):
         raise ValueError("noise_sd must hold 2 positive values")
+    if origin not in ("top", "anchor"):
+        raise ValueError(f'origin must be "top" or "anchor", not {origin!r}')
+    if (origin == "anchor") != (anchor_node is not None):
+        raise ValueError('origin "anchor" needs anchor_node, and only it takes one')
 
     def say(msg: str) -> None:
         if log_fn is not None:
@@ -909,18 +1028,42 @@ def solve(
     volumes = FT.smoothed_echoes(inputs.contrast, settings.band_scale_vox)
     spacing = grid_spacing_mm(grid)
 
+    anchor = None if anchor_node is None else int(anchor_node)
+    tau_max: float | None = T.TAU_TOP if anchor is None else None
+    if anchor is not None:
+        if not 0 <= anchor < n:
+            raise ValueError(f"anchor_node {anchor} is not a node id (n = {n})")
+        if lo[anchor] >= 0.0:
+            raise ValueError(
+                f"the stop field gives the anchor node {anchor} a log-odds "
+                f"{lo[anchor]:.6g} >= 0: the anchor must be a moving node"
+            )
+
     tau0, dir0, qs0 = initial_field(ga, lo, tdir)
     if init is not None:
-        ti, di, qi, has = initial_from_field(init, nodes, settings)
+        ti, di, qi, has = initial_from_field(init, nodes, settings, tau_max)
         tau0 = np.where(has, ti, tau0)
         dir0 = np.where(has[:, None], di, dir0)
         qs0 = qi
+    no_stop: BoolArray | None = None
+    if anchor is not None:
+        tau0 = tau0 - tau0[anchor]
+        qs0 = qs0.copy()
+        qs0[anchor] = 0.0
+        no_stop = np.zeros(n, bool)
+        no_stop[anchor] = True
     u = np.zeros(n)
     colours = np.asarray(grid.colour, np.int64)
     groups = [np.flatnonzero(colours == c) for c in range(grid.n_colours)]
 
     log = _new_log(settings, noise_sd, tau_prior, profile_dtype, grid, n)
     log["run"]["tensor_not_finite"] = n_bad_tensor
+    log["run"]["origin"] = origin
+    log["run"]["recentre_at_edge"] = bool(recentre_at_edge)
+    log["run"]["anchor_node"] = anchor
+    log["run"]["anchor_position_vox"] = (
+        None if anchor is None else [float(v) for v in nodes[anchor]]
+    )
     old: list[npt.NDArray[Any]] = [
         tau0[:, None],
         dir0[:, None, :],
@@ -933,61 +1076,78 @@ def solve(
     ci: npt.NDArray[np.int16] | None = None
     for w in settings.widths:
         t0 = time.perf_counter()
-        tw = FT.term_weights(spacing, noise_sd, w, settings, tau_prior)
-        if st is not None:
-            tau_pred, dir_pred = recentre(st, ga, dir_pred, settings)
-            # views of the old buffers: only the profiles are freed here; the rest
-            # goes when _new_state empties `old` after the carry-over
-            old = [st.cand_tau, st.cand_dir, st.q, st.valid]
-            q_stop = st.q_stop
-            u = st.u
-            st = None  # free the profiles before the new ones
-            ci = None
-        st, ci = _new_state(
-            ga,
-            tau_pred,
-            dir_pred,
-            old,
-            q_stop,
-            u,
-            lo,
-            tdir,
-            coh,
-            volumes,
-            settings,
-            profile_dtype,
+        tw = FT.term_weights(
+            spacing, noise_sd, w, settings, tau_prior, jump=anchor is None
         )
-        mom = FT.node_moments(st)
-        F_old, terms = free_energy(st, ga, tw, mom)
-        F_end = F_old
+        used = 0  # the sweeps of this width, over all its passes
+        rep = 0  # the pass of this width: 0 is the plan's pass, 1, 2, ... repeats
         fl: list[float] = []
-        end = "max_sweeps"
-        for sweep in range(1, settings.max_sweeps + 1):
-            dq = 0.0
-            for sel in groups:
-                dq = max(dq, _update_colour(st, ga, tw, sel, mom))
-            for sel in groups:
-                st.u[sel] = FT.update_u(st, ga, tw, sel, mom)
-            F_new, terms = free_energy(st, ga, tw, mom)
-            F_end = F_new
-            fl.append(F_new)
-            if F_new - F_old > RISE_REL * abs(F_old):
-                rise = dict(width=float(w), sweep=sweep, f_before=F_old, f_after=F_new)
-                log["free_energy_rises"].append(rise)
-                log["defects"].append(
-                    f"free energy rose at width {w:g}, sweep {sweep}: "
-                    f"{F_old:.17g} -> {F_new:.17g}"
-                )
-            dF = abs(F_new - F_old)
-            say(f"w={w:g} sweep={sweep} F={F_new:.12g} dF={dF:.3g} max_dq={dq:.3g}")
-            if sweep == 1:
-                del mom  # the moments of the pruned state replace it
-                st, ci, pr = prune(st, ci, settings)
-                mom = FT.node_moments(st)
-                F_pruned, terms = free_energy(st, ga, tw, mom)
-                F_end = F_pruned
-                log["pruning"]["per_width"].append(
-                    dict(
+        while True:
+            if st is not None:
+                tau_pred, dir_pred = recentre(st, ga, dir_pred, settings)
+                if anchor is not None:
+                    tau_pred[anchor] = 0.0
+                # views of the old buffers: only the profiles are freed here; the
+                # rest goes when _new_state empties `old` after the carry-over
+                old = [st.cand_tau, st.cand_dir, st.q, st.valid]
+                q_stop = st.q_stop
+                u = st.u
+                st = None  # free the profiles before the new ones
+                ci = None
+            st, ci = _new_state(
+                ga,
+                tau_pred,
+                dir_pred,
+                old,
+                q_stop,
+                u,
+                lo,
+                tdir,
+                coh,
+                volumes,
+                settings,
+                profile_dtype,
+                tau_max,
+                anchor,
+            )
+            mom = FT.node_moments(st)
+            F_old, terms = free_energy(st, ga, tw, mom)
+            F_start = F_old
+            F_end = F_old
+            fr: list[float] = []
+            prec: dict[str, Any] = {}
+            end = "max_sweeps"
+            for sweep in range(1, settings.max_sweeps - used + 1):
+                dq = 0.0
+                for sel in groups:
+                    dq = max(dq, _update_colour(st, ga, tw, sel, mom, no_stop=no_stop))
+                for sel in groups:
+                    st.u[sel] = FT.update_u(st, ga, tw, sel, mom)
+                F_new, terms = free_energy(st, ga, tw, mom)
+                F_end = F_new
+                fr.append(F_new)
+                if F_new - F_old > RISE_REL * abs(F_old):
+                    rise: dict[str, Any] = dict(
+                        width=float(w), sweep=sweep, f_before=F_old, f_after=F_new
+                    )
+                    at = ""
+                    if recentre_at_edge:
+                        rise["repeat"] = rep
+                        at = f" (repeat {rep})"
+                    log["free_energy_rises"].append(rise)
+                    log["defects"].append(
+                        f"free energy rose at width {w:g}, sweep {sweep}{at}: "
+                        f"{F_old:.17g} -> {F_new:.17g}"
+                    )
+                dF = abs(F_new - F_old)
+                say(f"w={w:g} sweep={sweep} F={F_new:.12g} dF={dF:.3g} max_dq={dq:.3g}")
+                if sweep == 1:
+                    del mom  # the moments of the pruned state replace it
+                    st, ci, pr = prune(st, ci, settings)
+                    mom = FT.node_moments(st)
+                    F_pruned, terms = free_energy(st, ga, tw, mom)
+                    F_end = F_pruned
+                    prec = dict(
                         width=float(w),
                         kept=_stats(pr.n_keep),
                         at_prune_max=int((pr.n_keep >= settings.prune_max).sum()),
@@ -997,29 +1157,62 @@ def solve(
                         free_energy_before=F_new,
                         free_energy_after=F_pruned,
                     )
-                )
-                say(f"w={w:g} pruned: kept {_stats(pr.n_keep)} F={F_pruned:.12g}")
-                del pr
-                F_cmp = F_pruned
-            else:
-                F_cmp = F_new
-            if dq < settings.tol_q:
-                end = "tol_q"
-            elif dF < settings.tol_free_energy_rel * abs(F_new):
-                end = "tol_free_energy"
-            if end != "max_sweeps":
+                    if rep == 0:
+                        log["pruning"]["per_width"].append(prec)
+                    say(f"w={w:g} pruned: kept {_stats(pr.n_keep)} F={F_pruned:.12g}")
+                    del pr
+                    F_cmp = F_pruned
+                else:
+                    F_cmp = F_new
+                if dq < settings.tol_q:
+                    end = "tol_q"
+                elif dF < settings.tol_free_energy_rel * abs(F_new):
+                    end = "tol_free_energy"
+                if end != "max_sweeps":
+                    break
+                F_old = F_cmp
+            del mom
+            used += len(fr)
+            fl.extend(fr)
+            if not recentre_at_edge:
                 break
-            F_old = F_cmp
+            assert ci is not None
+            ec = edge_counts(st, ci, settings)
+            at_edge = ec["tau_at_kept_edge"] > 0 or ec["dir_at_ring"] > 0
+            nxt = "repeat" if at_edge and used < settings.max_sweeps else "stop"
+            log["edge_repeats"].append(
+                dict(
+                    width=float(w),
+                    repeat=rep,
+                    sweeps=len(fr),
+                    sweeps_of_width=used,
+                    end_reason=end,
+                    free_energy_start=F_start,
+                    free_energy_end=F_end,
+                    free_energy=fr,
+                    pruning=prec,
+                    edge_counts=ec,
+                    at_edge=bool(at_edge),
+                    next=nxt,
+                )
+            )
+            say(
+                f"w={w:g} repeat {rep}: {len(fr)} sweeps ({end}), F={F_end:.12g}, "
+                f"tau_at_kept_edge={ec['tau_at_kept_edge']}, "
+                f"dir_at_ring={ec['dir_at_ring']}: {nxt}"
+            )
+            if nxt == "stop":
+                break
+            rep += 1
         log["free_energy"].append(fl)
-        log["sweeps"].append(len(fl))
+        log["sweeps"].append(used)
         log["end_reason"].append(end)
         log["terms"].append(dict(width=float(w), free_energy=F_end, **terms))
         log["time_s"].append(time.perf_counter() - t0)
-        say(f"w={w:g} done: {len(fl)} sweeps ({end}), F={F_end:.12g}")
-        del mom
+        say(f"w={w:g} done: {used} sweeps ({end}), F={F_end:.12g}")
     assert st is not None and ci is not None
     # the outputs do not use the profiles: free their buffer first
-    st = replace(st, profiles=np.zeros((n, st.K, 0, 2)))
+    st = replace(st, profiles=np.zeros((n, st.profiles.shape[1], 0, 2)))
     n_kept = st.valid.sum(1).astype(np.int64)
     field = _field(grid, st, n_kept, settings.prune_max)
     log["pruning"]["final"] = edge_counts(st, ci, settings)
@@ -1030,7 +1223,7 @@ def solve(
     extras: dict[str, npt.NDArray[Any]] = dict(
         u=st.u.copy(),
         speed=np.exp(st.u),
-        p_jump=p_jump(st, ga, tw),
+        p_jump=p_jump(st, ga, tw) if anchor is None else np.full(n, np.nan),
         tau_pred=np.asarray(tau_pred, np.float64),
         dir_pred=np.asarray(dir_pred, np.float64),
         cand_index=ci_out,
@@ -1055,13 +1248,23 @@ def _new_log(
     and after; final: `edge_counts` and the kept counts), terms (per width at its end:
     each expected term, the entropy and F), time_s (per width), time_total_s, settings
     (SolverSettings.record()) and run (noise_sd, tau_prior, profile_dtype, grid kind,
-    spacing, nodes, rise_rel)."""
+    spacing, nodes, rise_rel; `solve` adds tensor_not_finite, origin, recentre_at_edge,
+    anchor_node and anchor_position_vox).
+
+    With recentre_at_edge (CD-13) on: free_energy and sweeps of a width hold all its
+    passes in order (F can jump between two passes); end_reason is that of the last
+    pass; pruning.per_width is of the first pass; terms is of the last pass; a rise
+    also holds its pass ("repeat"); edge_repeats holds one record per pass (width,
+    repeat, sweeps, sweeps_of_width, end_reason, free_energy_start after the
+    carry-over, free_energy_end, free_energy per sweep, pruning, edge_counts, at_edge,
+    next: "repeat" or "stop"). With the option off, edge_repeats is empty."""
     return dict(
         free_energy=[],
         sweeps=[],
         end_reason=[],
         free_energy_rises=[],
         defects=[],
+        edge_repeats=[],
         pruning=dict(per_width=[], final={}),
         terms=[],
         time_s=[],
