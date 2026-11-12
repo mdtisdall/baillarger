@@ -14,7 +14,7 @@ The plan's PR 4 runs use a uniform grid at 0.16 mm. One such run takes about 7�
 about 16–17 GB. The coordinator decided (CD-11) to run stand-ins at 0.32 mm first. The
 stand-ins use the same code and the same defaults. At 0.32 mm the FEM prior has its
 correct length ℓ = 0.5 mm (CD-6). **Every number in this section is a 0.32 mm stand-in
-result.** No 0.16 mm result exists yet. The first 0.16 mm run (ckiss_smooth, oracle, noise 0) is running. Its results go into this section when it ends.
+result.** One 0.16 mm run exists: ckiss_smooth, oracle, noise 0. Its results are in *The first 0.16 mm run*, below. Each other number is a 0.32 mm stand-in result.
 
 Table 1. The PR 4 matrix and the state of each run (0.32 mm stand-in stage).
 
@@ -25,7 +25,7 @@ Table 1. The PR 4 matrix and the state of each run (0.32 mm stand-in stage).
 | ckiss_smooth | oracle | 0 | shiftB (R6) | done at 0.32 mm (stand-in) |
 | ckiss_smooth | oracle | 0 | anchor (Q6) | done at 0.32 mm (stand-in; 2566 s, 2.33 GB) |
 | ckiss_smooth | oracle | 0 | coarse first (Q6) | done at 0.32 mm (stand-in; 5152 s, 2.42 GB) |
-| ckiss_smooth | oracle | 0 | top, 0.16 mm | running since 06:14 (heavy run) |
+| ckiss_smooth | oracle | 0 | top, 0.16 mm | done (10,592 s, peak 11.26 GB) |
 | all four ckiss phantoms | image | 0 and 1 | top | not run: time |
 | all four ckiss phantoms | oracle | 1 | top | not run: time |
 | ckiss_smooth_flat, ckiss_sharp_flat | oracle | 0 | top | not run: time |
@@ -228,20 +228,56 @@ largest value of the three bins.
 
 ![R6: bank A and bank B change](figures/flow-field-phantoms/kiss_r6_ckiss_smooth_oracle_0_u0.32.png)
 
+### The first 0.16 mm run
+
+ckiss_smooth, oracle inputs, noise 0, uniform grid at 0.16 mm (the plan's grid). 1,179,648 nodes. Time 10,592 s (2 h 57 min), peak RSS 11.26 GB (memguard), 4 threads. Sweeps per width 18 / 38 / 39; every width ended by the free-energy tolerance; 0 free-energy rises. Measured from the roots (re-measured from the saved field after 88bc488).
+
+Table 9. The 0.16 mm run against the 0.32 mm stand-in of the same phantom.
+
+| measure | 0.16 mm | 0.32 mm stand-in |
+|---|---|---|
+| CONTACT stop error, bank A / B (median; p90; max of A) | 0.124 / 0.077 mm; 0.16; 0.19 | 0.27 / 0.17 mm |
+| stop error by kind, median: PIA / CONTACT / HAIRPIN | 0.074 / 0.097 / 0.057 mm | 0.08 / 0.21 / 0.12 mm |
+| stops on own side (flat banks) A / B | 1 / 1 | 1 / 0.999 |
+| contact crossings (flat banks); on true paths | 0; 0 | 1; 0 |
+| overlap / focal points / sinks | 0 / 0 / 0 | 0 / 0 / 0 |
+| unresolved contact cells; columns ended UNRESOLVED | 304; 247 | 274; 237 |
+| stopped sheet at the fused contact (true 0.04 mm) | 0.22 mm | 0.55 mm |
+| stop ramp q_stop 0.2 → 0.8, median, CONTACT / PIA | 0.107 / 0.107 mm | 0.21 / 0.21 mm |
+| speed ratio A/B (true 2.08); solved/true bank A, bank B | 0.976; 0.76, 1.61 | 0.983; 0.77, 1.61 |
+| τ_arrival at CONTACT, median, bank A / B | −0.19 / −0.22 | −0.56 / −0.51 |
+| integrator jump > 0 (no abrasion) | 2661 of 2662, median 0.083 | 2672 of 2672, median 0.33 |
+| level deviation, abs, median / p90 / max | 0.149 / 0.42 / 0.55 mm | — |
+| spacing near the stop, solved / true, median | 1.01 | 1.20 |
+| direction against ∇τ, median | 1.1° | 1.9° |
+| sweeps per width | 18 / 38 / 39 | 59 / 120 / 99 |
+
+- Question 1: the CONTACT stops are within one voxel (0.16 mm) at the median and the p90 of both banks; the largest error is 0.19 mm (bank A). No flow line crosses the contact, and no cortex overlaps.
+- Question 4: the stopped sheet at the fused contact is 0.22 mm, about 1.4 spacings, against the true 0.04 mm. The plan expects the sheet to be resolved only where the octree refines.
+- Question 5: the speed ratio stays near 1 (0.976), against 2.08. The grid does not change it. One possible cause is the speed prior (log v near 0, SD 0.3; log 2.08 = 0.73, about 2.4 SD). The prior is not changed.
+- R2 and R3: the integrator's jump is still positive at almost every stop, but it falls with the spacing (median 0.33 → 0.083). This agrees with the caveat in the R2 row: the jump comes from the masked interpolation, over about one spacing.
+- The solve needed far fewer sweeps at 0.16 mm than at 0.32 mm (95 against 278).
+
+![q_stop in sections at 0.16 mm](figures/flow-field-phantoms/kiss_q4_sections_ckiss_smooth_u0.16.png)
+
+![Stop error against z at 0.16 mm](figures/flow-field-phantoms/kiss_q1q3_stop_vs_z_u0.16.png)
+
+![Free energy at 0.16 mm](figures/flow-field-phantoms/kiss_free_energy_u0.16.png)
+
 ### Design decisions R1–R7 and R11
 
-Evidence for every row: 0.32 mm stand-in only; 0.16 mm pending. R8–R10 are not in PR 4.
+Evidence: the 0.32 mm stand-ins, and one 0.16 mm run (ckiss_smooth, oracle, noise 0; Table 9). R6 and R4 have 0.32 mm evidence only. R8–R10 are not in PR 4.
 
 | # | supports | does not support | failure signature (plan) seen |
 |---|---|---|---|
-| R1 stop as a node state | stops on the own side of the slot plane (≥ 0.991); no cortex node stopped at the open slot | CONTACT stops early by 0.12–0.29 mm (median); PIA 0.08–0.09 mm | not decided: the stop error and the sheet are at the scale of the spacing; no image run |
+| R1 stop as a node state | stops on the own side of the slot plane (≥ 0.991); no cortex node stopped at the open slot. At 0.16 mm: CONTACT stops within one voxel at the median and p90 (0.124 / 0.077 mm; max 0.19 mm), own side 1 / 1 | CONTACT stops early by 0.12–0.29 mm (median); PIA 0.08–0.09 mm | not decided: the stop error and the sheet are at the scale of the spacing; no image run |
 | R2 speed to zero at the stop, τ jumps to τ_top | — | the integrator's jump −τ_arrival is positive at all stops: 2672 of 2672 (smooth; median 0.33), 2994 of 2994 (sharp), 2581 of 2581 (shiftB), also at the pia | seen, with a caveat: τ at the q_stop = 0.5 crossing comes from the last moving nodes, up to one spacing below the stop (masked interpolation). It can measure the integrator, not the solver's jump state. A likely cause is that of CD-12. The provisional change for R2 (#208) failed again; its diagnosis agrees: the column jump is −τ_arrival from the masked interpolation, and the stop boundary sits beyond the pia because of the entropy of the moving candidates |
 | R3 jump prior near zero | — | as R2 | seen, with the caveat of R2 |
 | R4 τ_top = 0 as origin | the anchor run gives the same levels after one constant (\|residual\| median 0.003, p90 0.0075) | the top origin does not need fewer sweeps (278 against 212 with the anchor); the coarse grid first needs more (346) | different levels: not seen. Sweeps: the top origin needs 31 % more than the anchor (278 against 212); whether this is "many more sweeps" is for the user |
-| R5 no overlap | overlap 0; contact crossings 0 on the true paths | contact crossings 1, 1, 3, all bank B. Each crossing column starts at its root in bank B, far from the fundus (local y 4.2–6.4 mm): not a start effect. Four of the five end STOPPED 0.000–0.010 mm past the far face of the fused slot (g = 0.02 mm): they overshoot the contact by less than 1/16 voxel. The fifth (shiftB) ends STOPPED inside the slot at local z = 0.74 mm, where g = 0.092 mm (the window of the gap's end): 0.024 mm past the slot plane, 0.068 mm before the far face. No crossing column runs on into bank A | seen (count above zero), small |
+| R5 no overlap | overlap 0; contact crossings 0 on the true paths. At 0.16 mm: contact crossings 0, overlap 0 | contact crossings 1, 1, 3, all bank B. Each crossing column starts at its root in bank B, far from the fundus (local y 4.2–6.4 mm): not a start effect. Four of the five end STOPPED 0.000–0.010 mm past the far face of the fused slot (g = 0.02 mm): they overshoot the contact by less than 1/16 voxel. The fifth (shiftB) ends STOPPED inside the slot at local z = 0.74 mm, where g = 0.092 mm (the window of the gap's end): 0.024 mm past the slot plane, 0.068 mm before the far face. No crossing column runs on into bank A | seen (count above zero), small |
 | R6 no interpolation across the stop boundary | bank A changes less than bank B | bank A changes when only bank B changes (Table 7) | seen |
-| R7 non-crossing, sinks checked | sinks 0, sink columns 0, focal points 0, overlap 0 | reversed edges 3, 3, 13 (their places against the stop set are not checked here) | not seen for sinks, focal points and overlap at this grid |
-| R11 direction tied to ∇τ | direction against ∇τ: median 1.9–2.5° | — | not seen |
+| R7 non-crossing, sinks checked | sinks 0, sink columns 0, focal points 0, overlap 0 (also at 0.16 mm; reversed edges 9 there) | reversed edges 3, 3, 13 (their places against the stop set are not checked here) | not seen for sinks, focal points and overlap at this grid |
+| R11 direction tied to ∇τ | direction against ∇τ: median 1.9–2.5° (1.1° at 0.16 mm) | — | not seen |
 
 ### The image inputs (CD-5)
 
