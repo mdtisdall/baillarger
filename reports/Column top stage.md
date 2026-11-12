@@ -185,6 +185,60 @@ top. The context views show world planes through the root at ±25 mm and
   found tops near the user's tops with high confidence. Row 4 was wrong but
   near the front of the queue. Row 1 had no top.
 
+## A joint solver (prototype, 2026-11-10)
+
+The stage's propagation is best-first: each column takes its top from
+the neighbours that were decided before it. The joint solver instead
+treats all the tops as one problem, with the costs written as log
+probabilities.
+
+- **Evidence.** For each candidate top, the same sum of log terms as
+  `top_confidence.py`. Candidates beyond the end of their ray (padding
+  copies of the end point) are dropped: 55–58 % of all candidates.
+- **Agreement.** For candidate i of column b and candidate j of a
+  neighbour c: −½ ((k_i − x)·STEP / s_b)², capped at −8. Here x is where
+  b's ray crosses c's top plane at j (the plane through c's candidate,
+  normal to c's ray). s_b = √(s0² + sn_b²). s0 is the stage's
+  `sigma_local_mm`, and sn_b is 1.4826 × the MAD of the neighbours'
+  predictions for column b (`tl_spread.py`). The term is symmetric, and
+  its weight is 2 / (deg b + deg c).
+- **Inference.** Mean field. Each column holds a distribution q over its
+  candidates. Columns of one colour of a greedy graph colouring update
+  together: q_b ∝ exp(evidence + expected agreement). The agreement
+  width starts at 4 × s_b and narrows to 1 × in five steps. The
+  objective is the free energy (it includes the entropy of q).
+- **Output.** For each column: the most probable candidate, its
+  probability, the agreement there, and whether the column has a top.
+
+The solver chooses a point on each column's ray. It does not move the
+ray.
+
+**Results.**
+
+| Measure | Best-first | Mean field (colour groups) |
+|---|---|---|
+| Region (4 superblocks, 130,695 columns, 233,673 candidates): same top within 1 step | – | 92.7 % |
+| Region: columns with no top | 7,643 | 2,730 |
+| Region: share of tops deeper than 4.5 mm | 7.3 % | 6.6 % |
+| Exact test (434 trusted columns given a false strongest candidate): restored | 100 % | 55 % |
+| Exact test: unperturbed trusted columns broken | 0 % | 0.03 % |
+
+On the whole hemisphere (MPS), the solver ran on 1,179,148 columns.
+1,154,548 columns have a top. It took 278 sweeps and 65 s, and the
+objective did not rise in any sweep.
+
+`tl_spread.py` alone (the per-column scale in the local term, tops not
+changed): sn has a median of 0.030 mm and a 90th percentile of
+0.178 mm (s0 = 0.059 mm). The lag-1 autocorrelation of the local term
+over neighbours falls from 0.38 to 0.094.
+
+**Do not show.** If the mean-field tops are more correct than the
+best-first tops. No marked sites were compared. The exact test favours
+best-first, but the user found that this result is an artefact of the
+segmentation, which is quite bad in places. The test's trusted columns
+are columns with a clear label top, so the test depends on the labels.
+It cannot compare the two methods until the segmentation is repaired.
+
 ## Open items
 
 - Remove roots that do not face cortex (ventricle walls, cut faces) from the
@@ -212,6 +266,9 @@ All code is in `prototypes/scripts/`. Nothing moves to `src`.
 | `top_confidence.py` | The global pass: propagation, the terms, the review queue. |
 | `top_overlay.py` | The viewer maps (`.func.gii`). |
 | `top_rows.py`, `top_row_context.py` | The row views and the context views for review. |
+| `tl_spread.py` | The per-column scale sn of the local term (`sn.npy`), and its comparison with the stage. |
+| `joint_tops.py` | The joint solver against best-first on one region, on the CPU, with the exact test. |
+| `joint_gpu.py` | The joint solver in PyTorch, for the whole hemisphere or a region. |
 
 Tests: `test_top_stage_lib.py`, `test_coarse_kernels.py`,
 `test_bent_confidence.py`.
@@ -234,4 +291,14 @@ DEVICE=mps WORKERS=4 SAVE_DIAG=1 scripts/memguard 56 uv run python prototypes/sc
 DEVICE=mps WORKERS=3 scripts/memguard 19 uv run python prototypes/scripts/top_features.py OUT OUT/features
 scripts/memguard 16 uv run python prototypes/scripts/top_confidence.py OUT/features OUT/conf
 scripts/memguard 8 uv run python prototypes/scripts/top_overlay.py OUT/conf/top_confidence.npz $TOP_SURF OUT/overlay/top_conf.func.gii
+```
+
+The joint solver (prototype) needs the features, the confidence output
+and `sn.npy`. The caps are the ones that the runs of 2026-11-10 used. The
+peaks were not recorded.
+
+```bash
+scripts/memguard 12 uv run python prototypes/scripts/tl_spread.py OUT/features OUT/conf OUT/spread
+scripts/memguard 16 uv run python prototypes/scripts/joint_tops.py OUT/features OUT/conf OUT/spread/sn.npy OUT/joint-region 1_1_1,1_1_2,2_1_1,2_1_2
+scripts/memguard 30 uv run python prototypes/scripts/joint_gpu.py OUT/features OUT/conf OUT/spread/sn.npy OUT/joint mps
 ```
