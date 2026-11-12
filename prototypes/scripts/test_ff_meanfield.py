@@ -434,7 +434,7 @@ def _anchor_pair(
 
 
 ANCHOR_XFAIL = (
-    "PENDING the coordinator's permission (CD-8). Measured on this case: the far "
+    "Finding (coordinator decision CD-12). Measured on this case: the far "
     "field moves by the initial offset (C = -12 Δτ), but near the anchors the "
     "solved field differs by more than 1e-6: max |Δτ - C| 0.066 (on) and 0.063 "
     "(off), q_stop 0.014 (on) and 0.16 (off), speed 0.056 (on) and 0.10 (off). The "
@@ -481,7 +481,7 @@ def test_origin_moving_the_anchor_shifts_tau_only(contrast: str) -> None:
 
 
 TOP_XFAIL = (
-    "PENDING the coordinator's permission (CD-8). Measured on this case (13 STOPPED "
+    "Finding (coordinator decision CD-12). Measured on this case (13 STOPPED "
     "columns, grid 0.32 mm): |τ_arrival| from 0.052 to 0.24, all above Δτ = 0.04. "
     "τ_arrival is the masked interpolation of τ̄ over the moving corners only, and "
     "a moving node can lie up to one spacing (0.32 mm, τ about -0.32 at speed 1) "
