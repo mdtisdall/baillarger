@@ -1,0 +1,319 @@
+# Column solver: probes first or growth
+
+Stream 2 of `docs/version-2-plan.md`: the refined columns (§4b, item 5)
+and the open question "which paths are right in real cortex" (§4c, *Open*).
+Read first:
+
+- `docs/version-2-plan.md` §4b–4d (columns) and §5c, step 3 (the joint
+  warp);
+- `reports/Bent columns trial.md`;
+- `reports/Column top stage.md`, *A joint solver (prototype, 2026-11-10)*
+  (in PR #200), and `prototypes/scripts/joint_gpu.py`;
+- `reports/Fused sulci and thickness priors.md` (the Gaussian core, the
+  border weight, calibration).
+
+This is a prototype plan. Nothing in the ray sampler or `src/` changes.
+The rules in `docs/plans/round-2.md` apply. Heavy runs go under
+`scripts/memguard`, one at a time.
+
+**Status:** draft for review. No code is written.
+
+## Goal
+
+Find out how to make the refined columns, and decide one question: is it
+worth casting rays as probes to start the solve? Two strategies use the
+same energy and differ only in where the solve starts and in which order it
+updates:
+
+- **A, probes first.** Cast the rays, correct the tops, then solve the
+  whole length of every column together.
+- **B, growth.** Grow all the columns from their starts, a small step at a
+  time, and correct them at each step.
+
+The plan also fixes what the solver writes, so that the result can become
+the stored refined columns (§4b, item 5) and the editor can re-solve a
+region after a label edit.
+
+## What is known
+
+- **The top solver works as a probabilistic model.** `joint_gpu.py` keeps
+  a distribution over candidate tops on each column, with the costs as log
+  probabilities, and solves it by mean field in colour groups, from a wide
+  agreement width to a narrow one. On the whole hemisphere (1,179,148
+  columns, MPS) it took 65 s, and the objective did not rise in any sweep.
+  It chooses a point on each column's ray. It does not move the ray.
+- **Its exact test did not compare the methods.** Best-first restored all
+  the false candidates and the mean field about half. The user found that
+  this is an artefact of the segmentation, which is quite bad in places.
+  So every comparison in this plan uses sites where the labels are correct
+  or were repaired.
+- **The bent-columns fit hardly bent the columns** (median bend at the top
+  0.14–0.17°), did not converge in 4 rounds, and did not remove the
+  sawtooth. Its barrier and crowding terms held the probes back. The best
+  probe used only agreement, alignment, length and bending.
+- **The large errors at the fundus come from the direction of the rays.**
+  Rays from the fundus floor pass the slot tip and run up the wall's cortex
+  at a shallow angle. They meet the outside late or not at all. The labels
+  there are close to correct (user).
+- **Straight rays fold** below about 1.5 mm in a quarter of the trial box.
+  They can be probes but not columns.
+- **The joint warp** (§5c, step 3; `joint_site.py`) gives each trace
+  ordered levels τ and solves the pial surface and the depth together. It
+  uses straight traces, weighted L1 costs and QPBO, not probabilities.
+
+## The model (shared by both strategies)
+
+### Columns in τ
+
+Each column b is a path x_b(τ) through the ribbon, parametrised by a shared
+"time" τ. Neighbouring columns at equal τ are at the same laminar level.
+Three things are unknown for each column:
+
+1. **Its path.** Where it goes laterally, so it can bend.
+2. **Its speed** along the path, ds/dτ. The speeds are set so that
+   neighbours' contrast matches at equal τ. This is seismic flattening
+   applied to the columns themselves.
+3. **Its offset.** The τ at which the column starts. The start is a fixed
+   point: 2 mm behind the root along the root's normal (the sampler's
+   inward cap). No probe is needed to find it. The
+   offsets let neighbouring columns align, both at the GM/WM transition and
+   at the top.
+
+τ = 0 is not the GM/WM boundary. There is no sharp boundary. Only the
+relative alignment matters, so one point on one chosen column is τ = 0
+(the **anchor**). The column graph (the across-triangle mesh graph of
+`white-surf/1`) is one connected graph, also around excisions. So one
+anchor fixes τ everywhere. The solver checks that the graph is connected.
+A disconnected part is a defect to report and repair, not a case for a
+second anchor. The speed prior's typical value fixes the unit of τ.
+
+### The chain of each column
+
+Each column is a chain of nodes, one at each τ step τ_k = k·Δτ. The state
+of a node is one of:
+
+- **not begun**: τ_k is before the column's offset;
+- **a position**: one candidate point of the path at τ_k;
+- **ended**: τ_k is after the column's top.
+
+The offset is the step where the chain leaves "not begun". The top is the
+step where it enters "ended". So the offset and the top are both
+transitions of the chain, and both are aligned across neighbours like any
+other level. A zero-thickness top at an excision is a chain that ends
+right after the GM/WM levels. The top needs no separate solve: the top
+solver's candidates and terms become the evidence for the "ended"
+transition.
+
+The candidates at a node are a small set of points round the node's
+expected position: steps of several lengths (the speed) in several
+directions within a cone round the current heading (the bend). The form of
+the set is decision D1.
+
+### The energy
+
+All the terms are log probabilities, as in the top solver. Each term is a
+cost on one node, on two consecutive nodes of one column, or on two nodes
+of neighbouring columns at the same τ step. So the energy of a partial
+column (the steps grown so far) is defined, which growth needs.
+
+| Term | Acts on | What it does |
+|---|---|---|
+| Contrast match | neighbours at equal τ | The echoes at the two candidates agree, at the band scale of at least 2–3 voxels. Thinner layers follow the τ levels. A weight falls where the deep profiles differ, so an areal border is a change of facies, not forced into a match (D2). |
+| Alignment | one column, step k → k+1 | The step direction follows the tensor's leading eigenvector, weighted by coherence. |
+| Bending | one column, k−1, k, k+1 | The heading changes slowly. |
+| Speed prior | one column, and neighbours | The speed is smooth along τ and across neighbours, and near a typical value. Where the contrast is flat, this term alone sets the speed. |
+| Separation | neighbours at equal τ | The two positions keep their order along the edge between the roots. A crossing has a high cost. |
+| Start | the "not begun" → position transition | The column's first position is its fixed start point. |
+| Top evidence | the position → "ended" transition | The top stage's terms (`top_confidence.py`) at the last position. |
+
+The weights come from data where they can (σ from the spread of the
+measured quantity), as in the top stage. A weight scan (each weight × 0.1
+and × 10) is a finding to report, never a setting to tune.
+
+**Non-crossing is not a guarantee.** The mean field gives each node its
+own distribution, and a crossing is a property of the joint configuration.
+The separation term acts only in expectation. So the solver checks the
+chosen configuration for folds after every solve, in both strategies.
+
+### Inference
+
+Mean field over all the nodes, as in `joint_gpu.py`: each node holds a
+distribution q over its states, updated from its own terms plus the
+expected terms of its neighbours (along its chain and across at equal τ).
+The pair widths start wide and narrow in steps. Colour groups of the
+column graph update together. The objective is the free energy, and it
+must not rise in any sweep. A rise is a defect.
+
+**Pruning.** Each node keeps the candidates that hold most of its
+probability mass (a mass rule, not a fixed count). A later backward step
+cannot restore a pruned candidate. So the solver logs how often the final
+choice is near the edge of the kept set.
+
+## The strategies
+
+The energy, the candidates and the pruning rule are the same in every arm.
+
+| Arm | Start | Update order |
+|---|---|---|
+| **A** (probes first) | The top stage's rays and its corrected tops. The candidates are centred on the probe paths, with the offset and the speed from a first fit of the contrast along the probes. The top stage traces one ray per coarse cell, so phase 1 traces a probe for every column of the trial sites. | All the nodes of all the columns, until the objective stops falling. |
+| **B-fwd** (growth, forward only) | The anchor column's start. | One τ step at a time, outward. A node is final when the front passes it. |
+| **B-fb** (growth, forward and backward) | As B-fwd. | As B-fwd, then sweeps over all the nodes, back from the tops and out again, until the objective stops falling. |
+
+- **A against B-fb** answers the main question. Both end as solves of the
+  whole length. Only the start differs.
+- **B-fwd against B-fb** measures how much evidence from deeper in the
+  column (mainly the top) must flow back to shallow steps.
+- In B, a column's offset is unknown when the front reaches its start. The
+  "not begun" state carries that: until the front has grown far enough to
+  see the contrast, a column holds a distribution over when it begins. The
+  plan records how many steps each column needs before its offset settles.
+
+Two arms are not in the first round. They can be added if the first round
+calls for them:
+
+- **Fixed-lag growth.** B with a backward window of L steps. Memory stays
+  bounded by L.
+- **Growth with lookahead probes.** B with short probe rays from each
+  candidate. This mixes in the probes, so it is not a clean B.
+
+## Evaluation
+
+### Sites
+
+Only where the labels are correct or were repaired.
+
+| Site | Truth | What it tests |
+|---|---|---|
+| Fold phantoms (`fold_phantoms.py`) and the curved fundus phantom (`bent_phantom.py`) | Known true columns and levels | Path error; exact recovery |
+| τ phantoms (new, phase 0) | Known offsets and speeds | The warp alone; the anchor; flat contrast; an areal border |
+| The fundus box of the bent-columns trial (true vertex 12182770, hemisphere R, radius 5 mm), with the painted labels | The user's reading of the fundus; the failing stretch | The direction failure; the sawtooth |
+| M1S1 (`prototypes/data/M1S1_points_full0.json`, 23 points) | Marked points | The profile split; tops at a contact |
+| V1V2 banks (`prototypes/data/V1V2_banks_points_full0.json`) | Marked points | A striate border |
+| The four superblocks of the top solver's region (`1_1_1, 1_1_2, 2_1_1, 2_1_2`) | None. Read only at columns whose sites the user has reviewed and found label-correct. | Scale, memory, folds at scale |
+
+### Measures
+
+Diagnostics and views, not pass/fail rules. Each run shows every measure
+for every arm. The arms' views go to the user blind (labelled X, Y, Z),
+and the user's reading is recorded before the arms are named.
+
+- **Final energy and its parts.** If two arms give different columns, the
+  one with the lower energy is the one the energy prefers. If that one is
+  also closer to the truth, the other arm failed to optimise. If it is
+  further from the truth, the energy is wrong, and the plan records which
+  term.
+- **Folds** in the chosen configuration: the sign of the local Jacobian of
+  the map from the roots, the count of crossing neighbour pairs, and where
+  they are.
+- **Tops** against the user's marked tops.
+- **Path error** on the phantoms. Straight rays: 0.18–0.41 mm at crowns.
+- **The profile split** at the marked points. Straight normal rays:
+  0.17 mm at M1/S1, 0.075 mm at V1V2.
+- **Alignment** to the tensor where coherence ≥ 0.7, as the median and
+  the 90th percentile angle.
+- **Level shifts between neighbours** (the "no faults" rule, §4b): a
+  shift of a level by more than 1–2 voxels between neighbours, or a step
+  along a border between groups of columns.
+- **Calibration.** Report the uncertainty of the offset difference between
+  neighbours, which does not depend on the anchor, not the absolute offset
+  uncertainty. Mask the visible tops in blocks, solve again, and check
+  that z = (t_true − μ)/σ has an SD near 1 and that 95 % intervals cover
+  about 95 %.
+- **Pruning:** the share of final choices near the edge of the kept set.
+- **Growth only:** steps to settle each offset; how far B-fwd's columns
+  move when B-fb's backward sweeps run.
+- **Cost:** time and peak memory per arm, and a memory model for a 50 µm
+  whole brain (below).
+
+### Exact tests (phase 0)
+
+- On a τ phantom with known offsets and speeds, the solver recovers the
+  offset differences between neighbours and the speeds, up to the anchor.
+- Moving the anchor to another column changes every offset by one
+  constant and changes nothing else.
+- A phantom whose contrast is flat over a band: the speed there follows the
+  speed prior, and the levels on both sides stay aligned.
+- A phantom with an areal border (the profile's content changes, the
+  layers do not shift): no level shifts across the border.
+- A graph with two components: the solver reports the defect and stops.
+- On a straight phantom with straight true columns, no arm bends them.
+
+## Memory at the target scale
+
+The estimate for a 50 µm whole brain, about 3.5·10⁸ columns, with about
+150 τ steps per column (6 mm at 0.04 mm) and about 20 kept candidates per
+node, in float32:
+
+- **A and B-fb** hold every node: 3.5·10⁸ × 150 × 20 × 4 B ≈ 4 TB for q
+  alone, with the evidence of the same order. So they must run by
+  superblock with a halo, in sweeps, with q on disk between sweeps.
+- **B-fwd** holds the front: 3.5·10⁸ × 20 × 4 B ≈ 28 GB, also by
+  superblock.
+
+These are estimates from assumptions. Phase 4 measures the real step count,
+candidate count and halo width, and gives the analysis again. The choice
+between the arms is by accuracy first. Memory and the cost of a local
+re-solve decide only between arms that are equally accurate.
+
+## What the solver writes
+
+The prototype writes scratch `.npz` files with these fields, so that the
+stored form (§4b, item 5) can be chosen from them:
+
+- per column: the edge key; the chosen path at each τ step; the offset and
+  the top (or censored); the most probable state's probability at each
+  step; the offset difference to each neighbour with its uncertainty;
+  provenance (from data, or rule-only);
+- per run: the arm, the anchor, the input versions, the energy and its
+  parts per sweep, and the pruning log.
+
+The stored form is chosen after phase 3, with the result. A compact
+candidate: the path as a shear spline off the probe ray (as in the
+bent-columns trial), plus the τ map as a monotone spline and the offset.
+
+**Local re-solve for the editor.** After a label edit, the columns in the
+edit's blocks and a margin are solved again, with the columns outside the
+margin fixed. Phase 4 measures, for each arm, the time of a re-solve at a
+column site, and how far the change reaches past the edit.
+
+## Phases
+
+Each phase ends with views for the user. A checkpoint needs the user's
+reading before the next phase starts.
+
+0. **The shared model.** The chain, the terms, the mean field on the CPU
+   (NumPy reference), and the τ phantoms with the exact tests. Torch on MPS
+   for the same kernels, checked against the reference.
+1. **Arm A** on the fold phantoms, the curved phantom and the fundus box.
+2. **Arms B-fwd and B-fb** on the same sites.
+3. **Comparison and checkpoint.** The blind views, the energies, and the
+   measures above. The user decides which arms go on, and whether
+   fixed-lag growth or lookahead runs.
+4. **M1S1, V1V2 and the four superblocks** with the arms that go on: the
+   measures, the memory model from measured sizes, and the local re-solve
+   timing.
+5. **Write-up.** A report in `reports/`, and the stored form proposed as a
+   change to `docs/version-2-plan.md` §4b–4d. The format spec comes with
+   its own plan.
+
+## Decisions for the user
+
+- **D1. The form of the candidates.** Discrete candidates (a fan of steps
+  round the heading) with the mean field above, or a continuous Gaussian
+  form, which keeps the posterior in closed form (the fused-sulci report's
+  argument). The plan assumes discrete, because the top solver is
+  discrete and works.
+- **D2. The contrast match.** Which echoes, the band scale, and the form of
+  the border weight.
+- **D3. The sites.** Whether the fundus box's painted labels are enough, and
+  which marked points to add.
+- **D4. The τ step** Δτ, and the number of candidates kept per node.
+
+## Not in this plan
+
+- Any change to the ray sampler or to "normal rays stay straight" (user,
+  #47). A result here is evidence for a separate decision.
+- The format spec of the stored columns.
+- The viewer's column preview.
+- The laminar depth metric. The τ levels are contrast levels. Equal-volume
+  depth within a column stays a separate role.
