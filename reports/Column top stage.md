@@ -233,9 +233,11 @@ changed): sn has a median of 0.030 mm and a 90th percentile of
 over neighbours falls from 0.38 to 0.094.
 
 **Do not show.** If the mean-field tops are more correct than the
-best-first tops. No marked sites were compared. In the exact test,
-best-first restored all the false candidates and the mean field
-restored about half.
+best-first tops. No marked sites were compared. The exact test favours
+best-first, but the user found that this result is an artefact of the
+segmentation, which is quite bad in places. The test's trusted columns
+are columns with a clear label top, so the test depends on the labels.
+It cannot compare the two methods until the segmentation is repaired.
 
 ## Open items
 
