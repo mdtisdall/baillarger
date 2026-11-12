@@ -255,7 +255,11 @@ def grid_arrays(
             if hasattr(grid, "edge_weights_vox")
             else FG.edge_weights_vox(grid)
         ),
-        face_w=FG.face_weights_vox(grid),
+        face_w=(  # an octree gives its own (the dual face of a split edge)
+            grid.face_weights_vox()
+            if hasattr(grid, "face_weights_vox")
+            else FG.face_weights_vox(grid)
+        ),
         dir_pairs=dir_pairs.reshape(-1, 2),
         dir_pair_w=dir_pair_w,
         Q_u=Q_u,
