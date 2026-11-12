@@ -1,6 +1,7 @@
 """Tests of ff_meanfield: the plan's exact test "the free energy does not rise in any
 sweep on the slab", a loose sanity check of the solved slab, the pruning, the
-determinism and the carry-over of the re-centring.
+determinism, the carry-over of the re-centring and the option CD-13 (re-centring at
+the edge).
 
 Run from the repository root:
     nix develop --command uv run pytest -q prototypes/scripts/test_ff_meanfield.py
@@ -17,6 +18,7 @@ Every tolerance here was fixed when the test was written.
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 import math
 import sys
@@ -402,6 +404,72 @@ def test_pruned_slots_read_their_lines() -> None:
     pa = FTM.candidate_profile_rows(a, rows, slots)
     pb = FTM.candidate_profile_rows(b, rows, slots)
     assert pa.tobytes() == pb.tobytes()
+
+
+# ---------------------------------------------------------------- CD-13
+
+
+TINY_SHAPE = (12, 12, 12)  # 7³ = 343 nodes at 0.32 mm
+TINY_MAX_SWEEPS = 60  # the first pass ends by a stop rule, a repeat reaches the cap
+
+
+def test_recentre_at_edge_is_off_by_default() -> None:
+    """The option CD-13 is off by default: the plan's schedule, no repeats."""
+    p = inspect.signature(MF.solve).parameters["recentre_at_edge"]
+    assert p.default is False
+    _, _, _, _, log = slab_run()
+    assert log["run"]["recentre_at_edge"] is False
+    assert log["edge_repeats"] == []
+
+
+@functools.cache
+def tiny_run_at_edge() -> dict[str, Any]:
+    ph = FTR.build_phantom("slab", FEATS, noise=0.0, shape=TINY_SHAPE)
+    grid = FG.UniformGrid(ph.shape, SPACING_MM)
+    s = replace(T.DEFAULTS, max_sweeps=TINY_MAX_SWEEPS)
+    _, _, log = MF.solve(
+        grid, FO.oracle_inputs(ph), ph.image["noise_sd"], s, recentre_at_edge=True
+    )
+    return log
+
+
+def test_recentre_at_edge_ends_without_edge_or_at_the_cap() -> None:
+    """With the option on, each width ends with no final choice at the edge, or with
+    max_sweeps sweeps used over its passes. The passes add up to the width's sweeps."""
+    log = tiny_run_at_edge()
+    assert log["run"]["recentre_at_edge"] is True
+    reps = log["edge_repeats"]
+    assert any(r["repeat"] > 0 for r in reps)  # the case does repeat
+    for i, w in enumerate(T.DEFAULTS.widths):
+        rw = [r for r in reps if r["width"] == float(w)]
+        assert [r["repeat"] for r in rw] == list(range(len(rw)))
+        assert sum(r["sweeps"] for r in rw) == log["sweeps"][i] <= TINY_MAX_SWEEPS
+        assert [f for r in rw for f in r["free_energy"]] == log["free_energy"][i]
+        for r in rw[:-1]:
+            assert r["at_edge"] and r["next"] == "repeat"
+        last = rw[-1]
+        assert last["next"] == "stop"
+        ec = last["edge_counts"]
+        no_edge = ec["tau_at_kept_edge"] == 0 and ec["dir_at_ring"] == 0
+        assert no_edge == (not last["at_edge"])
+        assert no_edge or last["sweeps_of_width"] == TINY_MAX_SWEEPS
+    fin = {k: v for k, v in log["pruning"]["final"].items() if k != "kept"}
+    assert fin == reps[-1]["edge_counts"]
+
+
+def test_recentre_at_edge_free_energy_does_not_rise_in_a_pass() -> None:
+    """With the option on, F does not rise in any sweep of a pass (the plan's rise
+    rule; after the first sweep the reference is F after the pruning)."""
+    log = tiny_run_at_edge()
+    assert log["free_energy_rises"] == []
+    assert log["defects"] == []
+    for r in log["edge_repeats"]:
+        fr = r["free_energy"]
+        assert len(fr) == r["sweeps"] >= 1
+        seq = [r["pruning"]["free_energy_after"], *fr[1:]]
+        for a, b in zip(seq[:-1], seq[1:], strict=True):
+            assert b - a <= RISE_REL * abs(a), (r["width"], r["repeat"], a, b)
+    json.dumps(log, allow_nan=True)  # JSON-able for run.json
 
 
 # ---------------------------------------------------------------- the origin
