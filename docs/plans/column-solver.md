@@ -30,6 +30,9 @@ updates:
 - **B, growth.** Grow all the columns from their starts, a small step at a
   time, and correct them at each step.
 
+A third arm, **C**, holds the same unknowns as fields on a grid instead of
+as chains, to compare the two representations.
+
 The plan also fixes what the solver writes, so that the result can become
 the stored refined columns (§4b, item 5) and the editor can re-solve a
 region after a label edit.
@@ -61,7 +64,7 @@ region after a label edit.
   ordered levels τ and solves the pial surface and the depth together. It
   uses straight traces, weighted L1 costs and QPBO, not probabilities.
 
-## The model (shared by both strategies)
+## The model (shared by all arms)
 
 ### Columns in τ
 
@@ -100,14 +103,42 @@ The offset is the step where the chain leaves "not begun". The top is the
 step where it enters "ended". So the offset and the top are both
 transitions of the chain, and both are aligned across neighbours like any
 other level. A zero-thickness top at an excision is a chain that ends
-right after the GM/WM levels. The top needs no separate solve: the top
-solver's candidates and terms become the evidence for the "ended"
-transition.
+right after the GM/WM levels. The top needs no separate solve: the
+"ended" transition reads the shared stop field (below).
 
 The candidates at a node are a small set of points round the node's
 expected position: steps of several lengths (the speed) in several
 directions within a cone round the current heading (the bend). The form of
 the set is decision D1.
+
+### Stopping and contacts
+
+A top is a probability of stopping at each point of space. So the stop
+evidence is one **stop field** over the ribbon, shared by every column
+and every arm: the top stage's terms (`top_confidence.py`), evaluated at
+points, not per ray. The mirror term is already contact evidence: it looks
+for the column's profile mirrored on the far side.
+
+- **Open sulcus:** two stop sheets with outside medium between them. Each
+  bank's columns end on their own sheet.
+- **Contact:** the two sheets coincide. Columns from both sides end on the
+  same sheet. The contact is a stop set reached from more than one
+  direction.
+- Between them, the sheets come closer by degrees, as a fold and a contact
+  differ only along a continuum (version-2 §4c, step 1).
+
+No step labels banks, and no column is paired with another. Each column
+only has to stop on the shared set. Which side of a contact a point is on
+follows from where the columns stop.
+
+**No result concludes that cortex overlaps** (user, 2026-11-11). A point
+of tissue belongs to one bank. Gaps are allowed. An overlap in an estimate
+means only that the banks' evidence disagrees, so it is reported, never
+drawn: at each contact site, the signed distance between where each
+bank's evidence alone would stop (positive: a gap; negative: the old
+overlap). This replaces the overlap view of version-2 §5c, step 3
+("neither is forced to meet the other"). The chains need an exclusion term
+for this (below). The field form excludes overlaps by its form.
 
 ### The energy
 
@@ -124,7 +155,8 @@ column (the steps grown so far) is defined, which growth needs.
 | Speed prior | one column, and neighbours | The speed is smooth along τ and across neighbours, and near a typical value. Where the contrast is flat, this term alone sets the speed. |
 | Separation | neighbours at equal τ | The two positions keep their order along the edge between the roots. A crossing has a high cost. |
 | Start | the "not begun" → position transition | The column's first position is its fixed start point. |
-| Top evidence | the position → "ended" transition | The top stage's terms (`top_confidence.py`) at the last position. |
+| Stop | the position → "ended" transition | The stop field at the last position. |
+| Exclusion | any two columns at the same point | The expected occupancy of space by the columns, on a grid. Occupancy by two columns whose roots are far apart on the mesh has a high cost. This is what keeps the banks from overlapping, because columns of opposite banks are not neighbours on the mesh. |
 
 The weights come from data where they can (σ from the spread of the
 measured quantity), as in the top stage. A weight scan (each weight × 0.1
@@ -133,7 +165,38 @@ and × 10) is a finding to report, never a setting to tune.
 **Non-crossing is not a guarantee.** The mean field gives each node its
 own distribution, and a crossing is a property of the joint configuration.
 The separation term acts only in expectation. So the solver checks the
-chosen configuration for folds after every solve, in both strategies.
+chosen configuration for folds and overlaps after every solve, in every
+chain arm.
+
+### The field form (arm C)
+
+The same unknowns can be held as fields on a grid instead of as chains.
+Each grid node holds a distribution over candidates of **τ and the column
+direction**. A local consistency term ties them: the speed along the
+direction equals 1/|∇τ| in that direction. The columns are the flow lines
+of the direction field, from each column's start. With τ stored at the
+node, every term is between adjacent grid nodes, so the mean field is the
+same kind of problem as the tops. With only a velocity stored, the τ at a
+point would be an integral over the whole field below it.
+
+- **Non-crossing by form.** Any smooth field gives flow lines that cannot
+  cross, so the posterior mean field, or the per-node choices after smooth
+  interpolation, give columns that do not cross, whatever the uncertainty.
+  The solver checks only where the field falls to zero or reverses, which
+  makes columns meet at a sink.
+- **Contacts.** The field is smooth except on the stop set. On either side
+  of a contact sheet it points toward the sheet, and it reverses across it.
+  No flow line crosses the sheet, so each point lies on one column and
+  cortex cannot overlap.
+- **The grid.** 0.3–0.6 mm (the scale the data support) is too coarse for a
+  tight fundus (crowns down to 0.32 mm on the phantoms): the columns there
+  would be too smooth. The grid is finer near tight folds (D6).
+- **Per-column uncertainty** comes from samples: draw fields from the node
+  distributions, smooth them, integrate the columns, and take the spread
+  of each column's levels and top.
+- **Storage.** The field and the offsets on the start surface encode every
+  column. The integrator and its step become part of the spec, and must be
+  deterministic.
 
 ### Inference
 
@@ -174,25 +237,33 @@ the energy above.
   fine level must be free to correct them.
 - **In growth.** B-fwd and B-fb grow on the coarse level first, then on the
   fine level with the coarse priors.
+- **In the field form.** Arm C solves a coarse grid first, and its
+  distributions become priors on the finer grid.
 
 Coarse to fine is tested as one factor (fine only against coarse to fine),
 not as more arms (*Evaluation*).
 
 ## The strategies
 
-The energy, the candidates, the pruning rule and the coarse-to-fine
-schedule are the same in every arm.
+The energy, the candidates, the pruning rule, the stop field and the
+coarse-to-fine schedule are the same in every arm. Arms A and B use
+chains. Arm C uses the field form, with the same terms written locally on
+the grid.
 
 | Arm | Start | Update order |
 |---|---|---|
 | **A** (probes first) | The top stage's rays and its corrected tops. The candidates are centred on the probe paths, with the offset and the speed from a first fit of the contrast along the probes. The top stage traces one ray per coarse cell, so phase 1 traces a probe for every column of the trial sites. | All the nodes of all the columns, until the objective stops falling. |
 | **B-fwd** (growth, forward only) | The anchor column's start. | One τ step at a time, outward. A node is final when the front passes it. |
 | **B-fb** (growth, forward and backward) | As B-fwd. | As B-fwd, then sweeps over all the nodes, back from the tops and out again, until the objective stops falling. |
+| **C** (field form) | The tensor's leading eigenvector for the direction, and τ from distance along it, at the coarse level. | All the grid nodes, until the objective stops falling. |
 
 - **A against B-fb** answers the main question. Both end as solves of the
   whole length. Only the start differs.
 - **B-fwd against B-fb** measures how much evidence from deeper in the
   column (mainly the top) must flow back to shallow steps.
+- **C against the better chain arm** compares the representations: the
+  guarantee of non-crossing and no overlap against the resolution of the
+  grid at tight folds.
 - In B, a column's offset is unknown when the front reaches its start. The
   "not begun" state carries that: until the front has grown far enough to
   see the contrast, a column holds a distribution over when it begins. The
@@ -224,7 +295,7 @@ Only where the labels are correct or were repaired.
 ### Measures
 
 Diagnostics and views, not pass/fail rules. Each run shows every measure
-for every arm. The arms' views go to the user blind (labelled X, Y, Z),
+for every arm. The arms' views go to the user blind (with neutral labels),
 and the user's reading is recorded before the arms are named.
 
 - **Final energy and its parts.** If two arms give different columns, the
@@ -256,6 +327,13 @@ and the user's reading is recorded before the arms are named.
   answer, and whether that is at the features smaller than a coarse cell;
   and whether the coarse level's errors at the tight fundus remain in the
   fine result.
+- **Contacts:** at each contact site, the stop sheet's position and
+  probability against the user's reading, and the signed distance between
+  the banks' own stops. For the chain arms, the overlaps found by the check
+  before the exclusion term resolved them.
+- **Field only (arm C):** where the field falls to zero or reverses; the
+  per-column spread from samples; the columns' error at tight folds
+  against the chains'.
 - **Growth only:** steps to settle each offset; how far B-fwd's columns
   move when B-fb's backward sweeps run.
 - **Cost:** time and peak memory per arm, and a memory model for a 50 µm
@@ -272,6 +350,10 @@ and the user's reading is recorded before the arms are named.
 - A phantom with an areal border (the profile's content changes, the
   layers do not shift): no level shifts across the border.
 - A graph with two components: the solver reports the defect and stops.
+- A contact phantom with a known contact sheet, and an open-sulcus phantom
+  with a known gap: every arm puts the stops on the known sheets, and no
+  arm's output has overlapping cortex.
+- Arm C on a straight phantom gives the same columns as the chains.
 - On a straight phantom with straight true columns, no arm bends them.
 - On the same phantom, fine only and coarse to fine reach the same columns
   and the same energy.
@@ -289,6 +371,10 @@ node, in float32:
   superblock with a halo, in sweeps, with q on disk between sweeps.
 - **B-fwd** holds the front: 3.5·10⁸ × 20 × 4 B ≈ 28 GB, also by
   superblock.
+- **Arm C** holds the grid nodes only. With a whole brain's ribbon and
+  margins at about 10⁶ mm³ (an assumption), a grid of 0.3–0.6 mm has about
+  4·10⁶–4·10⁷ nodes: about 0.4–3 GB for q at 20 candidates, plus the finer
+  grid near tight folds. It does not depend on the image resolution.
 - **The coarse level** has about 12 times fewer columns (hemisphere R:
   1,179,148 coarse columns against 13,763,166 white-mesh vertices) and a τ
   step 2–3 times larger. That is about 23–35 times less than the fine
@@ -312,6 +398,9 @@ stored form (§4b, item 5) can be chosen from them:
   the top (or censored); the most probable state's probability at each
   step; the offset difference to each neighbour with its uncertainty;
   provenance (from data, or rule-only);
+- arm C also: the grid's τ and direction (the posterior mean and the
+  most probable candidate at each node), the offsets on the start surface,
+  and the integrator and its step;
 - per run: the arm, the anchor, the input versions, the energy and its
   parts per sweep, and the pruning log.
 
@@ -337,7 +426,8 @@ reading before the next phase starts.
 1. **Arm A** on the fold phantoms, the curved phantom and the fundus box,
    fine only and coarse to fine.
 2. **Arms B-fwd and B-fb** on the same sites, fine only and coarse to
-   fine.
+   fine. **Arm C** on the same sites, with the contact and open-sulcus
+   phantoms.
 3. **Comparison and checkpoint.** The blind views, the energies, and the
    measures above. The user decides which arms go on, whether coarse to
    fine stays, and whether fixed-lag growth or lookahead runs.
@@ -345,7 +435,8 @@ reading before the next phase starts.
    measures, the memory model from measured sizes, and the local re-solve
    timing.
 5. **Write-up.** A report in `reports/`, and the stored form proposed as a
-   change to `docs/version-2-plan.md` §4b–4d. The format spec comes with
+   change to `docs/version-2-plan.md` §4b–4d, with the no-overlap rule and
+   the signed-distance view in §5c, step 3. The format spec comes with
    its own plan.
 
 ## Decisions for the user
@@ -362,6 +453,8 @@ reading before the next phase starts.
 - **D4. The τ step** Δτ, and the number of candidates kept per node.
 - **D5. The coarse level.** The cell size (the plan assumes the top stage's
   2 voxels), the coarse τ step, and how wide the coarse priors are.
+- **D6. The field grid** (arm C): its spacing, and how much finer it is
+  near tight folds.
 
 ## Not in this plan
 
