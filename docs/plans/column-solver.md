@@ -149,9 +149,39 @@ probability mass (a mass rule, not a fixed count). A later backward step
 cannot restore a pruned candidate. So the solver logs how often the final
 choice is near the edge of the kept set.
 
+### Coarse to fine
+
+Every arm solves a coarse level first and then the fine level. This
+changes how the solver works, not the energy: the fine level's energy is
+the energy above.
+
+- **The coarse level.** Coarse columns, one root per coarse cell, as in the
+  top stage (cells of 2 voxels, about 0.32 mm). The coarse graph links
+  cells whose roots are neighbours on the white mesh, so it stays connected
+  and never links roots that face opposite ways across a thin WM blade. The
+  coarse τ step is at most the band scale (2–3 voxels), so the contrast
+  that sets the speed is not blurred. Coarsen across columns much more
+  than along depth.
+- **What it gives.** Mean field moves evidence about one neighbour per
+  sweep, so on the fine graph the offsets far from the anchor settle
+  slowly. On the coarse graph the same distance takes few sweeps. The
+  coarse level fits in memory for a whole hemisphere, and the fine level
+  then runs by superblock with a halo.
+- **How it passes down.** The coarse distributions become priors on the
+  fine nodes, not fixed values. Where the coarse level is uncertain, the
+  fine level's candidates spread wider. Features smaller than a coarse
+  cell (tight fundi, thin blades) cannot be represented coarsely, so the
+  fine level must be free to correct them.
+- **In growth.** B-fwd and B-fb grow on the coarse level first, then on the
+  fine level with the coarse priors.
+
+Coarse to fine is tested as one factor (fine only against coarse to fine),
+not as more arms (*Evaluation*).
+
 ## The strategies
 
-The energy, the candidates and the pruning rule are the same in every arm.
+The energy, the candidates, the pruning rule and the coarse-to-fine
+schedule are the same in every arm.
 
 | Arm | Start | Update order |
 |---|---|---|
@@ -220,6 +250,12 @@ and the user's reading is recorded before the arms are named.
   that z = (t_true − μ)/σ has an SD near 1 and that 95 % intervals cover
   about 95 %.
 - **Pruning:** the share of final choices near the edge of the kept set.
+- **Coarse to fine,** as one factor: each arm on the fundus box and the
+  curved phantom, fine only and coarse to fine. The final energies; the
+  sweeps to converge; where the fine level moves away from the coarse
+  answer, and whether that is at the features smaller than a coarse cell;
+  and whether the coarse level's errors at the tight fundus remain in the
+  fine result.
 - **Growth only:** steps to settle each offset; how far B-fwd's columns
   move when B-fb's backward sweeps run.
 - **Cost:** time and peak memory per arm, and a memory model for a 50 µm
@@ -237,6 +273,10 @@ and the user's reading is recorded before the arms are named.
   layers do not shift): no level shifts across the border.
 - A graph with two components: the solver reports the defect and stops.
 - On a straight phantom with straight true columns, no arm bends them.
+- On the same phantom, fine only and coarse to fine reach the same columns
+  and the same energy.
+- On a phantom with a fundus narrower than a coarse cell, the fine level
+  corrects the coarse answer at the fundus.
 
 ## Memory at the target scale
 
@@ -249,6 +289,14 @@ node, in float32:
   superblock with a halo, in sweeps, with q on disk between sweeps.
 - **B-fwd** holds the front: 3.5·10⁸ × 20 × 4 B ≈ 28 GB, also by
   superblock.
+- **The coarse level** has about 12 times fewer columns (hemisphere R:
+  1,179,148 coarse columns against 13,763,166 white-mesh vertices) and a τ
+  step 2–3 times larger. That is about 23–35 times less than the fine
+  level, about 120–180 GB for q at 50 µm. That is still too large for one
+  machine, so a
+  whole brain needs more than one coarse level, or the coarse level by
+  superblock with a larger halo. Phase 4 decides which from the measured
+  sizes.
 
 These are estimates from assumptions. Phase 4 measures the real step count,
 candidate count and halo width, and gives the analysis again. The choice
@@ -273,7 +321,8 @@ bent-columns trial), plus the τ map as a monotone spline and the offset.
 
 **Local re-solve for the editor.** After a label edit, the columns in the
 edit's blocks and a margin are solved again, with the columns outside the
-margin fixed. Phase 4 measures, for each arm, the time of a re-solve at a
+margin fixed, at the fine level, with the coarse level fixed unless the
+edit changes it. Phase 4 measures, for each arm, the time of a re-solve at a
 column site, and how far the change reaches past the edit.
 
 ## Phases
@@ -282,13 +331,16 @@ Each phase ends with views for the user. A checkpoint needs the user's
 reading before the next phase starts.
 
 0. **The shared model.** The chain, the terms, the mean field on the CPU
-   (NumPy reference), and the τ phantoms with the exact tests. Torch on MPS
+   (NumPy reference), the coarse level and its priors on the fine level,
+   and the τ phantoms with the exact tests. Torch on MPS
    for the same kernels, checked against the reference.
-1. **Arm A** on the fold phantoms, the curved phantom and the fundus box.
-2. **Arms B-fwd and B-fb** on the same sites.
+1. **Arm A** on the fold phantoms, the curved phantom and the fundus box,
+   fine only and coarse to fine.
+2. **Arms B-fwd and B-fb** on the same sites, fine only and coarse to
+   fine.
 3. **Comparison and checkpoint.** The blind views, the energies, and the
-   measures above. The user decides which arms go on, and whether
-   fixed-lag growth or lookahead runs.
+   measures above. The user decides which arms go on, whether coarse to
+   fine stays, and whether fixed-lag growth or lookahead runs.
 4. **M1S1, V1V2 and the four superblocks** with the arms that go on: the
    measures, the memory model from measured sizes, and the local re-solve
    timing.
@@ -308,6 +360,8 @@ reading before the next phase starts.
 - **D3. The sites.** Whether the fundus box's painted labels are enough, and
   which marked points to add.
 - **D4. The τ step** Δτ, and the number of candidates kept per node.
+- **D5. The coarse level.** The cell size (the plan assumes the top stage's
+  2 voxels), the coarse τ step, and how wide the coarse priors are.
 
 ## Not in this plan
 
@@ -315,5 +369,11 @@ reading before the next phase starts.
   #47). A result here is evidence for a separate decision.
 - The format spec of the stored columns.
 - The viewer's column preview.
+- **A hierarchical model**, in which coarse nodes stay in the model as
+  latent variables (for example a bank's shared offset or thickness) and
+  both levels are solved together. It is the next step if the coarse level
+  shows bank-level structure. Plain long-range links between columns are
+  not used: they change the energy and count the same evidence many times,
+  so the probabilities become too confident.
 - The laminar depth metric. The τ levels are contrast levels. Equal-volume
   depth within a column stays a separate role.
