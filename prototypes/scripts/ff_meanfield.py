@@ -34,6 +34,38 @@ The loop
    the candidates and the profiles).
 7. Only with `solve(recentre_at_edge=True)` (the provisional option CD-13; default
    off): see *Re-centring at the edge* below.
+8. Only with `solve(recentre_every_sweep=True)` (the provisional change for R11;
+   default off): see *Re-centring τ in every sweep* below.
+
+Re-centring τ in every sweep (the provisional change for R11)
+-------------------------------------------------------------
+
+A finding of PR 3: on the τ phantom the directions are right and τ stays near the
+initial field, because the τ candidates move only at the re-centrings between widths.
+With recentre_every_sweep (default False) the τ candidates move in every sweep. At the
+start of a width, each node's τ candidates are τ = c_w + (a − h) Δτ round the width's
+prediction c_w, as without the option. Before each later sweep of the width:
+
+- the prediction of each node is `recentre`'s τ_pred (the mean over the moving axis
+  neighbours of their expected τ moved along their predicted direction; the anchor
+  keeps 0); the directions do not change in a width;
+- the node's τ candidates move by a whole number k of steps Δτ along the node's τ
+  lattice c_w + k Δτ, to the step nearest the prediction (`tau_steps`; not above
+  τ_top). So there are again n_tau τ values round the prediction, and n_dir directions
+  (n_tau · n_dir candidates). The levels of the contrast move by the same k, so the
+  profile lines of the width stay valid and are not computed again;
+- the distribution is carried over by the interpolation in τ (`slide_tau`). The new τ
+  values are on the old lattice, so the interpolation is exact: each old candidate's
+  mass goes to the new candidate with the same τ and direction, and mass beyond the
+  new window goes to its nearest valid end;
+- after the sweep the pruning runs, as after the first sweep of a width.
+
+F is computed after the move as well (log tau_moves: the nodes moved, the largest
+move, F before and after the move). The plan's rise rule compares F after a sweep with
+F after the pruning of the sweep before, so a rise that the move causes is logged as a
+rise (free_energy_rises, with f_after_move). The colour updates after the move cannot
+raise F; a rise there is a separate defect. The option adds no constant. With the
+option off, the loop is the plan's schedule, with the same bits.
 
 Re-centring at the edge (CD-13, provisional)
 --------------------------------------------
@@ -458,6 +490,101 @@ def recentre(
     has = np.linalg.norm(dbar, axis=1) > 0
     d_pred = np.where(has[:, None], dbar, dir_prev)
     return tau_pred, d_pred
+
+
+# ---------------------------------------------------------------- τ in every sweep
+
+
+def tau_steps(
+    tau_pred: Array,
+    c_w: Array,
+    settings: T.SolverSettings = T.DEFAULTS,
+    tau_max: float | None = T.TAU_TOP,
+) -> IntArray:
+    """k (n,): the step of the node's τ lattice c_w + k Δτ nearest to tau_pred
+    (np.rint), and at most the largest step with c_w + k Δτ ≤ tau_max (no bound if
+    tau_max is None). c_w: the centre of the τ candidates at the start of the width."""
+    k = np.rint((np.asarray(tau_pred, np.float64) - c_w) / settings.dtau)
+    if tau_max is not None:
+        k = np.minimum(k, np.floor((tau_max - c_w) / settings.dtau + 1e-9))
+    return np.asarray(k, np.int64)
+
+
+def slide_tau(
+    st: FT.TermState,
+    cand_index: npt.NDArray[np.int16],
+    k_old: IntArray,
+    k_new: IntArray,
+    c_w: Array,
+    dirs_w: Array,
+    lb_w: IntArray,
+    settings: T.SolverSettings = T.DEFAULTS,
+    tau_max: float | None = T.TAU_TOP,
+    anchor_node: int | None = None,
+) -> tuple[FT.TermState, npt.NDArray[np.int16]]:
+    """The re-centring of the τ candidates in a sweep (`solve(recentre_every_sweep=
+    True)`; module docstring, *Re-centring τ in every sweep*).
+
+    The new state has all n_tau · n_dir candidates of each node: τ = c_w + (k_new +
+    a − h) Δτ (a = 0 .. n_tau − 1, h = (n_tau − 1) / 2), the directions dirs_w (n,
+    n_dir, 3) of the width, valid where τ ≤ tau_max (as ff_terms.moving_candidates),
+    level_base = lb_w + k_new, and the profile lines of the width (each slot reads its
+    line at the same index as at the start of the width: the shift of τ and of the
+    levels by k Δτ keeps the sample points). The anchor node keeps the centre τ index
+    only (its k is 0).
+
+    The carry-over is the interpolation in τ onto the new candidates. The new τ values
+    are on the same lattice as the old ones, so the interpolation is exact: the mass of
+    the old slot (a, m) goes to the new slot (a + k_old − k_new, m), and the mass beyond
+    the new window goes to its nearest valid end. The moving mass and q_stop of each
+    node are kept. The direction of a slot does not change."""
+    n = st.n
+    na, nm = settings.n_tau, settings.n_dir
+    h = (na - 1) // 2
+    K = na * nm
+    a = np.arange(na) - h
+    tau = (c_w + k_new * settings.dtau)[:, None] + a[None, :] * settings.dtau
+    if tau_max is None:
+        valid_a = np.ones((n, na), bool)
+    else:
+        valid_a = tau <= tau_max + 1e-9 * settings.dtau
+        tau = np.where(valid_a, np.minimum(tau, tau_max), tau)
+    if anchor_node is not None:
+        valid_a[anchor_node] = np.arange(na) == h
+    a_lo = np.argmax(valid_a, axis=1)
+    a_hi = na - 1 - np.argmax(valid_a[:, ::-1], axis=1)
+    # the carry-over: old slot (a, m) -> new slot (a + k_old - k_new, m)
+    ci = cand_index.astype(np.int64)
+    ok = st.valid & (ci >= 0)
+    a_old = ci // nm
+    m_old = ci % nm
+    a_new = a_old + (k_old - k_new)[:, None]
+    a_new = np.clip(a_new, a_lo[:, None], a_hi[:, None])
+    flat = np.arange(n, dtype=np.int64)[:, None] * K + a_new * nm + m_old
+    q = np.bincount(flat[ok], weights=st.q[ok], minlength=n * K).reshape(n, K)
+    del ci, a_old, m_old, a_new, flat, ok
+    valid = np.repeat(valid_a, nm, axis=1)
+    q = np.where(valid, q, 0.0)
+    line, off = FT.line_slots(na, nm)
+    new = FT.TermState(
+        cand_tau=np.repeat(tau, nm, axis=1),
+        cand_dir=np.tile(dirs_w, (1, na, 1)),
+        valid=valid,
+        q=q,
+        q_stop=st.q_stop,
+        u=st.u,
+        s_ref=st.s_ref,
+        profiles=st.profiles,
+        level_base=np.asarray(lb_w + k_new, np.int64),
+        stop_log_odds=st.stop_log_odds,
+        tensor_dir=st.tensor_dir,
+        coherence=st.coherence,
+        prof_line=np.broadcast_to(line, (n, K)).copy(),
+        prof_off=np.broadcast_to(off, (n, K)).copy(),
+        n_levels=st.n_levels,
+    )
+    ci_new = np.broadcast_to(np.arange(K, dtype=np.int16), (n, K)).copy()
+    return new, ci_new
 
 
 # ---------------------------------------------------------------- pruning
@@ -955,6 +1082,7 @@ def solve(
     profile_dtype: Any = np.float64,
     log_fn: LogFn | None = None,
     recentre_at_edge: bool = False,
+    recentre_every_sweep: bool = False,
 ) -> tuple[T.Field, dict[str, npt.NDArray[Any]], dict[str, Any]]:
     """Solve the field on a grid by the mean field (module docstring).
 
@@ -970,7 +1098,11 @@ def solve(
     text per sweep. recentre_at_edge: the provisional option CD-13 (default False: the
     plan's schedule). True: a width does more passes while a final choice is at the
     edge, up to max_sweeps sweeps in total (module docstring, *Re-centring at the
-    edge*).
+    edge*). recentre_every_sweep: the provisional change for R11 (default False: the
+    plan's schedule). True: before each sweep after the first of a width, the τ
+    candidates of each node move to its current prediction, and the pruning runs
+    after every sweep (module docstring, *Re-centring τ in every sweep*). Not with
+    recentre_at_edge.
 
     The anchor origin: the anchor node is a moving node with τ = 0, and every other τ
     is free. In detail:
@@ -1004,6 +1136,8 @@ def solve(
         raise ValueError("noise_sd must hold 2 positive values")
     if origin not in ("top", "anchor"):
         raise ValueError(f'origin must be "top" or "anchor", not {origin!r}')
+    if recentre_at_edge and recentre_every_sweep:
+        raise ValueError("recentre_at_edge and recentre_every_sweep exclude each other")
     if (origin == "anchor") != (anchor_node is not None):
         raise ValueError('origin "anchor" needs anchor_node, and only it takes one')
 
@@ -1053,6 +1187,7 @@ def solve(
     log["run"]["tensor_not_finite"] = n_bad_tensor
     log["run"]["origin"] = origin
     log["run"]["recentre_at_edge"] = bool(recentre_at_edge)
+    log["run"]["recentre_every_sweep"] = bool(recentre_every_sweep)
     log["run"]["anchor_node"] = anchor
     log["run"]["anchor_position_vox"] = (
         None if anchor is None else [float(v) for v in nodes[anchor]]
@@ -1103,6 +1238,14 @@ def solve(
                 tau_max,
                 anchor,
             )
+            if recentre_every_sweep:
+                # the τ lattice of the width: its centre, directions and levels
+                c_w = np.asarray(tau_pred, np.float64)
+                if tau_max is not None:
+                    c_w = np.minimum(c_w, tau_max)
+                dirs_w = st.cand_dir[:, : settings.n_dir].copy()
+                lb_w = st.level_base.copy()
+                k_tot = np.zeros(n, np.int64)
             mom = FT.node_moments(st)
             F_old, terms = free_energy(st, ga, tw, mom)
             F_start = F_old
@@ -1111,6 +1254,44 @@ def solve(
             prec: dict[str, Any] = {}
             end = "max_sweeps"
             for sweep in range(1, settings.max_sweeps - used + 1):
+                F_move = math.nan
+                if recentre_every_sweep and sweep > 1:
+                    assert ci is not None
+                    tau_now, _ = recentre(st, ga, dir_pred, settings)
+                    if anchor is not None:
+                        tau_now[anchor] = 0.0
+                    k_new = tau_steps(tau_now, c_w, settings, tau_max)
+                    if anchor is not None:
+                        k_new[anchor] = 0
+                    step = np.abs(k_new - k_tot)
+                    del mom
+                    st, ci = slide_tau(
+                        st,
+                        ci,
+                        k_tot,
+                        k_new,
+                        c_w,
+                        dirs_w,
+                        lb_w,
+                        settings,
+                        tau_max,
+                        anchor,
+                    )
+                    mom = FT.node_moments(st)
+                    F_move, _ = free_energy(st, ga, tw, mom)
+                    log["tau_moves"].append(
+                        dict(
+                            width=float(w),
+                            sweep=sweep,
+                            nodes_moved=int((step > 0).sum()),
+                            max_steps=int(step.max(initial=0)),
+                            steps_from_width_start=_stats(k_new),
+                            f_before=F_old,
+                            f_after_move=F_move,
+                        )
+                    )
+                    k_tot = k_new
+                    del tau_now, step
                 dq = 0.0
                 for sel in groups:
                     dq = max(dq, _update_colour(st, ga, tw, sel, mom, no_stop=no_stop))
@@ -1127,14 +1308,32 @@ def solve(
                     if recentre_at_edge:
                         rise["repeat"] = rep
                         at = f" (repeat {rep})"
+                    if not math.isnan(F_move):
+                        rise["f_after_move"] = F_move
+                        at = f" (after the move of τ: {F_move:.17g})"
                     log["free_energy_rises"].append(rise)
                     log["defects"].append(
                         f"free energy rose at width {w:g}, sweep {sweep}{at}: "
                         f"{F_old:.17g} -> {F_new:.17g}"
                     )
                 dF = abs(F_new - F_old)
-                say(f"w={w:g} sweep={sweep} F={F_new:.12g} dF={dF:.3g} max_dq={dq:.3g}")
-                if sweep == 1:
+                mv = ""
+                if not math.isnan(F_move):
+                    tm = log["tau_moves"][-1]
+                    mv = (
+                        f" moved={tm['nodes_moved']} (max {tm['max_steps']})"
+                        f" F_move={F_move:.12g}"
+                    )
+                say(
+                    f"w={w:g} sweep={sweep} F={F_new:.12g} dF={dF:.3g} "
+                    f"max_dq={dq:.3g}{mv}"
+                )
+                if not math.isnan(F_move) and F_new - F_move > RISE_REL * abs(F_move):
+                    log["defects"].append(
+                        f"free energy rose in the colour updates at width {w:g}, "
+                        f"sweep {sweep}: {F_move:.17g} -> {F_new:.17g}"
+                    )
+                if sweep == 1 or recentre_every_sweep:
                     del mom  # the moments of the pruned state replace it
                     st, ci, pr = prune(st, ci, settings)
                     mom = FT.node_moments(st)
@@ -1150,9 +1349,13 @@ def solve(
                         free_energy_before=F_new,
                         free_energy_after=F_pruned,
                     )
-                    if rep == 0:
+                    if rep == 0 and sweep == 1:
                         log["pruning"]["per_width"].append(prec)
-                    say(f"w={w:g} pruned: kept {_stats(pr.n_keep)} F={F_pruned:.12g}")
+                    if sweep == 1:
+                        say(
+                            f"w={w:g} pruned: kept {_stats(pr.n_keep)} "
+                            f"F={F_pruned:.12g}"
+                        )
                     del pr
                     F_cmp = F_pruned
                 else:
@@ -1250,7 +1453,13 @@ def _new_log(
     also holds its pass ("repeat"); edge_repeats holds one record per pass (width,
     repeat, sweeps, sweeps_of_width, end_reason, free_energy_start after the
     carry-over, free_energy_end, free_energy per sweep, pruning, edge_counts, at_edge,
-    next: "repeat" or "stop"). With the option off, edge_repeats is empty."""
+    next: "repeat" or "stop"). With the option off, edge_repeats is empty.
+
+    With recentre_every_sweep (the change for R11) on: tau_moves holds one record per
+    sweep after the first of a width (width, sweep, nodes_moved, max_steps,
+    steps_from_width_start: min, median, max of k, f_before: F after the pruning of
+    the sweep before, f_after_move); a rise also holds f_after_move; pruning.per_width
+    is of the first sweep of each width. With the option off, tau_moves is empty."""
     return dict(
         free_energy=[],
         sweeps=[],
@@ -1258,6 +1467,7 @@ def _new_log(
         free_energy_rises=[],
         defects=[],
         edge_repeats=[],
+        tau_moves=[],
         pruning=dict(per_width=[], final={}),
         terms=[],
         time_s=[],
