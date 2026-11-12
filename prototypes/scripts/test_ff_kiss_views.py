@@ -246,3 +246,14 @@ def test_find_runs_grid_label_and_variants(tmp_path: Path) -> None:
     ]
     k = KV.RunKey("ckiss_smooth", "oracle", 0.0, "_shiftB")
     assert found[k] == ph / "oracle_0_uniform0.32_shiftB"
+
+
+def test_speed_vs_true() -> None:
+    true = np.array([1.0, 2.0, 4.0, NAN, 1.0])
+    solved = np.array([0.5, 1.0, 2.0, 3.0, NAN])  # half the true speed where both exist
+    d = KV.speed_vs_true(solved, true)
+    assert d["n"] == 3
+    assert d["ratio"]["median"] == pytest.approx(0.5)
+    assert d["ratio"]["max"] == pytest.approx(0.5)
+    assert d["solved"]["median"] == pytest.approx(1.0)
+    assert d["true"]["max"] == pytest.approx(4.0)

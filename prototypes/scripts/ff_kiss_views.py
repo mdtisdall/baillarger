@@ -46,7 +46,10 @@ What the script computes, per run
   OPEN_MAX_Z_MM): the fraction of true outside-medium nodes with q_stop > 0.5, and of
   true cortex nodes deeper than one grid spacing (stop_sdf < −spacing) with
   q_stop > 0.5.
-- **Q5 τ at the contact.** The bank speed ratio of run.json, against tA / tB.
+- **Q5 τ at the contact.** The bank speed ratio of run.json, against tA / tB. Per bank
+  (geometry bank), at the moving cortex nodes: the solved speed (field.npz "speed"),
+  the true speed (`ff_types.true_speed`, as in `ff_run.measure_speeds`) and their
+  ratio (`speed_vs_true`).
   tau_arrival per bank at the CONTACT stops (true value 0). The level deviations
   (column_errors.npz level_dev_mm) per bank: |deviation| over all levels, and the
   signed median per level.
@@ -349,6 +352,20 @@ def inference_summary(rec: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
+def speed_vs_true(speed: Array, true: Array) -> dict[str, Any]:
+    """Stats of the solved speed, the true speed and their ratio (solved / true) at the
+    same nodes. Pairs where either value is not finite are left out of all three."""
+    v = np.asarray(speed, float)
+    t = np.asarray(true, float)
+    ok = np.isfinite(v) & np.isfinite(t) & (t != 0)
+    return dict(
+        n=int(ok.sum()),
+        solved=stats(v[ok]),
+        true=stats(t[ok]),
+        ratio=stats(v[ok] / t[ok]),
+    )
+
+
 def fig_name(stem: str, suffix: str = "") -> str:
     """The PNG file name of a figure: stem, then the optional suffix."""
     return f"{stem}{suffix}.png"
@@ -397,6 +414,7 @@ class Run:
     cols: T.Columns
     errs: dict[str, Array]
     extra: dict[str, Any] | None
+    speed: Array | None = None  # the solver's speed per node (field.npz "speed")
 
     @property
     def spacing(self) -> float:
@@ -469,6 +487,7 @@ def load_run(key: RunKey, path: Path) -> Run:
         cols,
         {k: ez[k] for k in ez.files},
         extra,
+        np.asarray(z["speed"], float) if "speed" in z.files else None,
     )
 
 
@@ -765,7 +784,16 @@ def per_run(run: Run, G: Geo, settings: T.SolverSettings) -> dict[str, Any]:
     dev = np.asarray(errs["level_dev_mm"], float)
     for b, bn in ((0, "A"), (1, "B")):
         sel = contact & (bank == b) & stopped
+        # the speed at the moving cortex nodes of this bank (geometry bank), against
+        # the true speed there (ff_types.true_speed, as ff_run.measure_speeds)
+        nb = np.flatnonzero(mov_ctx & (ng.bank == b))
+        if run.speed is not None and len(nb):
+            vt = T.true_speed(geo, G.tau_scale, run.grid.nodes[nb])
+            spd: dict[str, Any] | None = speed_vs_true(run.speed[nb], vt)
+        else:
+            spd = None
         q5["by_bank"][bn] = dict(
+            speed_moving_cortex=spd,
             tau_arrival_contact=stats(cols.tau_arrival[sel]),
             level_abs_dev_mm=stats(np.abs(dev[bank == b])),
             level_signed_median_mm=[
@@ -1535,6 +1563,9 @@ def markdown(
                     bn,
                     _n(sp.get("solved_ratio_A_over_B")),
                     _n(sp.get("thickness_ratio_tA_over_tB")),
+                    _st((b.get("speed_moving_cortex") or {}).get("solved")),
+                    _st((b.get("speed_moving_cortex") or {}).get("true")),
+                    _st((b.get("speed_moving_cortex") or {}).get("ratio")),
                     _st(b["tau_arrival_contact"]),
                     _st(b["level_abs_dev_mm"]),
                     " ".join(_n(v, 2) for v in b["level_signed_median_mm"]),
@@ -1549,6 +1580,9 @@ def markdown(
                 "bank",
                 "speed ratio A/B",
                 "tA/tB",
+                "solved speed (moving cortex nodes of the bank)",
+                "true speed there",
+                "solved / true",
                 "tau_arrival at CONTACT",
                 "abs level deviation",
                 "signed median per level",
