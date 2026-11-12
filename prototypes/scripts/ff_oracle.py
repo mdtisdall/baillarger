@@ -23,8 +23,12 @@ signed distance of the geometry (positive in the stopped region). Reasons:
   the 1-D blur, not measured on a phantom), so the contact would have no stop at all.
 
 Where the stop surface is curved, or where two parts of the stopped region are closer than a few
-sigma, the closed form is not the literal blur. The reading of the plan is the checkpoint's to
-confirm.
+sigma, the closed form is not the literal blur. The coordinator accepted this reading as the
+provisional decision CD-4. Measured on the PR 1 truth (200 CONTACT stops each, a Monte-Carlo blur
+of `geometry.stopped`): the literal blur has a median p of 0.193 at the true stop, and its peak
+along the column reaches 0.5 at 10 % of the contact stops of ckiss_smooth and at none of
+ckiss_sharp. The literal blur stays available as an option (`literal=True`, `literal_blur`), not
+the default.
 
 stop_sdf on its positive side: `Geometry.stop_sdf` promises its value only where it is negative.
 Task 2.2 compared it with a brute-force distance (a 0.01 mm grid, a 0.25 mm window) at points
@@ -76,7 +80,7 @@ from typing import Any
 
 import numpy as np
 from scipy import ndimage as ndi
-from scipy.special import ndtr
+from scipy.special import ndtr, ndtri
 
 sys.path.insert(0, str(Path(__file__).parent))
 import bent_fit as BF  # noqa: E402
@@ -94,8 +98,10 @@ NO_DIRECTION = np.array([1.0, 0.0, 0.0])
 #: the largest |difference| of the rebuilt, detrended echoes and image["det"] that
 #: `ImageTensor.of` accepts (the arrays are of order 1)
 REBUILD_TOL = 1e-12
-#: points per chunk in `ImageTensor.at`
+#: points per chunk in `ImageTensor.at` (and blur samples per chunk in `literal_blur`)
 CHUNK = 1 << 20
+#: the offsets per axis of the literal blur (an option, not the default)
+LITERAL_NODES = 16
 
 
 # ---------------------------------------------------------------- the oracle
@@ -111,15 +117,22 @@ class OracleStopField:
     source: T.InputSource = "oracle"
 
     def __init__(
-        self, geometry: T.Geometry, settings: T.SolverSettings = T.DEFAULTS
+        self,
+        geometry: T.Geometry,
+        settings: T.SolverSettings = T.DEFAULTS,
+        literal: bool = False,
     ) -> None:
         self.geometry = geometry
         self.settings = settings
         self.sigma_mm = settings.oracle_blur_vox * T.VOXEL_MM
+        self.literal = literal
 
     def probability(self, X: T.Array) -> T.Array:
-        """The unclipped stop probability Phi(stop_sdf / sigma) at voxel positions X."""
+        """The unclipped stop probability at voxel positions X: Phi(stop_sdf / sigma), or
+        with `literal` the Gaussian blur of the indicator of `geometry.stopped`."""
         Y = self.geometry.to_local(np.asarray(X, float))
+        if self.literal:
+            return literal_blur(self.geometry, Y, self.sigma_mm)
         return np.asarray(ndtr(self.geometry.stop_sdf(Y) / self.sigma_mm))
 
     def log_odds(self, X: T.Array) -> T.Array:
@@ -127,6 +140,24 @@ class OracleStopField:
 
     def terms(self, X: T.Array) -> dict[str, T.Array]:
         return {"oracle": self.log_odds(X)}
+
+
+def literal_blur(geometry: T.Geometry, Y: T.Array, sigma_mm: float) -> T.Array:
+    """The Gaussian blur (SD sigma_mm) of the indicator of `geometry.stopped` at local mm
+    points Y, on a product grid of LITERAL_NODES offsets per axis at the Gaussian's
+    mid-quantiles, equal weights (a stratified rule: on a flat surface the error is at most
+    1 / (2 LITERAL_NODES)). Not the default (module docstring): at a fused contact its peak is
+    near 0.2."""
+    x = ndtri((np.arange(LITERAL_NODES) + 0.5) / LITERAL_NODES)
+    G = np.stack(np.meshgrid(x, x, x, indexing="ij"), -1).reshape(-1, 3) * sigma_mm
+    Y = np.asarray(Y, float)
+    out = np.empty(len(Y))
+    step = max(1, CHUNK // len(G))
+    for i in range(0, len(Y), step):
+        P = (Y[i : i + step, None, :] + G[None]).reshape(-1, 3)
+        st = np.asarray(geometry.stopped(P), float).reshape(-1, len(G))
+        out[i : i + step] = st.mean(1)
+    return out
 
 
 class OracleTensor:

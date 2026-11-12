@@ -247,3 +247,21 @@ def test_oracle_inputs() -> None:
     noise = FT.build_phantom("noise", FEATS_N, noise=1.0, shape=SMALL["noise"])
     with pytest.raises(ValueError):
         FO.oracle_inputs(noise)
+
+
+LITERAL_FLAT_TOL = 0.03  # the literal option against the closed form on a flat surface
+
+
+def test_literal_blur_option_matches_the_closed_form_on_the_slab() -> None:
+    """On a flat stop surface the literal blur is the closed form (to the quadrature)."""
+    geo, tr = case("slab")
+    f_cf = FO.OracleStopField(geo)
+    f_lit = FO.OracleStopField(geo, literal=True)
+    d = tr.paths[:, 1] - tr.paths[:, 0]
+    d /= np.linalg.norm(d, axis=1)[:, None]
+    s = np.linspace(-0.2, 0.2, 21) / T.VOXEL_MM
+    X = (tr.stops[:, None, :] + s[None, :, None] * d[:, None, :]).reshape(-1, 3)
+    np.testing.assert_allclose(
+        f_lit.probability(X), f_cf.probability(X), rtol=0, atol=LITERAL_FLAT_TOL
+    )
+    assert np.array_equal(f_lit.log_odds(X), T.log_odds(f_lit.probability(X)))
