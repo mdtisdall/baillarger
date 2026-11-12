@@ -3,8 +3,8 @@
 This report gives the results of the stage in `docs/plans/flow-field-phantoms.md`. The
 stage tests the flow-field column solver on phantoms with a closed-form truth. Each
 section comes from one PR of the plan. This version has the section *Kissing surfaces*
-(PR 4). The sections *Hairpins*, *Jumps*, *Grid*, *Uncertainty* and *Checkpoint* come
-from later PRs.
+(PR 4) and the sections *Hairpins*, *Jumps*, *Grid* and *Uncertainty* (PR 6, partial).
+The section *Checkpoint* comes from a later PR.
 
 ## Kissing surfaces
 
@@ -231,3 +231,131 @@ Evidence for every row: 0.32 mm stand-in only; 0.16 mm pending. R8–R10 are not
 
 The image stop terms are ranking scores, not calibrated log-odds (CD-5). No image run
 ran in PR 4. So this section has no evidence on the stop field from the image.
+
+
+## PR 6: what ran (partial)
+
+PR 6 (tasks 6.1–6.4) opened with partial results, by the coordinator's decision CD-15.
+No new run starts after 12:00 EST on 2026-11-12. Runs that started before 12:00 can
+finish. A later agent adds their results. **Every number below is from the runs that had
+ended at 07:25 EST.** The code is `prototypes/scripts/ff_pr6_runs.py` (run driver),
+`ff_sample.py` (task 6.4) and `ff_pr6_views.py` (tables and figures). The base is #205
+(octree), with #209 (kissing surfaces) and the start fix of #204 (columns start at the
+roots).
+
+Table 8. The state of the PR 6 runs at 07:25 EST.
+
+| task | run | state |
+|---|---|---|
+| 6.1 | fundus_g0.04, oracle, noise 0, uniform 0.16 mm | done (2162 s, 3.8 GB) |
+| 6.1 | curved_g0.04, oracle, noise 0, uniform 0.16 mm | running since 07:21 (est. 4–8 h, 6.1 GB) |
+| 6.1 | fundus_g0.04 oracle 1; fundus_g0.04 image 0; fundus_g0.16 and fundus_g0.48 oracle 0 (uniform 0.16 mm) | pending, slot A positions 6–9; probably cut at 12:00 |
+| 6.1 | fundus_g0.04, oracle, noise 0, octree | running since 06:50 (round 0 refinement accepted) |
+| 6.1 | curved_g0.04, oracle, noise 0, octree | pending, slot B position 2 |
+| 6.1 | all other image and noise-1 cells; the other fundi and curved_g0.16 on the octree | not run: time (one 0.16 mm run takes 2–8 h) |
+| 6.2 | abraded, oracle, noise 0, octree | pending, slot B position 3 |
+| 6.2 | abraded, oracle, noise 0, uniform 0.32 mm (stand-in) | pending, slot B position 4 |
+| 6.2 | abraded at 0.16 mm | not run: heavy (memguard stopped the probe at 8.2 GB in setup; est. 13–15 GB, 12–20 h) |
+| 6.2 | abraded, image source, noise 1 | not run: time |
+| 6.3 | 10 phantoms, oracle, noise 1, uniform 0.64 mm | done (55–217 s, 0.85–1.06 GB) |
+| 6.3 | slab at 0.48 mm | done (257 s, 1.0 GB) |
+| 6.3 | the other 9 phantoms at 0.48 mm, then all 10 at 0.32 mm | running and pending in slot C |
+| 6.3 | 0.16 mm column, octree column, noise phantom, ckiss phantoms, abraded | not run: time |
+| 6.4 | curved_g0.16, image, noise 1, seed 1, uniform 0.32 mm (stand-in), 32 sampled fields | pending, slot C positions 34–35 of 35; probably cut at 12:00 |
+| 6.4 | seeds 2–4; ckiss_smooth and abraded; the octree | not run: time |
+
+## Hairpins
+
+The view is `ff_pr6_views.py hairpins`. Focal points are counted again from the saved
+columns. The only hairpin run that ended is fundus_g0.04, oracle, noise 0, uniform
+0.16 mm (287 496 nodes, 463 columns).
+
+- Topology: focal points 0, crossings 0, overlap 0, sink nodes 0, sink columns 0.
+  Reversed edges 42.
+- 106 of 463 columns (23 %) end UNRESOLVED_CONTACT, with 293 unresolved cells, at the
+  fused slot. Question 2 expected focal points at g = 0.04 mm on a uniform grid. They do
+  not occur. The columns end unresolved instead.
+- 357 columns stop. All stop early: signed median −0.074 mm, |error| p90 0.112 mm
+  (CONTACT median 0.078 mm, HAIRPIN median 0.062 mm). 5 stops are on the wrong bank,
+  0 of them farther than 0.08 mm from the plane x = 0.
+- Speed ratio to the truth: median 1.03, p90 1.07. Direction against ∇τ: median 1.4°;
+  against the truth: 0.09°. Levels |error| median 0.019 mm. Paths 0.001 mm. Spacing of
+  the levels near the stop: ratio 1.16. Sweeps 18/14/40.
+
+No octree hairpin run has ended. So there is no map of cells finer than 0.16 mm yet. The
+first octree round on fundus_g0.04 accepted a refinement (F 214 171 → 180 028; 5832 →
+17 060 nodes, cells to 0.32 mm). The scan at 0.64 mm (Table 9) also has unresolved
+cells on every fundus and curved phantom (21–163), and none on the slab, crowns and τ.
+
+## Jumps
+
+The view is `ff_pr6_views.py jumps`. No abraded run has ended. The abraded octree run is
+pending (slot B position 3), and the 0.32 mm stand-in is pending (slot B position 4).
+Both can be cut at 12:00. The abraded phantom at 0.16 mm is not run (heavy).
+
+The only jump evidence in PR 6 is on intact cortex. On fundus_g0.04 (oracle, noise 0,
+0.16 mm) all jumps on intact cortex are positive: median 0.168, p90 0.21 (about 4 Δτ).
+On the slab (#208) the jump was about 1 Δτ. This is R2's and R3's failure signature.
+The causes are not separated: the integrator's readout of τ at the stop (#204, #208) or
+the inference (#204, #207). `Columns.p_jump` is nan in every run, because `_measure_write`
+does not pass it; the view reads the node p_jump from `field.npz`.
+
+## Grid
+
+The view is `ff_pr6_views.py grid`. The runs use oracle inputs and noise 1.0.
+
+Table 9. The spacing scan (uniform 0.64 mm, and the slab at 0.48 mm). Distances in mm.
+
+| run | nodes | stops med/p90 | paths med/p90 | levels med/p90 | unresolved | time (s) |
+|---|---|---|---|---|---|---|
+| slab 0.64 | 3757 | 0.098 / 0.259 | 0.004 / 0.012 | 0.020 / 0.053 | 0 | 47 |
+| slab 0.48 | 8228 | 0.098 / 0.223 | 0.003 / 0.008 | 0.014 / 0.036 | 0 | 248 |
+| crown_w0.32 0.64 | 6859 | 0.204 / 2.40 | 0.192 / 0.424 | 0.035 / 0.103 | 0 | 61 |
+| crown_w0.64 0.64 | 8000 | 0.215 / 0.436 | 0.093 / 0.220 | 0.039 / 0.102 | 0 | 58 |
+| crown_w1.28 0.64 | 9261 | 0.152 / 0.400 | 0.010 / 0.051 | 0.036 / 0.092 | 0 | 73 |
+| fundus_g0.48 0.64 | 6859 | 0.162 / 0.459 | 0.007 / 0.030 | 0.061 / 0.134 | 21 | 142 |
+| fundus_g0.16 0.64 | 5832 | 0.318 / 0.554 | 0.006 / 0.026 | 0.124 / 0.227 | 98 | 113 |
+| fundus_g0.04 0.64 | 5832 | 0.510 / 1.21 | 0.009 / 0.041 | 0.179 / 0.377 | 63 | 156 |
+| curved_g0.16 0.64 | 9261 | 0.224 / 0.484 | 0.006 / 0.036 | 0.170 / 0.388 | 163 | 195 |
+| curved_g0.04 0.64 | 9261 | 0.459 / 0.843 | 0.004 / 0.038 | 0.171 / 0.415 | 127 | 206 |
+| tau 0.64 | 5525 | 0.126 / 0.318 | 0.010 / 0.046 | 0.118 / 0.279 | 0 | 94 |
+
+Focal points, overlap, crossings and sinks are 0 in every scan run. At 0.64 mm the stop
+error grows as the fundus gap closes (median 0.16 → 0.32 → 0.51 mm for g = 0.48, 0.16,
+0.04 mm). The narrow crown (w = 0.32 mm) has stops p90 2.4 mm and paths median 0.19 mm:
+at 0.64 mm the grid does not resolve it. On the slab, 0.48 mm lowers the p90 of stops,
+paths and levels; the stop median does not change (0.098 mm). The other phantoms have
+only one spacing so far, so there is no curve against the node count yet.
+
+![The spacing scan: p90 against the node count](figures/flow-field-phantoms/pr6_grid_overview.png)
+
+![The spacing scan on the slab](figures/flow-field-phantoms/pr6_grid_slab.png)
+
+![The spacing scan on fundus_g0.04](figures/flow-field-phantoms/pr6_grid_fundus_g0.04.png)
+
+No octree result is in the scan: the octree column of the scan is not run (time). The
+octree evidence for R9 is in #205 and #206: on the noise phantom the first refinement
+was accepted (ΔF −9417.6), and a control re-solve of the same grid gave the same gain
+(ΔF −9418.8), so the gain came from the restart, not from the refinement. With the
+control rule (#206) the refinement is refused by +1.14 in about 35 000.
+
+## Uncertainty
+
+Task 6.4 (question 8) is pending. The first calibration run (curved_g0.16, image,
+noise 1, seed 1, uniform 0.32 mm stand-in, 32 sampled fields) is at positions 34–35 of
+35 in slot C. It can be cut at 12:00. Seeds 2–4, ckiss_smooth and abraded, and the
+octree are not run (time). The sampler (`ff_sample.py`) is tested: it draws 32 fields
+from each node's q and q_stop, integrates columns from the roots, fits one map g on the
+posterior-mean columns, and gives z = (0 − m)/σ per column for the stops (`stop_sdf`)
+and the levels. It draws hanging nodes independently (CD-10). There is no SD of z yet.
+
+## Design decisions R2, R3, R7–R10 (PR 6, partial)
+
+| # | supports | does not support | state |
+|---|---|---|---|
+| R2 speed to zero at the stop, τ jumps to τ_top | spacing of the levels near the stop: ratio 1.16 (no strong pile-up) on fundus_g0.04 | jumps on intact cortex all positive, median 0.168 (about 4 Δτ) on fundus_g0.04; slab about 1 Δτ (#208); also #204, #209 | failure signature seen; cause not separated (integrator readout or inference, #204, #207, #208) |
+| R3 jump prior near zero | — | as R2: positive jumps on intact cortex | partial: no abraded run yet, so no jump on a patch |
+| R7 non-crossing, sinks checked | focal points 0, crossings 0, overlap 0, sinks 0 on fundus_g0.04 at 0.16 mm and in all 11 scan runs | 42 reversed edges on fundus_g0.04; 23 % of its columns end UNRESOLVED_CONTACT | partial: one 0.16 mm hairpin run; the signature (a count above zero away from the stop set) not seen |
+| R8 adaptive grid, prior-shaped cells marked | the uniform grid at g = 0.04 mm gives no focal points | no focal point exists for the octree to remove; no octree run has ended | partial: octree runs running or pending |
+| R9 refinement accepted by F | the control rule (#206) refuses the noise refinement | the original rule accepts a refinement on noise (#205); the gain is the restart | failed in #205; the change (#206) is under review; no PR 6 run on the slab or noise |
+| R10 uncertainty from sampled fields | — | — | pending: no calibration run has ended |
