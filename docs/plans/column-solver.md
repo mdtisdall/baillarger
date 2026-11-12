@@ -188,9 +188,23 @@ point would be an integral over the whole field below it.
   of a contact sheet it points toward the sheet, and it reverses across it.
   No flow line crosses the sheet, so each point lies on one column and
   cortex cannot overlap.
-- **The grid.** 0.3–0.6 mm (the scale the data support) is too coarse for a
-  tight fundus (crowns down to 0.32 mm on the phantoms): the columns there
-  would be too smooth. The grid is finer near tight folds (D6).
+- **The grid is adaptive.** The grid holds how the geometry changes (the
+  bends and the speed), not the image. In the smooth interior of a bank
+  that changes over fractions of a millimetre or more, so the grid there
+  can be coarser than the image: 0.3–0.6 mm, the scale that the data
+  support (version-2 §4c, *Open*). Near tight folds (crowns down to
+  0.32 mm on the phantoms) a coarse grid makes the columns too smooth, so
+  the grid there goes down to image resolution. Whether the coarse spacing
+  is safe is tested, not assumed (*Evaluation*, D6).
+- **What the grid does not limit.** The field gives a separate continuous
+  column from every root, at any density: the columns are not snapped to
+  the grid. The contrast match samples the image at full resolution along
+  the interpolated τ, so the thin bands are matched at image resolution.
+- **A cut at stop sheets.** The stop field stays at image resolution. The
+  field reverses across a contact sheet, so it is interpolated on each
+  side of the sheet separately, never across it. A grid cell that the
+  sheet passes through holds values for each side. Without the cut, the
+  reversal would be smeared over a whole cell.
 - **Per-column uncertainty** comes from samples: draw fields from the node
   distributions, smooth them, integrate the columns, and take the spread
   of each column's levels and top.
@@ -331,9 +345,14 @@ and the user's reading is recorded before the arms are named.
   probability against the user's reading, and the signed distance between
   the banks' own stops. For the chain arms, the overlaps found by the check
   before the exclusion term resolved them.
-- **Field only (arm C):** where the field falls to zero or reverses; the
-  per-column spread from samples; the columns' error at tight folds
-  against the chains'.
+- **Field only (arm C):** where the field falls to zero or reverses away
+  from a stop sheet; the per-column spread from samples; the columns'
+  error at tight folds against the chains'.
+- **The grid spacing scan (arm C):** on the curved phantom and the fundus
+  box, arm C at several uniform spacings, from 0.6 mm down to image
+  resolution, then the adaptive grid. For each spacing: the path error,
+  the error at the tight fundus, the stops against the known sheets, and
+  where the error starts to grow. This sets the spacing for D6.
 - **Growth only:** steps to settle each offset; how far B-fwd's columns
   move when B-fb's backward sweeps run.
 - **Cost:** time and peak memory per arm, and a memory model for a 50 µm
@@ -354,6 +373,9 @@ and the user's reading is recorded before the arms are named.
   with a known gap: every arm puts the stops on the known sheets, and no
   arm's output has overlapping cortex.
 - Arm C on a straight phantom gives the same columns as the chains.
+- Arm C on the contact phantom: no flow line crosses the known sheet, and
+  the field on each side does not depend on the field on the other side
+  (the cut).
 - On a straight phantom with straight true columns, no arm bends them.
 - On the same phantom, fine only and coarse to fine reach the same columns
   and the same energy.
@@ -427,7 +449,7 @@ reading before the next phase starts.
    fine only and coarse to fine.
 2. **Arms B-fwd and B-fb** on the same sites, fine only and coarse to
    fine. **Arm C** on the same sites, with the contact and open-sulcus
-   phantoms.
+   phantoms and the grid spacing scan.
 3. **Comparison and checkpoint.** The blind views, the energies, and the
    measures above. The user decides which arms go on, whether coarse to
    fine stays, and whether fixed-lag growth or lookahead runs.
@@ -453,8 +475,9 @@ reading before the next phase starts.
 - **D4. The τ step** Δτ, and the number of candidates kept per node.
 - **D5. The coarse level.** The cell size (the plan assumes the top stage's
   2 voxels), the coarse τ step, and how wide the coarse priors are.
-- **D6. The field grid** (arm C): its spacing, and how much finer it is
-  near tight folds.
+- **D6. The field grid** (arm C): the coarse spacing in bank interiors,
+  and the rule for refining near tight folds. The spacing scan gives the
+  evidence.
 
 ## Not in this plan
 
