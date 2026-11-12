@@ -890,3 +890,80 @@ def test_line_slots_index_map():
             c = a * 7 + m
             assert line[c] == m and off[c] == 8 - a
     assert off.min() == 0 and off.max() + FT.N_LEVELS == 17
+
+
+# ---------------------------------------------------------------- the anchor origin
+
+
+def test_no_upper_bound_on_tau_with_the_anchor_origin() -> None:
+    s = T.DEFAULTS
+    tp = np.array([0.3, -0.05])
+    p = np.array([[1.0, 0, 0]] * 2)
+    tau, d, valid = FT.moving_candidates(tp, p, s, tau_max=None)
+    t0, d0, _ = FT.moving_candidates(np.array([-0.3, -1.0]), p, s)
+    a = np.arange(63) // 7
+    assert valid.all()
+    np.testing.assert_allclose(tau, tp[:, None] + (a - 4)[None, :] * s.dtau, atol=1e-15)
+    assert np.array_equal(d, d0)
+    lb = FT.level_base(np.array([0.5, -1.0]), s, tau_max=None)
+    assert lb.tolist() == [round(0.5 / 0.04) - 4, -25 - 4]
+
+
+def test_jump_switch_off() -> None:
+    """TermWeights.jump = False: the jump term is 0 in the expected energy, in the
+    state energy and in the messages (the messages equal those with face_w = 0); the
+    other terms do not change."""
+    rng = np.random.default_rng(41)
+    ga = uniform_ga((3, 3, 2), rng=rng)
+    st = random_state(ga.n, 4, 3, rng, invalid=0.2)
+    on = weights(w=2.0)
+    off = replace(on, jump=False)
+    e_on = FT.expected_energy(st, ga, on)
+    e_off = FT.expected_energy(st, ga, off)
+    assert e_on["jump"] > 0.0 and e_off["jump"] == 0.0
+    for k in e_on:
+        if k != "jump":
+            assert e_off[k] == e_on[k], k
+    ch = rng.integers(-1, 4, (5, ga.n))
+    assert np.all(FT.state_energy(st, ga, off, ch)["jump"] == 0.0)
+    M, Ms = FT.messages(st, ga, off, np.arange(ga.n))
+    M0, Ms0 = FT.messages(st, ga_with(ga, face_w=np.zeros_like(ga.face_w)), on,
+                          np.arange(ga.n))  # fmt: skip
+    np.testing.assert_allclose(M, M0, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(Ms, Ms0, rtol=1e-13, atol=1e-13)
+
+
+@pytest.mark.parametrize("k", [3, -7])
+def test_energy_is_invariant_under_a_shift_of_every_tau(k: int) -> None:
+    """With the jump term off and no τ prior (the anchor origin), a shift of every τ by
+    k Δτ, with every level_base shifted by k, changes no expected term and no message
+    (to rounding); and the sampled profiles at τ + k Δτ and the levels + k are the
+    profiles at τ. So a shift by an integer multiple of Δτ is a symmetry of the
+    discrete energy."""
+    s = T.DEFAULTS
+    rng = np.random.default_rng(43)
+    ga = uniform_ga((3, 3, 3), rng=rng)
+    st = random_state(ga.n, 4, 3, rng, invalid=0.2)
+    tw = replace(weights(w=2.0), jump=False)
+    sh = replace(st, cand_tau=st.cand_tau + k * s.dtau, level_base=st.level_base + k)
+    e0 = FT.expected_energy(st, ga, tw)
+    e1 = FT.expected_energy(sh, ga, tw)
+    for key in e0:
+        assert e1[key] == pytest.approx(e0[key], rel=1e-12, abs=1e-12), key
+    M0, Ms0 = FT.messages(st, ga, tw, np.arange(ga.n))
+    M1, Ms1 = FT.messages(sh, ga, tw, np.arange(ga.n))
+    v = st.valid  # the values of slots that are not valid have no use
+    np.testing.assert_allclose(M1[v], M0[v], rtol=1e-12, atol=1e-10)
+    np.testing.assert_allclose(Ms1, Ms0, rtol=1e-12, atol=1e-10)
+    shape = (20, 20, 20)
+    vols = [rng.normal(size=shape), rng.normal(size=shape)]
+    nodes = rng.uniform(6.0, 14.0, (5, 3))
+    tau = -rng.uniform(0.0, 0.5, (5, 4))
+    d = unit(rng.normal(size=(5, 4, 3)))
+    s_ref = rng.uniform(0.8, 1.2, 5)
+    lb = rng.integers(-12, 0, 5)
+    P0 = FT.candidate_profiles(nodes, tau, d, s_ref, lb, vols, L=9, dtau=s.dtau)
+    P1 = FT.candidate_profiles(
+        nodes, tau + k * s.dtau, d, s_ref, lb + k, vols, L=9, dtau=s.dtau
+    )
+    np.testing.assert_allclose(P1, P0, rtol=0, atol=1e-9)

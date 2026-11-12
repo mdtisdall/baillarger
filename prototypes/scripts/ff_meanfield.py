@@ -32,6 +32,29 @@ The loop
 6. A rise of F in a sweep above 1e-9 · |F| is a defect: the log keeps it, and the
    loop continues. F is compared only within one width (the energy changes with w,
    the candidates and the profiles).
+7. Only with `solve(recentre_at_edge=True)` (the provisional option CD-13; default
+   off): see *Re-centring at the edge* below.
+
+Re-centring at the edge (CD-13, provisional)
+--------------------------------------------
+
+A finding: a solve reaches only the minimum of F over its last candidate sets, and
+the predictions move only at the re-centrings between widths. The option
+recentre_at_edge (default False) adds re-centrings inside a width. At the end of
+each pass of a width, `edge_counts` gives the final choices at the edge. A final
+choice is at the edge if tau_at_kept_edge counts it or dir_at_ring counts it. A node
+that kept one τ index only (tau_single) is at both τ edges, and tau_at_kept_edge
+counts it, so it is at the edge too: a re-centring moves its window. If a final
+choice is at the edge and the width has used fewer than max_sweeps sweeps over its
+passes, the width does a new pass: `recentre`, new candidates round the new
+predictions, the carry-over as at a width change, the pruning after the first sweep,
+the same stop rules, and at most max_sweeps minus the sweeps used. The width ends
+when no final choice is at the edge or when its passes used max_sweeps sweeps in
+total. F is compared only within one pass (the rise rule above). The option adds no
+constant. With the option off, the loop is the plan's schedule, with the same bits.
+
+The origin of τ is the top (τ_top = 0, the default) or an anchor node (the comparison
+run of the plan's question 6; see `solve`).
 
 Every coupling term is multilinear in the node distributions, and no two nodes of one
 colour share a term. So each colour update is the exact minimiser of F over the q of
@@ -305,14 +328,17 @@ def initial_field(
 
 
 def initial_from_field(
-    init: T.Field, nodes: Array, settings: T.SolverSettings = T.DEFAULTS
+    init: T.Field,
+    nodes: Array,
+    settings: T.SolverSettings = T.DEFAULTS,
+    tau_max: float | None = T.TAU_TOP,
 ) -> tuple[Array, Array, Array, BoolArray]:
     """(τ (n,), d (n, 3), q_stop (n,), has (n,)) of a solved Field on another grid,
     interpolated to the nodes (voxel positions). The nodes are clipped to the box of
     init's nodes. q_stop: the trilinear interpolation over the 8 corners. τ and d: the
     trilinear weights times the corners' moving probability, renormalised (d then
     normalised). has = False where no corner has moving mass or the mean direction is
-    zero; there τ and d have no meaning."""
+    zero; there τ and d have no meaning. τ is clipped to tau_max (no clip if None)."""
     g = init.grid
     lo = g.nodes.min(0)
     hi = g.nodes.max(0)
@@ -328,7 +354,8 @@ def initial_from_field(
     dm = init.direction_mean()[corners]
     sw = pm.sum(1)
     tau = np.where(sw > 0, (pm * tm).sum(1) / np.maximum(sw, 1e-300), T.TAU_TOP)
-    tau = np.minimum(tau, T.TAU_TOP)
+    if tau_max is not None:
+        tau = np.minimum(tau, tau_max)
     D = np.einsum("nk,nkc->nc", pm, dm)
     nr = np.linalg.norm(D, axis=1)
     has = (sw > 0) & (nr > 0)
@@ -637,15 +664,18 @@ def _update_colour(
     sel: IntArray,
     mom: FT.Moments,
     chunk: int = FT.CHUNK,
+    no_stop: BoolArray | None = None,
 ) -> float:
     """q_i ∝ exp(−(unary + messages)) over the valid states of the nodes sel; refresh
     their moments. Returns max |Δq| of these nodes. The nodes go in chunks of `chunk`.
     No two nodes of one colour share a term, so the messages of a chunk do not use the
-    moments of the other chunks of sel, and the result is the same as in one step."""
+    moments of the other chunks of sel, and the result is the same as in one step.
+    no_stop (n,): the nodes that have no stopped state (the anchor); None: no such
+    node."""
     dq = 0.0
     for s0 in range(0, len(sel), chunk):
         c = sel[s0 : s0 + chunk]
-        dq = max(dq, _update_rows(st, ga, tw, c, mom))
+        dq = max(dq, _update_rows(st, ga, tw, c, mom, no_stop))
     return dq
 
 
@@ -655,6 +685,7 @@ def _update_rows(
     tw: FT.TermWeights,
     sel: IntArray,
     mom: FT.Moments,
+    no_stop: BoolArray | None = None,
 ) -> float:
     """_update_colour for one chunk of nodes."""
     M, Ms = FT.messages(st, ga, tw, sel, mom)
@@ -662,6 +693,8 @@ def _update_rows(
     v = st.valid[sel]
     lm = np.where(v, -(e_move + M), -np.inf)
     ls = -(e_stop + Ms)
+    if no_stop is not None:
+        ls = np.where(no_stop[sel], -np.inf, ls)
     mx = np.maximum(lm.max(1), ls)
     wm = np.where(v, np.exp(lm - mx[:, None]), 0.0)
     ws = np.exp(ls - mx)
@@ -814,12 +847,21 @@ def _new_state(
     volumes: Sequence[Array],
     settings: T.SolverSettings,
     profile_dtype: Any,
+    tau_max: float | None = T.TAU_TOP,
+    anchor_node: int | None = None,
 ) -> tuple[FT.TermState, npt.NDArray[np.int16]]:
     """The state of a new width: candidates round the predictions, q carried over from
     `old` = [τ, d, q, valid], q_stop kept, s_ref = exp(−u), the profiles. The list `old`
     is emptied after the carry-over, so that the old arrays can be freed before the
-    profiles are allocated."""
-    cand_tau, cand_dir, valid = FT.moving_candidates(tau_pred, dir_pred, settings)
+    profiles are allocated. tau_max: the upper bound of τ (None: no bound). anchor_node:
+    only the candidates of the centre τ index (τ = τ_pred = 0 there) are valid at this
+    node."""
+    cand_tau, cand_dir, valid = FT.moving_candidates(
+        tau_pred, dir_pred, settings, tau_max
+    )
+    if anchor_node is not None:
+        a_idx = np.arange(cand_tau.shape[1]) // settings.n_dir
+        valid[anchor_node] = a_idx == (settings.n_tau - 1) // 2
     q = carry_over(
         old[0],
         old[1],
@@ -834,8 +876,10 @@ def _new_state(
     old.clear()
     q = np.where(valid, q, 0.0)
     s_ref = np.exp(-u)
-    lb = FT.level_base(tau_pred, settings, FT.N_LEVELS)
-    c = np.minimum(np.asarray(tau_pred, np.float64), T.TAU_TOP)
+    lb = FT.level_base(tau_pred, settings, FT.N_LEVELS, tau_max)
+    c = np.asarray(tau_pred, np.float64)
+    if tau_max is not None:
+        c = np.minimum(c, tau_max)
     # the directions of the candidates a = 0: m = 0 .. n_dir − 1
     prof = _profile_lines(
         ga,
@@ -906,8 +950,11 @@ def solve(
     *,
     tau_prior: bool = False,
     init: T.Field | None = None,
+    origin: str = "top",
+    anchor_node: int | None = None,
     profile_dtype: Any = np.float64,
     log_fn: LogFn | None = None,
+    recentre_at_edge: bool = False,
 ) -> tuple[T.Field, dict[str, npt.NDArray[Any]], dict[str, Any]]:
     """Solve the field on a grid by the mean field (module docstring).
 
@@ -915,9 +962,37 @@ def solve(
     the contrast (the detrended echoes {1: echo 2, 2: echo 3}). noise_sd: the matched
     noise SD of the two echoes (the image's "noise_sd"); both must be positive.
     tau_prior: the switch of the FEM prior on τ. init: a solved Field on another grid
-    that replaces the initial field. profile_dtype: the dtype of the stored profile
-    lines (np.float32 halves their memory; the arithmetic stays float64). log_fn:
-    called with one line of text per sweep.
+    that replaces the initial field (a start field only, not a prior). origin: "top"
+    (τ_top = 0, the default) or "anchor" (the comparison run of the plan's question 6:
+    see *The anchor origin* below); anchor_node: the node id of the anchor (only with
+    origin "anchor"). profile_dtype: the dtype of the stored profile lines (np.float32
+    halves their memory; the arithmetic stays float64). log_fn: called with one line of
+    text per sweep. recentre_at_edge: the provisional option CD-13 (default False: the
+    plan's schedule). True: a width does more passes while a final choice is at the
+    edge, up to max_sweeps sweeps in total (module docstring, *Re-centring at the
+    edge*).
+
+    The anchor origin: the anchor node is a moving node with τ = 0, and every other τ
+    is free. In detail:
+
+    - The jump term is off (TermWeights.jump = False): the stopped state gives no τ
+      value to its moving neighbours.
+    - No upper bound on τ: τ can be positive away from the anchor. The candidates are
+      τ_pred + (a − 4) Δτ (ff_terms.moving_candidates, tau_max None), and the profiles
+      use c = τ_pred.
+    - The anchor node: τ_pred = 0 at every width, only the 7 candidates of the centre
+      τ index (τ = 0) are valid, and it has no stopped state (q_stop = 0). So its τ is
+      a point mass at 0 and it is moving. The stop field must give it log-odds < 0 (a
+      moving node of the initial field); else solve raises ValueError.
+    - The initial τ (from the stop field, or from init) is shifted by one constant so
+      that the anchor's τ is 0. init's τ is not clipped.
+    - All else is as with the top origin. p_jump in extras is nan (no jump term).
+
+    The energy with the anchor origin changes by no constant shift of every τ, except
+    for two parts: the contrast term samples the profiles at the absolute levels ℓ Δτ,
+    so only a shift by an integer multiple of Δτ keeps it (with the levels shifted by
+    the same integer); and the FEM prior on τ (tau_prior) has a mass term that no
+    shift keeps.
 
     Returns (field, extras, log). field: K = settings.prune_max slots. extras (n,)
     arrays: u, speed (= exp(u)), p_jump, tau_pred and the (n, 3) dir_pred of the last
@@ -927,6 +1002,10 @@ def solve(
     t_all = time.perf_counter()
     if len(noise_sd) != 2 or not all(float(s) > 0 for s in noise_sd):
         raise ValueError("noise_sd must hold 2 positive values")
+    if origin not in ("top", "anchor"):
+        raise ValueError(f'origin must be "top" or "anchor", not {origin!r}')
+    if (origin == "anchor") != (anchor_node is not None):
+        raise ValueError('origin "anchor" needs anchor_node, and only it takes one')
 
     def say(msg: str) -> None:
         if log_fn is not None:
@@ -942,18 +1021,42 @@ def solve(
     volumes = FT.smoothed_echoes(inputs.contrast, settings.band_scale_vox)
     spacing = grid_spacing_mm(grid)
 
+    anchor = None if anchor_node is None else int(anchor_node)
+    tau_max: float | None = T.TAU_TOP if anchor is None else None
+    if anchor is not None:
+        if not 0 <= anchor < n:
+            raise ValueError(f"anchor_node {anchor} is not a node id (n = {n})")
+        if lo[anchor] >= 0.0:
+            raise ValueError(
+                f"the stop field gives the anchor node {anchor} a log-odds "
+                f"{lo[anchor]:.6g} >= 0: the anchor must be a moving node"
+            )
+
     tau0, dir0, qs0 = initial_field(ga, lo, tdir)
     if init is not None:
-        ti, di, qi, has = initial_from_field(init, nodes, settings)
+        ti, di, qi, has = initial_from_field(init, nodes, settings, tau_max)
         tau0 = np.where(has, ti, tau0)
         dir0 = np.where(has[:, None], di, dir0)
         qs0 = qi
+    no_stop: BoolArray | None = None
+    if anchor is not None:
+        tau0 = tau0 - tau0[anchor]
+        qs0 = qs0.copy()
+        qs0[anchor] = 0.0
+        no_stop = np.zeros(n, bool)
+        no_stop[anchor] = True
     u = np.zeros(n)
     colours = np.asarray(grid.colour, np.int64)
     groups = [np.flatnonzero(colours == c) for c in range(grid.n_colours)]
 
     log = _new_log(settings, noise_sd, tau_prior, profile_dtype, grid, n)
     log["run"]["tensor_not_finite"] = n_bad_tensor
+    log["run"]["origin"] = origin
+    log["run"]["recentre_at_edge"] = bool(recentre_at_edge)
+    log["run"]["anchor_node"] = anchor
+    log["run"]["anchor_position_vox"] = (
+        None if anchor is None else [float(v) for v in nodes[anchor]]
+    )
     old: list[npt.NDArray[Any]] = [
         tau0[:, None],
         dir0[:, None, :],
@@ -966,61 +1069,78 @@ def solve(
     ci: npt.NDArray[np.int16] | None = None
     for w in settings.widths:
         t0 = time.perf_counter()
-        tw = FT.term_weights(spacing, noise_sd, w, settings, tau_prior)
-        if st is not None:
-            tau_pred, dir_pred = recentre(st, ga, dir_pred, settings)
-            # views of the old buffers: only the profiles are freed here; the rest
-            # goes when _new_state empties `old` after the carry-over
-            old = [st.cand_tau, st.cand_dir, st.q, st.valid]
-            q_stop = st.q_stop
-            u = st.u
-            st = None  # free the profiles before the new ones
-            ci = None
-        st, ci = _new_state(
-            ga,
-            tau_pred,
-            dir_pred,
-            old,
-            q_stop,
-            u,
-            lo,
-            tdir,
-            coh,
-            volumes,
-            settings,
-            profile_dtype,
+        tw = FT.term_weights(
+            spacing, noise_sd, w, settings, tau_prior, jump=anchor is None
         )
-        mom = FT.node_moments(st)
-        F_old, terms = free_energy(st, ga, tw, mom)
-        F_end = F_old
+        used = 0  # the sweeps of this width, over all its passes
+        rep = 0  # the pass of this width: 0 is the plan's pass, 1, 2, ... repeats
         fl: list[float] = []
-        end = "max_sweeps"
-        for sweep in range(1, settings.max_sweeps + 1):
-            dq = 0.0
-            for sel in groups:
-                dq = max(dq, _update_colour(st, ga, tw, sel, mom))
-            for sel in groups:
-                st.u[sel] = FT.update_u(st, ga, tw, sel, mom)
-            F_new, terms = free_energy(st, ga, tw, mom)
-            F_end = F_new
-            fl.append(F_new)
-            if F_new - F_old > RISE_REL * abs(F_old):
-                rise = dict(width=float(w), sweep=sweep, f_before=F_old, f_after=F_new)
-                log["free_energy_rises"].append(rise)
-                log["defects"].append(
-                    f"free energy rose at width {w:g}, sweep {sweep}: "
-                    f"{F_old:.17g} -> {F_new:.17g}"
-                )
-            dF = abs(F_new - F_old)
-            say(f"w={w:g} sweep={sweep} F={F_new:.12g} dF={dF:.3g} max_dq={dq:.3g}")
-            if sweep == 1:
-                del mom  # the moments of the pruned state replace it
-                st, ci, pr = prune(st, ci, settings)
-                mom = FT.node_moments(st)
-                F_pruned, terms = free_energy(st, ga, tw, mom)
-                F_end = F_pruned
-                log["pruning"]["per_width"].append(
-                    dict(
+        while True:
+            if st is not None:
+                tau_pred, dir_pred = recentre(st, ga, dir_pred, settings)
+                if anchor is not None:
+                    tau_pred[anchor] = 0.0
+                # views of the old buffers: only the profiles are freed here; the
+                # rest goes when _new_state empties `old` after the carry-over
+                old = [st.cand_tau, st.cand_dir, st.q, st.valid]
+                q_stop = st.q_stop
+                u = st.u
+                st = None  # free the profiles before the new ones
+                ci = None
+            st, ci = _new_state(
+                ga,
+                tau_pred,
+                dir_pred,
+                old,
+                q_stop,
+                u,
+                lo,
+                tdir,
+                coh,
+                volumes,
+                settings,
+                profile_dtype,
+                tau_max,
+                anchor,
+            )
+            mom = FT.node_moments(st)
+            F_old, terms = free_energy(st, ga, tw, mom)
+            F_start = F_old
+            F_end = F_old
+            fr: list[float] = []
+            prec: dict[str, Any] = {}
+            end = "max_sweeps"
+            for sweep in range(1, settings.max_sweeps - used + 1):
+                dq = 0.0
+                for sel in groups:
+                    dq = max(dq, _update_colour(st, ga, tw, sel, mom, no_stop=no_stop))
+                for sel in groups:
+                    st.u[sel] = FT.update_u(st, ga, tw, sel, mom)
+                F_new, terms = free_energy(st, ga, tw, mom)
+                F_end = F_new
+                fr.append(F_new)
+                if F_new - F_old > RISE_REL * abs(F_old):
+                    rise: dict[str, Any] = dict(
+                        width=float(w), sweep=sweep, f_before=F_old, f_after=F_new
+                    )
+                    at = ""
+                    if recentre_at_edge:
+                        rise["repeat"] = rep
+                        at = f" (repeat {rep})"
+                    log["free_energy_rises"].append(rise)
+                    log["defects"].append(
+                        f"free energy rose at width {w:g}, sweep {sweep}{at}: "
+                        f"{F_old:.17g} -> {F_new:.17g}"
+                    )
+                dF = abs(F_new - F_old)
+                say(f"w={w:g} sweep={sweep} F={F_new:.12g} dF={dF:.3g} max_dq={dq:.3g}")
+                if sweep == 1:
+                    del mom  # the moments of the pruned state replace it
+                    st, ci, pr = prune(st, ci, settings)
+                    mom = FT.node_moments(st)
+                    F_pruned, terms = free_energy(st, ga, tw, mom)
+                    F_end = F_pruned
+                    prec = dict(
                         width=float(w),
                         kept=_stats(pr.n_keep),
                         at_prune_max=int((pr.n_keep >= settings.prune_max).sum()),
@@ -1030,26 +1150,59 @@ def solve(
                         free_energy_before=F_new,
                         free_energy_after=F_pruned,
                     )
-                )
-                say(f"w={w:g} pruned: kept {_stats(pr.n_keep)} F={F_pruned:.12g}")
-                del pr
-                F_cmp = F_pruned
-            else:
-                F_cmp = F_new
-            if dq < settings.tol_q:
-                end = "tol_q"
-            elif dF < settings.tol_free_energy_rel * abs(F_new):
-                end = "tol_free_energy"
-            if end != "max_sweeps":
+                    if rep == 0:
+                        log["pruning"]["per_width"].append(prec)
+                    say(f"w={w:g} pruned: kept {_stats(pr.n_keep)} F={F_pruned:.12g}")
+                    del pr
+                    F_cmp = F_pruned
+                else:
+                    F_cmp = F_new
+                if dq < settings.tol_q:
+                    end = "tol_q"
+                elif dF < settings.tol_free_energy_rel * abs(F_new):
+                    end = "tol_free_energy"
+                if end != "max_sweeps":
+                    break
+                F_old = F_cmp
+            del mom
+            used += len(fr)
+            fl.extend(fr)
+            if not recentre_at_edge:
                 break
-            F_old = F_cmp
+            assert ci is not None
+            ec = edge_counts(st, ci, settings)
+            at_edge = ec["tau_at_kept_edge"] > 0 or ec["dir_at_ring"] > 0
+            nxt = "repeat" if at_edge and used < settings.max_sweeps else "stop"
+            log["edge_repeats"].append(
+                dict(
+                    width=float(w),
+                    repeat=rep,
+                    sweeps=len(fr),
+                    sweeps_of_width=used,
+                    end_reason=end,
+                    free_energy_start=F_start,
+                    free_energy_end=F_end,
+                    free_energy=fr,
+                    pruning=prec,
+                    edge_counts=ec,
+                    at_edge=bool(at_edge),
+                    next=nxt,
+                )
+            )
+            say(
+                f"w={w:g} repeat {rep}: {len(fr)} sweeps ({end}), F={F_end:.12g}, "
+                f"tau_at_kept_edge={ec['tau_at_kept_edge']}, "
+                f"dir_at_ring={ec['dir_at_ring']}: {nxt}"
+            )
+            if nxt == "stop":
+                break
+            rep += 1
         log["free_energy"].append(fl)
-        log["sweeps"].append(len(fl))
+        log["sweeps"].append(used)
         log["end_reason"].append(end)
         log["terms"].append(dict(width=float(w), free_energy=F_end, **terms))
         log["time_s"].append(time.perf_counter() - t0)
-        say(f"w={w:g} done: {len(fl)} sweeps ({end}), F={F_end:.12g}")
-        del mom
+        say(f"w={w:g} done: {used} sweeps ({end}), F={F_end:.12g}")
     assert st is not None and ci is not None
     # the outputs do not use the profiles: free their buffer first
     st = replace(st, profiles=np.zeros((n, st.profiles.shape[1], 0, 2)))
@@ -1063,7 +1216,7 @@ def solve(
     extras: dict[str, npt.NDArray[Any]] = dict(
         u=st.u.copy(),
         speed=np.exp(st.u),
-        p_jump=p_jump(st, ga, tw),
+        p_jump=p_jump(st, ga, tw) if anchor is None else np.full(n, np.nan),
         tau_pred=np.asarray(tau_pred, np.float64),
         dir_pred=np.asarray(dir_pred, np.float64),
         cand_index=ci_out,
@@ -1088,13 +1241,23 @@ def _new_log(
     and after; final: `edge_counts` and the kept counts), terms (per width at its end:
     each expected term, the entropy and F), time_s (per width), time_total_s, settings
     (SolverSettings.record()) and run (noise_sd, tau_prior, profile_dtype, grid kind,
-    spacing, nodes, rise_rel)."""
+    spacing, nodes, rise_rel; `solve` adds tensor_not_finite, origin, recentre_at_edge,
+    anchor_node and anchor_position_vox).
+
+    With recentre_at_edge (CD-13) on: free_energy and sweeps of a width hold all its
+    passes in order (F can jump between two passes); end_reason is that of the last
+    pass; pruning.per_width is of the first pass; terms is of the last pass; a rise
+    also holds its pass ("repeat"); edge_repeats holds one record per pass (width,
+    repeat, sweeps, sweeps_of_width, end_reason, free_energy_start after the
+    carry-over, free_energy_end, free_energy per sweep, pruning, edge_counts, at_edge,
+    next: "repeat" or "stop"). With the option off, edge_repeats is empty."""
     return dict(
         free_energy=[],
         sweeps=[],
         end_reason=[],
         free_energy_rises=[],
         defects=[],
+        edge_repeats=[],
         pruning=dict(per_width=[], final={}),
         terms=[],
         time_s=[],
