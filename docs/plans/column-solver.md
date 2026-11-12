@@ -85,20 +85,32 @@ Three things are unknown for each column:
    offsets let neighbouring columns align, both at the GM/WM transition and
    at the top.
 
-τ = 0 is not the GM/WM boundary. There is no sharp boundary. Only the
-relative alignment matters, so one point on one chosen column is τ = 0
-(the **anchor**). The column graph (the across-triangle mesh graph of
-`white-surf/1`) is one connected graph, also around excisions. So one
-anchor fixes τ everywhere. The solver checks that the graph is connected.
-A disconnected part is a defect to report and repair, not a case for a
-second anchor. The speed prior's typical value fixes the unit of τ.
+**The origin of τ is the top: τ_top = 0** (user, 2026-11-11). Every
+complete column ends at the same level, τ_top (*Stopping and contacts*),
+so τ = 0 is the outermost laminar level: the pial edge, or the contact
+where two banks meet. Every value in the cortex is negative and says how
+far below the top, in laminar terms, a point lies. The pia is the
+better-defined end: the transition to outside medium is sharp, and there
+is no sharp GM/WM boundary. Limits:
 
-**The top as the origin (D7).** Every complete column ends at the same
-level, τ_top (*Stopping and contacts*). So the top itself can fix the
-origin, τ_top = 0, in place of a chosen point on one column. The pia is
-the one level present almost everywhere, and columns that stop early
-(excisions, abrasion) are accounted for by their jumps. This is the plan's
-assumption. The anchor column stays as the fallback.
+- **The unit is arbitrary.** The speed prior's typical value fixes it, so
+  τ is not millimetres. Read τ by its order and by equality between
+  columns.
+- **Columns that stop early** (excisions, abrasion) keep the same origin:
+  they stop below it, by their jump.
+- **At a fused contact with no visible notch**, the top is inferred from
+  the shared stop and the alignment with neighbours, and the origin has
+  that uncertainty.
+- **In the WM below the cortex** there is little contrast, so τ there comes
+  mostly from the speed prior. A column's start has a τ value but not a
+  meaningful laminar depth.
+
+The column graph (the across-triangle mesh graph of `white-surf/1`) is one
+connected graph, also around excisions. The solver checks that it is
+connected. A disconnected part is a defect to report and repair. An
+**anchor column** (one point on one column as τ = 0) is no longer the
+default. It is kept only as the comparison run in the flow-field plan's
+question 6.
 
 ### The chain of each column
 
@@ -372,8 +384,8 @@ the energy above.
   that sets the speed is not blurred. Coarsen across columns much more
   than along depth.
 - **What it gives.** Mean field moves evidence about one neighbour per
-  sweep, so on the fine graph the offsets far from the anchor settle
-  slowly. On the coarse graph the same distance takes few sweeps. The
+  sweep, so on the fine graph the offsets far from columns with clear tops
+  settle slowly. On the coarse graph the same distance takes few sweeps. The
   coarse level fits in memory for a whole hemisphere, and the fine level
   then runs by superblock with a halo.
 - **How it passes down.** The coarse distributions become priors on the
@@ -399,7 +411,7 @@ the grid.
 | Arm | Start | Update order |
 |---|---|---|
 | **A** (probes first) | The top stage's rays and its corrected tops. The candidates are centred on the probe paths, with the offset and the speed from a first fit of the contrast along the probes. The top stage traces one ray per coarse cell, so every column of the phantoms and the fundus box gets its own probe. | All the nodes of all the columns, until the objective stops falling. |
-| **B-fwd** (growth, forward only) | The anchor column's start. | One τ step at a time, outward. A node is final when the front passes it. |
+| **B-fwd** (growth, forward only) | The columns' starts. | One τ step at a time, outward. A node is final when the front passes it. |
 | **B-fb** (growth, forward and backward) | As B-fwd. | As B-fwd, then sweeps over all the nodes, back from the tops and out again, until the objective stops falling. |
 | **C** (field form) | The tensor's leading eigenvector for the direction, and τ from distance along it, at the coarse level. | All the grid nodes, until the objective stops falling. |
 
@@ -461,9 +473,9 @@ and the user's reading is recorded before the arms are named.
 - **Level shifts between neighbours** (the "no faults" rule, §4b): a
   shift of a level by more than 1–2 voxels between neighbours, or a step
   along a border between groups of columns.
-- **Calibration.** Report the uncertainty of the offset difference between
-  neighbours, which does not depend on the anchor, not the absolute offset
-  uncertainty. Mask the visible tops in blocks, solve again, and check
+- **Calibration.** Report the uncertainty of each column's levels relative
+  to its own top (τ_top = 0), and of the offset difference between
+  neighbours. Mask the visible tops in blocks, solve again, and check
   that z = (t_true − μ)/σ has an SD near 1 and that 95 % intervals cover
   about 95 %.
 - **Pruning:** the share of final choices near the edge of the kept set.
@@ -526,9 +538,9 @@ and the user's reading is recorded before the arms are named.
 ### Exact tests (stages 1 and 2)
 
 - On a τ phantom with known offsets and speeds, the solver recovers the
-  offset differences between neighbours and the speeds, up to the anchor.
-- Moving the anchor to another column changes every offset by one
-  constant and changes nothing else.
+  offsets and the speeds, with every complete column's top at τ = 0.
+- In the comparison run with an anchor column instead, moving the anchor
+  changes every offset by one constant and changes nothing else.
 - A phantom whose contrast is flat over a band: the speed there follows the
   speed prior, and the levels on both sides stay aligned.
 - A phantom with an areal border (the profile's content changes, the
@@ -599,7 +611,8 @@ stored form (§4b, item 5) can be chosen from them:
 - arm C also: the grid's τ and direction (the posterior mean and the
   most probable candidate at each node), the offsets on the start surface,
   and the integrator and its step;
-- per run: the arm, the anchor, the input versions, the energy and its
+- per run: the arm, the origin (the top, or an anchor column in the
+  comparison run), the input versions, the energy and its
   parts per sweep, and the pruning log.
 
 The stored form is chosen after the stage 3 checkpoint, with the result. A compact
@@ -671,8 +684,6 @@ phantoms and the τ phantoms of stage 1 are reused by every later stage.
 - **D6. The field grid** (arm C): the coarsest spacing, the indicators'
   weighting, and the hysteresis between refining and coarsening. The
   spacing scan gives the evidence.
-- **D7. The origin of τ.** The top level (τ_top = 0, the plan's
-  assumption) or an anchor column.
 
 ## Not in this plan
 

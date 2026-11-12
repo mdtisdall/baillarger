@@ -57,7 +57,8 @@ Each question names the phantoms that answer it (*Phantoms*).
    2.5 and 1.2 mm)? Does each bank get its own speed?
 6. **The origin of τ across a fold.** In the connected kiss phantom, as
    in a real brain, the banks' WM is connected under the fundus. The plan
-   takes the top level as the origin of τ (`column-solver.md`, D7), so
+   takes the top level as the origin of τ (`column-solver.md`, *Columns
+   in τ*; user, 2026-11-11), so
    every complete column is tied to τ_top at its own stop. Run it both
    ways: with the top as the origin, and with one anchor column, whose
    reach to the far side of the contact runs round the whole fold. Do both
@@ -202,8 +203,8 @@ need at scale.
 None are open in this plan. D-F1 is decided (*Truth under the stop rule*).
 The connected kiss phantom removed the need for D-F2. The stopped state
 removed the need for D-F3: the stop surface is solved with the flow, so no
-cut on a fixed surface is needed. The column solver plan's D7 (the origin
-of τ) is tested here, in question 6.
+cut on a fixed surface is needed. The origin of τ is decided (τ_top = 0),
+and question 6 compares it with an anchor column.
 
 ## Not in this plan
 
