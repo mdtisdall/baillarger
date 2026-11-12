@@ -66,7 +66,9 @@ Each question names the phantoms that answer it (*Phantoms*).
 ## Truth under the stop rule
 
 The phantoms' own truth must be restated for the rule that columns stop
-at the stop surface (`column-solver.md`, *Stopping and contacts*):
+at the stop surface (`column-solver.md`, *Stopping and contacts*). The
+user decided (2026-11-11): cortex stops at a contact and does not overlap.
+So at a fused contact each bank's column stops on the contact:
 
 - **kiss, fused sector.** `fold_phantoms.Fold.column` lets a fused column
   run through the contact to the far bank's WM. Under the stop rule, each
@@ -172,9 +174,6 @@ need at scale.
 
 ## Decisions for the user
 
-- **D-F1. The truth at a fused contact.** Each bank's column stops at the
-  contact (this plan's assumption), not at the far bank's WM as
-  `fold_phantoms` defines it.
 - **D-F2. Separate WM in the kiss phantom.** One anchor for each component
   (a phantom-only exception to the one-anchor rule), or alignment through
   the shared stop surface only. Question 6 gives evidence for either.
