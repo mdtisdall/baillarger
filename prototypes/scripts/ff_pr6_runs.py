@@ -130,7 +130,8 @@ def probe(a: argparse.Namespace, feats: Any, shape: Any) -> dict[str, Any]:
     _, _, log = MF.solve(grid, inputs, ph.image["noise_sd"], settings)
     t_solve = time.perf_counter() - t0
     per_sweep = [
-        float(t) / max(int(s), 1) for t, s in zip(log["time_s"], log["sweeps"])
+        float(t) / max(int(s), 1)
+        for t, s in zip(log["time_s"], log["sweeps"], strict=True)
     ]
     return dict(
         phantom=a.phantom,
