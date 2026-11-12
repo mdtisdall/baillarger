@@ -260,14 +260,27 @@ coarsened where a parent cell already describes its children:
   does not count.
 - **Acceptance by evidence.** More cells always fit the data better, so a
   refinement is kept only if the finer model's free energy (a bound on the
-  evidence) is better than the coarser one's. This penalises detail that
+  evidence) is better than the coarser one's. The free energy includes the
+  constraint terms (separation, exclusion), not only the data, so a
+  refinement that removes a fold or a focal point is accepted even where
+  the contrast terms barely change. This penalises detail that
   only fits noise, with no hand-set threshold. It needs a smoothness prior
   that means the same at every spacing: FEM weights with a mass matrix,
   so the correlation length is physical (the fused-sulci report).
-- **Limits.** No cell is finer than the image: below image resolution, the
-  stop surface's sub-voxel position comes from the stop probability. Cells
-  near a hairpin may refine down to that limit, and the acceptance test
-  stops them there.
+- **Finer than the image where the geometry needs it.** The grid describes
+  the coordinate map, not detail in the image, so there is no limit at
+  image resolution. At a fused fundus the hairpin's radius can be smaller
+  than a voxel, and a grid that cannot follow it forces the columns to
+  meet. Below a voxel, the shape still has constraints: the stop surface's
+  sub-voxel position (partial volume in the stop probability), the white
+  surface (a sub-voxel mesh), no folds, no overlap, and the smoothness of
+  cortex. Where nothing is violated, finer cells bring no gain and the
+  acceptance test refuses them.
+- **Prior-shaped cells.** Inside a cell finer than the image, the shape
+  comes mostly from the prior and the constraints, and the contrast match
+  reads interpolated values. Each such cell is marked prior-shaped, like
+  the rule-only provenance, and its broad distributions are reported, not
+  hidden.
 - **Hysteresis.** The threshold to refine is higher than the threshold to
   coarsen, so a cell does not change back and forth between sweeps.
 - **2:1 balance.** Neighbouring cells differ by at most one level, so
@@ -426,6 +439,30 @@ and the user's reading is recorded before the arms are named.
   D6, and for the fallback (chains at hairpins).
 - **Focal points:** the count and the places where columns meet inside the
   cortex, per arm.
+- **Prior-shaped cells (arm C):** where they are, and the spread of the
+  columns through them.
+- **Compressibility of the unfolded image.** The columns' samples at each τ
+  step are already computed for the contrast match, so the unfolded image
+  costs nothing more. Predict each fine column's profile from its coarse
+  parent (the coarse-to-fine levels) and report the energy of the residual
+  per unit volume of tissue, level by level. This is a lifting-style
+  wavelet step on the column hierarchy, about the cost of one sweep. It
+  needs no ground truth, so it also works at the superblocks. It overlaps
+  the contrast match term, which is its nearest-neighbour form. What it
+  adds is the longer range: coordinates that agree with each neighbour but
+  drift over millimetres. Like the contrast term, and unlike the tensor,
+  it sees the offsets and speeds. Three guards:
+  - **No collapse.** A map that sends many columns through the same tissue
+    makes the image trivially compressible, so the measure counts only
+    maps that cover the ribbon one to one, per unit volume covered.
+  - **Tilt is invisible to it.** Columns all tilted the same way still give
+    smooth profiles, stretched by 1/cos θ. Alignment stays a separate
+    check.
+  - **Areal borders are real.** The image is piecewise smooth across a
+    border, so the measure is read with the borders in mind.
+
+  It is dropped if it adds nothing to the contrast term at the first
+  sites.
 - **Growth only:** steps to settle each offset; how far B-fwd's columns
   move when B-fb's backward sweeps run.
 - **Cost:** time and peak memory per arm, and a memory model for a 50 µm
@@ -454,6 +491,9 @@ and the user's reading is recorded before the arms are named.
   tip hold one region, and those above a fused slot hold two.
 - Adaptive refinement on a straight phantom stays at the coarsest level,
   and on noise alone the evidence test refuses every refinement.
+- A hairpin phantom with a radius below one voxel: every arm's columns end
+  on the hairpin with no focal point. Arm C's cells at the tip are finer
+  than the image and are marked prior-shaped.
 - On a straight phantom with straight true columns, no arm bends them.
 - On the same phantom, fine only and coarse to fine reach the same columns
   and the same energy.
@@ -569,5 +609,12 @@ reading before the next phase starts.
   shows bank-level structure. Plain long-range links between columns are
   not used: they change the energy and count the same evidence many times,
   so the probabilities become too confident.
+- **Wavelets in laminar coordinates.** In the correct laminar coordinates
+  the cortex's contrast should be highly compressible: it varies along
+  depth and is nearly constant across. The column solve is, in this view,
+  a search for the coordinates that give the shortest description of the
+  image plus the map. Later work extends the octree and the lifting step
+  to a full wavelet representation in those coordinates: as the objective,
+  as a compact form for the 50 µm data, and for the viewer.
 - The laminar depth metric. The τ levels are contrast levels. Equal-volume
   depth within a column stays a separate role.
