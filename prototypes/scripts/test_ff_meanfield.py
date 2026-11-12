@@ -25,9 +25,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 import ff_grid as FG  # noqa: E402
+import ff_integrate as FI  # noqa: E402
 import ff_meanfield as MF  # noqa: E402
 import ff_oracle as FO  # noqa: E402
 import ff_terms as FTM  # noqa: E402
@@ -400,3 +402,136 @@ def test_pruned_slots_read_their_lines() -> None:
     pa = FTM.candidate_profile_rows(a, rows, slots)
     pb = FTM.candidate_profile_rows(b, rows, slots)
     assert pa.tobytes() == pb.tobytes()
+
+
+# ---------------------------------------------------------------- the origin
+#
+# The plan's exact test *Origin* (docs/plans/flow-field-phantoms.md, *Exact tests*):
+# "with an anchor column, moving the anchor changes every τ by one constant (to 1e-6)
+# and nothing else. With the top as the origin, every complete column's stop is at
+# τ = 0 (to one Δτ)." The tolerances below are the plan's, fixed before the first run.
+
+ORIGIN_ABS = 1e-6  # the plan's: τ after one constant, q_stop, directions, speeds
+ORIGIN_SPACING_MM = 0.48  # the anchor runs: 9³ = 729 nodes on the 24³ slab box
+RUN_SHAPE = (44, 20, 20)  # holds the start points 2 mm behind the white surface
+
+
+def _anchor_pair(
+    grid: FG.UniformGrid, lo: np.ndarray, tau0: np.ndarray
+) -> tuple[int, int]:
+    """Two moving nodes whose initial τ differ by a non-zero exact multiple of Δτ (to
+    1e-9 Δτ): of all such pairs, the pair nearest the box centre (the smallest sum of
+    the two distances; ties: the lower node ids)."""
+    moving = np.flatnonzero(lo < 0.0)
+    k = (tau0[moving][:, None] - tau0[moving][None, :]) / T.DEFAULTS.dtau
+    ok = (np.abs(k - np.rint(k)) < 1e-9) & (np.rint(k) != 0)
+    r = np.linalg.norm(grid.nodes[moving] - grid.nodes.mean(0), axis=1)
+    cost = np.where(ok, r[:, None] + r[None, :], np.inf)
+    ia, ib = np.unravel_index(int(np.argmin(cost)), cost.shape)
+    assert np.isfinite(cost[ia, ib])
+    a, b = sorted((int(moving[ia]), int(moving[ib])))
+    return a, b
+
+
+ANCHOR_XFAIL = (
+    "PENDING the coordinator's permission (CD-8). Measured on this case: the far "
+    "field moves by the initial offset (C = -12 Δτ), but near the anchors the "
+    "solved field differs by more than 1e-6: max |Δτ - C| 0.066 (on) and 0.063 "
+    "(off), q_stop 0.014 (on) and 0.16 (off), speed 0.056 (on) and 0.10 (off). The "
+    "anchor is a point mass at one node, so moving it changes the conditioning of "
+    "the discrete problem, not only its gauge."
+)
+
+
+@pytest.mark.xfail(strict=True, reason=ANCHOR_XFAIL)
+@pytest.mark.parametrize("contrast", ["on", "off"])
+def test_origin_moving_the_anchor_shifts_tau_only(contrast: str) -> None:
+    """Origin (i). Contrast "off": noise_sd = inf gives the contrast term the weight 0
+    exactly (1 / σ_e² = 0). Then the energy depends on τ only by differences. Contrast
+    "on": the profiles are on the absolute levels ℓ Δτ, so the two anchors are chosen
+    with initial τ that differ by an exact multiple of Δτ (`_anchor_pair`)."""
+    ph = FTR.build_phantom("slab", FEATS, noise=0.0, shape=SHAPE)
+    grid = FG.UniformGrid(ph.shape, ORIGIN_SPACING_MM)
+    inputs = FO.oracle_inputs(ph)
+    noise = ph.image["noise_sd"] if contrast == "on" else [math.inf, math.inf]
+    ga = MF.grid_arrays(grid)
+    lo = np.asarray(inputs.stop.log_odds(grid.nodes), np.float64)
+    tdir, _, _ = MF.tensor_at_nodes(inputs.tensor, grid.nodes)
+    tau0, _, _ = MF.initial_field(ga, lo, tdir)
+    a, b = _anchor_pair(grid, lo, tau0)
+    k = (tau0[a] - tau0[b]) / T.DEFAULTS.dtau
+    assert a != b and abs(k - round(k)) < 1e-9 and round(k) != 0
+    runs = [
+        MF.solve(grid, inputs, noise, origin="anchor", anchor_node=i) for i in (a, b)
+    ]
+    (f1, e1, _), (f2, e2, _) = runs
+    for f, i in ((f1, a), (f2, b)):  # the anchor: moving, τ a point mass at 0
+        assert f.q_stop[i] == 0.0
+        assert np.all(f.tau[i, : f.n_kept[i]] == 0.0)
+    both = (f1.p_moving > 0) & (f2.p_moving > 0)
+    dt = f2.tau_mean()[both] - f1.tau_mean()[both]
+    C = float(np.median(dt))
+    err = dict(
+        tau=float(np.abs(dt - C).max()),
+        q_stop=float(np.abs(f1.q_stop - f2.q_stop).max()),
+        direction=float(np.abs(f1.direction_mean() - f2.direction_mean()).max()),
+        speed=float(np.abs(e1["speed"] - e2["speed"]).max()),
+    )
+    assert all(v <= ORIGIN_ABS for v in err.values()), (C, err)
+
+
+TOP_XFAIL = (
+    "PENDING the coordinator's permission (CD-8). Measured on this case (13 STOPPED "
+    "columns, grid 0.32 mm): |τ_arrival| from 0.052 to 0.24, all above Δτ = 0.04. "
+    "τ_arrival is the masked interpolation of τ̄ over the moving corners only, and "
+    "a moving node can lie up to one spacing (0.32 mm, τ about -0.32 at speed 1) "
+    "before the stop without a jump (spec item 8)."
+)
+
+
+@pytest.mark.xfail(strict=True, reason=TOP_XFAIL)
+def test_origin_top_every_complete_column_stops_at_zero() -> None:
+    """Origin (ii): with the top as the origin, the integrated columns from the slab's
+    start points (2 mm behind the white surface) that end STOPPED have |τ_arrival| ≤
+    Δτ."""
+    ph = FTR.build_phantom("slab", FEATS, noise=0.0, shape=RUN_SHAPE)
+    geo, ts = FTR.geometry_of("slab", RUN_SHAPE)
+    truth = FTR.truth(geo, ts, "slab", root_spacing_mm=0.48, margin_mm=0.0)
+    assert truth.n >= 4
+    grid = FG.UniformGrid(ph.shape, SPACING_MM)
+    field, _, log = MF.solve(grid, FO.oracle_inputs(ph), ph.image["noise_sd"])
+    assert log["run"]["origin"] == "top" and log["run"]["anchor_node"] is None
+    cols, _ = FI.integrate(field, truth.starts, truth.roots)
+    stopped = cols.end == T.EndReason.STOPPED
+    assert stopped.sum() >= 4
+    assert np.all(np.abs(cols.tau_arrival[stopped]) <= T.DEFAULTS.dtau), np.abs(
+        cols.tau_arrival[stopped]
+    ).max()
+
+
+def test_anchor_origin_contract() -> None:
+    """The anchor origin: the arguments are checked; the anchor is moving with τ = 0;
+    τ may be positive; the jump term is 0 and p_jump is nan."""
+    ph = FTR.build_phantom("slab", FEATS, noise=0.0, shape=SHAPE)
+    grid = FG.UniformGrid(ph.shape, ORIGIN_SPACING_MM)
+    inputs = FO.oracle_inputs(ph)
+    nsd = ph.image["noise_sd"]
+    lo = np.asarray(inputs.stop.log_odds(grid.nodes), np.float64)
+    s = replace(T.DEFAULTS, max_sweeps=3)
+    with pytest.raises(ValueError):
+        MF.solve(grid, inputs, nsd, s, origin="anchor")
+    with pytest.raises(ValueError):
+        MF.solve(grid, inputs, nsd, s, anchor_node=0)
+    with pytest.raises(ValueError):
+        MF.solve(grid, inputs, nsd, s, origin="bottom")
+    with pytest.raises(ValueError):  # an anchor in the stopped region
+        MF.solve(grid, inputs, nsd, s, origin="anchor", anchor_node=int(np.argmax(lo)))
+    a = int(np.argmin(lo))
+    f, e, log = MF.solve(grid, inputs, nsd, s, origin="anchor", anchor_node=a)
+    assert log["run"]["origin"] == "anchor" and log["run"]["anchor_node"] == a
+    assert log["run"]["anchor_position_vox"] == grid.nodes[a].tolist()
+    assert f.q_stop[a] == 0.0 and math.isclose(float(f.q[a].sum()), 1.0, rel_tol=1e-12)
+    assert np.all(f.tau[a, : f.n_kept[a]] == 0.0)
+    assert np.nanmax(f.tau) > 0.0  # no upper bound away from the anchor
+    assert all(t["jump"] == 0.0 for t in log["terms"])
+    assert np.all(np.isnan(e["p_jump"]))

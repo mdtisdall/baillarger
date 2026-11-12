@@ -27,6 +27,11 @@ moments, so no division by p occurs and an expectation is exact also where p = 0
 Width w: the energies of items 3 to 7 of the spec are divided by w². The unary terms and
 the jump are not.
 
+The anchor origin (ff_meanfield.solve, origin "anchor"): TermWeights.jump = False sets
+the jump term to 0 in `messages`, `expected_energy` and `state_energy`, and
+`moving_candidates` and `level_base` with tau_max None put no upper bound on τ. The
+defaults (jump on, tau_max = TAU_TOP) are the top origin.
+
 NumPy or Torch (the plan's *NumPy or Torch*)
 --------------------------------------------
 
@@ -284,7 +289,9 @@ class TermWeights:
     """The weights of the terms. sigma_c: consistency σ (τ per mm); sigma_e (2,):
     contrast σ per echo; sigma_align: σ of the alignment (sin 15°); lambda_dir: λ of the
     direction prior; tau_prior: the switch of the FEM prior on τ; w: the width (4, 2 or
-    1); jump_p_zero and jump_mean: the jump prior."""
+    1); jump_p_zero and jump_mean: the jump prior; jump: the switch of the jump term
+    (off with an anchor origin: then the stopped state gives no τ value to its
+    neighbours)."""
 
     sigma_c: float
     sigma_e: tuple[float, float]
@@ -294,6 +301,7 @@ class TermWeights:
     w: float = 1.0
     jump_p_zero: float = T.DEFAULTS.jump_p_zero
     jump_mean: float = T.DEFAULTS.jump_mean
+    jump: bool = True
 
 
 def term_weights(
@@ -302,9 +310,10 @@ def term_weights(
     w: float,
     settings: T.SolverSettings = T.DEFAULTS,
     tau_prior: bool = False,
+    jump: bool = True,
 ) -> TermWeights:
     """The weights of the spec: σ_c = Δτ / h, σ_e = contrast_sigma, σ_a = sin 15°,
-    λ_d = 1 / (sin² 15° · ℓ)."""
+    λ_d = 1 / (sin² 15° · ℓ). jump: the switch of the jump term."""
     sa = math.sin(math.radians(settings.dir_cone_deg))
     se = contrast_sigma(noise_sd, settings.band_scale_vox)
     return TermWeights(
@@ -316,6 +325,7 @@ def term_weights(
         w=float(w),
         jump_p_zero=settings.jump_p_zero,
         jump_mean=settings.jump_mean,
+        jump=jump,
     )
 
 
@@ -324,7 +334,10 @@ def term_weights(
 
 
 def moving_candidates(
-    tau_pred: Array, dir_pred: Array, settings: T.SolverSettings = T.DEFAULTS
+    tau_pred: Array,
+    dir_pred: Array,
+    settings: T.SolverSettings = T.DEFAULTS,
+    tau_max: float | None = T.TAU_TOP,
 ) -> tuple[Array, Array, BoolArray]:
     """The moving candidates of each node: (cand_tau (n, 63), cand_dir (n, 63, 3), valid
     (n, 63)).
@@ -335,15 +348,22 @@ def moving_candidates(
     with e the voxel axis least aligned with p (the first such axis on a tie). Candidate
     c = a · 7 + m. A candidate with τ > TAU_TOP is not valid. A τ within 1e-9 Δτ above
     TAU_TOP (rounding) is valid and set to TAU_TOP.
+
+    tau_max: the upper bound of τ (TAU_TOP above). With tau_max None (the anchor
+    origin) there is no upper bound: c = τ_pred and every candidate is valid.
     """
     tau_pred = np.asarray(tau_pred, float)
     n = len(tau_pred)
     na, nm = settings.n_tau, settings.n_dir
-    c = np.minimum(tau_pred, T.TAU_TOP)
     a = np.arange(na) - (na - 1) // 2
-    tau = c[:, None] + a[None, :] * settings.dtau  # (n, na)
-    valid_a = tau <= T.TAU_TOP + 1e-9 * settings.dtau
-    tau = np.where(valid_a, np.minimum(tau, T.TAU_TOP), tau)
+    if tau_max is None:
+        tau = tau_pred[:, None] + a[None, :] * settings.dtau  # (n, na)
+        valid_a = np.ones(tau.shape, bool)
+    else:
+        c = np.minimum(tau_pred, tau_max)
+        tau = c[:, None] + a[None, :] * settings.dtau  # (n, na)
+        valid_a = tau <= tau_max + 1e-9 * settings.dtau
+        tau = np.where(valid_a, np.minimum(tau, tau_max), tau)
     p = np.asarray(dir_pred, float)
     p = p / np.linalg.norm(p, axis=1, keepdims=True)
     e = np.zeros((n, 3))
@@ -366,11 +386,17 @@ def moving_candidates(
 
 
 def level_base(
-    tau_pred: Array, settings: T.SolverSettings = T.DEFAULTS, L: int = N_LEVELS
+    tau_pred: Array,
+    settings: T.SolverSettings = T.DEFAULTS,
+    L: int = N_LEVELS,
+    tau_max: float | None = T.TAU_TOP,
 ) -> IntArray:
     """The first absolute level of each node's profiles: rint(c / Δτ) − (L − 1) / 2,
-    c = min(τ_pred, TAU_TOP). np.rint rounds a half to the even integer."""
-    c = np.minimum(np.asarray(tau_pred, float), T.TAU_TOP)
+    c = min(τ_pred, tau_max) (c = τ_pred if tau_max is None). np.rint rounds a half to
+    the even integer."""
+    c = np.asarray(tau_pred, float)
+    if tau_max is not None:
+        c = np.minimum(c, tau_max)
     return np.asarray(np.rint(c / settings.dtau) - (L - 1) // 2, dtype=np.int64)
 
 
@@ -882,6 +908,8 @@ def messages(
                 - 2.0 * np.einsum("skle,sle->sk", P[sub], Wl * m1j)
                 + (Wl * m2j).sum((1, 2))[:, None]
             )
+            if not tw.jump:
+                continue
             delta = ga.inc_edge_sign[i, k][:, None] * ga.edge_vec_mm[e]
             Ei, _ = jump_energy(
                 tau[sub], d[sub], st.s_ref[i][:, None], delta[:, None, :], tw
@@ -978,6 +1006,8 @@ def expected_energy(
                 )
             ).sum()
         )
+        if not tw.jump:
+            continue
         ti, di, qi = _cand(st, i)
         tj, dj, qj = _cand(st, j)
         delta = ga.edge_vec_mm[es][:, None, :]
@@ -1094,6 +1124,8 @@ def state_energy(
     out["jump"] = (
         ga.face_w * (mov[:, i] * ~mov[:, j] * Ei + mov[:, j] * ~mov[:, i] * Ej)
     ).sum(1)
+    if not tw.jump:
+        out["jump"] = np.zeros(B)
     return out
 
 

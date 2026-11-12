@@ -33,6 +33,9 @@ The loop
    loop continues. F is compared only within one width (the energy changes with w,
    the candidates and the profiles).
 
+The origin of τ is the top (τ_top = 0, the default) or an anchor node (the comparison
+run of the plan's question 6; see `solve`).
+
 Every coupling term is multilinear in the node distributions, and no two nodes of one
 colour share a term. So each colour update is the exact minimiser of F over the q of
 these nodes, and the u update is the minimiser over u of these nodes (update_u never
@@ -305,14 +308,17 @@ def initial_field(
 
 
 def initial_from_field(
-    init: T.Field, nodes: Array, settings: T.SolverSettings = T.DEFAULTS
+    init: T.Field,
+    nodes: Array,
+    settings: T.SolverSettings = T.DEFAULTS,
+    tau_max: float | None = T.TAU_TOP,
 ) -> tuple[Array, Array, Array, BoolArray]:
     """(τ (n,), d (n, 3), q_stop (n,), has (n,)) of a solved Field on another grid,
     interpolated to the nodes (voxel positions). The nodes are clipped to the box of
     init's nodes. q_stop: the trilinear interpolation over the 8 corners. τ and d: the
     trilinear weights times the corners' moving probability, renormalised (d then
     normalised). has = False where no corner has moving mass or the mean direction is
-    zero; there τ and d have no meaning."""
+    zero; there τ and d have no meaning. τ is clipped to tau_max (no clip if None)."""
     g = init.grid
     lo = g.nodes.min(0)
     hi = g.nodes.max(0)
@@ -328,7 +334,8 @@ def initial_from_field(
     dm = init.direction_mean()[corners]
     sw = pm.sum(1)
     tau = np.where(sw > 0, (pm * tm).sum(1) / np.maximum(sw, 1e-300), T.TAU_TOP)
-    tau = np.minimum(tau, T.TAU_TOP)
+    if tau_max is not None:
+        tau = np.minimum(tau, tau_max)
     D = np.einsum("nk,nkc->nc", pm, dm)
     nr = np.linalg.norm(D, axis=1)
     has = (sw > 0) & (nr > 0)
@@ -637,15 +644,18 @@ def _update_colour(
     sel: IntArray,
     mom: FT.Moments,
     chunk: int = FT.CHUNK,
+    no_stop: BoolArray | None = None,
 ) -> float:
     """q_i ∝ exp(−(unary + messages)) over the valid states of the nodes sel; refresh
     their moments. Returns max |Δq| of these nodes. The nodes go in chunks of `chunk`.
     No two nodes of one colour share a term, so the messages of a chunk do not use the
-    moments of the other chunks of sel, and the result is the same as in one step."""
+    moments of the other chunks of sel, and the result is the same as in one step.
+    no_stop (n,): the nodes that have no stopped state (the anchor); None: no such
+    node."""
     dq = 0.0
     for s0 in range(0, len(sel), chunk):
         c = sel[s0 : s0 + chunk]
-        dq = max(dq, _update_rows(st, ga, tw, c, mom))
+        dq = max(dq, _update_rows(st, ga, tw, c, mom, no_stop))
     return dq
 
 
@@ -655,6 +665,7 @@ def _update_rows(
     tw: FT.TermWeights,
     sel: IntArray,
     mom: FT.Moments,
+    no_stop: BoolArray | None = None,
 ) -> float:
     """_update_colour for one chunk of nodes."""
     M, Ms = FT.messages(st, ga, tw, sel, mom)
@@ -662,6 +673,8 @@ def _update_rows(
     v = st.valid[sel]
     lm = np.where(v, -(e_move + M), -np.inf)
     ls = -(e_stop + Ms)
+    if no_stop is not None:
+        ls = np.where(no_stop[sel], -np.inf, ls)
     mx = np.maximum(lm.max(1), ls)
     wm = np.where(v, np.exp(lm - mx[:, None]), 0.0)
     ws = np.exp(ls - mx)
@@ -814,12 +827,21 @@ def _new_state(
     volumes: Sequence[Array],
     settings: T.SolverSettings,
     profile_dtype: Any,
+    tau_max: float | None = T.TAU_TOP,
+    anchor_node: int | None = None,
 ) -> tuple[FT.TermState, npt.NDArray[np.int16]]:
     """The state of a new width: candidates round the predictions, q carried over from
     `old` = [τ, d, q, valid], q_stop kept, s_ref = exp(−u), the profiles. The list `old`
     is emptied after the carry-over, so that the old arrays can be freed before the
-    profiles are allocated."""
-    cand_tau, cand_dir, valid = FT.moving_candidates(tau_pred, dir_pred, settings)
+    profiles are allocated. tau_max: the upper bound of τ (None: no bound). anchor_node:
+    only the candidates of the centre τ index (τ = τ_pred = 0 there) are valid at this
+    node."""
+    cand_tau, cand_dir, valid = FT.moving_candidates(
+        tau_pred, dir_pred, settings, tau_max
+    )
+    if anchor_node is not None:
+        a_idx = np.arange(cand_tau.shape[1]) // settings.n_dir
+        valid[anchor_node] = a_idx == (settings.n_tau - 1) // 2
     q = carry_over(
         old[0],
         old[1],
@@ -834,8 +856,10 @@ def _new_state(
     old.clear()
     q = np.where(valid, q, 0.0)
     s_ref = np.exp(-u)
-    lb = FT.level_base(tau_pred, settings, FT.N_LEVELS)
-    c = np.minimum(np.asarray(tau_pred, np.float64), T.TAU_TOP)
+    lb = FT.level_base(tau_pred, settings, FT.N_LEVELS, tau_max)
+    c = np.asarray(tau_pred, np.float64)
+    if tau_max is not None:
+        c = np.minimum(c, tau_max)
     # the directions of the candidates a = 0: m = 0 .. n_dir − 1
     prof = _profile_lines(
         ga,
@@ -906,6 +930,8 @@ def solve(
     *,
     tau_prior: bool = False,
     init: T.Field | None = None,
+    origin: str = "top",
+    anchor_node: int | None = None,
     profile_dtype: Any = np.float64,
     log_fn: LogFn | None = None,
 ) -> tuple[T.Field, dict[str, npt.NDArray[Any]], dict[str, Any]]:
@@ -915,9 +941,34 @@ def solve(
     the contrast (the detrended echoes {1: echo 2, 2: echo 3}). noise_sd: the matched
     noise SD of the two echoes (the image's "noise_sd"); both must be positive.
     tau_prior: the switch of the FEM prior on τ. init: a solved Field on another grid
-    that replaces the initial field. profile_dtype: the dtype of the stored profile
-    lines (np.float32 halves their memory; the arithmetic stays float64). log_fn:
-    called with one line of text per sweep.
+    that replaces the initial field (a start field only, not a prior). origin: "top"
+    (τ_top = 0, the default) or "anchor" (the comparison run of the plan's question 6:
+    see *The anchor origin* below); anchor_node: the node id of the anchor (only with
+    origin "anchor"). profile_dtype: the dtype of the stored profile lines (np.float32
+    halves their memory; the arithmetic stays float64). log_fn: called with one line of
+    text per sweep.
+
+    The anchor origin: the anchor node is a moving node with τ = 0, and every other τ
+    is free. In detail:
+
+    - The jump term is off (TermWeights.jump = False): the stopped state gives no τ
+      value to its moving neighbours.
+    - No upper bound on τ: τ can be positive away from the anchor. The candidates are
+      τ_pred + (a − 4) Δτ (ff_terms.moving_candidates, tau_max None), and the profiles
+      use c = τ_pred.
+    - The anchor node: τ_pred = 0 at every width, only the 7 candidates of the centre
+      τ index (τ = 0) are valid, and it has no stopped state (q_stop = 0). So its τ is
+      a point mass at 0 and it is moving. The stop field must give it log-odds < 0 (a
+      moving node of the initial field); else solve raises ValueError.
+    - The initial τ (from the stop field, or from init) is shifted by one constant so
+      that the anchor's τ is 0. init's τ is not clipped.
+    - All else is as with the top origin. p_jump in extras is nan (no jump term).
+
+    The energy with the anchor origin changes by no constant shift of every τ, except
+    for two parts: the contrast term samples the profiles at the absolute levels ℓ Δτ,
+    so only a shift by an integer multiple of Δτ keeps it (with the levels shifted by
+    the same integer); and the FEM prior on τ (tau_prior) has a mass term that no
+    shift keeps.
 
     Returns (field, extras, log). field: K = settings.prune_max slots. extras (n,)
     arrays: u, speed (= exp(u)), p_jump, tau_pred and the (n, 3) dir_pred of the last
@@ -927,6 +978,10 @@ def solve(
     t_all = time.perf_counter()
     if len(noise_sd) != 2 or not all(float(s) > 0 for s in noise_sd):
         raise ValueError("noise_sd must hold 2 positive values")
+    if origin not in ("top", "anchor"):
+        raise ValueError(f'origin must be "top" or "anchor", not {origin!r}')
+    if (origin == "anchor") != (anchor_node is not None):
+        raise ValueError('origin "anchor" needs anchor_node, and only it takes one')
 
     def say(msg: str) -> None:
         if log_fn is not None:
@@ -942,18 +997,41 @@ def solve(
     volumes = FT.smoothed_echoes(inputs.contrast, settings.band_scale_vox)
     spacing = grid_spacing_mm(grid)
 
+    anchor = None if anchor_node is None else int(anchor_node)
+    tau_max: float | None = T.TAU_TOP if anchor is None else None
+    if anchor is not None:
+        if not 0 <= anchor < n:
+            raise ValueError(f"anchor_node {anchor} is not a node id (n = {n})")
+        if lo[anchor] >= 0.0:
+            raise ValueError(
+                f"the stop field gives the anchor node {anchor} a log-odds "
+                f"{lo[anchor]:.6g} >= 0: the anchor must be a moving node"
+            )
+
     tau0, dir0, qs0 = initial_field(ga, lo, tdir)
     if init is not None:
-        ti, di, qi, has = initial_from_field(init, nodes, settings)
+        ti, di, qi, has = initial_from_field(init, nodes, settings, tau_max)
         tau0 = np.where(has, ti, tau0)
         dir0 = np.where(has[:, None], di, dir0)
         qs0 = qi
+    no_stop: BoolArray | None = None
+    if anchor is not None:
+        tau0 = tau0 - tau0[anchor]
+        qs0 = qs0.copy()
+        qs0[anchor] = 0.0
+        no_stop = np.zeros(n, bool)
+        no_stop[anchor] = True
     u = np.zeros(n)
     colours = np.asarray(grid.colour, np.int64)
     groups = [np.flatnonzero(colours == c) for c in range(grid.n_colours)]
 
     log = _new_log(settings, noise_sd, tau_prior, profile_dtype, grid, n)
     log["run"]["tensor_not_finite"] = n_bad_tensor
+    log["run"]["origin"] = origin
+    log["run"]["anchor_node"] = anchor
+    log["run"]["anchor_position_vox"] = (
+        None if anchor is None else [float(v) for v in nodes[anchor]]
+    )
     old: list[npt.NDArray[Any]] = [
         tau0[:, None],
         dir0[:, None, :],
@@ -966,9 +1044,13 @@ def solve(
     ci: npt.NDArray[np.int16] | None = None
     for w in settings.widths:
         t0 = time.perf_counter()
-        tw = FT.term_weights(spacing, noise_sd, w, settings, tau_prior)
+        tw = FT.term_weights(
+            spacing, noise_sd, w, settings, tau_prior, jump=anchor is None
+        )
         if st is not None:
             tau_pred, dir_pred = recentre(st, ga, dir_pred, settings)
+            if anchor is not None:
+                tau_pred[anchor] = 0.0
             # views of the old buffers: only the profiles are freed here; the rest
             # goes when _new_state empties `old` after the carry-over
             old = [st.cand_tau, st.cand_dir, st.q, st.valid]
@@ -989,6 +1071,8 @@ def solve(
             volumes,
             settings,
             profile_dtype,
+            tau_max,
+            anchor,
         )
         mom = FT.node_moments(st)
         F_old, terms = free_energy(st, ga, tw, mom)
@@ -998,7 +1082,7 @@ def solve(
         for sweep in range(1, settings.max_sweeps + 1):
             dq = 0.0
             for sel in groups:
-                dq = max(dq, _update_colour(st, ga, tw, sel, mom))
+                dq = max(dq, _update_colour(st, ga, tw, sel, mom, no_stop=no_stop))
             for sel in groups:
                 st.u[sel] = FT.update_u(st, ga, tw, sel, mom)
             F_new, terms = free_energy(st, ga, tw, mom)
@@ -1063,7 +1147,7 @@ def solve(
     extras: dict[str, npt.NDArray[Any]] = dict(
         u=st.u.copy(),
         speed=np.exp(st.u),
-        p_jump=p_jump(st, ga, tw),
+        p_jump=p_jump(st, ga, tw) if anchor is None else np.full(n, np.nan),
         tau_pred=np.asarray(tau_pred, np.float64),
         dir_pred=np.asarray(dir_pred, np.float64),
         cand_index=ci_out,
@@ -1088,7 +1172,8 @@ def _new_log(
     and after; final: `edge_counts` and the kept counts), terms (per width at its end:
     each expected term, the entropy and F), time_s (per width), time_total_s, settings
     (SolverSettings.record()) and run (noise_sd, tau_prior, profile_dtype, grid kind,
-    spacing, nodes, rise_rel)."""
+    spacing, nodes, rise_rel; `solve` adds tensor_not_finite, origin, anchor_node and
+    anchor_position_vox)."""
     return dict(
         free_energy=[],
         sweeps=[],

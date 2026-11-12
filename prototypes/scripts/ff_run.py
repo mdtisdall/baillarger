@@ -13,7 +13,8 @@ Usage:
     python ff_run.py PHANTOM --source {oracle,image} --noise N --grid uniform:0.16
         --out OUT_DIR --truth TRUTH_DIR --features FEATURES_JSON
         [--site V1V2_banks] [--seed 0] [--shape X,Y,Z] [--profile-dtype float32]
-        [--tau-prior] [--set name=value ...] [--quiet]
+        [--tau-prior] [--origin {top,anchor}] [--anchor-node ID]
+        [--set name=value ...] [--quiet]
 
 TRUTH_DIR holds TRUTH_DIR/<phantom>/truth.npz, as `ff_truth.py` writes it (a path to one
 truth.npz also works). `--shape` builds a box that is not the plan's; the truth must
@@ -22,6 +23,9 @@ from the same box (the script checks that the truth's roots lie on phi = 0). `--
 changes
 one field of `ff_types.SolverSettings` for this run (a scan) and records it in
 `changed_settings`. The value is JSON text, for example `--set max_sweeps=3`.
+`--origin anchor --anchor-node ID` is the anchor comparison run of the plan's question 6
+(`ff_meanfield.solve`); the anchor is a node id of the grid. The run directory does not
+depend on the origin, so give an anchor run its own `--out`.
 
 Where to add a source or a grid
 -------------------------------
@@ -1201,11 +1205,18 @@ def run(
     changed_settings: Mapping[str, Any] | None = None,
     tau_prior: bool = False,
     profile_dtype: Any = np.float64,
+    init: T.Field | None = None,
+    origin: str = "top",
+    anchor_node: int | None = None,
     versions: Mapping[str, str] | None = None,
     log_fn: LogFn | None = None,
 ) -> T.RunRecord:
     """One run into `out_dir` (the module docstring). Returns the record that it
-    wrote."""
+    wrote. init, origin and anchor_node go to `ff_meanfield.solve` (init: a start field
+    only, not a prior). run.json records the origin in RunRecord.origin, and
+    measures["origin"] holds the origin, the anchor node, its position (voxel) and
+    whether an init field was given. The run directory does not depend on the origin:
+    give an anchor run its own `out_dir`."""
     geo = phantom.geometry
     if geo is None:
         raise ValueError(f"phantom {phantom.name!r} has no geometry, so no truth")
@@ -1225,8 +1236,9 @@ def run(
     noise_sd = [float(s) for s in phantom.image["noise_sd"]]
     t0 = time.perf_counter()
     field, extras, log = MF.solve(
-        grid, inputs, noise_sd, settings, tau_prior=tau_prior,
-        profile_dtype=profile_dtype, log_fn=log_fn,
+        grid, inputs, noise_sd, settings, tau_prior=tau_prior, init=init,
+        origin=origin, anchor_node=anchor_node, profile_dtype=profile_dtype,
+        log_fn=log_fn,
     )  # fmt: skip
     t_solve = time.perf_counter() - t0
     t0 = time.perf_counter()
@@ -1249,6 +1261,7 @@ def run(
         grid=grid_record(grid, grid_spec),
         settings=settings.record(),
         changed_settings=dict(changed_settings or {}),
+        origin=origin,
         versions=dict(versions or {}),
         free_energy=log["free_energy"],
         sweeps=[int(s) for s in log["sweeps"]],
@@ -1264,6 +1277,12 @@ def run(
         n_rises=len(log["free_energy_rises"]),
         terms=log["terms"],
         run=log["run"],
+    )
+    rec.measures["origin"] = dict(
+        origin=origin,
+        anchor_node=log["run"]["anchor_node"],
+        anchor_position_vox=log["run"]["anchor_position_vox"],
+        init=init is not None,
     )
     rec.measures["inputs"] = {
         **inputs.record(),
@@ -1317,6 +1336,10 @@ def main(argv: Sequence[str] | None = None) -> T.RunRecord:
         "--profile-dtype", choices=("float32", "float64"), default="float64"
     )
     ap.add_argument("--tau-prior", action="store_true")
+    ap.add_argument("--origin", choices=("top", "anchor"), default="top")
+    ap.add_argument(
+        "--anchor-node", type=int, default=None, help="node id; needs --origin anchor"
+    )
     ap.add_argument(
         "--set", dest="sets", action="append", default=[], metavar="NAME=VALUE"
     )
@@ -1366,7 +1389,7 @@ def main(argv: Sequence[str] | None = None) -> T.RunRecord:
         phantom, inputs, truth, grid, out,
         source=a.source, grid_spec=a.grid, settings=settings, changed_settings=changed,
         tau_prior=a.tau_prior, profile_dtype=np.dtype(a.profile_dtype).type,
-        versions=versions, log_fn=log_fn,
+        origin=a.origin, anchor_node=a.anchor_node, versions=versions, log_fn=log_fn,
     )  # fmt: skip
     if not a.quiet:
         print(
