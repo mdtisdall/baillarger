@@ -8,6 +8,7 @@ run."""
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 from typing import Any, Literal
@@ -469,3 +470,71 @@ def test_check_sinks() -> None:
         [a, a + [0, 2, 0]], np.zeros((2, 3)), end=[int(T.EndReason.SINK), 0]
     )
     assert FC.topology(f2, cols)["sink_columns"]["count"] == 1
+
+
+# ---------------------------------------------------------------- the R2 change: τ at
+# the stop crossing (integrate(jump_at="crossing"))
+
+
+@pytest.mark.parametrize("d", [[1.0, 0.0, 0.0], [1.0, 0.7, -0.4]])
+def test_arrival_at_the_crossing_by_hand(d: list[float]) -> None:
+    """The plane field of test_stop_lies_on_the_plane_to_six_bisections with τ in mm
+    at speed 1 along x: τ_c = (x_c − x0) · V, u = 0, every direction d. The level at
+    the stop X is Σ w_c (τ_c + max(d · (X − x_c) V, 0)) / Σ w_c over the moving
+    corners (x_c = 5, the stop's cell has x in [5, 6], the corners at 6 are stopped).
+    With d along x it is exactly (X_x − x0) · V, within one bisection step of 0. The
+    default ("node") keeps the PR 3 value τ = (5 − x0) V."""
+    g = Grid((11, 11, 11))
+    du = np.array(d) / np.linalg.norm(d)
+    x0 = 5.37
+    q_stop = 0.5 + 0.08 * (g.nodes[:, 0] - x0)
+    tau = (g.nodes[:, 0] - x0) * T.VOXEL_MM
+    f = make_field(g, np.tile(du, (g.n_nodes, 1)), tau, q_stop)
+    starts = np.array([[1.0, 1.0, 5.0], [1.3, 1.9, 6.2], [2.0, 2.5, 7.1]])
+    u = np.zeros(g.n_nodes)
+    c0, _ = FI.integrate(f, starts, starts)
+    c1, _ = FI.integrate(f, starts, starts, jump_at="crossing", u=u)
+    np.testing.assert_array_equal(c0.stops, c1.stops)  # the stop does not move
+    np.testing.assert_array_equal(c0.tau_path, c1.tau_path)
+    np.testing.assert_allclose(c0.tau_arrival, (5.0 - x0) * T.VOXEL_MM, atol=1e-12)
+    X = c1.stops
+    # by hand: the moving corners have x_c = 5 and τ_c = (5 − x0) V; the advance is
+    # d · (X − x_c) V, the same for the 4 corners up to their y, z offsets
+    W = T.trilinear_weights(X - np.floor(X))
+    lev = np.zeros(3)
+    ws = np.zeros(3)
+    for k in range(8):  # corner order i + 2 j + 4 k
+        a, b, c = k & 1, (k >> 1) & 1, (k >> 2) & 1
+        if a:
+            continue
+        xc = np.floor(X) + np.array([a, b, c])
+        adv = np.maximum(((X - xc) * du).sum(1) * T.VOXEL_MM, 0.0)
+        lev += W[:, k] * ((5.0 - x0) * T.VOXEL_MM + adv)
+        ws += W[:, k]
+    np.testing.assert_allclose(c1.tau_arrival, lev / ws, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(c1.jump, np.maximum(0.0, -c1.tau_arrival), atol=0)
+    if du[1] == 0.0:
+        res = T.DEFAULTS.rk4_step_mm / 2**T.DEFAULTS.stop_bisections
+        assert np.all(np.abs(c1.tau_arrival) <= res + 1e-12)
+    # the slowness scales the advance
+    c2, _ = FI.integrate(
+        f, starts, starts, jump_at="crossing", u=np.full(g.n_nodes, -math.log(2.0))
+    )
+    adv1 = c1.tau_arrival - (5.0 - x0) * T.VOXEL_MM
+    np.testing.assert_allclose(
+        c2.tau_arrival - (5.0 - x0) * T.VOXEL_MM, 2 * adv1, atol=1e-12
+    )
+
+
+def test_crossing_needs_u() -> None:
+    g = Grid((3, 3, 3))
+    f = make_field(
+        g,
+        np.tile([1.0, 0, 0], (g.n_nodes, 1)),
+        np.zeros(g.n_nodes),
+        np.zeros(g.n_nodes),
+    )
+    with pytest.raises(ValueError):
+        FI.integrate(f, np.ones((1, 3)), np.ones((1, 3)), jump_at="crossing")
+    with pytest.raises(ValueError):
+        FI.integrate(f, np.ones((1, 3)), np.ones((1, 3)), jump_at="edge")

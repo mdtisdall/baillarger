@@ -967,3 +967,112 @@ def test_energy_is_invariant_under_a_shift_of_every_tau(k: int) -> None:
         nodes, tau + k * s.dtau, d, s_ref, lb + k, vols, L=9, dtau=s.dtau
     )
     np.testing.assert_allclose(P1, P0, rtol=0, atol=1e-9)
+
+
+# ---------------------------------------------------------------- the R2 change: the
+# jump at the stop crossing (TermWeights.jump_at "crossing")
+
+
+def _lo(p):
+    return math.log(p / (1.0 - p))
+
+
+def test_stop_crossing_cases() -> None:
+    """t* = (0.5 − p_from) / (p_to − p_from) inside; 0 if p_from ≥ 0.5; 1 if p_to <
+    0.5."""
+    t = FT.stop_crossing(
+        np.array([_lo(0.2), _lo(0.3), _lo(0.6), _lo(0.1), _lo(0.5)]),
+        np.array([_lo(0.8), _lo(0.6), _lo(0.9), _lo(0.4), _lo(0.9)]),
+    )
+    np.testing.assert_allclose(t, [0.5, 2.0 / 3.0, 0.0, 1.0, 0.0], rtol=0, atol=1e-12)
+
+
+def test_jump_at_crossing_by_hand_two_nodes() -> None:
+    """Two nodes 0.16 mm apart on x. Node 0 moving (τ = −0.2, d = +x, slowness 1),
+    node 1 stopped. The stop field: p = 0.3 at node 0, 0.6 at node 1, so the crossing
+    is at t* = 2/3 of the edge. The level there: −0.2 + 0.16 · 2/3 = −0.09333; J =
+    0.09333. With jump_at "node" (PR 3): −0.2 + 0.16 = −0.04, J = 0.04."""
+    ga = two_node_ga()
+    st = replace(
+        one_state(2, 1),
+        cand_tau=np.array([[-0.2], [-0.1]]),
+        s_ref=np.array([1.0, 2.0]),
+        stop_log_odds=np.array([_lo(0.3), _lo(0.6)]),
+    )
+    e1 = -math.log(0.001) + math.log(0.5)
+    J_cross = 0.2 - 0.16 * 2.0 / 3.0
+    tw_c = replace(weights(), jump_at="crossing")
+    e = FT.state_energy(st, ga, tw_c, np.array([0, -1]))
+    assert e["jump"][0] == pytest.approx(e1 + J_cross / 0.5, rel=1e-12)
+    e = FT.state_energy(st, ga, weights(), np.array([0, -1]))
+    assert e["jump"][0] == pytest.approx(e1 + 0.04 / 0.5, rel=1e-12)
+    # node 1 moving toward −x is not the direction (d = +x, away from node 0): the
+    # level is τ = −0.1 at any crossing, J = 0.1 in both forms
+    for tw in (weights(), tw_c):
+        e = FT.state_energy(st, ga, tw, np.array([-1, 0]))
+        assert e["jump"][0] == pytest.approx(e1 + 0.1 / 0.5, rel=1e-12)
+    # the same J from jump_energy with the fraction
+    _, J = FT.jump_energy(
+        np.array(-0.2), np.array([1.0, 0, 0]), np.array(1.0),
+        np.array([V, 0, 0]), frac=np.array(2.0 / 3.0),
+    )  # fmt: skip
+    assert float(J) == pytest.approx(J_cross, rel=1e-12)
+    # the level at the crossing reaches 0: no jump
+    st0 = replace(st, cand_tau=np.array([[-0.16 * 2.0 / 3.0 + 1e-9], [-0.1]]))
+    assert FT.state_energy(st0, ga, tw_c, np.array([0, -1]))["jump"][0] == (
+        pytest.approx(-math.log(0.999), rel=1e-12)
+    )
+
+
+def test_term_weights_jump_at() -> None:
+    assert FT.term_weights(0.16, [0.1, 0.2], 1.0).jump_at == "node"
+    assert FT.term_weights(0.16, [0.1, 0.2], 1.0, jump_at="crossing").jump_at == (
+        "crossing"
+    )
+    with pytest.raises(ValueError):
+        FT.term_weights(0.16, [0.1, 0.2], 1.0, jump_at="edge")
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_crossing_messages_finite_differences(seed: int) -> None:
+    """With jump_at "crossing", the messages are the derivatives of the expected
+    energy (the same tolerance as test_messages_finite_differences)."""
+    rng = np.random.default_rng(seed)
+    ga = uniform_ga((3, 3, 3), rng=rng)
+    st = random_state(ga.n, 4, 3, rng, invalid=0.2)
+    tw = replace(weights(w=2.0), jump_at="crossing")
+    M, Ms = FT.messages(st, ga, tw, np.arange(ga.n))
+    eps = 1e-4
+    for i in range(ga.n):
+        for k in [*np.nonzero(st.valid[i])[0], -1]:
+            vals = []
+            for sgn in (1, -1):
+                if k >= 0:
+                    q = st.q.copy()
+                    q[i, k] += sgn * eps
+                    s2 = replace(st, q=q)
+                else:
+                    qs = st.q_stop.copy()
+                    qs[i] += sgn * eps
+                    s2 = replace(st, q_stop=qs)
+                vals.append(coupling(FT.expected_energy(s2, ga, tw)))
+            fd = (vals[0] - vals[1]) / (2 * eps)
+            m = M[i, k] if k >= 0 else Ms[i]
+            assert m == pytest.approx(fd, rel=1e-6, abs=1e-6 * max(1.0, abs(fd)))
+
+
+def test_crossing_expected_energy_by_enumeration() -> None:
+    """With jump_at "crossing", the expected jump energy is the exact expectation over
+    the joint states, and it differs from the "node" form."""
+    rng = np.random.default_rng(7)
+    ga = uniform_ga((2, 2, 2), rng=rng)
+    st = random_state(ga.n, 3, 3, rng, invalid=0.25)
+    tw = replace(weights(w=2.0), jump_at="crossing")
+    states = [[*np.nonzero(st.valid[i])[0], -1] for i in range(ga.n)]
+    ch = np.array(list(itertools.product(*states)), np.int64)
+    rows = np.arange(ga.n)[None, :]
+    prob = np.where(ch >= 0, st.q[rows, np.maximum(ch, 0)], st.q_stop[rows]).prod(1)
+    se = FT.state_energy(st, ga, tw, ch)
+    ee = FT.expected_energy(st, ga, tw)
+    assert ee["jump"] == pytest.approx(float(prob @ se["jump"]), rel=1e-10, abs=1e-12)
+    assert ee["jump"] != FT.expected_energy(st, ga, weights(w=2.0))["jump"]

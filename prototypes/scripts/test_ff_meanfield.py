@@ -603,3 +603,62 @@ def test_anchor_origin_contract() -> None:
     assert np.nanmax(f.tau) > 0.0  # no upper bound away from the anchor
     assert all(t["jump"] == 0.0 for t in log["terms"])
     assert np.all(np.isnan(e["p_jump"]))
+
+
+# ---------------------------------------------------------------- the R2 change: the
+# jump at the stop crossing (solve(jump_at="crossing"), integrate(jump_at="crossing"))
+
+
+@functools.cache
+def _crossing_run() -> tuple[Any, ...]:
+    ph = FTR.build_phantom("slab", FEATS, noise=0.0, shape=RUN_SHAPE)
+    geo, ts = FTR.geometry_of("slab", RUN_SHAPE)
+    truth = FTR.truth(geo, ts, "slab", root_spacing_mm=0.48, margin_mm=0.0)
+    grid = FG.UniformGrid(ph.shape, SPACING_MM)
+    inputs = FO.oracle_inputs(ph)
+    field, extras, log = MF.solve(
+        grid, inputs, ph.image["noise_sd"], jump_at="crossing"
+    )
+    cols, _ = FI.integrate(
+        field, truth.starts, truth.roots, jump_at="crossing", u=extras["u"]
+    )
+    return grid, inputs, truth, field, extras, log, cols
+
+
+def test_crossing_every_complete_column_stops_at_zero() -> None:
+    """Origin (ii) with the R2 change: on the small slab (oracle, noise 0, 0.32 mm),
+    the columns that end STOPPED have |τ_arrival| ≤ Δτ, and their jumps (all on
+    intact cortex) are 0 to within Δτ. Tolerance Δτ, fixed before the first run."""
+    _, _, truth, _, _, log, cols = _crossing_run()
+    assert log["run"]["jump_at"] == "crossing"
+    stopped = cols.end == T.EndReason.STOPPED
+    assert stopped.sum() >= 4
+    ta = np.abs(cols.tau_arrival[stopped])
+    assert np.all(ta <= T.DEFAULTS.dtau), (ta.max(), np.median(ta))
+    assert np.all(cols.jump[stopped] <= T.DEFAULTS.dtau), cols.jump[stopped].max()
+
+
+def test_crossing_edge_jumps_on_intact_cortex() -> None:
+    """With the R2 change, the jump of the solved field on each edge from a moving node
+    to a stopped node (the posterior-mean τ, direction and slowness, measured at the
+    stop crossing) is 0 to within Δτ on the small slab (all intact). Tolerance Δτ,
+    fixed before the first run."""
+    grid, inputs, _, field, extras, _, _ = _crossing_run()
+    lo = np.asarray(inputs.stop.log_odds(grid.nodes), np.float64)
+    mov = field.q_stop < T.DEFAULTS.stop_level
+    tm = np.nan_to_num(field.tau_mean())
+    dm = field.direction_mean()
+    ga = MF.grid_arrays(grid, T.DEFAULTS, False)
+    i, j = ga.edges[:, 0], ga.edges[:, 1]
+    J = []
+    for a, b, sgn in ((i, j, 1.0), (j, i, -1.0)):
+        m = mov[a] & ~mov[b]
+        frac = FTM.stop_crossing(lo[a][m], lo[b][m])
+        _, Jm = FTM.jump_energy(
+            tm[a][m], dm[a][m], np.exp(-extras["u"][a][m]),
+            sgn * ga.edge_vec_mm[m], T.DEFAULTS, frac,
+        )  # fmt: skip
+        J.append(Jm)
+    Jall = np.concatenate(J)
+    assert len(Jall) > 0
+    assert np.all(Jall <= T.DEFAULTS.dtau), (Jall.max(), np.median(Jall), len(Jall))

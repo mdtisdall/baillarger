@@ -47,6 +47,13 @@ The rules
   is τ at the last point of each column. jump = max(0, −tau_arrival) for a STOPPED
   column, nan for the other ends. p_jump, stop_sd and level_sd are nan unless the caller
   gives them (the sampled fields are PR 6).
+- **τ at the stop crossing** (`integrate(jump_at="crossing")`, the provisional design
+  change for R2; the default "node" is the PR 3 rule above). The stop point X stays
+  where it is (the q_stop 0.5 crossing). tau_arrival is the masked interpolation at X of
+  each moving corner's τ advanced to X with its speed and direction: τ_c + s_c ·
+  max(d_c · (X − x_c), 0), s_c = exp(−u_c) the slowness (per mm). This is the level of
+  ff_terms.jump_energy with jump_at "crossing", read at the integrator's stop. jump =
+  max(0, −tau_arrival) as before. tau_path is not changed.
 
 Determinism
 -----------
@@ -346,12 +353,50 @@ def _order(starts: T.Array, roots: T.Array) -> T.IntArray:
     return np.asarray(np.lexsort(keys), np.int64)
 
 
+def arrival_level(
+    field: T.Field,
+    X: T.Array,
+    u: T.Array,
+    settings: T.SolverSettings = T.DEFAULTS,
+) -> T.Array:
+    """(N,) the level at the stop points X (N, 3, voxels) with jump_at "crossing" (the
+    module docstring, *τ at the stop crossing*): Σ w_c (τ_c + exp(−u_c) · max(d_c · (X
+    − x_c) · VOXEL_MM, 0)) / Σ w_c over the moving corners c of X's cell. u (n,): the
+    log speed of each node. nan where no moving corner has weight or X is outside."""
+    X = np.asarray(X, float).reshape(-1, 3)
+    n = len(X)
+    mov = field.q_stop < settings.stop_level
+    d = np.where(mov[:, None], field.direction_mean(), 0.0)
+    tau = np.where(mov, np.nan_to_num(field.tau_mean()), 0.0)
+    slow = np.exp(-np.asarray(u, float))
+    nodes = np.asarray(field.grid.nodes, float)
+    cells = np.asarray(field.grid.cells, np.int64)
+    cell, loc = field.grid.locate(X)
+    cell = np.asarray(cell, np.int64)
+    inside = cell >= 0
+    c = np.where(inside, cell, 0)
+    corners = cells[c]
+    W = T.trilinear_weights(np.where(inside[:, None], loc, 0.0))
+    ws, lev = np.zeros(n), np.zeros(n)
+    for k in range(8):  # a fixed order of additions
+        ids = corners[:, k]
+        wm = W[:, k] * mov[ids]
+        dx = (X - nodes[ids]) * T.VOXEL_MM
+        adv = slow[ids] * np.maximum(_dot(d[ids], dx), 0.0)
+        ws = ws + wm
+        lev = lev + wm * (tau[ids] + adv)
+    has = inside & (ws > 0)
+    return np.asarray(np.where(has, lev / np.where(has, ws, 1.0), np.nan), float)
+
+
 def integrate(
     field: T.Field,
     starts: T.Array,
     roots: T.Array,
     settings: T.SolverSettings = T.DEFAULTS,
     *,
+    jump_at: str = "node",
+    u: T.Array | None = None,
     max_cos: float = CONTACT_COS,
     p_jump: T.Array | None = None,
     stop_sd: T.Array | None = None,
@@ -365,7 +410,15 @@ def integrate(
     enter the trace. Returns (Columns, info). info holds: "ends" (the count of each
     EndReason, by name), "unresolved_cells_met" (the sorted ids of the unresolved
     contact cells that ended a column), "n_unresolved_cells" (the count in the whole
-    field), "steps" (the iterations of the loop), "max_steps"."""
+    field), "steps" (the iterations of the loop), "max_steps".
+
+    jump_at: "node" (PR 3, the default: tau_arrival is τ at the last point) or
+    "crossing" (the provisional design change for R2: `arrival_level` at the stop
+    point of each STOPPED column; it needs u, the (n,) log speed of the nodes)."""
+    if jump_at not in ("node", "crossing"):
+        raise ValueError(f'jump_at must be "node" or "crossing", not {jump_at!r}')
+    if jump_at == "crossing" and u is None:
+        raise ValueError('jump_at "crossing" needs u (the log speed of the nodes)')
     S0 = np.asarray(starts, float).reshape(-1, 3)
     R0 = np.asarray(roots, float).reshape(-1, 3)
     assert len(S0) == len(R0)
@@ -449,6 +502,11 @@ def integrate(
     stops = paths[idx, counts - 1] if N else np.zeros((0, 3))
     tau_arrival = tau_path[idx, counts - 1] if N else np.zeros(0)
     stopped = end == int(T.EndReason.STOPPED)
+    if jump_at == "crossing" and N:
+        assert u is not None
+        tau_arrival = np.where(
+            stopped, arrival_level(field, stops, u, settings), tau_arrival
+        )
     jump = np.where(stopped, np.maximum(0.0, T.TAU_TOP - tau_arrival), np.nan)
     lv = np.zeros(0) if levels is None else np.asarray(levels, float)
     cols = T.Columns(
