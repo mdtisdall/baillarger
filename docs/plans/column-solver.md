@@ -633,7 +633,7 @@ checkpoint needs the user's reading before the next phase starts.
 **Stage 1: the field form on phantoms** (`docs/plans/flow-field-phantoms.md`).
 Arm C alone, on phantoms only. The phantoms have known geometry, so gaps
 in how the field represents kissing surfaces (contacts, hairpins, the end
-of a gap) show as clear failures. Its checkpoint (F4) decides whether the
+of a gap) show as clear failures. Its checkpoint (PR 7 there) decides whether the
 field form goes on as it is, changed, or with chains at hairpins, before
 any later stage starts. The truth adapters under the stop rule, the new
 phantoms and the τ phantoms of stage 1 are reused by every later stage.
