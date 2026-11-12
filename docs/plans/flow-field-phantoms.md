@@ -16,7 +16,9 @@ any chain arm and before any real data. Read first:
 
 This is a prototype plan. Nothing in the ray sampler or `src/` changes.
 
-**Status:** draft for review. No code is written.
+**Status:** draft for review. The code of this stage is in the open PRs
+#202–#211 (not merged). The checkpoint is in `reports/Flow-field phantoms.md`,
+section *Checkpoint*.
 
 ## Goal
 
@@ -121,6 +123,13 @@ So at a fused contact each bank's column stops on the contact:
   τ_top − τ(φ at the face).
 - **The truth is a definition.** `bent_phantom.py` says so for its depth
   function. The adapters state it for each phantom.
+- **The bank of a column** is the bank of its root, not the side where it
+  stops. Where tA ≠ tB, true columns from bank B round the fundus end and
+  stop on the x > 0 side. So a test that each bank stops on its own face
+  uses the flat banks (y ≥ 0) only.
+- **The start of a column** is its root on the white surface. The point
+  2 mm behind the root (`Truth.starts`) is not a valid start where the WM
+  is thinner than 4 mm (the crowns): it lies in the other bank.
 
 **The true τ.** For every phantom here, the true τ is φ − 1 (so τ_top = 0)
 times one constant per phantom: the mean bank thickness. So the unit is
@@ -145,9 +154,9 @@ noise 1.0 (the site's matched SD), seed 0. Question 8 adds seeds 1–4.
 | `fundus_g0.48`, `fundus_g0.16` | `fold_phantoms.standard` | t 2.4 | 2 |
 | `fundus_g0.04` | new parameter value | t 2.4 | 2, 4 |
 | `curved_g0.16`, `curved_g0.04` | `bent_phantom.curved` | tA 2.5, tB 1.2, shape 80³ | 2, 5 |
-| `abraded` | new, from `curved_g0.16` | bank A, two disc patches of radius 2 mm, centres 3 mm and 8 mm from the slot's edge: the top 0.3 mm and 0.9 mm replaced by the outside medium (label 1, the medium's level) | 4: jumps, R3 |
-| `tau` | new | as `slab`, box 96 × 64 × 48, with: thickness 2.4 × (1 + 0.25 sin(2πu/6 mm)) along u; a flat band (the profile constant over relative depth 0.40–0.55); an areal border at u = 0 where two bands change amplitude by × 0.5 and no band moves | the warp alone (`column-solver.md`, exact tests) |
-| `noise` | new | the `slab`'s box, with noise only (no structure; cortex label everywhere) | R9 |
+| `abraded` | new, from `curved_g0.16` | bank A, two disc patches of radius 2 mm, centres 3 mm and 8 mm from the slot's edge: the top 0.3 mm and 0.9 mm replaced by the outside medium (label 1, the medium's level). Box 112³ voxels, origin (0.601, −3.424, −0.428) mm: the smallest multiple of 16 voxels that holds both patches, bank B and the fundus with a 1 mm margin (the 80³ box holds bank A only to y = 7.3 mm) | 4: jumps, R3 |
+| `tau` | new | as `slab`, box (64, 96, 48) voxels in array axis order, with: thickness 2.4 × (1 + 0.25 sin(2πu/6 mm)) along u; a flat band (the profile constant over relative depth 0.40–0.55), made by a depth map that keeps the profile continuous: the profile at 0.40 is held over 0.40–0.55, and 0.40–1 is compressed into 0.55–1; an areal border at u = 0 where two bands change amplitude by × 0.5 and no band moves | the warp alone (`column-solver.md`, exact tests) |
+| `noise` | new | the `slab`'s box, with noise only (no structure; cortex label everywhere). It has no oracle. Its runs use a null input (`ff_octree.null_inputs`: stop log-odds log(0.02/0.98) everywhere, coherence 0). Whether this null is right is a question in the checkpoint | R9 |
 
 The features file is `scratch/onepass/fold_features.json` in the main
 checkout (made by `fold_measure.py`), passed as an argument. Tests use a
@@ -170,7 +179,7 @@ Each run takes three inputs, each from one of two sources:
 
 | Input | Image source | Oracle source |
 |---|---|---|
-| Stop field: the log-odds that a point is stopped | the point-wise stop terms below, from the phantom's image and labels | the true stopped region, blurred by a Gaussian of 0.5 voxel SD, as a probability clipped to [0.02, 0.98] |
+| Stop field: the log-odds that a point is stopped | the point-wise stop terms below, from the phantom's image and labels | p = Φ(stop_sdf / 0.08 mm), clipped to [0.02, 0.98]: the exact blur of a locally flat stop surface by a Gaussian of 0.5 voxel SD (CD-4). The literal blur of the stopped region does not reach 0.5 at a fused contact (a sheet thinner than the SD): median p 0.193 at the true stop on `ckiss_smooth`. Whether Φ is the meaning of the blur is a question in the checkpoint |
 | Tensor: the leading eigenvector and coherence | `baillarger.orient` on the phantom's echoes, as for the site | the true column direction, coherence 1 |
 | Contrast: the detrended echoes 2 and 3 | `fold_phantoms.make` (`det`) | the same: the contrast has no oracle |
 
@@ -191,7 +200,14 @@ evidence on top of it. Every question runs both.
 
 The weights follow `top_confidence.py`. Where that file needs a site
 statistic (the floor S_floor, the thickness prior), the phantom's own
-noise-free image gives it. The checkpoint report states which terms carry the
+noise-free image gives it. `Phantom.image` does not keep the raw noisy
+log echoes, so the stop terms and the oracle render the raw noisy echoes
+again (about 25 s per connected-kiss phantom). These terms are ranking scores along one ray,
+not calibrated log-odds. Without a prior and a scale the slab test of
+task 2.1 fails (#203, CD-5). The calibration is a question in the
+checkpoint. Until it is decided, the image runs are read as rankings
+only. On the `noise` phantom the noise-free reference is constant, so
+S_floor is degenerate and the sheet term saturates. The checkpoint report states which terms carry the
 contact on each phantom.
 
 ### Node states
@@ -224,16 +240,24 @@ energy*).
 | Alignment | on one node: the angle between the direction and the tensor's eigenvector, weighted by coherence |
 | Bending | on an edge: the change of direction between the two nodes, per mm |
 | Speed prior | on one node: log v near log 1, SD 0.3. On an edge: smooth across |
-| Smoothness | the FEM prior below, on τ and the direction |
+| Smoothness | the FEM prior below, on the speed u = log v (mean 0) and, by its stiffness part only, on the direction. Not on τ itself: M/ℓ² on τ pulls τ toward τ_top and breaks the test *Origin* (CD-3, for review) |
 | Stop | on the stopped state: the stop field's log-odds |
-| Jump | on an edge between a moving node at τ and a stopped node: the jump −τ − (the level that the step reaches), with the prior: a point mass at 0 of 0.999, and an exponential above 0 with mean 0.5. A negative jump is not a state |
-| Start | the column's start points (2 mm behind the white surface, along its normal) seed τ through the speed prior. No offset is fixed except by the origin |
+| Jump | on an edge between a moving node at τ and a stopped node: the jump −τ − (the level that the step reaches), with the prior: a point mass at 0 of 0.999, and an exponential above 0 with mean 0.5. A negative jump is not a state. The jump is measured at the same point on the edge as the integrator's stop. Which point (the input stop field's crossing, or a stop term corrected for the entropy of the moving candidates) is a question in the checkpoint (R2) |
+| Start | the column's roots on the white surface seed τ through the speed prior. No offset is fixed except by the origin |
 
 **The FEM prior.** Trilinear (Q1) elements on the octree's cells, with the
 stiffness matrix K and the mass matrix M: precision λ (K + M / ℓ²), with
-ℓ = 0.5 mm. The prior then means the same at every spacing, which the
-free-energy comparisons between grids need (`column-solver.md`,
-*Acceptance by evidence*).
+ℓ = 0.5 mm. In 3D this is the Matérn case α = 1. It has no pointwise
+variance, so the node variance grows as the spacing falls. The covariance
+at a fixed distance r > 0 is the same at every spacing, if Q1 can carry
+it: that needs h ≤ about ℓ/2. At 0.16 mm and 0.32 mm the decay length is
+0.50 mm. At 0.64 mm (h/ℓ = 1.28) the axis covariance changes sign (CD-6).
+So the 0.64 mm grid carries a different prior, and a free-energy
+comparison with 0.64 mm compares two priors. The coarsest spacing (or ℓ)
+is a question in the checkpoint. On the octree, the non-conforming form
+of CD-10 is weaker across coarse/fine faces (decay 0.415 mm). F omits the
+log-determinant of Q_u, and u is a point estimate, so F is not an
+evidence bound across spacings.
 
 ### Inference
 
@@ -242,17 +266,22 @@ node indices), the pair width 4 → 2 → 1. At most 200 sweeps per width.
 A width ends when the largest change of any q is below 1e-4, or when the
 free energy changes by less than 1e-7 of its value. A rise of the free
 energy in any sweep is a defect, logged and reported. The coarse grid
-(question 6 only): solve at 0.64 mm first, then use its distributions as
-priors on the fine grid.
+(question 6 only): solve at 0.64 mm first, then pass its solution to the
+fine grid as the start field (`init`) only, not as a prior (CD-9, for
+review). `init` carries the means only, not the distributions.
 
 ### The integrator
 
 - RK4 on the posterior-mean direction, step 0.01 mm (the step of the
-  truth), from each root of the phantom's white surface.
+  truth), from each root of the phantom's white surface (not from
+  `Truth.starts`).
 - **Masked interpolation.** Inside a cell, only moving nodes enter the
   interpolation, with weights renormalised. A cell whose moving nodes lie
   on both sides of a stopped sheet (the sheet passes between corners with
-  no stopped node at a corner) is an **unresolved contact cell**. The
+  no stopped node at a corner, and the mean directions of two moving
+  corners point toward each other, d_a·d_b < 0) is an **unresolved
+  contact cell**. Without the direction test, flow that converges toward
+  a focus beyond the cell is flagged too. The
   integrator stops there and counts it. A count above zero means the grid
   did not resolve the sheet.
 - **The stop.** In each step, the stop probability is interpolated along
@@ -273,7 +302,15 @@ priors on the fine grid.
   does not depend on the order of updates.
 - **Acceptance.** A nominated change is kept only if the free energy
   improves (*Acceptance by evidence*). The thresholds above only nominate.
-  They do not decide.
+  They do not decide. The two compared values are the trial's F and the
+  F of a control: a re-solve of the current grid from the same start with
+  the same schedule (#206, provisional). One solve does not reach its own
+  minimum, so F against the previous solve measures the restart, not the
+  change. Whether acceptance by F holds before the solve converges is a
+  question in the checkpoint (R9).
+- **Hanging nodes.** In the mean field each hanging node has its own free
+  state, with a non-conforming Q1 assembly on each leaf's 8 corners
+  (CD-10, for review).
 - **Prior-shaped cells.** A cell finer than 0.16 mm is marked.
 - **Stop.** At most 6 rounds of mark, refine or coarsen, and solve again.
 
@@ -318,7 +355,9 @@ percentile, and a view of where the largest values are.
 
 Exact tests use noise 0 and the oracle inputs unless stated. They are in
 `prototypes/scripts/test_ff_*.py`, added to `testpaths` in
-`pyproject.toml`. Each tolerance is fixed when the test is written, before
+`pyproject.toml`, and run in CI. A test that needs a full solve of a
+phantom (the τ phantom: about 60 min) is a run-time measure with pass
+flags, reported with the run, not a pytest test (CD-14). Each tolerance is fixed when the test is written, before
 any run on the phantoms in *Questions*.
 
 - **Truth adapters:** on each phantom, the true stops lie on the true stop
@@ -331,10 +370,15 @@ any run on the phantoms in *Questions*.
 - **Noise alone:** the free-energy test refuses every refinement.
 - **Origin:** with an anchor column, moving the anchor changes every τ by
   one constant (to 1e-6) and nothing else. With the top as the origin,
-  every complete column's stop is at τ = 0 (to one Δτ).
-- **τ phantom:** the speeds match the true speeds to 5%, the levels across
-  the flat band stay aligned, and no level shifts across the areal border
-  (below 0.04 mm).
+  every complete column's stop is at τ = 0 (to one Δτ). As worded, this
+  test fails on the discrete problem (CD-12): a point-mass anchor bends
+  the field locally, and the last moving node can lie up to one edge
+  before the boundary. The form of the anchor and of τ_arrival is a
+  question in the checkpoint.
+- **τ phantom** (a run-time measure): the speeds match the true speeds
+  to 5%, the levels across the flat band stay aligned, and no level
+  shifts across the areal border (below 0.04 mm). The flat-band part has
+  no tolerance of its own. PR 3 measured it against 0.04 mm.
 - **Masked interpolation:** on a synthetic two-cell grid, a moving value
   never takes weight from a stopped node or from the far side of a sheet.
 - **Integrator:** the same input gives the same columns to the last bit.
@@ -364,12 +408,16 @@ any run on the phantoms in *Questions*.
   the pruning log, time and peak memory) and the views.
 - **Figures** for the report go to `reports/figures/flow-field-phantoms/`,
   each well under 1 MB.
-- **Memory.** The largest box is 96 × 96 × 128 voxels. At 0.16 mm and 64
-  states per node in float32, q is about 300 MB. The octree's finest
-  cells near the contact may add as much again. Expected peak below 4 GB
-  per run, so the runs are light (*Organisation*). The first run of each
-  kind measures its peak under `scripts/memguard` with a cap of 8 GB. If a
-  run is above 4 GB, the matrix runs one job at a time.
+- **Memory and time.** The largest box is 96 × 96 × 128 voxels. At
+  0.16 mm and 64 states per node in float32, q is about 300 MB. The
+  contrast profiles are larger: n × K × L × 2 is about 11 GB at 1.2·10⁶
+  nodes with K = 63 in float64. So they are stored as one line per
+  direction (CD-7). Measured peaks at 0.16 mm: `ckiss_smooth` 16–17 GB,
+  `curved_g0.04` 6.1 GB, `abraded` above 8 GB in setup (estimated
+  13–15 GB). At 0.32 mm the peaks are 2.3–3.8 GB. One 0.16 mm run takes
+  2–8 h in NumPy, so the core matrix does not fit one night. The first
+  run of each kind measures its peak under `scripts/memguard` with a cap
+  of 8 GB. A run above 8 GB is heavy and runs alone.
 
 ## Organisation
 
@@ -509,9 +557,8 @@ Torch. Not by wall time on the laptop.
 ### Git
 
 Each PR has its own branch and worktree (`start-task`), stacked on the PR
-below it (`round-2.md`, *Git and PRs*, items 5–7). PR 1 is stacked on
-#201 (the branch `docs/column-solver-plan`, which holds this plan), so its
-body begins "Stacked on #201". No phase session waits for a merge. When a
+below it (`round-2.md`, *Git and PRs*, items 5–7). PR 1 branches from
+`origin/main` (#201 is merged). No phase session waits for a merge. When a
 PR below changes, the phase session merges its branch into its own, and
 does not rebase a pushed branch. The user merges after the stage. Nothing
 in this stage merges to `main` without the user's instruction that names
@@ -529,15 +576,17 @@ PR 1 (contracts, phantoms, truth) ──┬── PR 2 (inputs) ──┐
                                                                           └── PR 5 (octree) ── PR 6 (hairpins, jumps, grid, calibration) ── PR 7 (checkpoint)
 ```
 
-PR 2 and PR 3 can run at the same time: PR 3 tests with the oracle
-inputs, which PR 1 gives. PR 4 and PR 5 can run at the same time: PR 4
+PR 3 tests with the oracle inputs. PR 1 gives only their protocols
+(`StopField`, `Tensor`), and `ff_oracle.py` is in PR 2. So PR 3 contains
+PR 2 (a merge of `feature/ff-inputs` after the oracle commit), and runs
+in parallel with PR 2 only until then. PR 4 and PR 5 can run at the same time: PR 4
 uses the uniform grid only. PR 6 needs PR 2, PR 4 and PR 5.
 
 In the tables, "Parallel" names the sub-tasks that can run at the same
 time, each in its own sub-agent. The briefs are written for the
 sub-agents, in Simplified Technical English.
 
-### PR 1. Contracts, phantoms and truth (branch `feature/ff-phantoms`, stacked on #201)
+### PR 1. Contracts, phantoms and truth (branch `feature/ff-phantoms`, from `main`)
 
 **Task 1.1. Contracts** (the phase session, not a sub-agent; model:
 opus). Write `prototypes/scripts/ff_types.py`: the dataclasses of a
@@ -739,9 +788,11 @@ Torch follows *NumPy or Torch* in every PR. The later stages of
 
 ## Decisions for the user
 
-None are open in this plan. D-F1 is decided (*Truth under the stop rule*).
-The origin of τ is decided (τ_top = 0), and question 6 compares it with an
-anchor column. The defaults in *The solver for this stage* are
+D-F1 is decided (*Truth under the stop rule*). The origin of τ is
+decided (τ_top = 0), and question 6 compares it with an anchor column.
+The open questions of this stage are in the checkpoint
+(`reports/Flow-field phantoms.md`, *Checkpoint*, *Questions for the
+user*). This plan does not decide them. The defaults in *The solver for this stage* are
 provisional: they are for review in this plan, and PR 7 proposes D1, D4
 and D6 from the evidence.
 
