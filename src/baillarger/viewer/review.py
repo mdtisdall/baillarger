@@ -37,24 +37,26 @@ Routes (Review.get, Review.post), JSON:
   the log records it as shown. {site: {id, kind, rank, voxel, mm}} or
   {site: null} when the session has no site left.
 - POST /review/skip {site}.
-- POST /review/preview {site, choice, params}: the answer's voxels, the
-  correction's voxels and whether the correction overrides the answer
-  (wm_choices.preview), in grid voxels; a preview that takes more than
-  WAIT_S runs on as a job: {status: "running", job}, then GET
-  /review/preview?job=... until {status: "done", ...} (or {status:
-  "failed", error}). The previews of the choices are jobs of
+- POST /review/preview {site, choice, params}, or {site, choice:
+  manual-paint, strokes} (Preview of strokes, below): the answer's voxels,
+  the correction's voxels, whether the correction overrides the answer and
+  whether the box cuts the WM (wm_choices.preview), in grid voxels; a
+  preview that takes more than WAIT_S runs on as a job: {status: "running",
+  job}, then GET /review/preview?job=... until {status: "done", ...} (or
+  {status: "failed", error}). The previews of the choices are jobs of
   baillarger.viewer.jobs.Jobs, keyed by the site, the choice, the params and
-  the SHA-256 of the edits, and the last PREVIEWS_KEPT finished previews stay
-  in memory for polling. One runs at a time, in one worker process (the
-  "spawn" context): the request reads the box round the site and sends only
-  the box and the choice's arguments. The newest request wins: a request
-  for another key while a preview runs stops the worker (terminate, join),
-  its job fails with "replaced by a newer preview", and the new preview
-  starts in a new worker. A request for the key that runs gets {status:
-  "running", job}. A worker that ends without a result (the memory cap
-  killed it) fails its job. The worker is a daemon process: it stops when
-  the viewer ends (and at Review.close). The previews of manual-paint and
-  accept-fix are computed in the request.
+  the SHA-256 of the edits (manual-paint: of its change), and the last
+  PREVIEWS_KEPT finished previews stay in memory for polling. One runs at a
+  time, in one worker process (the "spawn" context): the request reads the
+  box round the site and sends only the box and the choice's arguments. The
+  newest request wins: a request for another key while a preview runs stops
+  the worker (terminate, join), its job fails with "replaced by a newer
+  preview", and the new preview starts in a new worker. A request for the
+  key that runs gets {status: "running", job}. A worker that ends without a
+  result (the memory cap killed it) fails its job. The worker is a daemon
+  process: it stops when the viewer ends (and at Review.close). The preview
+  of accept-fix, and of a manual-paint with no voxel to change, is computed
+  in the request.
 - POST /review/answer {site, choice, params, reviewer_seconds}: the choice's
   voxels and labels at the site, written into the label edits
   (label_edits.paint: only the voxels whose label changes from the dseg's
@@ -173,7 +175,23 @@ manual-paint (MANUAL) at a queue site: the page opens the paint mode, and its
 submit is /review/answer {site, choice: manual-paint, strokes,
 reviewer_seconds}. It writes into the edits as a paint, and the log records
 the answer: the voxels of the strokes and the label each takes (the eraser's
-voxels: their input label). Its preview has no voxels.
+voxels: their input label).
+
+Preview of strokes. /review/preview {site, choice: manual-paint, strokes}
+(the strokes not yet submitted, as for /review/paint; maybe none) shows what
+the automatic correction would do after the pending edits and the strokes.
+The change is the pending edits (Pending, below) as they would be after a
+paint of the strokes (label_edits.paint, as a paint: a voxel in two strokes
+keeps the later one; the eraser gives the input label), less the voxels that
+keep their dseg label, and only those inside the box of the site and the
+strokes, Choices.half({}) voxels each way (a pending edit farther away is
+left out). It goes to Choices.preview as a change (wm_choices.preview with a
+wm_choices.Change), through the worker and its jobs as the other choices'
+previews: white_dseg.wm_topo on a box round the change, with the change's
+voxels as edited voxels, which the correction changes last. An erased voxel
+is an edited voxel in the preview too. overrides: a fix of the correction
+changes a voxel of the change; cut_by_box: the box cuts the WM, so the
+preview is approximate. The preview writes nothing.
 
 Pending. The pending edits are the edits that are not yet in the dseg on
 the screen: the voxels where the current edits and the dseg's copy of the
@@ -360,7 +378,13 @@ class Choices(Protocol):
     ) -> Answer: ...
 
     def preview(
-        self, labels: Arr, lo: Site, site: Site, choice: str, params: dict[str, Any]
+        self,
+        labels: Arr,
+        lo: Site,
+        site: Site,
+        choice: str,
+        params: dict[str, Any],
+        change: Answer | None = None,
     ) -> Preview: ...
 
 
@@ -369,7 +393,9 @@ class WmChoices:
     preview for the preview. Both get a box of the grid, not the whole grid
     (wm_choices.preview copies the labels it is given). The box is one voxel
     larger each way than the box that preview reads (support(radius, reach)
-    and the halo), so preview's cut_by_box sees the faces of its own box."""
+    and the halo), so preview's cut_by_box sees the faces of its own box.
+    The preview of manual-paint takes its voxels as a change (grid voxels,
+    inside the box), given to preview as a wm_choices.Change."""
 
     def __init__(
         self, hemi: str, voxel_mm: npt.ArrayLike, halo_mm: float = 1.0
@@ -397,20 +423,32 @@ class WmChoices:
         return Answer(v, np.asarray(ch.labels, np.int64).ravel(), dict(ch.params))
 
     def preview(
-        self, labels: Arr, lo: Site, site: Site, choice: str, params: dict[str, Any]
+        self,
+        labels: Arr,
+        lo: Site,
+        site: Site,
+        choice: str,
+        params: dict[str, Any],
+        change: Answer | None = None,
     ) -> Preview:
         from baillarger import wm_choices as wc
 
+        off = np.asarray(lo)
+        what: str | wc.Change = choice
+        if change is not None:
+            what = wc.Change(
+                np.asarray(change.voxels, np.int64).reshape(-1, 3) - off,
+                np.asarray(change.labels, np.int64).ravel(),
+            )
         p = wc.preview(
             labels,
             _local(site, lo),
             self.hemi,
-            choice,
+            what,
             voxel_mm=self.voxel_mm,
             halo_mm=self.halo_mm,
             **params,
         )
-        off = np.asarray(lo)
         return Preview(
             np.asarray(p.answer.voxels, np.int64).reshape(-1, 3) + off,
             np.asarray(p.correction.voxels, np.int64).reshape(-1, 3) + off,
@@ -428,17 +466,17 @@ def _local(site: Site, lo: Site) -> Site:
 
 def _preview_worker(conn: Any) -> None:
     """The preview worker process: for each request (choices, box, lo, site,
-    choice, params) on conn, ("ok", Preview) or ("error", message). Ends when
-    the viewer's end of conn closes."""
+    choice, params, change) on conn, ("ok", Preview) or ("error", message).
+    Ends when the viewer's end of conn closes."""
     while True:
         try:
-            choices, box, lo, site, choice, params = conn.recv()
+            choices, box, lo, site, choice, params, change = conn.recv()
         except EOFError:
             return
         try:
             out: tuple[str, Any] = (
                 "ok",
-                choices.preview(box, lo, site, choice, params),
+                choices.preview(box, lo, site, choice, params, change),
             )
         except Exception as exc:  # reported to the viewer
             out = ("error", f"{type(exc).__name__}: {exc}")
@@ -1212,37 +1250,75 @@ class Review:
         replaced or the dseg has no copy of the edits."""
         with self.lock:
             self._check_outputs()
-            idx, lab = label_edits.differ(self._read_edits(), self._dseg_edits())
-            v = np.stack(np.unravel_index(idx, self.shape), 1).astype(np.int64)
-            out = lab.astype(np.int64)
-            erased = out == label_edits.INPUT
-            if erased.any():
-                out[erased] = self._input_labels()[tuple(v[erased].T)]
+            v, out = self._pending(self._read_edits())
         return dict(voxels=v.tolist(), labels=out.tolist())
 
+    def _pending(self, edits: label_edits.Edits) -> tuple[Arr, Arr]:
+        """The voxels (N, 3, in linear-index order) where edits and the dseg's
+        copy of the edits differ (label_edits.differ), and the label of each
+        in edits (int64; an erased voxel: its input label)."""
+        idx, lab = label_edits.differ(edits, self._dseg_edits())
+        v = np.stack(np.unravel_index(idx, self.shape), 1).astype(np.int64)
+        out = lab.astype(np.int64)
+        erased = out == label_edits.INPUT
+        if erased.any():
+            out[erased] = self._input_labels()[tuple(v[erased].T)]
+        return v.reshape(-1, 3), out
+
+    def _strokes_change(self, site: Site, strokes: Sequence[dict[str, Any]]) -> Answer:
+        """The change of a manual-paint preview (module docstring, Preview of
+        strokes): the pending edits as they would be after a paint of the
+        strokes, near the site and the strokes, less the voxels that keep
+        their dseg label. Raises ValueError as a paint does (paint_voxels),
+        if the outputs were replaced, or if the dseg has no copy of the
+        edits."""
+        v = np.zeros((0, 3), np.int64)
+        lab = np.zeros(0, np.int64)
+        if strokes:
+            v, lab = self.paint_voxels(strokes)
+        with self.lock:
+            self._check_outputs()
+            edits = self._read_edits()
+            if len(v):
+                edits, _, _ = self._painted(edits, v, lab)
+            pv, plab = self._pending(edits)
+        # near: the box of the site and the strokes, half(params) each way
+        pts = np.concatenate([np.asarray([site], np.int64), v])
+        half = self.choices.half({})
+        near = np.all((pv >= pts.min(0) - half) & (pv <= pts.max(0) + half), axis=1)
+        pv, plab = pv[near], plab[near]
+        keep = plab != np.asarray(self.labels()[tuple(pv.T)], np.int64)
+        return Answer(pv[keep], plab[keep], {})
+
     # -------------------------------------------------------------- choices
-    def window(self, site: Site, params: dict[str, Any]) -> tuple[Arr, Site]:
+    def window(
+        self, site: Site, params: dict[str, Any], voxels: Arr | None = None
+    ) -> tuple[Arr, Site]:
         """The labels (int64) in the box round a site that the choice with
-        these params reads (Choices.half), and the box's first voxel."""
+        these params reads (Choices.half), and the box's first voxel. With
+        voxels (N, 3), the box round the site and the voxels."""
         lab = self.labels()
         half = self.choices.half(params)
-        c = np.asarray(site, np.int64)
-        lo = np.clip(c - half, 0, np.array(lab.shape))
-        hi = np.clip(c + half + 1, 0, np.array(lab.shape))
+        c = np.asarray(site, np.int64).reshape(1, 3)
+        if voxels is not None and len(voxels):
+            c = np.concatenate([c, np.asarray(voxels, np.int64).reshape(-1, 3)])
+        lo = np.clip(c.min(0) - half, 0, np.array(lab.shape))
+        hi = np.clip(c.max(0) + half + 1, 0, np.array(lab.shape))
         box = np.array(lab[lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]], np.int64)
         return box, (int(lo[0]), int(lo[1]), int(lo[2]))
 
     def _preview(
         self, site: Site, choice: str, params: dict[str, Any]
     ) -> dict[str, Any]:
-        """The preview of manual-paint or accept-fix, computed here."""
+        """The preview of accept-fix, or of a manual-paint with no voxel to
+        change, computed here."""
         t0 = time.perf_counter()
+        none = np.zeros((0, 3), np.int64)
         if choice == MANUAL:
-            none = np.zeros((0, 3), np.int64)
             p = Preview(none, none, False)
         else:
             _, v, _ = self._fix(site)
-            p = Preview(v, np.zeros((0, 3), np.int64), False)
+            p = Preview(v, none, False)
         return _preview_dict(p, t0)
 
     def _remote(
@@ -1253,9 +1329,11 @@ class Review:
         choice: str,
         params: dict[str, Any],
         stops: int,
+        change: Answer | None = None,
     ) -> dict[str, Any]:
         """The preview of a choice computed by the worker process (started if
-        there is none). stops: self._stops when the job started. Raises
+        there is none). stops: self._stops when the job started; change: the
+        voxels of manual-paint (Choices.preview). Raises
         PreviewError if it fails, if a newer preview stops the worker, or if
         the worker ends without a result."""
         t0 = time.perf_counter()
@@ -1268,7 +1346,7 @@ class Review:
                     w.conn.close()
                 w = self._worker = self._start_worker()
         try:
-            w.conn.send((self.choices, box, lo, site, choice, params))
+            w.conn.send((self.choices, box, lo, site, choice, params, change))
             tag, val = w.conn.recv()
         except (EOFError, OSError):
             w.proc.join()
@@ -1317,23 +1395,54 @@ class Review:
         if th is not None:
             th.join()
 
-    def preview_key(self, site: Site, choice: str, params: dict[str, Any]) -> str:
+    def preview_key(
+        self,
+        site: Site,
+        choice: str,
+        params: dict[str, Any],
+        change: Answer | None = None,
+    ) -> str:
         """The job key of a preview: the SHA-256 of its site, choice, params and
-        the SHA-256 of the edits as the review last read or wrote them."""
+        the SHA-256 of the edits as the review last read or wrote them; with
+        a change (manual-paint), of its voxels and labels in place of the
+        edits."""
         sha = None if self._cur is None else self._cur.sha
+        if change is not None:
+            sha = hashlib.sha256(
+                np.ascontiguousarray(change.voxels, np.int64).tobytes()
+                + np.ascontiguousarray(change.labels, np.int64).tobytes()
+            ).hexdigest()
         text = json.dumps([list(site), choice, params, sha], sort_keys=True)
         return hashlib.sha256(text.encode()).hexdigest()[:24]
 
-    def preview(self, site: str, choice: str, params: dict[str, Any]) -> dict[str, Any]:
+    def preview(
+        self,
+        site: str,
+        choice: str,
+        params: dict[str, Any],
+        strokes: Sequence[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """The preview, or a job that computes it (module docstring): the
-        newest request wins."""
+        newest request wins. manual-paint takes the strokes not yet submitted
+        (a list, maybe empty; module docstring, Preview of strokes), and no
+        other choice takes strokes."""
         self._need()
         c = parse_site(site)
         self._find(c)
+        if (choice == MANUAL) != (strokes is not None):
+            raise ValueError(
+                "strokes go with the choice manual-paint, and only with it"
+            )
         params = dict(params or {})
-        if choice in (MANUAL, ACCEPT):
+        change: Answer | None = None
+        if choice == MANUAL:
+            assert strokes is not None
+            change = self._strokes_change(c, strokes)
+            if not len(change.voxels):
+                return self._preview(c, choice, params)
+        elif choice == ACCEPT:
             return self._preview(c, choice, params)
-        key = self.preview_key(c, choice, params)
+        key = self.preview_key(c, choice, params, change)
         with self._plock:
             st = self.jobs.status()
             if st["status"] == "running" and st["key"] == key:
@@ -1343,12 +1452,12 @@ class Review:
                 th = self.jobs.thread
                 if th is not None:
                     th.join()
-            box, lo = self.window(c, params)
+            box, lo = self.window(c, params, None if change is None else change.voxels)
             stops = self._stops
             out = self.jobs.run(
                 key,
                 f"preview {choice} at {site_id(c)}",
-                lambda log: self._remote(box, lo, c, choice, params, stops),
+                lambda log: self._remote(box, lo, c, choice, params, stops, change),
             )
             if out["status"] == "error":
                 return dict(status="failed", job=key, error=out["error"])
@@ -1513,8 +1622,12 @@ class Review:
         if path == "/review/skip":
             return self.skip(str(req["site"]))
         if path == "/review/preview":
+            st = req.get("strokes")
             return self.preview(
-                str(req["site"]), str(req["choice"]), req.get("params") or {}
+                str(req["site"]),
+                str(req["choice"]),
+                req.get("params") or {},
+                None if st is None else list(st),
             )
         if path == "/review/answer":
             st = req.get("strokes")

@@ -11,6 +11,12 @@
 // "manual paint" opens the paint mode, and Submit sends the strokes as the site's answer. With --edits alone the server
 // has no queue: the pane is paint only.
 //
+// Preview of strokes: with manual paint at a site, the pane asks /review/preview {site, choice: manual-paint, strokes}
+// when the choice opens and after each stroke, clear and undo (a newer request wins). The server previews the
+// pending edits near the site and the strokes, with the strokes not yet submitted. The pane draws the change and the
+// correction with the preview drawing, and says when the correction would change an edited voxel and when the box cuts the
+// WM (the preview is then approximate). Submit stays allowed.
+//
 // Pending edits (/review/pending): the edits that are not yet in the dseg on the screen (the labels volume), each with
 // the label that it gives (an erased voxel: its input label). The pane draws them on the slice tiles with the preview
 // drawing, each square in its label's colour of the label overlay (/volume/labels/meta; outside: no fill) with an
@@ -108,7 +114,7 @@ function pane() {
   $("rvssub").onclick = submitStrokes; $("rvsclr").onclick = clearStrokes; $("rvundo").onclick = undo;
   $("rvrgo").onclick = regenerate;
 }
-function clearStrokes() { R.strokes = []; R.stroke = null; strokesInfo(); R.api.draw(); }
+function clearStrokes() { R.strokes = []; R.stroke = null; strokesInfo(); R.api.draw(); strokesPreview(); }
 // the brush mode: paint (the menu of the paint mode) or scribble (the classes); strokes of the other mode must go first
 function setMode(m, quiet) {
   if (m === "scribble" && R.meta.paint_only) m = "paint";
@@ -194,24 +200,40 @@ async function choose(c) {
   if (c === "manual-paint" && !setMode("paint")) return;
   R.choice = c; R.params = params(c); const seq = ++R.previewSeq;
   for (const b of document.querySelectorAll("#rvsite button[data-choice]")) b.style.outline = b.dataset.choice === c ? "2px solid var(--acc)" : "";
-  if (c === "manual-paint") {   // the paint mode: the strokes are the answer; there is no preview of strokes yet
-    R.preview = null; $("rvbon").checked = true; R.brush = true; R.api.draw();
-    $("rvprev").textContent = "manual paint: paint the strokes (left drag), then Submit (Enter) writes them as this site's answer" +
-      " into the label edits and the log. Undo (u) takes them back from the edits (the log keeps the answer)."; $("rvprev").style.color = ""; return;
+  if (c === "manual-paint") {   // the paint mode: the strokes are the answer, previewed with the pending edits
+    R.preview = null; $("rvbon").checked = true; R.brush = true; R.api.draw(); strokesPreview(); return;
   }
   $("rvprev").textContent = `${c}: computing the preview…`;
-  let r; try { r = await post("/review/preview", { site: R.cur.id, choice: c, params: R.params }); } catch (e) { if (seq === R.previewSeq) say(e.message, true); return; }
-  while (r.status === "running") {   // a long preview runs as a job on the server
-    await new Promise(ok => setTimeout(ok, PREVIEW_POLL_MS)); if (seq !== R.previewSeq) return;
-    try { r = await getj(`/review/preview?job=${encodeURIComponent(r.job)}`); } catch (e) { say(e.message, true); return; }
-  }
-  if (seq !== R.previewSeq) return;
-  if (r.status !== "done") { say(`preview: ${r.error || r.status}`, true); return; }
+  const r = await askPreview({ site: R.cur.id, choice: c, params: R.params }, seq); if (!r) return;
   R.preview = index(r); R.api.draw();
   const w = r.overrides ? "\n⚠ the correction overrides this answer: the automatic fix changes the voxels that the answer sets" : "";
-  const cut = r.cut_by_box ? "\nthe preview's box cuts WM: the correction outside the box is not shown (approximate)" : "";
   $("rvprev").textContent = `${c}: the answer changes ${r.answer.length} voxels, then the correction changes ${r.correction.length}` +
-    ` (${(r.seconds ?? 0).toFixed(2)} s)` + w + cut;
+    ` (${(r.seconds ?? 0).toFixed(2)} s)` + w + cutNote(r);
+  $("rvprev").style.color = r.overrides ? "#ffd23f" : "";
+}
+const cutNote = r => r.cut_by_box ? "\nthe preview's box cuts WM: the correction outside the box is not shown (approximate)" : "";
+// a preview request, polled while it runs as a job on the server; null if it failed or a newer request (seq) replaced it
+async function askPreview(body, seq) {
+  let r; try { r = await post("/review/preview", body); } catch (e) { if (seq === R.previewSeq) say(e.message, true); return null; }
+  while (r.status === "running") {   // a long preview runs as a job on the server
+    await new Promise(ok => setTimeout(ok, PREVIEW_POLL_MS)); if (seq !== R.previewSeq) return null;
+    try { r = await getj(`/review/preview?job=${encodeURIComponent(r.job)}`); } catch (e) { if (seq === R.previewSeq) say(e.message, true); return null; }
+  }
+  if (seq !== R.previewSeq) return null;
+  if (r.status !== "done") { say(`preview: ${r.error || r.status}`, true); return null; }
+  return r;
+}
+// the preview of the strokes not yet submitted and the pending edits (the module comment), with manual paint at a site
+async function strokesPreview() {
+  if (!R.cur || R.choice !== "manual-paint" || closed()) return;
+  const seq = ++R.previewSeq, n = R.strokes.length, how = "manual paint: paint the strokes (left drag), then Submit (Enter) writes them" +
+    " as this site's answer into the label edits and the log. Undo (u) takes them back from the edits (the log keeps the answer).";
+  $("rvprev").textContent = `manual paint: computing the preview of ${n} strokes and the pending edits…\n${how}`; $("rvprev").style.color = "";
+  const r = await askPreview({ site: R.cur.id, choice: "manual-paint", params: {}, strokes: paintStrokes() }, seq); if (!r) return;
+  R.preview = index(r); R.api.draw();
+  const w = r.overrides ? "\n⚠ the correction would change edited voxels (of these strokes or of the pending edits): Submit is allowed" : "";
+  $("rvprev").textContent = `manual paint: the strokes and the pending edits near them change ${r.answer.length} voxels, then the` +
+    ` correction changes ${r.correction.length} (${(r.seconds ?? 0).toFixed(2)} s)` + w + cutNote(r) + "\n" + how;
   $("rvprev").style.color = r.overrides ? "#ffd23f" : "";
 }
 // [kind, voxel] entries by slice: for each voxel axis a, a map from the voxel's index along a to its entries
@@ -350,7 +372,7 @@ async function submitStrokes() {
 async function undo() {
   if (R.strokes.length || R.stroke) { say("submit or clear the strokes first (Esc)", true); return; }
   let r; try { r = await post("/review/undo", {}); } catch (e) { say(e.message, true); return; }
-  R.undoDepth = r.undo_depth; strokesInfo(); say(`undo: ${r.voxels} voxels of the label edits written back`); pending();
+  R.undoDepth = r.undo_depth; strokesInfo(); say(`undo: ${r.voxels} voxels of the label edits written back`); pending(); strokesPreview();
 }
 async function scribble() {
   if (!R.strokes.length) { say("no strokes", true); return; }
@@ -417,7 +439,10 @@ function pointer(type, e, h) {   // brush mode: a left drag paints one stroke of
   if (!R.stroke) return false;
   const t = R.stroke.tile, r = $("bvo").getBoundingClientRect(), x = e.clientX - r.left - t.x, y = e.clientY - r.top - t.y;
   if (type === "move") { paint(t, x, y); R.api.draw(); return true; }
-  if (type === "up") { if (R.stroke.voxels.size) R.strokes.push(R.stroke); R.stroke = null; strokesInfo(); R.api.draw(); return true; }
+  if (type === "up") {
+    const added = R.stroke.voxels.size > 0; if (added) R.strokes.push(R.stroke);
+    R.stroke = null; strokesInfo(); R.api.draw(); if (added) strokesPreview(); return true;
+  }
   return false;
 }
 
