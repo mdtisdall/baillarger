@@ -16,7 +16,8 @@ This is a prototype plan. Nothing in the ray sampler or `src/` changes.
 The rules in `docs/plans/round-2.md` apply. Heavy runs go under
 `scripts/memguard`, one at a time.
 
-**Status:** draft for review. No code is written.
+**Status:** draft for review. No code is written. Stage 1 is its own
+plan: `docs/plans/flow-field-phantoms.md`.
 
 ## Goal
 
@@ -31,7 +32,9 @@ updates:
   time, and correct them at each step.
 
 A third arm, **C**, holds the same unknowns as fields on a grid instead of
-as chains, to compare the two representations.
+as chains, to compare the two representations. Arm C is tested first, on
+phantoms only (*Phases*, stage 1), because its representation of kissing
+surfaces has the most open theory.
 
 The plan also fixes what the solver writes, so that the result can become
 the stored refined columns (§4b, item 5) and the editor can re-solve a
@@ -346,7 +349,7 @@ the grid.
 
 | Arm | Start | Update order |
 |---|---|---|
-| **A** (probes first) | The top stage's rays and its corrected tops. The candidates are centred on the probe paths, with the offset and the speed from a first fit of the contrast along the probes. The top stage traces one ray per coarse cell, so phase 1 traces a probe for every column of the trial sites. | All the nodes of all the columns, until the objective stops falling. |
+| **A** (probes first) | The top stage's rays and its corrected tops. The candidates are centred on the probe paths, with the offset and the speed from a first fit of the contrast along the probes. The top stage traces one ray per coarse cell, so every column of the phantoms and the fundus box gets its own probe. | All the nodes of all the columns, until the objective stops falling. |
 | **B-fwd** (growth, forward only) | The anchor column's start. | One τ step at a time, outward. A node is final when the front passes it. |
 | **B-fb** (growth, forward and backward) | As B-fwd. | As B-fwd, then sweeps over all the nodes, back from the tops and out again, until the objective stops falling. |
 | **C** (field form) | The tensor's leading eigenvector for the direction, and τ from distance along it, at the coarse level. | All the grid nodes, until the objective stops falling. |
@@ -380,7 +383,7 @@ Only where the labels are correct or were repaired.
 | Site | Truth | What it tests |
 |---|---|---|
 | Fold phantoms (`fold_phantoms.py`) and the curved fundus phantom (`bent_phantom.py`) | Known true columns and levels | Path error; exact recovery |
-| τ phantoms (new, phase 0) | Known offsets and speeds | The warp alone; the anchor; flat contrast; an areal border |
+| τ phantoms, the slab, sub-voxel fundi, kiss with rounded gap ends (new, stage 1) | Known offsets, speeds, stops and columns | The warp alone; the anchor; flat contrast; an areal border; kissing surfaces |
 | The fundus box of the bent-columns trial (true vertex 12182770, hemisphere R, radius 5 mm), with the painted labels | The user's reading of the fundus; the failing stretch | The direction failure; the sawtooth |
 | M1S1 (`prototypes/data/M1S1_points_full0.json`, 23 points) | Marked points | The profile split; tops at a contact |
 | V1V2 banks (`prototypes/data/V1V2_banks_points_full0.json`) | Marked points | A striate border |
@@ -468,7 +471,7 @@ and the user's reading is recorded before the arms are named.
 - **Cost:** time and peak memory per arm, and a memory model for a 50 µm
   whole brain (below).
 
-### Exact tests (phase 0)
+### Exact tests (stages 1 and 2)
 
 - On a τ phantom with known offsets and speeds, the solver recovers the
   offset differences between neighbours and the speeds, up to the anchor.
@@ -521,10 +524,10 @@ node, in float32:
   level, about 120–180 GB for q at 50 µm. That is still too large for one
   machine, so a
   whole brain needs more than one coarse level, or the coarse level by
-  superblock with a larger halo. Phase 4 decides which from the measured
+  superblock with a larger halo. Stage 4 decides which from the measured
   sizes.
 
-These are estimates from assumptions. Phase 4 measures the real step count,
+These are estimates from assumptions. Stage 4 measures the real step count,
 candidate count and halo width, and gives the analysis again. The choice
 between the arms is by accuracy first. Memory and the cost of a local
 re-solve decide only between arms that are equally accurate.
@@ -544,37 +547,54 @@ stored form (§4b, item 5) can be chosen from them:
 - per run: the arm, the anchor, the input versions, the energy and its
   parts per sweep, and the pruning log.
 
-The stored form is chosen after phase 3, with the result. A compact
+The stored form is chosen after the stage 3 checkpoint, with the result. A compact
 candidate: the path as a shear spline off the probe ray (as in the
 bent-columns trial), plus the τ map as a monotone spline and the offset.
 
 **Local re-solve for the editor.** After a label edit, the columns in the
 edit's blocks and a margin are solved again, with the columns outside the
 margin fixed, at the fine level, with the coarse level fixed unless the
-edit changes it. Phase 4 measures, for each arm, the time of a re-solve at a
+edit changes it. Stage 4 measures, for each arm, the time of a re-solve at a
 column site, and how far the change reaches past the edit.
 
 ## Phases
 
-Each phase ends with views for the user. A checkpoint needs the user's
-reading before the next phase starts.
+The work runs in stages. Each phase ends with views for the user. A
+checkpoint needs the user's reading before the next phase starts.
 
-0. **The shared model.** The chain, the terms, the mean field on the CPU
-   (NumPy reference), the coarse level and its priors on the fine level,
-   and the τ phantoms with the exact tests. Torch on MPS
-   for the same kernels, checked against the reference.
-1. **Arm A** on the fold phantoms, the curved phantom and the fundus box,
-   fine only and coarse to fine.
-2. **Arms B-fwd and B-fb** on the same sites, fine only and coarse to
-   fine. **Arm C** on the same sites, with the contact and open-sulcus
-   phantoms and the grid spacing scan.
-3. **Comparison and checkpoint.** The blind views, the energies, and the
-   measures above. The user decides which arms go on, whether coarse to
-   fine stays, and whether fixed-lag growth or lookahead runs.
-4. **M1S1, V1V2 and the four superblocks** with the arms that go on: the
-   measures, the memory model from measured sizes, and the local re-solve
-   timing.
-5. **Write-up.** A report in `reports/`, and the stored form proposed as a
+**Stage 1: the field form on phantoms** (`docs/plans/flow-field-phantoms.md`).
+Arm C alone, on phantoms only. The phantoms have known geometry, so gaps
+in how the field represents kissing surfaces (contacts, hairpins, the end
+of a gap) show as clear failures. Its checkpoint (F4) decides whether the
+field form goes on as it is, changed, or with chains at hairpins, before
+any later stage starts. The truth adapters under the stop rule, the new
+phantoms and the τ phantoms of stage 1 are reused by every later stage.
+
+**Stage 2: the chain arms on the same phantoms.**
+
+1. **The chain model.** The chain, the terms, the exclusion term, the mean
+   field on the CPU (NumPy reference), and the coarse level with its priors
+   on the fine level. Exact tests on the stage 1 phantoms.
+2. **Arms A, B-fwd and B-fb** on the stage 1 phantoms, fine only and coarse
+   to fine, against arm C's stage 1 results on the same phantoms.
+
+**Stage 3: real data at the fundus box.**
+
+3. **Every arm that goes on**, on the fundus box of the bent-columns trial
+   with its painted labels, fine only and coarse to fine, and arm C with its
+   grid from stage 1.
+4. **Comparison and checkpoint.** The blind views, the energies, and the
+   measures above. The user decides which arms and which representation go
+   on, whether coarse to fine stays, and whether fixed-lag growth or
+   lookahead runs.
+
+**Stage 4: scale and write-up.**
+
+5. **M1S1, V1V2 and the four superblocks** with the arms that go on: the
+   measures, the compressibility measure, the memory model from measured
+   sizes, and the local re-solve timing. Torch on MPS for the kernels that
+   run at this scale, checked against the reference.
+6. **Write-up.** A report in `reports/`, and the stored form proposed as a
    change to `docs/version-2-plan.md` §4b–4d, with the no-overlap rule and
    the signed-distance view in §5c, step 3. The format spec comes with
    its own plan.
