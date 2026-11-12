@@ -119,13 +119,23 @@ and every arm: the top stage's terms (`top_confidence.py`), evaluated at
 points, not per ray. The mirror term is already contact evidence: it looks
 for the column's profile mirrored on the far side.
 
-- **Open sulcus:** two stop sheets with outside medium between them. Each
-  bank's columns end on their own sheet.
-- **Contact:** the two sheets coincide. Columns from both sides end on the
-  same sheet. The contact is a stop set reached from more than one
-  direction.
-- Between them, the sheets come closer by degrees, as a fold and a contact
-  differ only along a continuum (version-2 §4c, step 1).
+The stop set is **one continuous surface**: the pial side of the cortex.
+It never ends. At the bottom of a sulcus it folds back on itself in a
+tight hairpin.
+
+- **Open sulcus:** two parts of the surface face each other with outside
+  medium between them. Each bank's columns end on their own part.
+- **Contact:** the surface is pressed against itself across a slot of zero
+  width. Columns from both sides end on the same sheet, which is two
+  layers of the one surface. The contact is a stop set reached from more
+  than one direction. This is the version-2 theory: every collision is a
+  front meeting itself (§4c, step 1).
+- Between them, the two parts come closer by degrees, as a fold and a
+  contact differ only along a continuum.
+- **Hairpin:** where the surface turns back at the bottom of a sulcus, its
+  curvature is very high, but nothing meets and nothing ends. Columns from
+  the floor and both walls converge toward the hairpin and end on it,
+  roughly along its normal.
 
 No step labels banks, and no column is paired with another. Each column
 only has to stop on the shared set. Which side of a contact a point is on
@@ -168,6 +178,12 @@ The separation term acts only in expectation. So the solver checks the
 chosen configuration for folds and overlaps after every solve, in every
 chain arm.
 
+**No focal point inside the cortex.** Columns converge strongly toward a
+hairpin, but a correct set of columns ends on the stop surface before any
+two meet. Columns that meet inside the cortex mean the map from the roots
+is folded. Every arm checks this after every solve and reports it as an
+error, like a fold.
+
 ### The field form (arm C)
 
 The same unknowns can be held as fields on a grid instead of as chains.
@@ -182,12 +198,21 @@ point would be an integral over the whole field below it.
 - **Non-crossing by form.** Any smooth field gives flow lines that cannot
   cross, so the posterior mean field, or the per-node choices after smooth
   interpolation, give columns that do not cross, whatever the uncertainty.
-  The solver checks only where the field falls to zero or reverses, which
-  makes columns meet at a sink.
-- **Contacts.** The field is smooth except on the stop set. On either side
-  of a contact sheet it points toward the sheet, and it reverses across it.
-  No flow line crosses the sheet, so each point lies on one column and
-  cortex cannot overlap.
+  The solver checks only where the field falls to zero or reverses away
+  from the stop surface, which makes columns meet at a sink.
+- **Contacts.** The field is smooth except on the stop surface. On either
+  side of a contact it points toward the surface, and it reverses across
+  it. No flow line crosses the surface, so each point lies on one column
+  and cortex cannot overlap.
+- **Hairpins.** Near a hairpin, the columns end on the surface roughly
+  along its normal, and the normal turns through about 180° over a
+  distance equal to the hairpin's radius. So the field's direction turns
+  as fast. This is a question of resolution, not a singularity: the field
+  is smooth on the cortex side wherever the grid resolves the radius. The
+  natural chart there is the stop surface itself (position on the surface
+  and distance from it), in which a hairpin is only a strongly curved part
+  of a smooth surface. `bent_phantom.py` uses the special case, polar
+  coordinates about the slot's edge.
 - **The grid is adaptive.** The grid holds how the geometry changes (the
   bends and the speed), not the image. In the smooth interior of a bank
   that changes over fractions of a millimetre or more, so the grid there
@@ -200,17 +225,59 @@ point would be an integral over the whole field below it.
   column from every root, at any density: the columns are not snapped to
   the grid. The contrast match samples the image at full resolution along
   the interpolated τ, so the thin bands are matched at image resolution.
-- **A cut at stop sheets.** The stop field stays at image resolution. The
-  field reverses across a contact sheet, so it is interpolated on each
-  side of the sheet separately, never across it. A grid cell that the
-  sheet passes through holds values for each side. Without the cut, the
-  reversal would be smeared over a whole cell.
+- **A cut at the stop surface.** The stop field stays at image resolution.
+  Each grid cell holds one set of values for each connected region of
+  cortex inside it, with the stop surface as the divider, and the field is
+  never interpolated across the surface. On a flat contact a cell has two
+  regions, one for each layer of the surface. At the tip of a hairpin it
+  has one, because the cortex wraps round the tip without a break. Just
+  above the tip of a fused sulcus it has two again. The rule needs no
+  special case at the tip. Without the cut, the reversal at a contact
+  would be smeared over a whole cell.
+- **Fallback: chains at hairpins.** If the spacing scan shows that the
+  field fails at hairpins even at image resolution, the field is used in
+  bank interiors and chains in a tube round each hairpin. The cost is a
+  seam where chain ends must match the field's flow lines. This is not
+  built unless the scan calls for it.
 - **Per-column uncertainty** comes from samples: draw fields from the node
   distributions, smooth them, integrate the columns, and take the spread
   of each column's levels and top.
 - **Storage.** The field and the offsets on the start surface encode every
   column. The integrator and its step become part of the spec, and must be
   deterministic.
+
+### Adaptive refinement and coarsening (arm C)
+
+The grid is an octree. It is refined where it cannot follow the data and
+coarsened where a parent cell already describes its children:
+
+- **Indicators.** The hierarchical surplus: the difference between a
+  cell's solution and the value interpolated from its parent. A large
+  surplus keeps or refines the cell, a small one coarsens it. And the local
+  residual: the part of the contrast, alignment and stop terms that a cell
+  cannot reduce. Both are weighted by their effect on the columns: how far
+  the columns or the stops would move. An error where no column passes
+  does not count.
+- **Acceptance by evidence.** More cells always fit the data better, so a
+  refinement is kept only if the finer model's free energy (a bound on the
+  evidence) is better than the coarser one's. This penalises detail that
+  only fits noise, with no hand-set threshold. It needs a smoothness prior
+  that means the same at every spacing: FEM weights with a mass matrix,
+  so the correlation length is physical (the fused-sulci report).
+- **Limits.** No cell is finer than the image: below image resolution, the
+  stop surface's sub-voxel position comes from the stop probability. Cells
+  near a hairpin may refine down to that limit, and the acceptance test
+  stops them there.
+- **Hysteresis.** The threshold to refine is higher than the threshold to
+  coarsen, so a cell does not change back and forth between sweeps.
+- **2:1 balance.** Neighbouring cells differ by at most one level, so
+  interpolation stays consistent.
+- **Moving the distributions.** A refined cell's children take the
+  parent's distribution as their prior. Coarsened children give the parent
+  their combined distribution.
+- **Determinism.** The marking does not depend on the order of updates, so
+  the same input gives the same grid. After a label edit, only the region
+  round the edit is marked again.
 
 ### Inference
 
@@ -351,8 +418,14 @@ and the user's reading is recorded before the arms are named.
 - **The grid spacing scan (arm C):** on the curved phantom and the fundus
   box, arm C at several uniform spacings, from 0.6 mm down to image
   resolution, then the adaptive grid. For each spacing: the path error,
-  the error at the tight fundus, the stops against the known sheets, and
-  where the error starts to grow. This sets the spacing for D6.
+  the error at the hairpin, the stops against the known surface, and
+  where the error starts to grow. The uniform spacings are the reference
+  for the adaptive grid: does it match the finest uniform grid's columns
+  with a fraction of the nodes, and does the evidence test stop refining
+  before the residual reaches the noise level? This is the evidence for
+  D6, and for the fallback (chains at hairpins).
+- **Focal points:** the count and the places where columns meet inside the
+  cortex, per arm.
 - **Growth only:** steps to settle each offset; how far B-fwd's columns
   move when B-fb's backward sweeps run.
 - **Cost:** time and peak memory per arm, and a memory model for a 50 µm
@@ -370,12 +443,17 @@ and the user's reading is recorded before the arms are named.
   layers do not shift): no level shifts across the border.
 - A graph with two components: the solver reports the defect and stops.
 - A contact phantom with a known contact sheet, and an open-sulcus phantom
-  with a known gap: every arm puts the stops on the known sheets, and no
+  with a known gap: every arm puts the stops on the known surface, and no
   arm's output has overlapping cortex.
 - Arm C on a straight phantom gives the same columns as the chains.
-- Arm C on the contact phantom: no flow line crosses the known sheet, and
-  the field on each side does not depend on the field on the other side
-  (the cut).
+- Arm C on the contact phantom: no flow line crosses the known surface,
+  and the field in each connected region of a cell does not depend on the
+  other regions (the cut).
+- On a phantom with a hairpin of known radius, every arm's columns end on
+  the hairpin, with no focal point inside the cortex. Arm C's cells at the
+  tip hold one region, and those above a fused slot hold two.
+- Adaptive refinement on a straight phantom stays at the coarsest level,
+  and on noise alone the evidence test refuses every refinement.
 - On a straight phantom with straight true columns, no arm bends them.
 - On the same phantom, fine only and coarse to fine reach the same columns
   and the same energy.
@@ -475,9 +553,9 @@ reading before the next phase starts.
 - **D4. The τ step** Δτ, and the number of candidates kept per node.
 - **D5. The coarse level.** The cell size (the plan assumes the top stage's
   2 voxels), the coarse τ step, and how wide the coarse priors are.
-- **D6. The field grid** (arm C): the coarse spacing in bank interiors,
-  and the rule for refining near tight folds. The spacing scan gives the
-  evidence.
+- **D6. The field grid** (arm C): the coarsest spacing, the indicators'
+  weighting, and the hysteresis between refining and coarsening. The
+  spacing scan gives the evidence.
 
 ## Not in this plan
 
