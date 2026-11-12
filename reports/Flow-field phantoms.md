@@ -23,8 +23,8 @@ Table 1. The PR 4 matrix and the state of each run (0.32 mm stand-in stage).
 | ckiss_smooth | oracle | 0 | top | done at 0.32 mm (stand-in) |
 | ckiss_sharp | oracle | 0 | top | done at 0.32 mm (stand-in) |
 | ckiss_smooth | oracle | 0 | shiftB (R6) | done at 0.32 mm (stand-in) |
-| ckiss_smooth | oracle | 0 | anchor (Q6) | running at 0.32 mm |
-| ckiss_smooth | oracle | 0 | coarse first (Q6) | running at 0.32 mm |
+| ckiss_smooth | oracle | 0 | anchor (Q6) | done at 0.32 mm (stand-in; 2566 s, 2.33 GB) |
+| ckiss_smooth | oracle | 0 | coarse first (Q6) | done at 0.32 mm (stand-in; 5152 s, 2.42 GB) |
 | ckiss_smooth | oracle | 0 | top, 0.16 mm | running since 06:14 (heavy run) |
 | all four ckiss phantoms | image | 0 and 1 | top | not run: time |
 | all four ckiss phantoms | oracle | 1 | top | not run: time |
@@ -170,7 +170,23 @@ the speed prior, not at the grid.
 
 ### Question 6: the origin of τ
 
-**No result yet.** The anchor stand-in and the coarse-first stand-in are running.
+The plan expects the same levels after one constant, and fewer sweeps with the top origin.
+
+Table 8. Question 6 (0.32 mm stand-in, ckiss_smooth, oracle, noise 0).
+
+| run | sweeps per width (fine grid) | other sweeps | result |
+|---|---|---|---|
+| top origin | 59 / 120 / 99 (278) | — | reference |
+| anchor origin | 60 / 97 / 55 (212) | — | τ_anchor = τ_top + c, c = 1.31, over 151,687 nodes moving in both runs: \|residual\| 0.0028 / 0.0075 / 0.30 (median / p90 / max). Level points after c: 0.0069 / 0.030 / 0.19 mm apart (16,625 of 26,181 found in both runs) |
+| top origin, coarse grid first | 68 / 177 / 101 (346) | 0.64 mm solve: 189 / 60 / 20 | CONTACT stop error median 0.34 / 0.26 mm (bank A / B), against 0.27 / 0.17 without the coarse grid; direction against ∇τ median 5.3°, against 1.9° |
+
+- The levels agree after one constant. This supports R4.
+- The anchor run needs fewer sweeps than the top run (212 against 278). The plan expects the opposite. This does not support the plan's claim that the top origin converges faster.
+- The coarse grid first needs more sweeps on the fine grid (346 against 278), and ends at a different field. So the warm start from 0.64 mm does not help here. Every width of every stand-in ended by the free-energy tolerance.
+- The anchor run and the coarse run were measured from the roots (commit 518aca3 for the coarse run; the anchor run was re-measured).
+
+![Q6: the anchor run against the top run](figures/flow-field-phantoms/kiss_q6_ckiss_smooth_oracle_0_u0.32.png)
+
 
 - The plan's coarse grid is an initial field only, not a prior (CD-9). So the sweep
   comparison measures a warm start. The 0.64 mm first stage carries a different FEM
@@ -221,7 +237,7 @@ Evidence for every row: 0.32 mm stand-in only; 0.16 mm pending. R8–R10 are not
 | R1 stop as a node state | stops on the own side of the slot plane (≥ 0.991); no cortex node stopped at the open slot | CONTACT stops early by 0.12–0.29 mm (median); PIA 0.08–0.09 mm | not decided: the stop error and the sheet are at the scale of the spacing; no image run |
 | R2 speed to zero at the stop, τ jumps to τ_top | — | the integrator's jump −τ_arrival is positive at all stops: 2672 of 2672 (smooth; median 0.33), 2994 of 2994 (sharp), 2581 of 2581 (shiftB), also at the pia | seen, with a caveat: τ at the q_stop = 0.5 crossing comes from the last moving nodes, up to one spacing below the stop (masked interpolation). It can measure the integrator, not the solver's jump state. A likely cause is that of CD-12. The provisional change for R2 (#208) failed again; its diagnosis agrees: the column jump is −τ_arrival from the masked interpolation, and the stop boundary sits beyond the pia because of the entropy of the moving candidates |
 | R3 jump prior near zero | — | as R2 | seen, with the caveat of R2 |
-| R4 τ_top = 0 as origin | — | — | not decided: Q6 pending |
+| R4 τ_top = 0 as origin | the anchor run gives the same levels after one constant (\|residual\| median 0.003, p90 0.0075) | the top origin does not need fewer sweeps (278 against 212 with the anchor); the coarse grid first needs more (346) | different levels: not seen. Sweeps: the top origin needs 31 % more than the anchor (278 against 212); whether this is "many more sweeps" is for the user |
 | R5 no overlap | overlap 0; contact crossings 0 on the true paths | contact crossings 1, 1, 3, all bank B. Each crossing column starts at its root in bank B, far from the fundus (local y 4.2–6.4 mm): not a start effect. Four of the five end STOPPED 0.000–0.010 mm past the far face of the fused slot (g = 0.02 mm): they overshoot the contact by less than 1/16 voxel. The fifth (shiftB) ends STOPPED inside the slot at local z = 0.74 mm, where g = 0.092 mm (the window of the gap's end): 0.024 mm past the slot plane, 0.068 mm before the far face. No crossing column runs on into bank A | seen (count above zero), small |
 | R6 no interpolation across the stop boundary | bank A changes less than bank B | bank A changes when only bank B changes (Table 7) | seen |
 | R7 non-crossing, sinks checked | sinks 0, sink columns 0, focal points 0, overlap 0 | reversed edges 3, 3, 13 (their places against the stop set are not checked here) | not seen for sinks, focal points and overlap at this grid |
