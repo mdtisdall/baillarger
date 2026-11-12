@@ -93,6 +93,13 @@ anchor fixes τ everywhere. The solver checks that the graph is connected.
 A disconnected part is a defect to report and repair, not a case for a
 second anchor. The speed prior's typical value fixes the unit of τ.
 
+**The top as the origin (D7).** Every complete column ends at the same
+level, τ_top (*Stopping and contacts*). So the top itself can fix the
+origin, τ_top = 0, in place of a chosen point on one column. The pia is
+the one level present almost everywhere, and columns that stop early
+(excisions, abrasion) are accounted for by their jumps. This is the plan's
+assumption. The anchor column stays as the fallback.
+
 ### The chain of each column
 
 Each column is a chain of nodes, one at each τ step τ_k = k·Δτ. The state
@@ -153,6 +160,28 @@ overlap). This replaces the overlap view of version-2 §5c, step 3
 ("neither is forced to meet the other"). The chains need an exclusion term
 for this (below). The field form excludes overlaps by its form.
 
+**The top level and the jump.** All complete columns end at one level of
+τ, τ_top, and no column passes it: τ ≤ τ_top everywhere in the cortex.
+Where a column stops, τ jumps from its value at arrival to τ_top. The jump
+is the part of the laminar sequence that is missing:
+
+- **zero** at a pia or a contact, where the column ends with its whole
+  sequence. Both sides of a contact have a zero jump;
+- **positive** where the top layers are missing: an excision, or tissue
+  where the top surface was abraded away (user, 2026-11-11: a realistic
+  case that fits the model). A region of positive jumps most likely shows
+  such damage. A zero-thickness top is the largest jump;
+- **never negative.**
+
+The jump has a prior that is almost always zero. A positive jump is an
+expensive explanation, chosen only where the stop evidence pays for it, so
+the solver cannot hide a misfit in it. The jump and its probability are
+an output: a map of missing laminae, and review items where a probable
+jump has weak evidence of damage. Complete columns that end at visibly
+different levels with an intact top would show as small jumps with no
+damage in the image. That is a sign that the model is wrong there, and the
+review separates it from damage.
+
 ### The energy
 
 All the terms are log probabilities, as in the top solver. Each term is a
@@ -168,7 +197,7 @@ column (the steps grown so far) is defined, which growth needs.
 | Speed prior | one column, and neighbours | The speed is smooth along τ and across neighbours, and near a typical value. Where the contrast is flat, this term alone sets the speed. |
 | Separation | neighbours at equal τ | The two positions keep their order along the edge between the roots. A crossing has a high cost. |
 | Start | the "not begun" → position transition | The column's first position is its fixed start point. |
-| Stop | the position → "ended" transition | The stop field at the last position. |
+| Stop | the position → "ended" transition | The stop field at the last position, and the prior on the jump τ_top − τ at the stop. |
 | Exclusion | any two columns at the same point | The expected occupancy of space by the columns, on a grid. Occupancy by two columns whose roots are far apart on the mesh has a high cost. This is what keeps the banks from overlapping, because columns of opposite banks are not neighbours on the mesh. |
 
 The weights come from data where they can (σ from the spread of the
@@ -190,23 +219,52 @@ error, like a fold.
 ### The field form (arm C)
 
 The same unknowns can be held as fields on a grid instead of as chains.
-Each grid node holds a distribution over candidates of **τ and the column
-direction**. A local consistency term ties them: the speed along the
-direction equals 1/|∇τ| in that direction. The columns are the flow lines
-of the direction field, from each column's start. With τ stored at the
-node, every term is between adjacent grid nodes, so the mean field is the
-same kind of problem as the tops. With only a velocity stored, the τ at a
-point would be an integral over the whole field below it.
+Each grid node is in one of two states:
 
-- **Non-crossing by form.** Any smooth field gives flow lines that cannot
-  cross, so the posterior mean field, or the per-node choices after smooth
-  interpolation, give columns that do not cross, whatever the uncertainty.
-  The solver checks only where the field falls to zero or reverses away
-  from the stop surface, which makes columns meet at a sink.
-- **Contacts.** The field is smooth except on the stop surface. On either
-  side of a contact it points toward the surface, and it reverses across
-  it. No flow line crosses the surface, so each point lies on one column
-  and cortex cannot overlap.
+- **moving:** a candidate τ and column direction. A local consistency term
+  ties them: the speed along the direction equals 1/|∇τ| in that
+  direction;
+- **stopped:** speed 0 and τ = τ_top.
+
+Each node holds a distribution over its moving candidates and the stopped
+state. The columns are the flow lines of the direction field, from each
+column's start. A column that reaches a stopped node ends there. So the
+**top probability at a point is the probability that its node is
+stopped**, and the stop surface is the boundary between moving and stopped
+nodes. It is solved in the same mean field as everything else, not located
+separately. The stop field is the data term on the stopped state. With τ
+stored at the node, every term is between adjacent grid nodes, so the mean
+field is the same kind of problem as the tops. With only a velocity
+stored, the τ at a point would be an integral over the whole field below
+it.
+
+**The speed jumps to zero at the top.** It does not decline smoothly. A
+smoothly declining speed would let the columns reach the top only as
+τ → ∞, and would squeeze the last levels into a vanishing distance. So
+the speed stays nonzero up to the boundary and is zero beyond it, and τ
+jumps to τ_top there (*The top level and the jump*). The integrator stops
+each column where it crosses the boundary, at a sub-cell position from the
+stop probabilities.
+
+- **Non-crossing by form.** A field that is smooth in the moving region
+  gives flow lines that cannot cross, so the posterior mean field, or the
+  per-node choices after smooth interpolation, give columns that do not
+  cross, whatever the uncertainty. The solver checks only where a moving
+  node's field falls toward zero or reverses away from the stop boundary,
+  which makes columns meet at a sink.
+- **The cases of the stop surface.** At an open sulcus the stopped region
+  is the outside medium. At a contact it is a stopped sheet thinner than
+  a cell, reached from both sides: the columns on each side flow into it
+  and end, nothing crosses it, so each point lies on one column and cortex
+  cannot overlap. At a hairpin the stopped sheet folds back. At an
+  excision or abraded tissue the stopped region begins below τ_top, with
+  a positive jump.
+- **No interpolation across the stop boundary.** The field is never
+  interpolated between a moving and a stopped node, or between the moving
+  nodes on the two sides of a thin stopped sheet. The boundary's position
+  is part of the solved state. At a contact the stopped sheet is thinner
+  than a cell, so the octree refines there until the sheet is resolved,
+  below a voxel if needed, with those cells marked prior-shaped.
 - **Hairpins.** Near a hairpin, the columns end on the surface roughly
   along its normal, and the normal turns through about 180° over a
   distance equal to the hairpin's radius. So the field's direction turns
@@ -228,15 +286,6 @@ point would be an integral over the whole field below it.
   column from every root, at any density: the columns are not snapped to
   the grid. The contrast match samples the image at full resolution along
   the interpolated τ, so the thin bands are matched at image resolution.
-- **A cut at the stop surface.** The stop field stays at image resolution.
-  Each grid cell holds one set of values for each connected region of
-  cortex inside it, with the stop surface as the divider, and the field is
-  never interpolated across the surface. On a flat contact a cell has two
-  regions, one for each layer of the surface. At the tip of a hairpin it
-  has one, because the cortex wraps round the tip without a break. Just
-  above the tip of a fused sulcus it has two again. The rule needs no
-  special case at the tip. Without the cut, the reversal at a contact
-  would be smeared over a whole cell.
 - **Fallback: chains at hairpins.** If the spacing scan shows that the
   field fails at hairpins even at image resolution, the field is used in
   bank interiors and chains in a tube round each hairpin. The cost is a
@@ -383,7 +432,7 @@ Only where the labels are correct or were repaired.
 | Site | Truth | What it tests |
 |---|---|---|
 | Fold phantoms (`fold_phantoms.py`) and the curved fundus phantom (`bent_phantom.py`) | Known true columns and levels | Path error; exact recovery |
-| τ phantoms, the slab, sub-voxel fundi, kiss with rounded gap ends (new, stage 1) | Known offsets, speeds, stops and columns | The warp alone; the anchor; flat contrast; an areal border; kissing surfaces |
+| τ phantoms, the slab, sub-voxel fundi, the connected kiss, the abraded phantom (new, stage 1) | Known offsets, speeds, stops, jumps and columns | The warp alone; the origin of τ; flat contrast; an areal border; kissing surfaces; missing laminae |
 | The fundus box of the bent-columns trial (true vertex 12182770, hemisphere R, radius 5 mm), with the painted labels | The user's reading of the fundus; the failing stretch | The direction failure; the sawtooth |
 | M1S1 (`prototypes/data/M1S1_points_full0.json`, 23 points) | Marked points | The profile split; tops at a contact |
 | V1V2 banks (`prototypes/data/V1V2_banks_points_full0.json`) | Marked points | A striate border |
@@ -442,6 +491,9 @@ and the user's reading is recorded before the arms are named.
   D6, and for the fallback (chains at hairpins).
 - **Focal points:** the count and the places where columns meet inside the
   cortex, per arm.
+- **Jumps:** the map of jumps at the stops, with their probability, against
+  the known missing depth on the abraded phantom, and their regions at the
+  real sites, read with the user.
 - **Prior-shaped cells (arm C):** where they are, and the spread of the
   columns through them.
 - **Compressibility of the unfolded image.** The columns' samples at each τ
@@ -487,11 +539,14 @@ and the user's reading is recorded before the arms are named.
   arm's output has overlapping cortex.
 - Arm C on a straight phantom gives the same columns as the chains.
 - Arm C on the contact phantom: no flow line crosses the known surface,
-  and the field in each connected region of a cell does not depend on the
-  other regions (the cut).
+  the stopped sheet lies on it, and the moving field on one side does not
+  depend on the other side (no interpolation across the sheet).
 - On a phantom with a hairpin of known radius, every arm's columns end on
-  the hairpin, with no focal point inside the cortex. Arm C's cells at the
-  tip hold one region, and those above a fused slot hold two.
+  the hairpin, with no focal point inside the cortex. Arm C's stopped
+  sheet follows the hairpin round its tip.
+- On a phantom with an abraded patch (the top layers removed to a known
+  depth), the jumps there match the missing depth, and the jumps elsewhere
+  are zero.
 - Adaptive refinement on a straight phantom stays at the coarsest level,
   and on noise alone the evidence test refuses every refinement.
 - A hairpin phantom with a radius below one voxel: every arm's columns end
@@ -616,6 +671,8 @@ phantoms and the τ phantoms of stage 1 are reused by every later stage.
 - **D6. The field grid** (arm C): the coarsest spacing, the indicators'
   weighting, and the hysteresis between refining and coarsening. The
   spacing scan gives the evidence.
+- **D7. The origin of τ.** The top level (τ_top = 0, the plan's
+  assumption) or an anchor column.
 
 ## Not in this plan
 

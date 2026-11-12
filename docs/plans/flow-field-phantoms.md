@@ -42,19 +42,26 @@ Each question names the phantoms that answer it (*Phantoms*).
    folds back in a hairpin across the slot. With a sharp change it turns
    through corners, and columns can graze the gap's end face. What does
    the field do in each case?
-4. **The cut on an uncertain surface.** The cut rule needs a definite
-   surface to count the regions of cortex in each cell, but the stop
-   surface is a probability. Is a cut on the most probable surface enough,
-   or must the region be part of each node's state (D-F3)?
+4. **The stop as a state.** Each node is moving or stopped, and the stop
+   surface is the boundary between them, solved with the flow
+   (`column-solver.md`, *The field form*). Does the stopped region take the
+   right form in each case: the outside medium at the open slot, a sheet
+   thinner than a cell at the fused contact, and a sheet that follows the
+   hairpin round its tip? Does the octree resolve the thin sheet, and is
+   the spread of the stops calibrated near the contact? On the abraded
+   phantom, do the jumps match the missing depth, and are they zero
+   elsewhere?
 5. **τ at a contact.** Both banks reach the top level at the contact, so
    the contact is one level of τ. Does the solved τ agree there, when the
    banks differ in thickness (the connected kiss and the curved fundus:
    2.5 and 1.2 mm)? Does each bank get its own speed?
-6. **The anchor across a fold.** In the connected kiss phantom, as in a
-   real brain, the banks' WM is connected under the fundus, so one anchor
-   reaches both banks. The path between the two sides of the contact runs
-   round the fundus, through the whole fold. Does τ agree across the
-   contact, and how many sweeps does the alignment take, with and without
+6. **The origin of τ across a fold.** In the connected kiss phantom, as
+   in a real brain, the banks' WM is connected under the fundus. The plan
+   takes the top level as the origin of τ (`column-solver.md`, D7), so
+   every complete column is tied to τ_top at its own stop. Run it both
+   ways: with the top as the origin, and with one anchor column, whose
+   reach to the far side of the contact runs round the whole fold. Do both
+   give the same levels? How many sweeps does each take, with and without
    the coarse level?
 7. **Grid.** On every phantom: the spacing scan from 0.6 mm down to image
    resolution, then the adaptive octree. Does the octree match the finest
@@ -106,6 +113,7 @@ The adapters are new code (phase F0), with exact tests.
 | Curved fundus (tA 2.5, tB 1.2, g 0.16), and g below one voxel | `bent_phantom.curved` | 2, 5 |
 | Concentric `kiss`, `kiss_flat` (optional) | `fold_phantoms.standard` | whether the shared stop surface alone aligns τ between banks with separate WM |
 | τ phantom: layers with known offsets and speeds, a flat band, an areal border | new | the warp alone (`column-solver.md`, exact tests) |
+| Abraded phantom: the curved fundus with the top layers removed to a known depth over a patch of one bank, outside medium in their place | new | 4: jumps |
 
 Every phantom is made with the noise of `fold_phantoms.make` and also
 without noise. The oblique rotation stays, so nothing is aligned with the
@@ -128,8 +136,11 @@ noise level:
   inside the cortex; places where the field falls to zero or reverses away
   from the stop surface; overlapping cortex (must be none by form; a count
   above zero is a defect).
-- **The cut:** the count of regions per cell against the truth, near the
-  contact, the hairpin and the gap's end.
+- **The stop boundary:** its position against the true stop surface near
+  the contact, the hairpin and the gap's end; the thickness of the
+  stopped sheet at the contact; where the octree refines to resolve it.
+- **Jumps:** the jump at each stop, against the missing depth on the
+  abraded phantom and against zero elsewhere.
 - **Grid:** nodes per arm of the spacing scan; where the octree refines
   and coarsens; prior-shaped cells.
 - **Uncertainty:** the spread of the stops and levels from sampled fields,
@@ -142,7 +153,11 @@ noise level:
   levels are planes, and the octree stays at its coarsest level.
 - With noise alone (no structure), the evidence test refuses every
   refinement.
-- Moving the anchor changes every τ by one constant and nothing else.
+- With an anchor column as the origin, moving the anchor changes every τ by
+  one constant and nothing else. With the top as the origin, every
+  complete column's stop is at τ_top.
+- On the abraded phantom without noise, the jumps match the missing depth
+  to within one τ step, and are zero elsewhere.
 - On the connected kiss without noise: no flow line crosses the fused
   contact, each bank's stops lie on it, and no cortex overlaps.
 - On a fundus with g below one voxel, without noise: the columns end on
@@ -158,21 +173,22 @@ Each phase ends with views for the user.
 
 - **F0. Truth and phantoms.** The truth adapters under the stop rule, the
   new phantoms (slab, fundus with sub-voxel g, the connected kiss and its
-  sharp variant, τ phantom), and their exact tests.
-- **F1. The field solver core.** A uniform grid first. (τ, direction)
-  candidates per node, the terms of `column-solver.md` written locally,
-  the stop field, the cut on the most probable stop surface, the mean
-  field, the integrator and the checks. NumPy reference on the CPU. Slab
+  sharp variant, the abraded phantom, τ phantom), and their exact tests.
+- **F1. The field solver core.** A uniform grid first. The moving
+  (τ, direction) candidates and the stopped state per node, the terms of
+  `column-solver.md` written locally, the stop field as the data term on
+  the stopped state, the jump and its prior, no interpolation across the
+  stop boundary, the mean field, the integrator and the checks. NumPy reference on the CPU. Slab
   and crowns.
 - **F2. Kissing surfaces.** The connected kiss and its sharp variant:
   questions 1, 3, 4, 5 and 6. Optional: the concentric kiss, to see whether
   the contact alone aligns τ between banks with separate WM. Real brains do
   not need this, because their WM is connected, but it shows how strongly
   the contact ties the banks.
-- **F3. Hairpins and the grid.** The fundus over its g values and the
-  curved fundus: question 2, then the spacing scan and the adaptive
-  octree on every phantom (question 7), and calibration with noise
-  (question 8).
+- **F3. Hairpins, jumps and the grid.** The fundus over its g values and
+  the curved fundus: question 2. The abraded phantom: the jumps
+  (question 4). Then the spacing scan and the adaptive octree on every
+  phantom (question 7), and calibration with noise (question 8).
 - **F4. Checkpoint.** A short report of the gaps found and what each
   needs. The user decides whether the field form goes on to the column
   solver's later stages as it is, changed, or with the fallback of chains
@@ -183,9 +199,11 @@ need at scale.
 
 ## Decisions for the user
 
-- **D-F3. The cut on an uncertain surface.** Cut on the most probable stop
-  surface and solve again (the plan's first form), or make the region part
-  of each node's state. Question 4 gives the evidence.
+None are open in this plan. D-F1 is decided (*Truth under the stop rule*).
+The connected kiss phantom removed the need for D-F2. The stopped state
+removed the need for D-F3: the stop surface is solved with the flow, so no
+cut on a fixed surface is needed. The column solver plan's D7 (the origin
+of τ) is tested here, in question 6.
 
 ## Not in this plan
 
