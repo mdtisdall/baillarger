@@ -603,3 +603,144 @@ def test_anchor_origin_contract() -> None:
     assert np.nanmax(f.tau) > 0.0  # no upper bound away from the anchor
     assert all(t["jump"] == 0.0 for t in log["terms"])
     assert np.all(np.isnan(e["p_jump"]))
+
+
+# ---------------------------------------------------------------- the change for R11
+#
+# The provisional change for R11 (solve(recentre_every_sweep=True)): the τ candidates
+# move to each node's prediction in every sweep. The tolerances below were fixed
+# before the first run of these tests.
+
+R11_EXACT = 1e-12  # the carry-over is an exact move on the τ lattice
+R11_PROFILE = 1e-9  # the profile lines read after a move against direct sampling
+R11_TRUTH_STEPS = 2.0  # the solved τ against the truth, in Δτ (the brief's)
+R11_INIT_STEPS = 4.0  # the truth differs from the initial τ by more than this, in Δτ
+
+
+def _r11_state(k: np.ndarray) -> tuple[Any, ...]:
+    """A full candidate state of 3 nodes round c (one at the top), its lines and a
+    random q."""
+    s = T.DEFAULTS
+    rng = np.random.default_rng(3)
+    n = 3
+    c = np.array([-0.913, -1.5, -0.021])
+    p = rng.normal(size=(n, 3))
+    p /= np.linalg.norm(p, axis=1, keepdims=True)
+    tau, d, valid = FTM.moving_candidates(c, p, s)
+    lb = FTM.level_base(c, s)
+    vols = (rng.normal(size=(12, 12, 12)), rng.normal(size=(12, 12, 12)))
+    nodes = np.full((n, 3), 5.5) + rng.normal(0.0, 0.3, (n, 3))
+    s_ref = np.array([1.0, 0.8, 1.25])
+    lines = FTM.profile_lines(
+        nodes, np.minimum(c, T.TAU_TOP), d[:, : s.n_dir], s_ref, lb, vols
+    )
+    q = np.where(valid, rng.random(valid.shape), 0.0)
+    q_stop = np.array([0.0, 0.2, 0.6])
+    q *= ((1.0 - q_stop) / q.sum(1))[:, None]
+    K = tau.shape[1]
+    line, off = FTM.line_slots(s.n_tau, s.n_dir)
+    st = FTM.TermState(
+        cand_tau=tau,
+        cand_dir=d,
+        valid=valid,
+        q=q,
+        q_stop=q_stop,
+        u=np.zeros(n),
+        s_ref=s_ref,
+        profiles=lines,
+        level_base=lb,
+        stop_log_odds=np.zeros(n),
+        tensor_dir=p,
+        coherence=np.ones(n),
+        prof_line=np.broadcast_to(line, (n, K)).copy(),
+        prof_off=np.broadcast_to(off, (n, K)).copy(),
+    )
+    ci = np.broadcast_to(np.arange(K, dtype=np.int16), (n, K)).copy()
+    return st, ci, c, d[:, : s.n_dir].copy(), lb.copy(), nodes, vols
+
+
+def test_r11_slide_with_no_step_is_the_width_state() -> None:
+    s = T.DEFAULTS
+    st, ci, c, dirs, lb, _, _ = _r11_state(np.zeros(3, np.int64))
+    z = np.zeros(3, np.int64)
+    new, ci2 = MF.slide_tau(st, ci, z, z, np.minimum(c, 0.0), dirs, lb, s)
+    assert np.array_equal(new.cand_tau, st.cand_tau)
+    assert np.array_equal(new.cand_dir, st.cand_dir)
+    assert np.array_equal(new.valid, st.valid)
+    assert np.array_equal(new.q, st.q)
+    assert np.array_equal(new.level_base, st.level_base)
+    assert np.array_equal(ci2, ci)
+
+
+def test_r11_slide_moves_mass_on_the_lattice_and_keeps_the_profiles() -> None:
+    s = T.DEFAULTS
+    st, ci, c, dirs, lb, nodes, vols = _r11_state(np.zeros(3, np.int64))
+    c_w = np.minimum(c, T.TAU_TOP)
+    pr_st, pr_ci, _ = MF.prune(st, ci, s)
+    k_new = np.array([3, -2, 0])
+    # the tau_steps rule: the nearest step, not above the top
+    pred = c_w + np.array([3.4, -1.6, 2.2]) * s.dtau
+    assert np.array_equal(MF.tau_steps(pred, c_w, s), k_new)
+    k_old = np.zeros(3, np.int64)
+    mass0 = np.where(pr_st.valid, pr_st.q, 0.0).sum(1)
+    old_tau = pr_st.cand_tau.copy()
+    old_dir = pr_st.cand_dir.copy()
+    old_q = pr_st.q.copy()
+    old_ok = pr_st.valid.copy()
+    new, _ = MF.slide_tau(pr_st, pr_ci, k_old, k_new, c_w, dirs, lb, s)
+    assert np.allclose(
+        np.where(new.valid, new.q, 0.0).sum(1), mass0, rtol=0, atol=1e-15
+    )
+    assert np.all(new.q[~new.valid] == 0.0)
+    assert np.all(new.cand_tau[new.valid] <= T.TAU_TOP)
+    for i in range(3):
+        lo = new.cand_tau[i][new.valid[i]].min()
+        hi = new.cand_tau[i][new.valid[i]].max()
+        for j in np.flatnonzero(old_ok[i]):
+            t = float(np.clip(old_tau[i, j], lo, hi))
+            hit = (
+                (np.abs(new.cand_tau[i] - t) < R11_EXACT)
+                & (np.abs(new.cand_dir[i] - old_dir[i, j]).max(1) < R11_EXACT)
+                & new.valid[i]
+            )
+            assert hit.sum() == 1, (i, j)
+            assert new.q[i, hit][0] >= old_q[i, j] - R11_EXACT
+    # the lines of the width give the profiles at the moved τ and levels
+    ids = np.repeat(np.arange(3), new.K)
+    slots = np.tile(np.arange(new.K), 3)
+    got = FTM.candidate_profile_rows(new, ids, slots).reshape(3, new.K, -1, 2)
+    want = FTM.candidate_profiles(
+        nodes, new.cand_tau, new.cand_dir, new.s_ref, new.level_base, vols
+    )
+    ok = new.valid
+    assert np.abs(got - want)[ok].max() < R11_PROFILE
+
+
+def test_r11_change_is_off_by_default() -> None:
+    p = inspect.signature(MF.solve).parameters["recentre_every_sweep"]
+    assert p.default is False
+    _, _, _, _, log = slab_run()
+    assert log["run"]["recentre_every_sweep"] is False
+    assert log["tau_moves"] == []
+
+
+@functools.cache
+def slab_run_r11() -> Solved:
+    """The tiny slab of the CD-13 tests (343 nodes, max_sweeps 60), with the change."""
+    ph = FTR.build_phantom("slab", FEATS, noise=0.0, shape=TINY_SHAPE)
+    grid = FG.UniformGrid(ph.shape, SPACING_MM)
+    s = replace(T.DEFAULTS, max_sweeps=TINY_MAX_SWEEPS)
+    field, extras, log = MF.solve(
+        grid, FO.oracle_inputs(ph), ph.image["noise_sd"], s, recentre_every_sweep=True
+    )
+    return ph, grid, field, extras, log
+
+
+def test_r11_free_energy_does_not_rise_on_the_slab() -> None:
+    """The plan's rule with the change: F after each sweep is not above F after the
+    pruning of the sweep before, across the moves of τ."""
+    _, _, _, _, log = slab_run_r11()
+    assert log["run"]["recentre_every_sweep"] is True
+    assert log["free_energy_rises"] == []
+    assert log["defects"] == []
+    json.dumps(log, allow_nan=True)
