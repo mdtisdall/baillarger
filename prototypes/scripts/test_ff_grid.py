@@ -271,9 +271,46 @@ def test_edge_weights_interior_edge():
     assert w2[e2] == pytest.approx(8.0 / 3, rel=1e-12)
 
 
-def test_face_weights():
-    assert np.allclose(G.face_weights_vox(G.UniformGrid((9, 9, 9), 0.16)), 1.0)
-    assert np.allclose(G.face_weights_vox(G.UniformGrid((9, 9, 9), 0.32)), 4.0)
+def _old_face_weights(g):
+    """The face weight before the fix: (edge length / VOXEL_MM)² on every edge."""
+    return (np.linalg.norm(G.edge_vectors_mm(g), axis=1) / G.VOXEL_MM) ** 2
+
+
+@pytest.mark.parametrize(
+    "shape,h", [((9, 9, 9), 0.16), ((9, 9, 9), 0.32), ((30, 2, 2), 0.16), ((11, 7, 5), 0.48)]
+)
+def test_face_weights_dual_faces(shape, h):
+    """The dual faces of the edges of one axis tile the box: Σ face_w · edge length (in
+    voxels) over the edges of each axis equals the box volume of the nodes in voxels³
+    (1e-12 relative). Inside the box the weight is the full face, bit for bit the old
+    value; ½ on a box face, ¼ on a box edge."""
+    g = G.UniformGrid(shape, h)
+    fw = G.face_weights_vox(g)
+    vec = G.edge_vectors_mm(g) / G.VOXEL_MM
+    length = np.linalg.norm(vec, axis=1)
+    axis = np.argmax(np.abs(vec), axis=1)
+    side = (np.array(g.dims) - 1) * g.h_vox
+    vol = float(np.prod(side))
+    for a in range(3):
+        k = axis == a
+        assert (fw[k] * length[k]).sum() == pytest.approx(vol, rel=1e-12)
+    count = G.edge_cell_counts(g)
+    old = _old_face_weights(g)
+    inner = count == 4
+    assert np.array_equal(fw[inner], old[inner])
+    assert np.allclose(fw[count == 2], old[count == 2] / 2, rtol=1e-15, atol=0)
+    assert np.allclose(fw[count == 1], old[count == 1] / 4, rtol=1e-15, atol=0)
+    assert set(np.unique(count)) <= {1, 2, 4}
+
+
+def test_face_weights_full_face_inside():
+    """An interior edge has the full face: 1 at 0.16 mm, 4 at 0.32 mm (1e-12)."""
+    for h, val in ((0.16, 1.0), (0.32, 4.0)):
+        g = G.UniformGrid((9, 9, 9), h)
+        fw = G.face_weights_vox(g)
+        inner = G.edge_cell_counts(g) == 4
+        assert inner.any()
+        assert np.allclose(fw[inner], val, rtol=1e-12, atol=0)
 
 
 # ---------------------------------------------------------------- the prior's length
