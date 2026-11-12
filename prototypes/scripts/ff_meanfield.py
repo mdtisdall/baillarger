@@ -187,7 +187,10 @@ def grid_arrays(
     i < j, with K_ij < 0 of the Q1 stiffness, and dir_pair_w = −K_ij. Q_u =
     fem_precision(grid, fem_length_mm, speed_log_sd). Q_tau = fem_precision(grid,
     fem_length_mm, TAU_PRIOR_SD) if tau_prior, else None."""
-    K, M = FG.fem_matrices(grid)  # one assembly for the pairs, Q_u, Q_tau and node_w
+    # one assembly for the pairs, Q_u, Q_tau and node_w; an octree gives its own (CD-10)
+    K, M = (
+        grid.fem_matrices() if hasattr(grid, "fem_matrices") else FG.fem_matrices(grid)
+    )
     up = sp.triu(K, k=1).tocoo()
     neg = up.data < 0
     rows = np.asarray(up.row[neg], np.int64)
@@ -210,7 +213,11 @@ def grid_arrays(
         edges=np.asarray(grid.edges, np.int64),
         edge_vec_mm=FG.edge_vectors_mm(grid),
         node_w=node_w,
-        edge_w=FG.edge_weights_vox(grid),
+        edge_w=(  # an octree gives its own (CD-10)
+            grid.edge_weights_vox()
+            if hasattr(grid, "edge_weights_vox")
+            else FG.edge_weights_vox(grid)
+        ),
         face_w=FG.face_weights_vox(grid),
         dir_pairs=dir_pairs.reshape(-1, 2),
         dir_pair_w=dir_pair_w,
