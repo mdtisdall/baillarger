@@ -49,7 +49,8 @@ def row(rank: int, kind: str, c: tuple[int, int, int]) -> dict[str, Any]:
 class Fake:
     """Stand-in choices: the answer sets the site to 42 and its +x neighbour to
     41; the correction then changes the voxel +y of the site; fill-gap
-    overrides. delay: seconds a preview takes."""
+    overrides. A preview with a change (manual-paint) gives the change's
+    voxels as the answer. delay: seconds a preview takes."""
 
     def __init__(self, delay: float = 0.0) -> None:
         self.delay = delay
@@ -67,10 +68,19 @@ class Fake:
         return VR.Answer(v if choice != "leave" else v[:0], lab, dict(params))
 
     def preview(
-        self, labels: Any, lo: Any, site: Any, choice: str, params: dict[str, Any]
+        self,
+        labels: Any,
+        lo: Any,
+        site: Any,
+        choice: str,
+        params: dict[str, Any],
+        change: VR.Answer | None = None,
     ) -> VR.Preview:
         time.sleep(self.delay)
-        a = self.answer(labels, lo, site, choice, params)
+        if change is not None:
+            a = change
+        else:
+            a = self.answer(labels, lo, site, choice, params)
         c = np.array([(site[0], site[1] + 1, site[2])], np.int64)
         return VR.Preview(a.voxels, c, choice == "fill-gap")
 
@@ -912,7 +922,8 @@ def test_manual_paint_at_a_site_writes_the_diff_and_the_log(server: Any) -> None
     base, rv, files = server
     post(base + "/review/session", dict(random_share=0, seed=None))
     get(base + "/review/next")
-    p = post(base + "/review/preview", dict(site="5,5,5", choice=VR.MANUAL))
+    # no strokes and no pending edit: nothing to change
+    p = post(base + "/review/preview", dict(site="5,5,5", choice=VR.MANUAL, strokes=[]))
     assert p["status"] == "done" and p["answer"] == [] and "command" not in p
     with pytest.raises(urllib.error.HTTPError):  # a manual paint needs strokes
         post(
@@ -1158,11 +1169,17 @@ class SlowThicken(Fake):
     """A Fake whose thicken preview takes 60 s; the other choices are quick."""
 
     def preview(
-        self, labels: Any, lo: Any, site: Any, choice: str, params: dict[str, Any]
+        self,
+        labels: Any,
+        lo: Any,
+        site: Any,
+        choice: str,
+        params: dict[str, Any],
+        change: VR.Answer | None = None,
     ) -> VR.Preview:
         if choice == "thicken":
             time.sleep(60)
-        return super().preview(labels, lo, site, choice, params)
+        return super().preview(labels, lo, site, choice, params, change)
 
 
 class Broken(Fake):
@@ -1345,3 +1362,125 @@ def test_pending_without_the_dseg_copy_is_refused(files: dict[str, Path]) -> Non
     with pytest.raises(ValueError, match="no copy of the edits"):
         rv.pending()
     rv.close()
+
+
+# ------------------------------------------------------- preview of strokes
+
+#: strokes of WM on the top face (z 12) of the phantom's WM block: an arch
+#: whose legs stand on the face, so it closes a loop (a handle) with the face
+ARCH = [(5, 8, 13), (5, 8, 14), *[(x, 8, 14) for x in range(6, 10)], (10, 8, 14)]
+ARCH = [*ARCH, (10, 8, 13)]
+#: a flat sheet of WM on the same face: no new loop
+SHEET = [(x, y, 13) for x in range(5, 11) for y in range(5, 11)]
+
+
+def real_review(files: dict[str, Path]) -> tuple[VR.Review, Any]:
+    """A review with the real choices (WmChoices), a session and its first
+    site (5,5,5) shown; and the dseg's labels."""
+    lab = np.asarray(nib.nifti1.load(files["dseg"]).dataobj).astype(np.int64)
+    rv = VR.Review(
+        files["queue"],
+        files["log"],
+        files["edits"],
+        files["dseg"],
+        lambda: lab,
+        A,
+        randoms,
+        inputs=files["input"],
+    )
+    rv.start(0, None)
+    rv.next("5,5,5")
+    return rv, lab
+
+
+def change_of(vox: dict[tuple[int, int, int], int]) -> Any:
+    from baillarger import wm_choices as wc
+
+    v = np.array(sorted(vox), np.int64).reshape(-1, 3)
+    return wc.Change(
+        v, np.array([vox[(x[0], x[1], x[2])] for x in v.tolist()], np.int64)
+    )
+
+
+def test_a_preview_of_strokes_equals_the_preview_of_the_same_change(
+    files: dict[str, Path],
+) -> None:
+    """Strokes that close a loop: the correction changes voxels round them.
+    The preview of the strokes, with a pending edit near them, equals
+    wm_choices.preview of the same Change (the pending edit and the
+    strokes, in linear-index order)."""
+    from baillarger import wm_choices as wc
+
+    rv, lab = real_review(files)
+    rv.paint(paint_strokes((0, [(7, 8, 12)])))  # pending: under the arch
+    out = poll(rv, rv.preview("5,5,5", VR.MANUAL, {}, paint_strokes((41, ARCH))))
+    assert out["status"] == "done", out
+    want = {v: 41 for v in ARCH} | {(7, 8, 12): 0}
+    ref = wc.preview(lab, (5, 5, 5), "R", change_of(want), voxel_mm=[0.16] * 3)
+    assert out["answer"] == ref.answer.voxels.tolist()
+    assert sorted(map(tuple, out["answer"])) == sorted(want)
+    assert out["correction"] == ref.correction.voxels.tolist()
+    assert out["overrides"] == ref.overrides
+    assert out["cut_by_box"] == ref.cut_by_box
+    # the correction is round the arch: inside its box, one voxel larger
+    c = np.array(out["correction"]).reshape(-1, 3)
+    assert len(c)
+    a = np.array(ARCH)
+    assert np.all((c >= a.min(0) - 1) & (c <= a.max(0) + 1))
+    # the preview wrote nothing
+    assert pending(rv.pending()) == {(7, 8, 12): 0}
+    rv.close()
+
+
+def test_a_preview_of_strokes_on_a_flat_sheet_gives_no_correction(
+    files: dict[str, Path],
+) -> None:
+    rv, _ = real_review(files)
+    out = poll(rv, rv.preview("5,5,5", VR.MANUAL, {}, paint_strokes((41, SHEET))))
+    assert out["status"] == "done", out
+    assert len(out["answer"]) == len(SHEET)
+    assert out["correction"] == [] and out["overrides"] is False
+    rv.close()
+
+
+def test_the_change_of_a_strokes_preview(server: Any) -> None:
+    """The change: the pending edits after a paint of the strokes (the later
+    stroke wins; the eraser gives the input label), near the site and the
+    strokes only, less the voxels that keep their dseg label."""
+    base, rv, files = server
+    post(base + "/review/session", dict(random_share=0, seed=None))
+    get(base + "/review/next")
+    post(
+        base + "/review/paint",
+        dict(strokes=paint_strokes((0, [(4, 4, 4), (6, 6, 6), (15, 14, 12)]))),
+    )
+    strokes = paint_strokes(
+        (42, [(4, 5, 4), (6, 6, 6)]),  # (6, 6, 6) pending 0, now 42
+        ("input", [(4, 4, 4)]),  # erased: its input label 41 is the dseg's
+        (41, [(5, 6, 5)]),  # the dseg's label: no change
+    )
+    out = poll(
+        rv,
+        post(
+            base + "/review/preview",
+            dict(site="5,5,5", choice=VR.MANUAL, strokes=strokes),
+        ),
+    )
+    assert out["status"] == "done", out
+    # (15, 14, 12) is pending but far (Fake.half: 4) from the site and strokes
+    assert out["answer"] == [[4, 5, 4], [6, 6, 6]]
+    # the preview wrote nothing
+    assert diff(files) == {(4, 4, 4): 0, (6, 6, 6): 0, (15, 14, 12): 0}
+    # the same request again: the same job
+    again = post(
+        base + "/review/preview",
+        dict(site="5,5,5", choice=VR.MANUAL, strokes=strokes),
+    )
+    assert again["answer"] == out["answer"]
+    # strokes go with manual-paint only, and manual-paint needs them
+    for body in (
+        dict(site="5,5,5", choice="thicken", strokes=strokes),
+        dict(site="5,5,5", choice=VR.MANUAL),
+    ):
+        with pytest.raises(urllib.error.HTTPError):
+            post(base + "/review/preview", body)
