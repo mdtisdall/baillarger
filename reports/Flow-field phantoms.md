@@ -4,7 +4,7 @@ This report gives the results of the stage in `docs/plans/flow-field-phantoms.md
 stage tests the flow-field column solver on phantoms with a closed-form truth. Each
 section comes from one PR of the plan. This version has the section *Kissing surfaces*
 (PR 4) and the sections *Hairpins*, *Jumps*, *Grid* and *Uncertainty* (PR 6, partial).
-The section *Checkpoint* comes from a later PR.
+The section *Checkpoint* (PR 7) reads all of them and gives the choice for the user.
 
 ## Kissing surfaces
 
@@ -359,3 +359,194 @@ and the levels. It draws hanging nodes independently (CD-10). There is no SD of 
 | R8 adaptive grid, prior-shaped cells marked | the uniform grid at g = 0.04 mm gives no focal points | no focal point exists for the octree to remove; no octree run has ended | partial: octree runs running or pending |
 | R9 refinement accepted by F | the control rule (#206) refuses the noise refinement | the original rule accepts a refinement on noise (#205); the gain is the restart | failed in #205; the change (#206) is under review; no PR 6 run on the slab or noise |
 | R10 uncertainty from sampled fields | — | — | pending: no calibration run has ended |
+
+## Checkpoint
+
+This section is the checkpoint of the plan (PR 7). It reads the results of #202–#210
+and of the three provisional design changes (#206, #207, #208). It adds no run. Some
+runs continue (PR 4's 0.16 mm `ckiss_smooth` run, and PR 6's queues until 12:00 EST).
+Rows that wait for these runs are marked **provisional, runs pending**.
+
+"Grid" gives the spacing of the evidence. "0.32 mm stand-in" means a run at 0.32 mm in
+place of the plan's 0.16 mm run (CD-11, CD-15). Every run used the oracle inputs (the
+true stop field and the true tensor). No image run ended. So no row can separate the
+evidence from the representation in the way that the plan's R1 signature does.
+
+### The cause of a failure
+
+Three causes can make a decision fail:
+
+- **evidence:** the stop field or the contrast does not hold the answer.
+- **representation:** the form of the field cannot hold the true answer.
+- **inference:** the form can hold the answer, and the energy's minimum is near it, but
+  the mean field does not find that minimum.
+
+Two findings show that the inference does not reach the energy's minimum:
+
+- **The candidate window** (#204, CD-13). Each node holds 9 τ values and 7 directions
+  round its prediction. The window moves only at the re-centring steps. On the small
+  slab (24³, 0.32 mm), 1114 of 1793 moving nodes end at the τ edge of their kept set,
+  and 907 keep one τ only. A second solve from the first solve's result lowers F. On
+  the noise phantom it lowers F by 9418.8 (#205). The CD-13 option (re-centre and solve
+  a width again) lowers F by 20 % at about 5 × the time, and a restart still lowers F.
+- **The stiff mode** (#207). On the τ phantom the true field has a lower F than the
+  solved field (by 347 on the small grid, by 8811 at 0.16 mm). The collective change of
+  τ and speed along a whole column is stiff under σ_c = Δτ/h. Node-wise updates move it
+  slowly. Re-centring each sweep (#207) does not remove it.
+
+A third finding is a bias of the inference at the stop boundary (#208). The moving state
+spreads over up to 63 candidates. The stopped state is one state. So the entropy of the
+moving q (median 1.88 nats) is as large as the stop log-odds that it must beat (up to
+1.70). On the slab the boundary is 0.07–0.09 mm beyond the true pia with the oracle.
+
+The integrator's readout is a fourth place where an error can come from. It is part of
+the design (the masked interpolation and the stop at q_stop = 0.5), but it is not the
+solver's state. #208 found that the energy's own jump is 0 on every boundary edge of the
+slab. The nonzero column jumps are the integrator's −τ_arrival: the masked interpolation
+does not advance τ past the last moving layer.
+
+### The design decisions
+
+Table 10. The design decisions R1–R11. "Supported" means the failure signature of the
+plan did not occur. "Not supported" means it occurred.
+
+| # | Decision | Result | Cause (if not supported) | Evidence | Grid |
+|---|---|---|---|---|---|
+| R1 | the top is a node state | **not decided**, provisional, runs pending. With the oracle, the stops are within one voxel on the slab (beyond the pia, median +0.073 mm, #204). In PR 3's final re-measure the stops are about 0.07 mm beyond the true stop on every run (slab, τ, crowns) and on fundus_g0.04 (early, median −0.074 mm, p90 0.112 mm). At the fused contact the stops are early by 0.12–0.29 mm (median). No image run, so the R1 signature (oracle right, image wrong) cannot be read | the offset at the pia: inference (the entropy bias, #208). The contact: not separated (the spacing, 0.32 mm) | #204, #208, *Hairpins*, Table 3, `kiss_q1q3_stop_vs_z_u0.32.png` | 0.16 mm (slab, fundus_g0.04), 0.32 mm stand-in (contact) |
+| R2 | the speed jumps to 0, τ jumps to τ_top | **not supported**. Jumps on intact cortex are positive at every stop: slab median 0.040 (1 Δτ, #204), about Δτ on every PR 3 run, fundus_g0.04 median 0.168 (4 Δτ), ckiss median 0.33. The levels do not pile up near the stop (spacing ratio 1.16 on fundus_g0.04). The provisional change (#208) also fails | integrator readout (τ_arrival from masked interpolation) and inference (the entropy bias moves the boundary). Not the energy's jump: it is 0 on every slab boundary edge (#208) | #204, #208, #209, *Jumps* | 0.16 mm (slab, fundus_g0.04), 0.32 mm stand-in (ckiss) |
+| R3 | the jump prior is almost always 0 | **not decided**, provisional, runs pending. No abraded run ended. The positive jumps on intact cortex have the cause of R2, not of the prior | — | *Jumps* | — |
+| R4 | τ_top = 0 is the origin | **not decided**, provisional, runs pending. The anchor stand-in ended after PR 4 wrote its section. From its `run.json`: levels against the truth after the fitted map, median / p90 0.185 / 0.409 mm (top origin 0.182 / 0.409 mm). Sweeps 60/97/55 (anchor) against 59/120/99 (top): the top origin did not need fewer sweeps. The direct Δτ comparison after one constant is not computed. The coarse-first stand-in is running. The exact test *Origin* fails in both parts (CD-12) | the sweeps: not separated. The |τ_arrival| of 0.05–0.24 at the top: the cause of R2 | `pr4/ckiss_smooth/oracle_0_uniform0.32_anchor/run.json`, CD-12 | 0.32 mm stand-in |
+| R5 | no cortex overlaps, by form | **supported, with a small exception**, provisional, runs pending. Overlap 0 in every run. Crossings of the stop set: 0 at 0.16 mm (fundus_g0.04) and in the 0.64 mm scan. At 0.32 mm on ckiss: 1, 1 and 3 columns. Four overshoot the far face of a 0.04 mm slot by 0.0003–0.0097 mm. One ends 0.024 mm past the slot plane in the window of the gap's end | integrator readout: an overshoot of at most about one RK4 step (0.01 mm) through a sheet thinner than a cell. Not the field | Table 3, *Hairpins*, Table 9 | 0.16 mm (fundus_g0.04), 0.32 mm stand-in (ckiss) |
+| R6 | no interpolation across the stop boundary | **not supported**, provisional. Bank A changes when only bank B's image changes: abs Δτ p90 0.027 within 0.32 mm of the stop, and 42 of 470 CONTACT columns change their end reason. No shiftB run at 0.16 mm is queued | not separated: representation (coupling through 274 unresolved contact cells and a stopped sheet 0.55 mm thick, true 0.04 mm) or inference (a different restricted minimum, the candidate window) | Table 7, `kiss_r6_ckiss_smooth_oracle_0_u0.32.png` | 0.32 mm stand-in |
+| R7 | non-crossing by form, sinks checked | **supported**. Sinks 0, focal points 0, overlap 0 in every run (ckiss, fundus_g0.04, 11 scan runs). Reversed edges 3–42 are not located against the stop set. On the crowns, 59–67 reversed edges lie at the WM midplane, where the oracle tensor has no direction (∇φ = 0, #204) | — | *Hairpins*, Table 9, Table 3 | 0.16 mm (fundus_g0.04), 0.32 mm stand-in, 0.64 mm scan |
+| R8 | the grid is adaptive and may go finer than the image | **not decided**, provisional, runs pending. On a uniform 0.16 mm grid at g = 0.04 mm there is no focal point for the octree to remove. 23 % of the columns end at an unresolved contact cell instead. No octree hairpin run ended. The non-conforming octree prior is weaker across coarse/fine faces (decay 0.415 against 0.502 mm, CD-10) | — | *Hairpins*, #205 | 0.16 mm |
+| R9 | refinement is accepted by F | **not supported**. The original rule accepts a refinement on noise (ΔF −9417.6). A control re-solve of the same grid gives the same gain (ΔF −9418.8). The provisional change (#206, a control re-solve) refuses it, by +1.14 in about 35 000. Further restarts reverse that verdict (by −995 to −2236). A restart of the 0.64 mm grid accepts noise on 24³ (−503) | inference (one solve does not reach its own minimum, the candidate window). Also the criterion: F omits the log-determinant of Q_u and is not an evidence bound across spacings, and the 0.64 mm grid carries a different FEM prior (CD-6) | #205, #206 | octree 0.64/0.32 mm, 24³ and the plan box |
+| R10 | uncertainty from sampled fields | **not decided**, provisional, runs pending. The sampler is tested. No calibration run ended | — | *Uncertainty* | — |
+| R11 | a node holds its own direction, tied to τ | **not supported with the plan's inference, supported as a representation**. τ phantom: direction against ∇τ median 9.8°, p90 23° (#204). The exact τ test fails (re-measured from the roots: speed p90 0.35, flat band 0.088 mm, border 0.107 mm, tolerances 0.05, 0.04, 0.04). From the true field the angle is 1.07° median and F is 8811 lower (#207). The other phantoms: 1.4–2.5°. The change (#207, re-centring each sweep) also fails | inference (the stiff mode) | #204, #207 | 0.16 mm (τ phantom), 0.32 mm (small τ grid) |
+
+### The provisional design changes
+
+| Change | PR | What it changes | Result |
+|---|---|---|---|
+| R9: accept against a control | #206 | a change is accepted only if F beats a control re-solve of the current grid from the same start, with the same schedule | refuses every refinement on noise and slab (24³ and the plan box), and removes PR 5's coarsening artefact. The noise margin is +1.14 in about 35 000, and further restarts reverse it. So it is supported only within the restart effect. Cost: one control solve per state (20–75 % of a trial) |
+| R2: the jump at the crossing | #208 | `jump_at = "crossing"`: the jump energy at the input stop field's 0.5 crossing on the edge, and τ_arrival advanced to the stop point | fails again on the slab (0.16 mm). Column jumps are 0, but τ_arrival is +0.002 to +0.056 (121 of 278 above Δτ). The stops move outward: median +0.126 mm (was +0.073). A moving node beyond the crossing that holds τ = 0 has no jump cost, so the boundary moves out |
+| R11: τ re-centred every sweep | #207 | the τ candidates move to the prediction in every sweep | fails on the small τ grid: τ error median 0.127 (original 0.150, from the truth 0.021). Every width reaches the cap of 200 sweeps. The coarse-first diagnostic at 0.16 mm is running |
+
+### Gaps and what each needs
+
+1. **The inference does not reach the energy's minimum** (#204, #205, #206, #207). It
+   affects R2, R4, R6, R9 and R11. It needs a mean field that is not restricted by its
+   candidate window: a continuous τ per node (D1 below), or a collective update of τ and
+   speed along a column, or a coarse grid used as a prior and not only as a start (CD-9).
+   Then every R result must run again.
+2. **The stop and the jump do not agree** (#204, #208). It affects R1–R4. It needs a
+   rule that sets the stop and the jump at the same point. The choices are a question
+   for the user (below).
+3. **The integrator's readout at the stop.** The masked interpolation reads τ from the
+   last moving layer, up to one spacing before the stop. It needs a readout that
+   advances τ to the stop point, measured apart from the solver's state.
+4. **A fused contact is not resolved on a uniform grid.** 274 unresolved contact cells
+   (ckiss, 0.32 mm), 293 and 23 % of the columns (fundus_g0.04, 0.16 mm). It needs the
+   octree results (R8), which are pending.
+5. **The bank speeds at the connected kiss.** The solved ratio is 0.98 against 2.08.
+   The speed prior (log v SD 0.3) is a possible cause. On the τ phantom the speed fails
+   also from the true field (p90 0.100, tolerance 0.05). It needs a scan of the speed
+   prior's SD as a finding (× 0.5 and × 2), not a tuned value.
+6. **The image stop terms are ranking scores, not log-odds** (#203, CD-5). No image run
+   is meaningful until they are calibrated. The image half of R1 is not tested. It needs
+   a calibration (a question for the user).
+7. **F is not an evidence bound across spacings** (#205). F omits the log-determinant of
+   Q_u. The FEM prior with ℓ = 0.5 mm needs h ≤ about ℓ/2, so the 0.64 mm grid carries
+   a different prior (CD-6). It needs a coarsest spacing of 0.32 mm (D6), and an
+   acceptance rule that is valid after gap 1 is closed.
+8. **The octree's hanging nodes are free** (CD-10). The prior is weaker across
+   coarse/fine faces, and τ steps there (median 0.052, above Δτ). It needs constrained
+   hanging nodes, if the user reverses CD-10.
+9. **Cost.** One 0.16 mm run takes 2–8 h in NumPy (ckiss 16–17 GB). The plan's matrix
+   does not fit one night. It needs the kernels of the later stages (GPU, batching)
+   before the next phantom stage, or a smaller matrix.
+10. **The image tensor near the outside medium.** Coherence is 0 at many stop points,
+    and the direction falls back to a fixed axis (#203). It needs a direction from the
+    stop field's gradient or the label distance there.
+11. **Tools.** `ff_run` has no octree branch. `Columns.p_jump` is nan in every run.
+    Reversed edges are not located against the stop set. The crossing check cannot see
+    fused sheets thinner than 0.04 mm. `ff_types.py` has 2 mypy-strict errors. Each is a
+    small change.
+
+### Proposed values for D1, D4 and D6
+
+These are proposals from the evidence. The user decides.
+
+- **D1, the form of the candidates.** Proposal: a continuous Gaussian form for τ (and
+  for the speed u = log v) at each node, and the discrete fan for the direction only.
+  Evidence: the discrete τ window restricts the solve (gap 1). Most moving nodes end at
+  the τ edge of their kept set, and many keep one τ only. The entropy bias of the stop
+  boundary comes from the count of discrete candidates (#208). A Gaussian form has no
+  window and its entropy does not depend on a candidate count. The discrete direction
+  fan shows no failure (R11 from the truth: 1.07°). This proposal needs its own test on
+  the same phantoms before real data.
+- **D4, the τ step and the kept candidates.** Proposal: if D1 stays discrete, keep
+  Δτ = 0.04 and keep at least three τ values per node (the choice and its two
+  neighbours), so that a choice is never at both edges. The evidence does not give a
+  better Δτ: the level errors are already below Δτ where the solve converges
+  (fundus_g0.04: levels 0.019 mm). The errors at the Δτ scale come from the inference
+  and the readout, not from the step. If D1 becomes continuous, Δτ is only the step of
+  the chains (arms A, B) and the readout.
+- **D6, the field grid.** Proposal: coarsest spacing 0.32 mm. Evidence: the FEM prior
+  keeps ℓ at 0.32 mm and 0.16 mm, but not at 0.64 mm (CD-6). The 0.64 mm scan does not
+  resolve the narrow crown (stops p90 2.4 mm) and its fundus stop errors grow as g falls
+  (median 0.16, 0.32, 0.51 mm). The indicator weighting and the hysteresis: no
+  evidence. No octree hairpin run ended, and acceptance by F is not reliable until gap 1
+  is closed. Keep the plan's values (refine above 2 × the median, coarsen below 0.5 ×)
+  as provisional.
+
+### The choice for the user
+
+The plan gives three ways to go on:
+
+1. **The field form goes on as it is.**
+2. **The field form goes on, changed.**
+3. **The field form goes on with chains at hairpins.**
+
+**Recommendation: 2, the field form goes on changed.** Reason: where the tests are
+clear, the representation holds. With the oracle there are no focal points, sinks or
+overlaps (R7, R5). The stops are within one voxel at 0.16 mm on the slab and
+fundus_g0.04. From the true field the direction and τ agree (R11). The failures (R2,
+R6, R9, R11) trace to the inference and to the readout, which a change can address
+(gaps 1–3). Chains at hairpins are not called for yet. The plan's trigger is a failure
+at hairpins at image resolution. At 0.16 mm on fundus_g0.04 there is no focal point.
+The open item there is the unresolved contact cells, and the octree runs decide it.
+The changes come first, before real data: the inference (D1), the stop and jump rule,
+the coarsest spacing (D6) and the calibration of the image stop terms. Then the same
+phantoms run again.
+
+### Questions for the user
+
+1. The choice above: as it is, changed, or with chains at hairpins.
+2. D1, D4 and D6: the proposals above.
+3. **R9.** Does acceptance by F mean anything before one solve reaches its own minimum?
+   (a) Acceptance waits for a solve that converges past its candidate window. (b) Keep
+   the control rule of #206. (c) Replace acceptance by F with another criterion.
+4. **R2.** How must the stop and the jump agree? (a) The integrator stops where the
+   input stop field crosses 0.5 next to a stopped node. (b) The stop term is corrected
+   for the entropy of the moving candidates (log K_eff). (c) R2's measure counts only the
+   energy's own jump, not the readout.
+5. **The image stop terms.** (a) Calibrate them as log-odds (a prior and a scale fitted
+   on the phantoms). Then the image runs run again. (b) Change the slab test's limits.
+   (c) Keep them, and read image runs as rankings only.
+6. **The oracle stop field (CD-4).** Is "blurred by a Gaussian" meant as
+   Φ(stop_sdf / σ), the exact blur of a flat surface? (a) Yes, keep CD-4. (b) No, the
+   literal blur. Then the oracle loses most fused contacts and PR 4 runs again.
+7. **The octree's hanging nodes (CD-10).** (a) Keep them free. (b) Constrain them. Then
+   every octree run runs again.
+8. **The noise phantom's input.** Is the null input (stop log-odds log(0.02/0.98)
+   everywhere, coherence 0) the right "oracle" for it? (a) Yes. (b) Another null that
+   the user names.
+9. **The origin test (CD-12).** Must the anchor be a gauge only (not a point mass), and
+   must τ_arrival be extrapolated to the stop boundary? (a) Yes, both. (b) Keep the
+   plan's form, and accept the failing test *Origin*.
+10. **ℓ and the coarsest spacing (CD-6).** ℓ = 0.5 mm with a coarsest spacing of
+    0.64 mm cannot hold in Q1. (a) Coarsest spacing 0.32 mm (the D6 proposal).
+    (b) ℓ ≥ 1.28 mm. (c) Keep both, and accept a different prior at 0.64 mm.
+11. **The direction prior (CD-3 d).** It has no mass term, so its only length scale
+    comes through λ_d. (a) Accept. (b) Another form that the user gives.
