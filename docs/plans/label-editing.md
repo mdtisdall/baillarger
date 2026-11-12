@@ -1,7 +1,8 @@
 # Plan: label editing in the viewer
 
-Status: Part 1 (core and join), the core of 4b and the core of 5 are merged. Part 2 is
-in review (PR #181). Parts 3 and 4a, the join of 4b and the join of 5 are not built.
+Status: every part is built and merged: Part 1 (#168, #175), Part 2 (#181), Part 3
+(#195), Part 4a (#197), Part 4b (core #171, join #198) and Part 5 (core #167, #172,
+#177, join #196). Not yet checked in a browser on a whole hemisphere.
 
 ## Goal
 
@@ -375,8 +376,19 @@ The joins use these interfaces. A core must keep them, or change this plan first
 - `antialias.thin_plate(mask, dev, band, eps, tol, max_iter, start=None, held=None)`.
 - The field derivative: the antialiased field on the mask's box, an uncompressed float32
   `.nii`, with `desc-antialias` in its BIDS name and a spec in `docs/formats/` (version 1).
-  `POST /review/surface-preview {strokes}` gives the re-marched blocks' vertices and faces
-  (voxel coordinates of the grid), their block ids and the radius used.
+  `POST /review/surface-preview {strokes, since}` brings the working field to the edits
+  and previews the strokes on a copy; it answers as a job (`{status, job}`), polled with
+  `GET /review/surface-preview?job=&since=`. When done: the revision of the working
+  blocks, the preview's block ids, the working blocks changed after `since`, and the
+  radius used. `GET /review/surface-preview/mesh?job=&since=` gives those blocks'
+  vertices (voxel coordinates of the grid) and faces (`viewer.columns.encode`);
+  `GET /review/surface-preview/cut?job=&axis=&mm=` gives their cut by a slice plane, as
+  `/outline` does.
+- The input labels are the volume "input" of the pane (`Volumes.add_nifti`).
+- `POST /review/regenerate` starts the command below under `scripts/memguard`;
+  `GET /review/regenerate` gives its state. Both: `{status (idle | running | done |
+  failed), log, overrides, error, outputs_changed, cap_gb, viewer_gb, command,
+  seconds}`. While it runs, each write into the edits is refused.
 - The command: `python -m baillarger.regenerate INPUT --edits EDITS --root ROOT`. INPUT
   is the input labels (the excised dseg). It writes the dseg, the white surface, the
   overview and the queue of sites, replaces the outputs in ROOT, and prints the
