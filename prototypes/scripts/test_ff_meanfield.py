@@ -361,3 +361,42 @@ def test_chunked_steps_give_the_same_bits() -> None:
     ec = MF.edge_counts(st0, ci, s, chunk=10**6)
     assert ec == MF.edge_counts(st0, ci, s, chunk=7)
     assert ec["moving_nodes"] > 0
+
+
+# ---------------------------------------------------------------- the profile lines
+
+
+def test_pruned_slots_read_their_lines() -> None:
+    """After the pruning, the kept slots of the line form read the same profiles as the
+    direct form, compacted (bit for bit); the lines themselves are not changed."""
+    s = T.DEFAULTS
+    rng = np.random.default_rng(31)
+    n, K = 200, s.n_tau * s.n_dir
+    st = _random_state(n, K, rng)
+    lines = rng.normal(size=(n, s.n_dir, FTM.N_LEVELS + s.n_tau - 1, 2))
+    line, off = FTM.line_slots(s.n_tau, s.n_dir)
+    st_line = replace(
+        st,
+        profiles=lines.copy(),
+        prof_line=np.broadcast_to(line, (n, K)).copy(),
+        prof_off=np.broadcast_to(off, (n, K)).copy(),
+    )
+    rows, slots = np.arange(n)[:, None], np.arange(K)[None, :]
+    direct = FTM.candidate_profile_rows(st_line, rows, slots)
+    ci0 = np.broadcast_to(np.arange(K, dtype=np.int16), (n, K)).copy()
+    # prune compacts the arrays of its state in place: each form gets its own copies
+    own = dict(
+        cand_tau=st.cand_tau.copy(),
+        cand_dir=st.cand_dir.copy(),
+        valid=st.valid.copy(),
+        q=st.q.copy(),
+        q_stop=st.q_stop.copy(),
+    )
+    st_direct = replace(st, profiles=direct.copy(), **own)
+    a, _, _ = MF.prune(st_line, ci0.copy(), s)
+    b, _, _ = MF.prune(st_direct, ci0.copy(), s)
+    assert a.profiles.shape == lines.shape and np.array_equal(a.profiles, lines)
+    rows, slots = np.arange(n)[:, None], np.arange(a.K)[None, :]
+    pa = FTM.candidate_profile_rows(a, rows, slots)
+    pb = FTM.candidate_profile_rows(b, rows, slots)
+    assert pa.tobytes() == pb.tobytes()

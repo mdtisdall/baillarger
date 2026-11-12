@@ -19,8 +19,8 @@ The loop
    first width the initial field, after it `recentre`); the moving candidates around
    them (ff_terms.moving_candidates); q carried over from the previous state with a
    Gaussian kernel of Δτ in τ and of settings.dir_cone_deg in angle (`carry_over`),
-   q_stop kept; s_ref = exp(−u); the profiles of the candidates (computed one time per
-   width).
+   q_stop kept; s_ref = exp(−u); the profile lines of the candidates (computed one
+   time per width).
 3. One sweep: for each colour c = 0 .. n_colours − 1 in order, q_i ∝ exp(−(unary +
    messages)) over the valid states of the nodes of colour c, then the moments of these
    nodes. Then u by colour (ff_terms.update_u). Then the free energy F = Σ
@@ -52,94 +52,108 @@ conditional mean τ and d̄_j the normalised posterior-mean direction of j. Wher
 neighbour is moving: τ̄_i if the node has moving mass, else TAU_TOP. d_pred_i = the
 node's posterior-mean direction (the previous prediction where it is zero).
 
+Profiles (CD-7): the state holds the profile lines of ff_terms.profile_lines, one line
+of L + n_tau − 1 = 17 levels per direction, 7 per node, computed one time per width.
+Each slot reads its 9 levels from its line (ff_terms.line_slots: line = m, first line
+index n_tau − 1 − a). After the pruning, the kept slots keep their line and first index
+(`prune` compacts prof_line and prof_off, not the lines). The map is exact; the two
+forms differ only by rounding (ff_terms.profile_lines). On the slab run below, F of the
+two forms agreed to 5e-15 of |F| in every sweep.
+
+Memory per node (the state that the loop holds):
+
+- the grid arrays (GridArrays, Q_u, the edge and pair tables): about 1.3 kB;
+- the candidates at K slots: cand_tau, q (8 K bytes each), cand_dir (24 K), valid (K),
+  the candidate index (2 K), prof_line and prof_off (K each): 44 K bytes, so 2.8 kB at
+  K = 63;
+- the profile lines: 238 · b bytes (b = 8 in float64, 4 in float32): 1.9 kB in
+  float64, 0.95 kB in float32;
+- the moments (Moments): about 0.35 kB.
+
+The pruning compacts every (n, K) array of the state in place (`_compact`): it does not
+allocate a second state, but the buffers of 63 slots stay allocated until the next
+width frees them. So the sweep-1 size is the peak of a width. At the next width the
+profile lines are freed first; the other old arrays are freed after the carry-over,
+before the new lines are allocated. The colour update, the moments, the free energy
+(ff_terms.expected_energy and `entropy`), update_u, the pruning rule, the posterior
+means and `edge_counts` work in node chunks, so no full (n, K) temporary occurs. The
+output Field (K = prune_max) is allocated after the lines are freed.
+
+The macOS allocator keeps freed large blocks resident (they count in the RSS that
+scripts/memguard reads) and reuses them only for requests of the same size. So the
+RSS peak is above the live peak.
+
+Measured (this machine, CPU, float32 profiles, oracle inputs with noise 0,
+OMP_NUM_THREADS=4, scripts/memguard; max_sweeps and widths set only for the
+measurement; "before" = the form of 63 profiles of 9 levels, run in the same session):
+
+- the slab, 64 × 64 × 48 voxels at 0.16 mm (1.97·10⁵ nodes), widths (4, 2, 1),
+  max_sweeps 4: peak 2482 MiB, 249 s, 13.5 to 14.2 s per sweep at K = 32, 38 to 40 s
+  from the end of one width to the end of sweep 1 of the next. Before: 3232 MiB, 272 s,
+  13.1 to 13.9 s per sweep, 44 to 46 s.
+- crown_w1.28, 81³ voxels at 0.16 mm (5.3·10⁵ nodes), width 4 only, max_sweeps 2:
+  peak 4876 MiB, 139 s, 36.2 s for sweep 2 (K = 32), 91 s to the end of sweep 1.
+  Before: 6443 MiB, 161 s, 36.2 s for sweep 2, 110 s to the end of sweep 1.
+- a profile (cProfile) of the slab, width 4, 4 sweeps (76 s): the colour updates 46 s
+  (ff_terms.messages 42 s), expected_energy 19 s (6 calls), update_u 6 s. Inside them:
+  the own octants 18 s, the octants of the neighbours 16 s, jump_energy 10 s, the
+  masked gathers of the candidates (ff_terms._cand) 8 s, the gathers of the profiles
+  from the lines 3 s.
+
 NumPy or Torch (the plan's *NumPy or Torch*)
 --------------------------------------------
 
 Symbols: n nodes, K candidate slots (63 in the first sweep of a width, then
-prune_max = 32), L = 9 levels, 2 echoes. Sizes: PR 3 runs up to 5.3·10⁵ nodes (the
-crown of 81³ voxels at 0.16 mm), PR 4 1.2·10⁶ nodes, the target 4·10⁶ to 4·10⁷ nodes.
+prune_max = 32). Sizes: PR 3 runs up to 5.3·10⁵ nodes, PR 4 1.2·10⁶ nodes, the target
+4·10⁶ to 4·10⁷ nodes.
 
 Operations per sweep (estimates from the loop structure, not measured): 8 calls of
 ff_terms.messages on n / 8 nodes each (about 2.4·10³ · K flops per node, from the
 analysis in ff_terms.py), 8 calls of update_u (the own octants, 8 · K · 40 flops, and a
 search of about 350 values of a 4-term function: about 3·10³ flops per node), one
-expected_energy (the own octants and the edges once: by estimate less than half of
-the messages) and the entropy (n · K). In total about 4·10³ · K flops per node: about
-7·10¹⁰ flops per sweep at 5.3·10⁵ nodes and K = 32, 1.5·10¹¹ at 1.2·10⁶ nodes,
-5·10¹¹ to 5·10¹² at the target size. A run has up to 3 · 200 sweeps.
+expected_energy (the own octants and the edges once) and the entropy (n · K). In total
+about 4·10³ · K flops per node: about 7·10¹⁰ flops per sweep at 5.3·10⁵ nodes and K =
+32, 1.5·10¹¹ at 1.2·10⁶ nodes, 5·10¹¹ to 5·10¹² at the target size. A run has up to
+3 · 200 sweeps. At the measured rate (14 s per sweep at 1.97·10⁵ nodes, about 70 µs per
+node and sweep), 600 sweeps take about 2.3 h on the slab, 6 h on the crown and about
+20 days at 4·10⁷ nodes.
 
-Memory traffic per sweep: the profiles dominate. ff_terms.messages reads the profiles
-of a chunk once and then the squared and plain profiles once per edge slot (6 slots);
-refresh_moments and expected_energy read them once each. That is about 14 · n · K ·
-18 · b bytes per sweep (b = 8 in float64, 4 in float32): about 34 GB at 5.3·10⁵ nodes,
-K = 32 and float64. By estimate this traffic and the NumPy temporaries, not the flops,
-set the time of a sweep.
+Memory traffic per sweep: by estimate the octant temporaries of ff_terms (about 10
+(m, K) arrays per octant combination) and the gathered chunk profiles, not the stored
+lines (2 · n · 238 · b bytes per sweep), set the time of a sweep.
 
-Memory per node (the state that the loop holds):
+Loop structure: Python loops over the widths, the sweeps, the 8 colours, the chunks
+and fixed small sets (octants, edge and pair slots). Each kernel inside is whole-array
+element-wise arithmetic, gathers by fixed padded tables and small dense contractions.
+The work is regular and data-parallel, and a Torch version could be the same
+algorithm (the CSR products with Q_u and Q_tau would become padded tables of up to 27
+neighbours).
 
-- the grid arrays (GridArrays, Q_u, the edge and pair tables): about 1.3 kB;
-- the candidates at K slots: cand_tau, q (8 K bytes each), cand_dir (24 K), valid,
-  the candidate index (K each): 42 K bytes, so 2.6 kB at K = 63;
-- the profiles: 18 · K · b bytes: 9.1 kB at K = 63 in float64, 4.5 kB in float32;
-- the moments (Moments): about 0.35 kB.
+The measurement (a line-for-line Torch port of ff_terms._own_octants, the largest
+kernel, on one colour; 4 CPU threads; the port is not part of this module):
 
-At 5.3·10⁵ nodes and K = 63 this is about 7.0 GB in float64 and 4.6 GB with float32
-profiles. The pruning compacts every (n, K) array of the state in place (`_compact`):
-it does not allocate a second state, but the buffers of 63 slots stay allocated until
-the next width frees them. So the sweep-1 size is the peak of a width. At the next
-width the profile buffer is freed first; the other old arrays are freed after the
-carry-over, before the new profiles are allocated. The colour update, the moments,
-the free energy (ff_terms.expected_energy and `entropy`), update_u, the pruning rule,
-the posterior means and `edge_counts` work in node chunks, so no full (n, K)
-temporary occurs. The output Field (K = prune_max) is allocated after the profile
-buffer is freed.
+- 1.97·10⁵ nodes, K = 32, one colour: NumPy float64 0.17 s; Torch CPU float64 0.13 s;
+  Torch CPU float32 0.06 s; MPS float32 0.036 s (chunk 32768; 0.14 s at chunk 4096).
+- 1.05·10⁶ nodes, K = 32, one colour: NumPy float64 0.90 to 0.99 s; Torch CPU float64
+  0.62 s; Torch CPU float32 0.30 s; MPS float32 0.16 s (chunk 131072).
 
-The macOS allocator keeps freed large blocks resident (they count in the RSS that
-scripts/memguard reads) and reuses them only for requests of the same size. So the
-RSS peak is above the live peak. The environment setting MallocLargeCache=0 gives the
-live peak, but it made the runs below about 1.5 times slower (each new large block
-is mapped again).
+The free energy in float32 (every float array of the solved slab state at width 4,
+sweep 3, cast to float32, NumPy): |F32 − F64| = 0.22, with |F| = 3.66·10⁵; 0.21 of it
+from the consistency term, which is a difference of large terms (F0 − 2 s F1 +
+s² F2). The stop rule needs |ΔF| < 1e-7 · |F| = 0.037, and the rise test
+1e-9 · |F| = 3.7·10⁻⁴.
 
-Measured (CPU, float32 profiles, oracle inputs with noise 0, OMP_NUM_THREADS=4,
-scripts/memguard; max_sweeps and widths set only for the measurement; earlier code =
-before the chunks and the in-place pruning):
-
-- the slab, 64 × 64 × 48 voxels at 0.16 mm (1.97·10⁵ nodes), widths (4, 2, 1),
-  max_sweeps 4: peak 3193 MiB, 265 s, 13.1 s per sweep at K = 32, about 45 s from
-  the end of one width to the end of sweep 1 of the next (the candidates, the
-  profiles, the first F and the sweep at K = 63). Earlier code: 4536 MiB, 309 s,
-  about 16 s per sweep, about 51 s.
-- crown_w1.28, 81³ voxels at 0.16 mm (5.3·10⁵ nodes), width 4 only, max_sweeps 2:
-  peak 6426 MiB (with MallocLargeCache=0: 5421 MiB), 159 s; 35 s for sweep 2 (K =
-  32); 110 s to the end of sweep 1 (grid arrays 3.6 s, candidates and profiles
-  29.6 s, the first F and the sweep at K = 63). Earlier code: memguard stopped it
-  at 8742 MiB (cap 8 GB), before the end of sweep 1.
-- a profile (cProfile) of 5 sweeps of width 4 on 32³ nodes: about 50 % of the time
-  in ff_terms.messages and 20 % in ff_terms.expected_energy.
-
-So the PR 3 runs at 0.16 mm are still above the 4 GB goal: the 63-slot state of the
-first sweep of a width (about 7.2 kB per node with float32 profiles) and the grid
-arrays (1.3 kB per node, measured 668 MiB at 5.3·10⁵ nodes) set the live peak. The
-profiles of one direction m and its 9 τ values sample one line at levels shifted by
-the τ index (to rounding);
-a store of 7 lines of 17 levels per node instead of 63 profiles of 9 levels would
-take about a fifth of the space, but it is a change of the state's layout, not done
-here. At the target size the state cannot be stored (the profiles alone: 92 GB in
-float32 at 4·10⁷ nodes and K = 32).
-
-Loop structure: Python loops over the widths, the sweeps, the 8 colours and the
-chunks; every kernel inside is a whole-array NumPy operation of ff_terms or of this
-module (the carry-over, the pruning and the compaction are chunked gathers and
-element-wise operations). The work is regular and data-parallel.
-
-Choice: NumPy. Reasons: (1) the loop calls the kernels of ff_terms, which are NumPy
-(the choice of task 3.2); a Torch loop would need the terms in Torch on the same
-device, else each colour moves the state between devices; (2) the exact tests need
-float64 on the CPU, where NumPy already runs whole-array kernels; (3) at the target
-size the state does not fit in memory on any device, so the design must change first
-(the profiles computed per chunk from the image, or the coarse level and superblocks
-with a halo of column-solver.md, *Coarse to fine*). `profile_dtype=np.float32` halves
-the largest array for the runs; the tests use float64.
+Choice: NumPy. Reasons: (1) on the CPU in float64 (the exact path) Torch gives 1.3 to
+1.6 times on the largest kernel with 4 threads: not a large gain. (2) MPS gives about
+5 to 6 times, but only in float32 (MPS has no float64). In float32 the error of F is
+about 6 times the stop threshold of the free energy and 600 times the rise test, so an
+MPS run would not keep the stop rules and would log false rises. (3) At the target
+size neither backend makes a run possible here: the state does not fit in memory
+(ff_terms.py, *NumPy or Torch*), and a run takes days even with the MPS gain. The
+target needs blocks with a halo first (column-solver.md, *Coarse to fine*); a CUDA
+device with float64 is the place to compare the backends again.
+`profile_dtype=np.float32` halves the profile lines for the runs; the tests use
+float64.
 
 Determinism: the loop has no random numbers, every sort is stable or has an explicit
 tie rule, and every sum is over a fixed order. The same input gives the same bits on
@@ -553,7 +567,14 @@ def prune(
     cand_dir = _compact(st.cand_dir, idx, chunk)
     valid = _compact(st.valid, idx, chunk, keep_valid)
     ci = _compact(cand_index, idx, chunk, index_or_none)
-    prof = _compact(st.profiles, idx, chunk)
+    if st.prof_line is None:  # direct form: one profile per slot
+        prof = _compact(st.profiles, idx, chunk)
+        pl, po = None, None
+    else:  # line form: the kept slots keep reading their lines
+        assert st.prof_off is not None
+        prof = st.profiles
+        pl = _compact(st.prof_line, idx, chunk)
+        po = _compact(st.prof_off, idx, chunk)
     new = FT.TermState(
         cand_tau=cand_tau,
         cand_dir=cand_dir,
@@ -567,6 +588,9 @@ def prune(
         stop_log_odds=st.stop_log_odds,
         tensor_dir=st.tensor_dir,
         coherence=st.coherence,
+        prof_line=pl,
+        prof_off=po,
+        n_levels=st.n_levels,
     )
     return new, ci, res
 
@@ -661,10 +685,10 @@ def _update_rows(
 # ---------------------------------------------------------------- profiles
 
 
-def _profiles(
+def _profile_lines(
     ga: FT.GridArrays,
-    cand_tau: Array,
-    cand_dir: Array,
+    c: Array,
+    dirs: Array,
     s_ref: Array,
     lb: IntArray,
     volumes: Sequence[Array],
@@ -672,21 +696,23 @@ def _profiles(
     dtype: Any,
     chunk: int = CHUNK,
 ) -> npt.NDArray[Any]:
-    """(n, K, L, 2) of ff_terms.candidate_profiles, computed by node chunks into an
-    array of `dtype` (so a float32 run never holds the float64 array of all nodes)."""
-    n, K = cand_tau.shape
+    """(n, n_dir, L + n_tau − 1, 2) of ff_terms.profile_lines, computed by node chunks
+    into an array of `dtype` (so a float32 run never holds the float64 array of all
+    nodes)."""
+    n, M = dirs.shape[:2]
     L = FT.N_LEVELS
-    out = np.empty((n, K, L, len(volumes)), dtype=dtype)
+    out = np.empty((n, M, L + settings.n_tau - 1, len(volumes)), dtype=dtype)
     for a in range(0, n, chunk):
         b = min(a + chunk, n)
-        out[a:b] = FT.candidate_profiles(
+        out[a:b] = FT.profile_lines(
             ga.nodes[a:b],
-            cand_tau[a:b],
-            cand_dir[a:b],
+            c[a:b],
+            dirs[a:b],
             s_ref[a:b],
             lb[a:b],
             volumes,
             L,
+            settings.n_tau,
             settings.dtau,
         )
     return out
@@ -809,11 +835,22 @@ def _new_state(
     q = np.where(valid, q, 0.0)
     s_ref = np.exp(-u)
     lb = FT.level_base(tau_pred, settings, FT.N_LEVELS)
-    prof = _profiles(
-        ga, cand_tau, cand_dir, s_ref, lb, volumes, settings, profile_dtype
+    c = np.minimum(np.asarray(tau_pred, np.float64), T.TAU_TOP)
+    # the directions of the candidates a = 0: m = 0 .. n_dir − 1
+    prof = _profile_lines(
+        ga,
+        c,
+        cand_dir[:, : settings.n_dir],
+        s_ref,
+        lb,
+        volumes,
+        settings,
+        profile_dtype,
     )
     K = cand_tau.shape[1]
-    ci = np.broadcast_to(np.arange(K, dtype=np.int16), (len(q), K)).copy()
+    n = len(q)
+    ci = np.broadcast_to(np.arange(K, dtype=np.int16), (n, K)).copy()
+    line, off = FT.line_slots(settings.n_tau, settings.n_dir)
     st = FT.TermState(
         cand_tau=cand_tau,
         cand_dir=cand_dir,
@@ -827,6 +864,9 @@ def _new_state(
         stop_log_odds=lo,
         tensor_dir=tdir,
         coherence=coh,
+        prof_line=np.broadcast_to(line, (n, K)).copy(),
+        prof_off=np.broadcast_to(off, (n, K)).copy(),
+        n_levels=FT.N_LEVELS,
     )
     return st, ci
 
@@ -875,9 +915,9 @@ def solve(
     the contrast (the detrended echoes {1: echo 2, 2: echo 3}). noise_sd: the matched
     noise SD of the two echoes (the image's "noise_sd"); both must be positive.
     tau_prior: the switch of the FEM prior on τ. init: a solved Field on another grid
-    that replaces the initial field. profile_dtype: the dtype of the stored profiles
-    (np.float32 halves their memory; the arithmetic stays float64). log_fn: called with
-    one line of text per sweep.
+    that replaces the initial field. profile_dtype: the dtype of the stored profile
+    lines (np.float32 halves their memory; the arithmetic stays float64). log_fn:
+    called with one line of text per sweep.
 
     Returns (field, extras, log). field: K = settings.prune_max slots. extras (n,)
     arrays: u, speed (= exp(u)), p_jump, tau_pred and the (n, 3) dir_pred of the last
@@ -1012,7 +1052,7 @@ def solve(
         del mom
     assert st is not None and ci is not None
     # the outputs do not use the profiles: free their buffer first
-    st = replace(st, profiles=np.zeros((n, st.K, 0, 2)))
+    st = replace(st, profiles=np.zeros((n, st.profiles.shape[1], 0, 2)))
     n_kept = st.valid.sum(1).astype(np.int64)
     field = _field(grid, st, n_kept, settings.prune_max)
     log["pruning"]["final"] = edge_counts(st, ci, settings)
