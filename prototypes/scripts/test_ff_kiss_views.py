@@ -190,3 +190,59 @@ def test_sample_nodes_trilinear() -> None:
     assert out[0] == pytest.approx(0.25)
     assert out[1] == pytest.approx(0.875)
     assert np.isnan(out[2])
+
+
+# ---------------------------------------------------------------- inference and names
+
+
+def test_inference_summary() -> None:
+    rec = dict(
+        sweeps=[200, 60, 20],
+        settings=dict(max_sweeps=200),
+        measures=dict(
+            inference=dict(end_reason=["max_sweeps", "tol_free_energy", "tol_q"])
+        ),
+        free_energy_rises=[dict(width=4), dict(width=2)],
+    )
+    s = KV.inference_summary(rec)
+    assert s["sweeps"] == [200, 60, 20] and s["max_sweeps"] == 200
+    assert s["at_cap"] == [True, False, False]
+    assert s["n_rises"] == 2
+    # without end reasons: the sweep count against the cap decides
+    rec2 = dict(sweeps=[10, 3], settings=dict(max_sweeps=10), measures={})
+    s2 = KV.inference_summary(rec2)
+    assert s2["at_cap"] == [True, False] and s2["end_reason"] == []
+
+
+def test_fig_name_and_label() -> None:
+    assert KV.fig_name("kiss_free_energy") == "kiss_free_energy.png"
+    assert KV.fig_name("kiss_q4_sections_ckiss_smooth", "_u0.32") == (
+        "kiss_q4_sections_ckiss_smooth_u0.32.png"
+    )
+    assert KV.with_label("Title") == "Title"
+    assert "0.32 mm stand-in" in KV.with_label("Title", "0.32 mm stand-in")
+
+
+def test_find_runs_grid_label_and_variants(tmp_path: Path) -> None:
+    ph = tmp_path / "ckiss_smooth"
+    for d in (
+        "oracle_0_uniform0.32",
+        "oracle_0_uniform0.32_shiftB",
+        "oracle_0_uniform0.32_anchor",
+        "image_1_uniform0.32",
+        "oracle_0_uniform0.16",  # another grid label: not found
+        "oracle_0_uniform0.32_other",  # an unknown suffix: not found
+    ):
+        (ph / d).mkdir(parents=True)
+        (ph / d / "run.json").write_text("{}")
+    (ph / "image_0_uniform0.32").mkdir()  # no run.json: not run
+    found = KV.find_runs(tmp_path, "uniform0.32", ["ckiss_smooth", "ckiss_sharp"])
+    names = sorted(k.dirname("uniform0.32") for k in found)
+    assert names == [
+        "image_1_uniform0.32",
+        "oracle_0_uniform0.32",
+        "oracle_0_uniform0.32_anchor",
+        "oracle_0_uniform0.32_shiftB",
+    ]
+    k = KV.RunKey("ckiss_smooth", "oracle", 0.0, "_shiftB")
+    assert found[k] == ph / "oracle_0_uniform0.32_shiftB"

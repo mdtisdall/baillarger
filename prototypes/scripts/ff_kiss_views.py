@@ -10,7 +10,12 @@ x > 0, bank B at x < 0, slot half-plane x = 0, y >= 0).
 
 Usage:
     python ff_kiss_views.py --runs RUNS_DIR --truth TRUTH_DIR --figures FIG_DIR
-        --out OUT_DIR [--grid-label uniform0.16] [--phantoms NAME ...]
+        --out OUT_DIR [--grid-label uniform0.16] [--label TEXT] [--fig-suffix TEXT]
+        [--phantoms NAME ...]
+
+--label puts a text in every figure title, at the top of kiss_views.md and in
+kiss_views.json ("label"). --fig-suffix goes at the end of each figure's file name
+(before .png), so that the figures of two grids do not overwrite each other.
 
 A run directory is RUNS_DIR/<phantom>/<source>_<noise:g>_<grid label>[_coarse|_anchor|
 _shiftB]/ with field.npz, columns.npz, column_errors.npz and run.json. A run without
@@ -45,6 +50,10 @@ What the script computes, per run
   tau_arrival per bank at the CONTACT stops (true value 0). The level deviations
   (column_errors.npz level_dev_mm) per bank: |deviation| over all levels, and the
   signed median per level.
+- **Inference.** The sweeps per width, the cap (settings.max_sweeps), the end reason per
+  width (run.json measures.inference.end_reason), whether the width reached the cap,
+  and the count of free-energy rises (`inference_summary`). One figure holds the
+  free-energy trace of every run, per width.
 - **R5, R7, R11.** The topology counts and the angle between the direction and grad τ
   (run.json, measures.direction.cortex), copied.
 
@@ -312,6 +321,42 @@ def path_distance(A: Array, B: Array) -> float:
         return float("nan")
     short, long_ = (A, B) if len(A) <= len(B) else (B, A)
     return float(cKDTree(long_).query(short)[0].max())
+
+
+END_CODES = {"tol_q": "q", "tol_free_energy": "F", "max_sweeps": "CAP"}
+
+
+def inference_summary(rec: Mapping[str, Any]) -> dict[str, Any]:
+    """The solver's inference record of one run: sweeps per width, the cap
+    (settings.max_sweeps), the end reason per width, at_cap per width (the width ended
+    because it reached the cap: end reason "max_sweeps", or, if the end reason is
+    missing, sweeps >= cap), and the count of free-energy rises."""
+    sweeps = [int(v) for v in (rec.get("sweeps") or [])]
+    cap = (rec.get("settings") or {}).get("max_sweeps")
+    inf = (rec.get("measures") or {}).get("inference") or {}
+    ends = list(inf.get("end_reason") or [])
+    at_cap = []
+    for j, sw in enumerate(sweeps):
+        e = ends[j] if j < len(ends) else None
+        if e is not None:
+            at_cap.append(e == "max_sweeps")
+        else:
+            at_cap.append(cap is not None and sw >= int(cap))
+    rises = rec.get("free_energy_rises")
+    n_rises = len(rises) if rises is not None else inf.get("n_rises")
+    return dict(
+        sweeps=sweeps, max_sweeps=cap, end_reason=ends, at_cap=at_cap, n_rises=n_rises
+    )
+
+
+def fig_name(stem: str, suffix: str = "") -> str:
+    """The PNG file name of a figure: stem, then the optional suffix."""
+    return f"{stem}{suffix}.png"
+
+
+def with_label(title: str, label: str = "") -> str:
+    """A figure title with the run set's label (if any) at its end."""
+    return f"{title}  [{label}]" if label else title
 
 
 # ---------------------------------------------------------------- the runs
@@ -735,8 +780,9 @@ def per_run(run: Run, G: Geo, settings: T.SolverSettings) -> dict[str, Any]:
     # ---- R5, R7, R11 and the inference
     out["topology"] = topo
     out["direction"] = (m.get("direction") or {}).get("cortex")
-    out["sweeps"] = run.rec.get("sweeps")
-    out["end_reason"] = (m.get("inference") or {}).get("end_reason")
+    out["inference"] = inference_summary(run.rec)
+    out["sweeps"] = out["inference"]["sweeps"]
+    out["_free_energy"] = run.rec.get("free_energy") or []
     out["stops_end_reasons"] = (m.get("stops") or {}).get("end_reasons")
     return out
 
@@ -900,7 +946,11 @@ def section_truth(G: Geo, z: float) -> SectionTruth:
 
 
 def figure_sections(
-    name: str, G: Geo, runs: Mapping[RunKey, tuple[FG.UniformGrid, Array]], path: Path
+    name: str,
+    G: Geo,
+    runs: Mapping[RunKey, tuple[FG.UniformGrid, Array]],
+    path: Path,
+    label: str = "",
 ) -> int:
     secs = [section_truth(G, z) for z in SECTION_Z_MM]
     ncol = 2 * len(secs)
@@ -1001,7 +1051,9 @@ def figure_sections(
         cb = fig.colorbar(im, ax=axes, shrink=0.6, pad=0.01)
         cb.set_label("q_stop", fontsize=7)
         cb.ax.tick_params(labelsize=6)
-    fig.suptitle(f"{name}: q_stop in sections normal to local z", fontsize=9)
+    fig.suptitle(
+        with_label(f"{name}: q_stop in sections normal to local z", label), fontsize=9
+    )
     return _save(fig, path)
 
 
@@ -1010,6 +1062,7 @@ def figure_stop_vs_z(
     phantoms: Sequence[str],
     geos: Mapping[str, Geo],
     path: Path,
+    label: str = "",
 ) -> int:
     fig, axes = plt.subplots(2, 2, figsize=(10, 6.5), squeeze=False, sharey=True)
     for ax, name in zip(axes.ravel(), CK.NAMES, strict=True):
@@ -1050,15 +1103,18 @@ def figure_stop_vs_z(
         ax.set_xlabel("local z of the true stop (mm)", fontsize=7)
         ax.set_ylabel("median |stop error| (mm)", fontsize=7)
     fig.suptitle(
-        "Stop error against the local z of the true stop (bins of 0.16 mm; grey: "
-        "the window round the gap's end; dotted: one voxel)",
+        with_label(
+            "Stop error against the local z of the true stop (bins of 0.16 mm; grey: "
+            "the window round the gap's end; dotted: one voxel)",
+            label,
+        ),
         fontsize=8,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     return _save(fig, path)
 
 
-def figure_r6(r6: dict[str, Any], path: Path) -> int:
+def figure_r6(r6: dict[str, Any], path: Path, label: str = "") -> int:
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.8))
     for bn, col in (("A", "#1f77b4"), ("B", "#d55e00")):
         d = r6["nodes"][bn]
@@ -1092,15 +1148,18 @@ def figure_r6(r6: dict[str, Any], path: Path) -> int:
         ax.tick_params(labelsize=7)
         ax.legend(fontsize=6, frameon=False)
     fig.suptitle(
-        f"R6: {r6['top']} against {r6['shift']} (bank B's image changed), "
-        "nodes that move in both",
+        with_label(
+            f"R6: {r6['top']} against {r6['shift']} (bank B's image changed), "
+            "nodes that move in both",
+            label,
+        ),
         fontsize=8,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     return _save(fig, path)
 
 
-def figure_q6(q6: dict[str, Any], path: Path) -> int:
+def figure_q6(q6: dict[str, Any], path: Path, label: str = "") -> int:
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.0))
     ax = axes[0]
     arr = q6.get("_arrays")
@@ -1155,8 +1214,56 @@ def figure_q6(q6: dict[str, Any], path: Path) -> int:
     ax.set_ylabel("sweeps", fontsize=8)
     ax.legend(fontsize=7, frameon=False)
     ax.tick_params(labelsize=7)
-    fig.suptitle(f"Q6: the origin of τ ({q6['top']})", fontsize=9)
+    fig.suptitle(with_label(f"Q6: the origin of τ ({q6['top']})", label), fontsize=9)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
+    return _save(fig, path)
+
+
+def figure_free_energy(
+    traces: Mapping[str, Sequence[Sequence[float]]], path: Path, label: str = ""
+) -> int:
+    """One panel per width: F − min F of each run's trace at that width, log scale.
+    The sweep that holds the minimum (F − min F = 0) is not drawn."""
+    nw = max([len(t) for t in traces.values()] + [len(T.DEFAULTS.widths)])
+    fig, axes = plt.subplots(1, nw, figsize=(4.2 * nw, 4.2), squeeze=False)
+    cmap = plt.get_cmap("tab20")
+    names = list(traces)
+    for j in range(nw):
+        ax = axes[0, j]
+        w = T.DEFAULTS.widths[j] if j < len(T.DEFAULTS.widths) else j
+        ax.set_title(f"width {w}", fontsize=8)
+        for i, name in enumerate(names):
+            tr = traces[name]
+            if j >= len(tr) or len(tr[j]) == 0:
+                continue
+            F = np.asarray(tr[j], float)
+            d = F - np.nanmin(F)
+            d = np.where(d > 0, d, np.nan)
+            ax.plot(
+                np.arange(1, len(F) + 1), d, "-", c=cmap(i % 20), lw=0.8, label=name
+            )
+        ax.set_yscale("log")
+        ax.set_xlabel("sweep", fontsize=7)
+        ax.set_ylabel("F − min F (of the run at this width)", fontsize=7)
+        ax.tick_params(labelsize=6)
+    handles: dict[str, Any] = {}
+    for ax in axes[0]:
+        for h, lab in zip(*ax.get_legend_handles_labels(), strict=True):
+            handles.setdefault(lab, h)
+    if handles:
+        fig.legend(
+            list(handles.values()),
+            list(handles),
+            loc="lower center",
+            ncol=min(4, len(handles)),
+            fontsize=6,
+            frameon=False,
+        )
+    else:
+        axes[0, 0].text(0.5, 0.5, "no run", transform=axes[0, 0].transAxes, ha="center")
+    nrow = (len(handles) + 3) // 4
+    fig.suptitle(with_label("Free energy per sweep, per width", label), fontsize=9)
+    fig.tight_layout(rect=(0, min(0.45, 0.04 * nrow + 0.02), 1, 0.94))
     return _save(fig, path)
 
 
@@ -1188,7 +1295,7 @@ def summary_rows(
         r = results.get(k)
         base = [k.phantom, k.source, f"{k.noise:g}", k.variant.lstrip("_") or "top"]
         if r is None:
-            rows.append(base + ["not run"] + [""] * 10)
+            rows.append(base + ["not run"] + [""] * 12)
             continue
         q1 = r["q1"]
         bA, bB = q1["by_bank"]["A"], q1["by_bank"]["B"]
@@ -1212,7 +1319,12 @@ def summary_rows(
                 _n(sp.get("solved_ratio_A_over_B")),
                 _n((dirn.get("direction_vs_grad_tau_deg") or {}).get("median")),
                 _n(q1["ramp"]["CONTACT"]["width_mm"]["median"]),
-                "/".join(str(s) for s in (r["sweeps"] or [])),
+                "/".join(str(s) for s in r["inference"]["sweeps"])
+                + f" (cap {r['inference']['max_sweeps']})",
+                "/".join(
+                    END_CODES.get(str(e), str(e)) for e in r["inference"]["end_reason"]
+                ),
+                str(r["inference"]["n_rises"]),
             ]
         )
     return rows
@@ -1230,6 +1342,8 @@ def markdown(
     results: Mapping[RunKey, dict[str, Any]],
 ) -> str:
     L: list[str] = [f"# Kissing surfaces: views and numbers ({doc['grid_label']})", ""]
+    if doc.get("label"):
+        L += [f"**{doc['label']}**", ""]
     L.append(
         "Distributions: median / p90 / max (n). Lengths in mm. Bank A / bank B. "
         "Diagnostics, not pass/fail rules."
@@ -1251,6 +1365,8 @@ def markdown(
         "dir vs ∇τ median (deg)",
         "stop ramp 0.2→0.8 median",
         "sweeps per width",
+        "end per width (F: tol_free_energy, q: tol_q, CAP: max_sweeps)",
+        "free-energy rises",
     ]
     L.append(_table(head, summary_rows(keys, results)))
     run_keys = [k for k in keys if k in results]
@@ -1539,6 +1655,8 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
     ap.add_argument("--figures", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--grid-label", default="uniform0.16")
+    ap.add_argument("--label", default="", help="a label for the titles and the files")
+    ap.add_argument("--fig-suffix", default="", help="added to each figure file name")
     ap.add_argument("--phantoms", nargs="*", default=list(CK.NAMES), choices=CK.NAMES)
     a = ap.parse_args(argv)
     t0 = time.perf_counter()
@@ -1573,11 +1691,16 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
         del run
     for name in a.phantoms:
         if name in sec_runs:
-            f = a.figures / f"kiss_q4_sections_{name}.png"
-            figures[f.name] = figure_sections(name, geos[name], sec_runs[name], f)
+            f = a.figures / fig_name(f"kiss_q4_sections_{name}", a.fig_suffix)
+            figures[f.name] = figure_sections(
+                name, geos[name], sec_runs[name], f, a.label
+            )
     sec_runs.clear()
-    f = a.figures / "kiss_q1q3_stop_vs_z.png"
-    figures[f.name] = figure_stop_vs_z(results, a.phantoms, geos, f)
+    f = a.figures / fig_name("kiss_q1q3_stop_vs_z", a.fig_suffix)
+    figures[f.name] = figure_stop_vs_z(results, a.phantoms, geos, f, a.label)
+    f = a.figures / fig_name("kiss_free_energy", a.fig_suffix)
+    traces = {k.name: results[k]["_free_energy"] for k in keys if k in results}
+    figures[f.name] = figure_free_energy(traces, f, a.label)
     q6s: dict[str, Any] = {}
     r6s: dict[str, Any] = {}
     for k in keys:
@@ -1591,20 +1714,22 @@ def main(argv: Sequence[str] | None = None) -> dict[str, Any]:
             anchor = load_run(ka, found[ka]) if ka in found else None
             coarse = load_run(kc, found[kc]) if kc in found else None
             q6 = q6_origin(top, anchor, coarse)
-            f = a.figures / f"kiss_q6_{k.slug}.png"
-            figures[f.name] = figure_q6(q6, f)
+            f = a.figures / fig_name(f"kiss_q6_{k.slug}", a.fig_suffix)
+            figures[f.name] = figure_q6(q6, f, a.label)
             q6s[k.name] = q6
             del top, anchor, coarse
         if ks in found:
             top = load_run(k, found[k])
             shift = load_run(ks, found[ks])
             r6 = r6_independence(top, shift, geos[k.phantom])
-            f = a.figures / f"kiss_r6_{k.slug}.png"
-            figures[f.name] = figure_r6(r6, f)
+            f = a.figures / fig_name(f"kiss_r6_{k.slug}", a.fig_suffix)
+            figures[f.name] = figure_r6(r6, f, a.label)
             r6s[k.name] = r6
             del top, shift
     doc: dict[str, Any] = dict(
         grid_label=a.grid_label,
+        label=a.label,
+        fig_suffix=a.fig_suffix,
         runs_dir=str(a.runs),
         truth_dir=str(a.truth),
         constants=dict(
