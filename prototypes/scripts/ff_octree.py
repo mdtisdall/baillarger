@@ -635,6 +635,48 @@ class OctreeGrid:
             add(nid[split], cn[split, b], 0.5 * vol[split])
         return w
 
+    def face_weights_vox(self) -> Array:
+        """(E,) the area of the dual face of each edge of `edges`, in voxel faces (as
+        `ff_grid.face_weights_vox`, which needs every leaf edge in `edges`). The dual
+        face lies across the edge. Each leaf that holds the edge adds the quadrant of
+        its cross-section next to the edge: (leaf side / 2)². A leaf edge that is split
+        at its middle node adds this quadrant to each half, because the split does not
+        make the cross-section smaller. So a half of a split edge (length h) that 2
+        coarse leaves (side 2h) and 2 fine leaves (side h) hold gets 2 h² + 2 (h/2)² =
+        2.5 h². Inside a uniform region the four quadrants give the full face; on a box
+        face ½, on a box edge ¼. For each axis, the sum of face weight × edge length is
+        the volume of the box (the dual cells tile it).
+
+        The value is (edge length / VOXEL_MM)² times the sum over the holding leaves of
+        (leaf side / (2 · edge length))², a ratio of integers (exact). Where that sum is
+        exactly 1, the value is (edge length / VOXEL_MM)², bit for bit the value of
+        `ff_grid.face_weights_vox` on an interior edge."""
+        e = self.edges
+        n = np.int64(self.n_nodes)
+        key = e[:, 0] * n + e[:, 1]
+        cp = self._corner_points
+        cn = self.cells
+        f = np.zeros(len(e))
+
+        def add(a: IntArray, b: IntArray, v: Array) -> None:
+            k = np.minimum(a, b) * n + np.maximum(a, b)
+            pos = np.minimum(np.searchsorted(key, k), len(key) - 1)
+            if np.any(key[pos] != k):
+                raise ValueError("a leaf edge is not in edges")
+            f[:] += np.bincount(pos, weights=v, minlength=len(e))
+
+        for a, b in EDGE_PAIRS:
+            mid = (cp[:, a] + cp[:, b]) // 2
+            nid = np.where(self.size_units >= 2, self.node_id(mid), -1)
+            split = nid >= 0
+            # unsplit: (s / (2 s))² = 1/4; a half of a split edge: (s / (2 · s/2))² = 1
+            add(cn[~split, a], cn[~split, b], np.full(int((~split).sum()), 0.25))
+            add(cn[split, a], nid[split], np.ones(int(split.sum())))
+            add(nid[split], cn[split, b], np.ones(int(split.sum())))
+        length = np.linalg.norm(FG.edge_vectors_mm(self), axis=1)
+        full = (length / T.VOXEL_MM) ** 2
+        return np.asarray(np.where(f == 1.0, full, full * f))
+
     def fem_matrices(self) -> tuple[sp.csr_matrix, sp.csr_matrix]:
         """(K, M) for the mean field: the non-conforming Q1 assembly on each leaf's 8
         corners (CD-10; `ff_octree_fem.nonconforming_matrices`)."""

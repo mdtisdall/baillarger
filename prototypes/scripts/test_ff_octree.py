@@ -431,3 +431,75 @@ def test_hanging_step_on_a_transferred_field() -> None:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q", "-s"]))
+
+
+# ---------------------------------------------------------------- face weights
+
+
+def _axis_tiling(g: Any, fw: Any) -> list[float]:
+    vec = FG.edge_vectors_mm(g) / T.VOXEL_MM
+    length = np.linalg.norm(vec, axis=1)
+    ax = np.argmax(np.abs(vec), axis=1)
+    return [float((fw[ax == a] * length[ax == a]).sum()) for a in range(3)]
+
+
+def _refined_more() -> O.OctreeGrid:
+    """refined_tree with one more refined leaf in the middle of the box."""
+    g = refined_tree()
+    mid = np.array([[g.extent[0] // 2, g.extent[1] // 2, g.extent[2] // 2]])
+    return g.refine(g.find_leaf(mid))
+
+
+@pytest.mark.parametrize("make", [refined_tree, _refined_more])
+def test_face_weights_tile_the_box(make):
+    """For each axis, Σ face_w · edge length (voxels) over the edges of that axis equals
+    the volume of the nodes' box in voxels³ (1e-12 relative): the dual cells tile the
+    box, also across coarse–fine faces and at split edges."""
+    g = make()
+    assert len(g.hanging[0]) > 0
+    fw = g.face_weights_vox()
+    vol = float(np.prod(np.asarray(g.extent, np.float64) * g.unit_vox))
+    for s in _axis_tiling(g, fw):
+        assert s == pytest.approx(vol, rel=1e-12)
+
+
+def test_face_weights_split_edge_example():
+    """A half of a split edge (length h) held by 2 coarse leaves (side 2h) and 2 fine
+    leaves (side h) gets 2.5 h² (1e-12): each holding leaf adds (its side / 2)²."""
+    g = refined_tree()
+    fw = g.face_weights_vox()
+    length = np.linalg.norm(FG.edge_vectors_mm(g), axis=1) / T.VOXEL_MM
+    ratio = fw / length**2
+    assert np.any(np.isclose(ratio, 2.5, rtol=0, atol=1e-12))
+    # every ratio is a sum of quarters (fine leaves) and ones (coarse leaves)
+    assert np.allclose(ratio * 4, np.round(ratio * 4), rtol=0, atol=1e-12)
+
+
+def test_face_weights_uniform_octree_equals_uniform_grid():
+    """An octree with no refinement gives ff_grid.face_weights_vox of the uniform grid
+    at the same spacing, to the last bit, edge by edge (matched by node positions)."""
+    g = O.OctreeGrid.base(SHAPE)
+    u = FG.UniformGrid(SHAPE, T.DEFAULTS.octree_coarsest_mm)
+    fo = g.face_weights_vox()
+    fu = FG.face_weights_vox(u)
+    assert len(fo) == len(fu)
+
+    def keyed(grid: Any, fw: Any) -> dict[tuple[float, ...], float]:
+        X = grid.nodes
+        return {
+            tuple(np.round(np.concatenate([X[i], X[j]]), 9)): float(w)
+            for (i, j), w in zip(grid.edges, fw, strict=True)
+        }
+
+    ko, ku = keyed(g, fo), keyed(u, fu)
+    assert ko.keys() == ku.keys()
+    assert all(ko[k] == ku[k] for k in ko)
+
+
+def test_grid_arrays_use_octree_face_weights():
+    """ff_meanfield.grid_arrays takes the octree's own face weights."""
+    import ff_meanfield as MF
+
+    g = refined_tree()
+    ga = MF.grid_arrays(g)
+    assert np.array_equal(ga.face_w, g.face_weights_vox())
