@@ -1043,6 +1043,7 @@ def adapt(
     profile_dtype: Any = np.float64,
     log_fn: LogFn | None = None,
     max_sweeps: int | None = None,
+    acceptance: str = "previous",
 ) -> tuple[OctreeGrid, T.Field, dict[str, Any], dict[str, Any], dict[str, Any]]:
     """The adaptive octree (the plan's *The octree*). Returns (grid, field, extras, log,
     record): the final octree, its solve (`ff_meanfield.solve`) and a JSON-able record
@@ -1068,6 +1069,14 @@ def adapt(
     solves per round; a group with a good and a bad change is kept or refused as a
     whole. The coarsening uses the indicators of the grid before the refinement trial.
 
+    acceptance: the rule that accepts a trial. "previous" (the default, the rule
+    above): F of the trial against F of the current solve. "control" (the provisional
+    change for R9, `ff_octree_r9.py`): F of the trial against F of a control, a solve
+    of the current grid with init = the current field, the same settings and the same
+    sweep limits as the trial. Only the grid differs. The control is solved at most
+    once per current state and is used by both trials of a round while the state does
+    not change. A refused trial keeps the current state (not the control).
+
     max_sweeps: if given, replaces settings.max_sweeps (for tests; the record says
     so). In a trial, delta_terms gives the change of each expected term, and of the
     entropy H (which enters F as −H), from the current solve to the trial.
@@ -1078,6 +1087,8 @@ def adapt(
     mm) and `hanging_step` of the final field."""
     import ff_meanfield as MF
 
+    if acceptance not in ("previous", "control"):
+        raise ValueError(f"unknown acceptance {acceptance!r}")
     if max_sweeps is not None:
         settings = dataclasses.replace(settings, max_sweeps=int(max_sweeps))
     shape = (
@@ -1100,10 +1111,34 @@ def adapt(
     record: dict[str, Any] = dict(
         settings=settings.record(),
         max_sweeps_override=max_sweeps,
+        acceptance=acceptance,
         base=dict(level_counts=grid.level_counts(), terms=cur_terms,
                   defects=log["defects"], sweeps=log["sweeps"]),
         rounds=[],
     )  # fmt: skip
+    control: dict[str, Any] | None = None  # the control of the current state
+
+    def judge(tr: dict[str, Any]) -> None:
+        """Apply the "control" rule to a solved trial record (in place)."""
+        nonlocal control
+        if acceptance != "control" or tr["free_energy_after"] is None:
+            return
+        if control is None:
+            _, _, lc = solve(grid, field)
+            control = dict(terms=_terms(lc), sweeps=lc["sweeps"],
+                           end_reason=lc["end_reason"], defects=lc["defects"],
+                           time_total_s=lc["time_total_s"])  # fmt: skip
+        fc = control["terms"]["free_energy"]
+        tr.update(
+            free_energy_control=fc,
+            delta_free_energy_control=tr["free_energy_after"] - fc,
+            delta_terms_control={
+                k: tr["terms_after"][k] - control["terms"][k] for k in tr["terms_after"]
+            },
+            control=control,
+            accepted=bool(tr["free_energy_after"] < fc),
+        )
+
     for r in range(settings.octree_rounds):
         ind = indicators_of_solve(grid, field, extras, inputs)
         marks = mark(grid, ind["total"], settings)
@@ -1131,12 +1166,13 @@ def adapt(
             tr = _trial_record(
                 "refine", len(marks["refine_level"]), grid, g_new, cur_terms, t2, l2
             )
+            judge(tr)
             rnd["trials"].append(tr)
             say(f"round {r} refine: F {cur_terms['free_energy']:.10g} -> "
                 f"{t2['free_energy']:.10g} accepted={tr['accepted']}")  # fmt: skip
             if tr["accepted"]:
                 grid, field, extras, log, cur_terms = g_new, f2, e2, l2, t2
-                accepted = True
+                accepted, control = True, None
         # the coarsening trial
         if len(marks["coarsen_level"]):
             g_new = grid.coarsen(marks["coarsen_level"], marks["coarsen_anchor"])
@@ -1148,11 +1184,12 @@ def adapt(
                 t2 = _terms(l2)
                 tr = _trial_record("coarsen", len(marks["coarsen_level"]), grid, g_new,
                                    cur_terms, t2, l2)  # fmt: skip
+                judge(tr)
                 say(f"round {r} coarsen: F {cur_terms['free_energy']:.10g} -> "
                     f"{t2['free_energy']:.10g} accepted={tr['accepted']}")  # fmt: skip
                 if tr["accepted"]:
                     grid, field, extras, log, cur_terms = g_new, f2, e2, l2, t2
-                    accepted = True
+                    accepted, control = True, None
             rnd["trials"].append(tr)
         record["rounds"].append(rnd)
         if not accepted:
