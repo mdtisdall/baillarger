@@ -27,6 +27,11 @@ moments, so no division by p occurs and an expectation is exact also where p = 0
 Width w: the energies of items 3 to 7 of the spec are divided by w². The unary terms and
 the jump are not.
 
+The anchor origin (ff_meanfield.solve, origin "anchor"): TermWeights.jump = False sets
+the jump term to 0 in `messages`, `expected_energy` and `state_energy`, and
+`moving_candidates` and `level_base` with tau_max None put no upper bound on τ. The
+defaults (jump on, tau_max = TAU_TOP) are the top origin.
+
 NumPy or Torch (the plan's *NumPy or Torch*)
 --------------------------------------------
 
@@ -48,20 +53,26 @@ In total about 2.4·10³ · K flops per node. Phantom size (n ≤ 1.2·10⁶): a
 flops per sweep at K = 63, 9·10¹⁰ at K = 32. Target size (n = 4·10⁶ to 4·10⁷, K ≤ 32):
 3·10¹¹ to 3·10¹² flops per sweep.
 
-Memory traffic per sweep: the profiles (n, K, L, 2) are read once for the own contrast
-messages and once to refresh the moments: 2 · n · K · 18 · 8 bytes, that is 22 GB at the
-phantom size and K = 63 (11 GB at K = 32). The other node arrays are smaller by a factor
-of L · 2. NumPy also writes about 10 temporary (m, K) arrays per octant combination (32
-combinations); by estimate this traffic, not the flops, sets the time of a NumPy sweep.
+Profiles (CD-7): the state holds one line of L + n_tau − 1 = 17 levels per direction
+(7 lines, `profile_lines`), 238 values per node, and each slot reads its 9 levels from
+its line (`candidate_profile_rows`). The form before CD-7 held 63 × 9 × 2 = 1134 values
+per node. The messages and refresh_moments gather the (chunk, K, L, 2) profiles of a
+chunk from the lines; this gather is a temporary, not a state.
+
+Memory traffic per sweep: the lines are read once for the own contrast messages and
+once to refresh the moments: 2 · n · 238 · b bytes (b = 4 in float32), about 2.3 GB at
+n = 1.2·10⁶. The gathered chunk profiles (n · K · 18 values in all) are then read again
+for each of the 6 edge slots (P and P²). The other node arrays are smaller. NumPy also
+writes about 10 temporary (m, K) arrays per octant combination (32 combinations); by
+estimate this traffic, not the flops, sets the time of a NumPy sweep.
 
 Memory: the messages, expected_energy, refresh_moments and update_u process the nodes
 (and expected_energy the edges) in chunks (`chunk`, default 4096), so the temporaries
 are O(chunk · K · L), no full (n, K) copy occurs and no n × K × K array occurs. The
-state itself is the large item: the profiles take n · K · 18 · 8 bytes, 11 GB at n =
-1.2·10⁶ and K = 63, and 184 GB at n = 4·10⁷ and K = 32 (92 GB in float32). At the
-target size the profiles cannot be stored; they must be computed per chunk from the
-image, or the state must change. That is a design question for the solver, not a
-question of the backend.
+state itself is the large item: the lines take 952 bytes per node in float32 (38 GB at
+4·10⁷ nodes) and the candidate arrays of K = 32 slots about 1.4 kB per node (58 GB). At
+the target size the state cannot be stored on this machine; that is a design question
+for the solver (blocks with a halo), not a question of the backend.
 
 Loop structure and regularity: Python loops only over fixed small sets (8 octants, 6 × 4
 neighbour octants, the padded edge and pair slots of each node) and over chunks. Inside,
@@ -70,15 +81,12 @@ small dense contraction over (L, 2) or 3. The work is regular and data-parallel.
 sums over the edges of a node are over padded slots (a dense sum), not a scatter, so a
 Torch version needs no index_add_, no scatter_add_ and no sparse tensors (except the
 products with Q_u and Q_tau, which are row-sliced CSR products here and would need a
-padded form in Torch).
+padded form of up to 27 neighbours in Torch).
 
-Choice: NumPy. Reasons: (1) the exact tests need float64 on the CPU, and there NumPy
-already runs the kernels as whole-array operations, so Torch on the CPU gains little;
-(2) a GPU gain needs the mean-field loop of task 3.3 on the same device, else each
-colour moves the state between devices; (3) at the target size the stored profiles do
-not fit in memory on any device, so the kernel must change its data layout before the
-backend matters. The code keeps the Torch form open: the same algorithm maps line for
-line to Torch (gathers, element-wise products, einsum over padded slots).
+Choice: NumPy. The measurements and the reasons are in the module docstring of
+ff_meanfield.py (*NumPy or Torch*): on the CPU in float64 Torch gave 1.3 to 1.6 times
+on the largest kernel; MPS gave about 5 to 6 times, but only in float32, and float32
+cannot resolve the stop rule of the free energy.
 """
 
 from __future__ import annotations
@@ -92,6 +100,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 from scipy import ndimage as ndi
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -220,9 +229,16 @@ class TermState:
     cand_tau (n, K), cand_dir (n, K, 3) unit, valid (n, K): the moving candidates. q (n,
     K) and q_stop (n,): the distributions (q = 0 on slots that are not valid). u (n,):
     the log speed, a point estimate per node. s_ref (n,): the slowness frozen at the
-    start of a width (profiles, jump). profiles (n, K, L, 2) at the absolute levels
-    level_base + 0 .. L − 1. stop_log_odds (n,), tensor_dir (n, 3), coherence (n,): the
-    inputs at the nodes.
+    start of a width (profiles, jump). stop_log_odds (n,), tensor_dir (n, 3), coherence
+    (n,): the inputs at the nodes.
+
+    The profiles have two forms. The profile of slot k is always given at the absolute
+    levels level_base + 0 .. L − 1 (`candidate_profile_rows` reads it).
+
+    - Direct form (prof_line None): profiles (n, K, L, 2), one profile per slot.
+    - Line form (CD-7): profiles (n, M, L_line, 2), one line per direction (M = n_dir,
+      L_line = L + n_tau − 1, from `profile_lines`). Slot k reads line prof_line[i, k]
+      at the line indices prof_off[i, k] + 0 .. L − 1 (`line_slots`). L = n_levels.
     """
 
     cand_tau: Array
@@ -237,12 +253,20 @@ class TermState:
     stop_log_odds: Array
     tensor_dir: Array
     coherence: Array
+    prof_line: npt.NDArray[np.int8] | None = None
+    prof_off: npt.NDArray[np.int8] | None = None
+    n_levels: int = N_LEVELS
 
     def __post_init__(self) -> None:
         n, K = self.cand_tau.shape
         assert self.cand_dir.shape == (n, K, 3) and self.valid.shape == (n, K)
         assert self.q.shape == (n, K) and self.q_stop.shape == (n,)
-        assert self.profiles.shape[:2] == (n, K) and self.profiles.shape[3] == 2
+        assert self.profiles.shape[0] == n and self.profiles.shape[3] == 2
+        if self.prof_line is None:
+            assert self.prof_off is None and self.profiles.shape[1] == K
+        else:
+            assert self.prof_off is not None
+            assert self.prof_line.shape == (n, K) and self.prof_off.shape == (n, K)
 
     @property
     def n(self) -> int:
@@ -254,7 +278,10 @@ class TermState:
 
     @property
     def L(self) -> int:
-        return int(self.profiles.shape[2])
+        """The levels of the profile of one slot."""
+        if self.prof_line is None:
+            return int(self.profiles.shape[2])
+        return int(self.n_levels)
 
 
 @dataclass(frozen=True)
@@ -262,7 +289,9 @@ class TermWeights:
     """The weights of the terms. sigma_c: consistency σ (τ per mm); sigma_e (2,):
     contrast σ per echo; sigma_align: σ of the alignment (sin 15°); lambda_dir: λ of the
     direction prior; tau_prior: the switch of the FEM prior on τ; w: the width (4, 2 or
-    1); jump_p_zero and jump_mean: the jump prior."""
+    1); jump_p_zero and jump_mean: the jump prior; jump: the switch of the jump term
+    (off with an anchor origin: then the stopped state gives no τ value to its
+    neighbours)."""
 
     sigma_c: float
     sigma_e: tuple[float, float]
@@ -272,6 +301,7 @@ class TermWeights:
     w: float = 1.0
     jump_p_zero: float = T.DEFAULTS.jump_p_zero
     jump_mean: float = T.DEFAULTS.jump_mean
+    jump: bool = True
 
 
 def term_weights(
@@ -280,9 +310,10 @@ def term_weights(
     w: float,
     settings: T.SolverSettings = T.DEFAULTS,
     tau_prior: bool = False,
+    jump: bool = True,
 ) -> TermWeights:
     """The weights of the spec: σ_c = Δτ / h, σ_e = contrast_sigma, σ_a = sin 15°,
-    λ_d = 1 / (sin² 15° · ℓ)."""
+    λ_d = 1 / (sin² 15° · ℓ). jump: the switch of the jump term."""
     sa = math.sin(math.radians(settings.dir_cone_deg))
     se = contrast_sigma(noise_sd, settings.band_scale_vox)
     return TermWeights(
@@ -294,6 +325,7 @@ def term_weights(
         w=float(w),
         jump_p_zero=settings.jump_p_zero,
         jump_mean=settings.jump_mean,
+        jump=jump,
     )
 
 
@@ -302,7 +334,10 @@ def term_weights(
 
 
 def moving_candidates(
-    tau_pred: Array, dir_pred: Array, settings: T.SolverSettings = T.DEFAULTS
+    tau_pred: Array,
+    dir_pred: Array,
+    settings: T.SolverSettings = T.DEFAULTS,
+    tau_max: float | None = T.TAU_TOP,
 ) -> tuple[Array, Array, BoolArray]:
     """The moving candidates of each node: (cand_tau (n, 63), cand_dir (n, 63, 3), valid
     (n, 63)).
@@ -313,15 +348,22 @@ def moving_candidates(
     with e the voxel axis least aligned with p (the first such axis on a tie). Candidate
     c = a · 7 + m. A candidate with τ > TAU_TOP is not valid. A τ within 1e-9 Δτ above
     TAU_TOP (rounding) is valid and set to TAU_TOP.
+
+    tau_max: the upper bound of τ (TAU_TOP above). With tau_max None (the anchor
+    origin) there is no upper bound: c = τ_pred and every candidate is valid.
     """
     tau_pred = np.asarray(tau_pred, float)
     n = len(tau_pred)
     na, nm = settings.n_tau, settings.n_dir
-    c = np.minimum(tau_pred, T.TAU_TOP)
     a = np.arange(na) - (na - 1) // 2
-    tau = c[:, None] + a[None, :] * settings.dtau  # (n, na)
-    valid_a = tau <= T.TAU_TOP + 1e-9 * settings.dtau
-    tau = np.where(valid_a, np.minimum(tau, T.TAU_TOP), tau)
+    if tau_max is None:
+        tau = tau_pred[:, None] + a[None, :] * settings.dtau  # (n, na)
+        valid_a = np.ones(tau.shape, bool)
+    else:
+        c = np.minimum(tau_pred, tau_max)
+        tau = c[:, None] + a[None, :] * settings.dtau  # (n, na)
+        valid_a = tau <= tau_max + 1e-9 * settings.dtau
+        tau = np.where(valid_a, np.minimum(tau, tau_max), tau)
     p = np.asarray(dir_pred, float)
     p = p / np.linalg.norm(p, axis=1, keepdims=True)
     e = np.zeros((n, 3))
@@ -344,11 +386,17 @@ def moving_candidates(
 
 
 def level_base(
-    tau_pred: Array, settings: T.SolverSettings = T.DEFAULTS, L: int = N_LEVELS
+    tau_pred: Array,
+    settings: T.SolverSettings = T.DEFAULTS,
+    L: int = N_LEVELS,
+    tau_max: float | None = T.TAU_TOP,
 ) -> IntArray:
     """The first absolute level of each node's profiles: rint(c / Δτ) − (L − 1) / 2,
-    c = min(τ_pred, TAU_TOP). np.rint rounds a half to the even integer."""
-    c = np.minimum(np.asarray(tau_pred, float), T.TAU_TOP)
+    c = min(τ_pred, tau_max) (c = τ_pred if tau_max is None). np.rint rounds a half to
+    the even integer."""
+    c = np.asarray(tau_pred, float)
+    if tau_max is not None:
+        c = np.minimum(c, tau_max)
     return np.asarray(np.rint(c / settings.dtau) - (L - 1) // 2, dtype=np.int64)
 
 
@@ -415,6 +463,70 @@ def candidate_profiles(
     return out
 
 
+def line_slots(
+    n_tau: int = T.DEFAULTS.n_tau, n_dir: int = T.DEFAULTS.n_dir
+) -> tuple[npt.NDArray[np.int8], npt.NDArray[np.int8]]:
+    """(line (n_tau · n_dir,), off (n_tau · n_dir,)) int8: the line and the first line
+    index of each moving candidate c = a · n_dir + m (`moving_candidates`) in the line
+    form of `profile_lines`: line = m, off = (n_tau − 1) − a."""
+    c = np.arange(n_tau * n_dir)
+    line = (c % n_dir).astype(np.int8)
+    off = ((n_tau - 1) - c // n_dir).astype(np.int8)
+    return line, off
+
+
+def profile_lines(
+    nodes: Array,
+    c: Array,
+    dirs: Array,
+    s_ref: Array,
+    level_base: IntArray,
+    volumes: Sequence[Array],
+    L: int = N_LEVELS,
+    n_tau: int = T.DEFAULTS.n_tau,
+    dtau: float = T.DEFAULTS.dtau,
+    chunk: int = CHUNK,
+) -> Array:
+    """(n, M, L + n_tau − 1, 2) the profile lines of CD-7: one line per direction m of
+    dirs (n, M, 3). Line index t samples the volumes (T.sample_volume) at
+    x_i + d_m ((level_base_i + t − h) Δτ − c_i) / (s_ref_i · VOXEL_MM), h = (n_tau − 1)
+    / 2, with c_i = min(τ_pred_i, TAU_TOP) the centre of the τ candidates. A point that
+    is not finite is sampled at the node.
+
+    The candidate (a, m) of `moving_candidates` has τ = c_i + (a − h) Δτ. Its profile
+    at level ℓ = level_base_i + l (l = 0 .. L − 1) is at the distance (ℓ Δτ − τ) =
+    ((level_base_i + l − a + h) Δτ − c_i), that is line index t = l + (n_tau − 1) − a
+    of line m (`line_slots`). The τ offsets and the levels are both integer multiples
+    of Δτ, so this map is exact for every c_i; c_i need not be on the level lattice.
+    The two forms differ only by rounding: the product (ℓ − a + h) Δτ is rounded in a
+    different order, and `moving_candidates` sets a τ within 1e-9 Δτ above TAU_TOP to
+    TAU_TOP (a shift of at most 1e-9 Δτ of the sample point along d, in τ units).
+    """
+    n_tau = int(n_tau)
+    assert n_tau % 2 == 1
+    h = (n_tau - 1) // 2
+    n, M = dirs.shape[:2]
+    Lt = L + n_tau - 1
+    out = np.empty((n, M, Lt, len(volumes)))
+    t = np.arange(Lt)
+    for st in range(0, n, chunk):
+        sl = slice(st, min(st + chunk, n))
+        m = sl.stop - sl.start
+        ell = (level_base[sl][:, None] + t[None, :] - h) * dtau  # (m, Lt)
+        dist = (ell - c[sl][:, None]) / (s_ref[sl][:, None] * T.VOXEL_MM)
+        X = (
+            nodes[sl][:, None, None, :]
+            + dirs[sl][:, :, None, :] * dist[:, None, :, None]
+        )
+        X = np.where(
+            np.isfinite(X), X, np.broadcast_to(nodes[sl][:, None, None, :], X.shape)
+        )
+        Xf = X.reshape(-1, 3)
+        for e, vol in enumerate(volumes):
+            out[sl, :, :, e] = T.sample_volume(vol, Xf).reshape(m, M, Lt)
+    return out
+
+
 # ---------------------------------------------------------------- the jump
 
 
@@ -464,8 +576,24 @@ def _cand(st: TermState, ids: IntArray) -> tuple[Array, Array, Array]:
     return tau, d, q
 
 
+def candidate_profile_rows(st: TermState, ids: IntArray, slots: IntArray) -> Array:
+    """The profiles (S..., L, 2) of the slots `slots` of the nodes `ids` (two integer
+    arrays that broadcast to the shape S). In the line form, a gather from the lines:
+    no array of all slots of all nodes occurs."""
+    if st.prof_line is None:
+        return np.asarray(st.profiles[ids, slots])
+    assert st.prof_off is not None
+    n, M, Lt, E = st.profiles.shape
+    ids_ = np.asarray(ids, np.intp)
+    # the flat row of (node, line, line index) in the profiles seen as (n · M · Lt, E)
+    row = (ids_ * M + st.prof_line[ids, slots]) * Lt + st.prof_off[ids, slots]
+    flat = st.profiles.reshape(n * M * Lt, E)
+    return np.asarray(np.take(flat, row[..., None] + np.arange(st.L), axis=0))
+
+
 def _prof(st: TermState, ids: IntArray) -> Array:
-    return np.where(st.valid[ids][..., None, None], st.profiles[ids], 0.0)
+    P = candidate_profile_rows(st, ids[:, None], np.arange(st.K)[None, :])
+    return np.where(st.valid[ids][..., None, None], P, 0.0)
 
 
 def node_moments(st: TermState, chunk: int = CHUNK) -> Moments:
@@ -780,6 +908,8 @@ def messages(
                 - 2.0 * np.einsum("skle,sle->sk", P[sub], Wl * m1j)
                 + (Wl * m2j).sum((1, 2))[:, None]
             )
+            if not tw.jump:
+                continue
             delta = ga.inc_edge_sign[i, k][:, None] * ga.edge_vec_mm[e]
             Ei, _ = jump_energy(
                 tau[sub], d[sub], st.s_ref[i][:, None], delta[:, None, :], tw
@@ -876,6 +1006,8 @@ def expected_energy(
                 )
             ).sum()
         )
+        if not tw.jump:
+            continue
         ti, di, qi = _cand(st, i)
         tj, dj, qj = _cand(st, j)
         delta = ga.edge_vec_mm[es][:, None, :]
@@ -930,7 +1062,7 @@ def state_energy(
     rows = np.arange(n)[None, :]
     tau = np.where(mov, st.cand_tau[rows, k], T.TAU_TOP)  # (B, n)
     d = np.where(mov[..., None], st.cand_dir[rows, k], 0.0)  # (B, n, 3)
-    prof = st.profiles[rows, k]  # (B, n, L, 2)
+    prof = candidate_profile_rows(st, np.broadcast_to(rows, k.shape), k)  # (B, n, L, 2)
     lo = st.stop_log_odds
     out: dict[str, Array] = {}
     out["stop"] = (ga.node_w * np.where(mov, _softplus(lo), _softplus(-lo))).sum(1)
@@ -992,6 +1124,8 @@ def state_energy(
     out["jump"] = (
         ga.face_w * (mov[:, i] * ~mov[:, j] * Ei + mov[:, j] * ~mov[:, i] * Ej)
     ).sum(1)
+    if not tw.jump:
+        out["jump"] = np.zeros(B)
     return out
 
 

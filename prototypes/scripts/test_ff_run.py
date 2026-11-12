@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
+import ff_meanfield as MF  # noqa: E402
 import ff_run as FR  # noqa: E402
 import ff_truth as FTR  # noqa: E402
 import ff_types as T  # noqa: E402
@@ -36,7 +38,7 @@ FEATS = {
 SHAPE = (44, 20, 20)  # holds a start point 2 mm behind the white surface
 MEASURE_KEYS = {
     "stops", "paths", "levels", "speeds", "spacing_near_stop", "topology", "direction",
-    "jumps", "exact", "inference", "cost", "inputs", "views",
+    "jumps", "exact", "inference", "cost", "inputs", "views", "origin",
 }  # fmt: skip
 
 
@@ -79,6 +81,10 @@ def test_slab_smoke(tmp_path: Path) -> None:
             assert (d / f).stat().st_size < 1_000_000
     back = T.RunRecord.from_json(d / "run.json")
     assert back.source == "oracle"
+    assert back.origin == "top"
+    assert back.measures["origin"] == dict(
+        origin="top", anchor_node=None, anchor_position_vox=None, init=False
+    )
     assert back.changed_settings == {"max_sweeps": 3}
     assert back.versions["truth_sha256"]
     assert back.grid["kind"] == "uniform" and back.grid["spacing_mm"] == 0.32
@@ -99,3 +105,32 @@ def test_slab_smoke(tmp_path: Path) -> None:
     z = np.load(d / "columns.npz")
     assert z["paths"].shape[0] == truth.n
     assert len(z["levels"]) == 9
+
+
+def test_anchor_run_records_the_origin(tmp_path: Path) -> None:
+    """run passes init, origin and anchor_node to the solver and records them."""
+    feats = tmp_path / "features.json"
+    feats.write_text(json.dumps({"synthetic": FEATS}))
+    geo, ts = FTR.geometry_of("slab", SHAPE)
+    truth = FTR.truth(geo, ts, "slab", root_spacing_mm=0.96, margin_mm=0.0)
+    ph = FTR.build_phantom("slab", FEATS, noise=0.0, shape=SHAPE)
+    grid = FR.make_grid("uniform:0.64", SHAPE)
+    inputs = FR.make_inputs(ph, "oracle", None)
+    lo = inputs.stop.log_odds(grid.nodes)
+    anchor = int(np.argmin(lo))
+    s = replace(T.DEFAULTS, max_sweeps=2, widths=(1,))
+    coarse, _, _ = MF.solve(grid, inputs, ph.image["noise_sd"], s)
+    out = tmp_path / "anchor"
+    rec = FR.run(
+        ph, inputs, truth, grid, out, source="oracle", grid_spec="uniform:0.64",
+        settings=s, changed_settings=dict(max_sweeps=2, widths=(1,)), init=coarse,
+        origin="anchor", anchor_node=anchor,
+    )  # fmt: skip
+    back = T.RunRecord.from_json(out / "run.json")
+    assert rec.origin == back.origin == "anchor"
+    assert back.measures["origin"] == dict(
+        origin="anchor", anchor_node=anchor,
+        anchor_position_vox=grid.nodes[anchor].tolist(), init=True,
+    )  # fmt: skip
+    z = np.load(out / "field.npz")
+    assert z["q_stop"][anchor] == 0.0

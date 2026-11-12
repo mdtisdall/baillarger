@@ -88,6 +88,8 @@ testpaths = [
   "prototypes/scripts/test_ff_oracle.py",
   "prototypes/scripts/test_ff_stop.py",
   "prototypes/scripts/test_ff_types.py",
+  "prototypes/scripts/test_ff_kiss_runs.py",
+  "prototypes/scripts/test_ff_kiss_views.py",
   "prototypes/scripts/test_fold_phantoms.py",
   "prototypes/scripts/test_joint_levels.py",
   "prototypes/scripts/test_levelset_fill.py",

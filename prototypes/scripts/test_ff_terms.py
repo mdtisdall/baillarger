@@ -719,3 +719,251 @@ def test_update_u_and_moments_chunks_give_the_same_bits():
     FT.refresh_moments(m3, st, np.arange(ga.n)[::-1].copy(), chunk=4)
     for k in ("p", "s1", "s2", "dsum", "m1", "m2"):
         assert getattr(m1, k).tobytes() == getattr(m3, k).tobytes(), k
+
+
+# ---------------------------------------------------------------- the profile lines
+# (CD-7) against the reference form of 63 profiles of 9 levels
+
+# The reference: the profile computation and the contrast energy and messages of the
+# form before CD-7, copied here without change of the arithmetic. Each candidate holds
+# its own profile of L levels.
+
+
+def _ref_candidate_profiles(nodes, cand_tau, cand_dir, s_ref, level_base, volumes, L,
+                            dtau):  # fmt: skip
+    """(n, K, L, 2): the volumes sampled at x_i + d (ℓ Δτ − τ) / (s_ref_i · VOXEL_MM),
+    ℓ = level_base_i + 0 .. L − 1 (the form before CD-7)."""
+    n, K = cand_tau.shape
+    lev = np.arange(L)
+    ell = (level_base[:, None] + lev[None, :]) * dtau
+    dist = (ell[:, None, :] - cand_tau[:, :, None]) / (s_ref[:, None, None] * V)
+    X = nodes[:, None, None, :] + cand_dir[:, :, None, :] * dist[..., None]
+    X = np.where(np.isfinite(X), X, np.broadcast_to(nodes[:, None, None, :], X.shape))
+    Xf = X.reshape(-1, 3)
+    out = np.empty((n, K, L, len(volumes)))
+    for e, vol in enumerate(volumes):
+        out[:, :, :, e] = T.sample_volume(vol, Xf).reshape(n, K, L)
+    return out
+
+
+def _ref_moments(valid, q, prof):
+    qv = np.where(valid, q, 0.0)
+    P = np.where(valid[..., None, None], prof, 0.0)
+    return (
+        qv.sum(1),
+        np.einsum("nk,nkle->nle", qv, P),
+        np.einsum("nk,nkle->nle", qv, P * P),
+    )
+
+
+def _ref_shift(arr, lb_i, lb_j, L):
+    idx = np.arange(L)[None, :] + (lb_i - lb_j)[:, None]
+    mask = (idx >= 0) & (idx < L)
+    out = np.take_along_axis(arr, np.clip(idx, 0, L - 1)[:, :, None], axis=1)
+    return out * mask[:, :, None], mask
+
+
+def _ref_contrast_energy(ga, tw, valid, q, prof, lb):
+    """The expected contrast energy of the form before CD-7."""
+    p, m1, m2 = _ref_moments(valid, q, prof)
+    L = prof.shape[2]
+    i, j = ga.edges[:, 0], ga.edges[:, 1]
+    m1j, mask = _ref_shift(m1[j], lb[i], lb[j], L)
+    m2j, _ = _ref_shift(m2[j], lb[i], lb[j], L)
+    nsh = mask.sum(1)
+    W = np.where(nsh > 0, ga.edge_w / (2.0 * tw.w**2 * np.maximum(nsh, 1)), 0.0)
+    inv_se = 1.0 / np.asarray(tw.sigma_e, float) ** 2
+    Wl = W[:, None, None] * mask[:, :, None] * inv_se[None, None, :]
+    val = p[j][:, None, None] * m2[i] - 2.0 * m1[i] * m1j + p[i][:, None, None] * m2j
+    return float((Wl * val).sum())
+
+
+def _ref_contrast_messages(ga, tw, valid, q, prof, lb):
+    """(n, K): the contrast messages of the form before CD-7."""
+    p, m1, m2 = _ref_moments(valid, q, prof)
+    n, K, L, _ = prof.shape
+    P = np.where(valid[..., None, None], prof, 0.0)
+    inv_se = 1.0 / np.asarray(tw.sigma_e, float) ** 2
+    out = np.zeros((n, K))
+    for k in range(ga.inc_edge.shape[1]):
+        e = ga.inc_edge[:, k]
+        has = np.nonzero(e >= 0)[0]
+        e = e[has]
+        j = ga.inc_edge_nbr[has, k]
+        m1j, mask = _ref_shift(m1[j], lb[has], lb[j], L)
+        m2j, _ = _ref_shift(m2[j], lb[has], lb[j], L)
+        nsh = mask.sum(1)
+        W = np.where(nsh > 0, ga.edge_w[e] / (2.0 * tw.w**2 * np.maximum(nsh, 1)), 0.0)
+        Wl = W[:, None, None] * mask[:, :, None] * inv_se[None, None, :]
+        out[has] += (
+            np.einsum("skle,sle->sk", P[has] ** 2, Wl * p[j][:, None, None])
+            - 2.0 * np.einsum("skle,sle->sk", P[has], Wl * m1j)
+            + (Wl * m2j).sum((1, 2))[:, None]
+        )
+    return out
+
+
+# The tolerance of the comparison, fixed before the first run: the two forms differ only
+# by the rounding of the sample positions (ff_terms.profile_lines), so the profiles, the
+# contrast energy and the contrast messages agree to 1e-9 of their scale.
+LINE_REL = 1e-9
+
+
+def test_profile_lines_match_the_reference_form():
+    rng = np.random.default_rng(29)
+    ga0 = uniform_ga((4, 4, 3), rng=rng)
+    ga = ga_with(ga0, nodes=ga0.nodes + 6.0)  # inside a 16³ volume
+    n = ga.n
+    vols = [
+        ndi.gaussian_filter(rng.standard_normal((16, 16, 16)), 1.5) * 10.0
+        for _ in range(2)
+    ]
+    tau_pred = -rng.uniform(0.05, 1.0, n)
+    tau_pred[0] = -0.08  # a candidate at the top (the rounding rule of the top)
+    tau_pred[1] = -0.4  # on the level lattice
+    tau_pred[2] = 0.03  # above the top: c = TAU_TOP
+    dir_pred = unit(rng.normal(size=(n, 3)))
+    s = T.DEFAULTS
+    cand_tau, cand_dir, valid = FT.moving_candidates(tau_pred, dir_pred, s)
+    s_ref = rng.uniform(0.6, 1.5, n)
+    lb = FT.level_base(tau_pred, s)
+    ref = _ref_candidate_profiles(
+        ga.nodes, cand_tau, cand_dir, s_ref, lb, vols, FT.N_LEVELS, s.dtau
+    )
+    c = np.minimum(tau_pred, T.TAU_TOP)
+    lines = FT.profile_lines(ga.nodes, c, cand_dir[:, : s.n_dir], s_ref, lb, vols)
+    assert lines.shape == (n, s.n_dir, FT.N_LEVELS + s.n_tau - 1, 2)
+    line, off = FT.line_slots(s.n_tau, s.n_dir)
+    K = cand_tau.shape[1]
+    q = rng.uniform(0.1, 1.0, (n, K)) * valid
+    qs = rng.uniform(0.0, 0.3, n)
+    z = q.sum(1) + qs
+    st = FT.TermState(
+        cand_tau=cand_tau,
+        cand_dir=cand_dir,
+        valid=valid,
+        q=q / z[:, None],
+        q_stop=qs / z,
+        u=rng.normal(0.0, 0.3, n),
+        s_ref=s_ref,
+        profiles=lines,
+        level_base=lb,
+        stop_log_odds=rng.normal(0.0, 2.0, n),
+        tensor_dir=unit(rng.normal(size=(n, 3))),
+        coherence=rng.uniform(0.0, 1.0, n),
+        prof_line=np.broadcast_to(line, (n, K)).copy(),
+        prof_off=np.broadcast_to(off, (n, K)).copy(),
+    )
+    # the profiles of every slot
+    P = FT.candidate_profile_rows(st, np.arange(n)[:, None], np.arange(K)[None, :])
+    scale = np.abs(ref).max()
+    assert np.abs(P - ref).max() <= LINE_REL * scale
+    tw = weights(w=2.0)
+    # the contrast energy
+    e_ref = _ref_contrast_energy(ga, tw, valid, st.q, ref, lb)
+    e_new = FT.expected_energy(st, ga, tw)["contrast"]
+    assert e_ref > 0.0
+    assert abs(e_new - e_ref) <= LINE_REL * abs(e_ref)
+    # the contrast messages: the messages less those of zero lines (no contrast term)
+    sel = np.arange(n)
+    M, Ms = FT.messages(st, ga, tw, sel)
+    M0, Ms0 = FT.messages(replace(st, profiles=np.zeros_like(lines)), ga, tw, sel)
+    np.testing.assert_array_equal(Ms, Ms0)  # the stopped state has no contrast term
+    m_ref = _ref_contrast_messages(ga, tw, valid, st.q, ref, lb)
+    tol = LINE_REL * np.abs(m_ref[valid]).max() + 1e-12 * np.abs(M[valid]).max()
+    assert np.abs((M - M0)[valid] - m_ref[valid]).max() <= tol
+    _line_report["profile"] = float(np.abs(P - ref).max() / scale)
+    _line_report["energy"] = float(abs(e_new - e_ref) / abs(e_ref))
+    _line_report["messages"] = float(
+        np.abs((M - M0)[valid] - m_ref[valid]).max() / np.abs(m_ref[valid]).max()
+    )
+    print("profile lines vs reference (relative):", _line_report)
+
+
+_line_report: dict[str, float] = {}
+
+
+def test_line_slots_index_map():
+    line, off = FT.line_slots(9, 7)
+    for a in range(9):
+        for m in range(7):
+            c = a * 7 + m
+            assert line[c] == m and off[c] == 8 - a
+    assert off.min() == 0 and off.max() + FT.N_LEVELS == 17
+
+
+# ---------------------------------------------------------------- the anchor origin
+
+
+def test_no_upper_bound_on_tau_with_the_anchor_origin() -> None:
+    s = T.DEFAULTS
+    tp = np.array([0.3, -0.05])
+    p = np.array([[1.0, 0, 0]] * 2)
+    tau, d, valid = FT.moving_candidates(tp, p, s, tau_max=None)
+    t0, d0, _ = FT.moving_candidates(np.array([-0.3, -1.0]), p, s)
+    a = np.arange(63) // 7
+    assert valid.all()
+    np.testing.assert_allclose(tau, tp[:, None] + (a - 4)[None, :] * s.dtau, atol=1e-15)
+    assert np.array_equal(d, d0)
+    lb = FT.level_base(np.array([0.5, -1.0]), s, tau_max=None)
+    assert lb.tolist() == [round(0.5 / 0.04) - 4, -25 - 4]
+
+
+def test_jump_switch_off() -> None:
+    """TermWeights.jump = False: the jump term is 0 in the expected energy, in the
+    state energy and in the messages (the messages equal those with face_w = 0); the
+    other terms do not change."""
+    rng = np.random.default_rng(41)
+    ga = uniform_ga((3, 3, 2), rng=rng)
+    st = random_state(ga.n, 4, 3, rng, invalid=0.2)
+    on = weights(w=2.0)
+    off = replace(on, jump=False)
+    e_on = FT.expected_energy(st, ga, on)
+    e_off = FT.expected_energy(st, ga, off)
+    assert e_on["jump"] > 0.0 and e_off["jump"] == 0.0
+    for k in e_on:
+        if k != "jump":
+            assert e_off[k] == e_on[k], k
+    ch = rng.integers(-1, 4, (5, ga.n))
+    assert np.all(FT.state_energy(st, ga, off, ch)["jump"] == 0.0)
+    M, Ms = FT.messages(st, ga, off, np.arange(ga.n))
+    M0, Ms0 = FT.messages(st, ga_with(ga, face_w=np.zeros_like(ga.face_w)), on,
+                          np.arange(ga.n))  # fmt: skip
+    np.testing.assert_allclose(M, M0, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(Ms, Ms0, rtol=1e-13, atol=1e-13)
+
+
+@pytest.mark.parametrize("k", [3, -7])
+def test_energy_is_invariant_under_a_shift_of_every_tau(k: int) -> None:
+    """With the jump term off and no τ prior (the anchor origin), a shift of every τ by
+    k Δτ, with every level_base shifted by k, changes no expected term and no message
+    (to rounding); and the sampled profiles at τ + k Δτ and the levels + k are the
+    profiles at τ. So a shift by an integer multiple of Δτ is a symmetry of the
+    discrete energy."""
+    s = T.DEFAULTS
+    rng = np.random.default_rng(43)
+    ga = uniform_ga((3, 3, 3), rng=rng)
+    st = random_state(ga.n, 4, 3, rng, invalid=0.2)
+    tw = replace(weights(w=2.0), jump=False)
+    sh = replace(st, cand_tau=st.cand_tau + k * s.dtau, level_base=st.level_base + k)
+    e0 = FT.expected_energy(st, ga, tw)
+    e1 = FT.expected_energy(sh, ga, tw)
+    for key in e0:
+        assert e1[key] == pytest.approx(e0[key], rel=1e-12, abs=1e-12), key
+    M0, Ms0 = FT.messages(st, ga, tw, np.arange(ga.n))
+    M1, Ms1 = FT.messages(sh, ga, tw, np.arange(ga.n))
+    v = st.valid  # the values of slots that are not valid have no use
+    np.testing.assert_allclose(M1[v], M0[v], rtol=1e-12, atol=1e-10)
+    np.testing.assert_allclose(Ms1, Ms0, rtol=1e-12, atol=1e-10)
+    shape = (20, 20, 20)
+    vols = [rng.normal(size=shape), rng.normal(size=shape)]
+    nodes = rng.uniform(6.0, 14.0, (5, 3))
+    tau = -rng.uniform(0.0, 0.5, (5, 4))
+    d = unit(rng.normal(size=(5, 4, 3)))
+    s_ref = rng.uniform(0.8, 1.2, 5)
+    lb = rng.integers(-12, 0, 5)
+    P0 = FT.candidate_profiles(nodes, tau, d, s_ref, lb, vols, L=9, dtau=s.dtau)
+    P1 = FT.candidate_profiles(
+        nodes, tau + k * s.dtau, d, s_ref, lb + k, vols, L=9, dtau=s.dtau
+    )
+    np.testing.assert_allclose(P1, P0, rtol=0, atol=1e-9)
