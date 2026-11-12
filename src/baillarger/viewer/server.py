@@ -37,7 +37,9 @@ Requests:
   /review/regenerate; POST /review/session, /review/skip, /review/preview,
   /review/answer, /review/scribble, /review/paint, /review/undo,
   /review/regenerate (the regenerate command as a subprocess under
-  scripts/memguard).
+  scripts/memguard); with a white surface, POST and GET
+  /review/surface-preview, GET /review/surface-preview/mesh and
+  /review/surface-preview/cut (the working field's surface preview).
 - Surface outlines (baillarger.viewer.outlines):
   /outline?axis=&mm=&box= (float32 segment ends, world mm).
 - The columns pane (baillarger.viewer.columns.route): /columns/meta,

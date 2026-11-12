@@ -177,6 +177,13 @@ def surface_paths(out: Path, ents: dict[str, str], hemi: str) -> dict[str, Path]
     )
 
 
+def field_path(surf: Path) -> Path:
+    """The antialiased field (write_field) next to the white surface at surf."""
+    ents = entities(surf)
+    name = surface_paths(surf.parent, ents, ents["hemi"])["field"].name
+    return surf.with_name(name)
+
+
 def mm_to_voxel(mm: npt.ArrayLike, affine: npt.ArrayLike) -> Float:
     """Points in scanner mm to voxel coordinates of the grid (float32), as
     WhiteSurface.load computes them: the inverse affine in float64, then

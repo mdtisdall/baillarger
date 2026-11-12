@@ -100,6 +100,11 @@ the changed voxels held (`held`). The margin past R is S + 2, so that sd (comput
 box) is exact within R of the changed voxels. The prototype used a margin of 3 and sd
 from a larger box; the two give the same problem within R.
 
+The viewer's surface preview (`baillarger.viewer.surface_preview`) calls
+`local_solve` for each group of changed voxels (26-connected cells of 2 x 16 voxels),
+with the working field (the stored field and the patches of earlier solves) as the
+earlier field.
+
 ## Evidence
 
 Script: `prototypes/scripts/antialias_preview_radius.py`. Data: the right hemisphere of
