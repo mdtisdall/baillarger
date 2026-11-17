@@ -98,6 +98,33 @@ class Contact:
         p = torch.clamp(p, lo, hi)
         return torch.log(p) - torch.log1p(-p)
 
+    @property
+    def root_b(self) -> float:
+        return -self.g - self.tB
+
+    @property
+    def root_a(self) -> float:
+        return self.g + self.tA
+
+    def nodes_roots(self, h: float, centre: str, ends: str) -> T.Array:
+        """The nodes of the line that ends at the two roots (the domain's white-matter edge):
+        the grid nodes c + i h strictly inside the roots, and a node at each root. ends: "keep"
+        (all those grid nodes) or "merge" (drop the grid node next to a root where the end cell
+        would be shorter than h / 2)."""
+        off = 0.5 * h if centre == "mid" else 0.0
+        i0 = int(np.floor((self.root_b - off) / h)) + 1
+        i1 = int(np.ceil((self.root_a - off) / h)) - 1
+        inner = off + h * np.arange(i0, i1 + 1)
+        inner = inner[(inner > self.root_b + 1e-12) & (inner < self.root_a - 1e-12)]
+        if ends == "merge":
+            if inner[0] - self.root_b < 0.5 * h:
+                inner = inner[1:]
+            if self.root_a - inner[-1] < 0.5 * h:
+                inner = inner[:-1]
+        elif ends != "keep":
+            raise ValueError(f"ends: {ends!r}")
+        return np.r_[self.root_b, inner, self.root_a]
+
     def nodes(self, h: float, centre: str) -> T.Array:
         off = 0.5 * h if centre == "mid" else 0.0
         i0 = int(np.floor((self.x_start_b - off) / h + 1e-9))

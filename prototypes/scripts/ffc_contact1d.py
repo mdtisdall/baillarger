@@ -52,6 +52,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import ff_types as T  # noqa: E402
+import ffc_basis as B  # noqa: E402
 import ffc_contact as CT  # noqa: E402
 import ffc_line as LN  # noqa: E402
 import ffc_tau1d as P  # noqa: E402
@@ -63,6 +64,7 @@ WALL_S = 120.0  # the wall-time limit of each start (kink form) and of each refi
 GS = (0.02, 0.32)
 CENTRES = ("mid", "node")
 MAX_REFINE = 8
+MEASURE_DX = 0.005  # the fixed measure grid (mm; the user's N1 b)
 F64 = torch.float64
 
 
@@ -124,8 +126,23 @@ def kink_start(x: T.Array, fB: float, fA: float) -> tuple[T.Array, int | None, f
 # ---------------------------------------------------------------- measures
 
 
-def side_measures(c: CT.Contact, p: P.Problem, z: T.Array) -> dict[str, Any]:
-    tau, xs = (a.numpy() for a in p.split(torch.as_tensor(z, dtype=F64)))
+def measure_grid(c: CT.Contact, bounds: tuple[float, float] | None = None) -> T.Array:
+    """The fixed measure grid (independent of the basis): MEASURE_DX steps from B's start point
+    to A's start point, or across `bounds` (the domain's ends)."""
+    lo, hi = (c.x_start_b, c.x_start_a) if bounds is None else bounds
+    n = int(np.floor((hi - lo) / MEASURE_DX + 1e-9))
+    return np.asarray(lo + MEASURE_DX * np.arange(n + 1))
+
+
+def side_measures(c: CT.Contact, p: P.Problem, z: T.Array,
+                  bounds: tuple[float, float] | None = None) -> dict[str, Any]:
+    """The tops (the crossings of τ = 0), and per side on the fixed grid: the affine map of τ
+    onto the truth, the τ residual and the speed |dx/dτ| (all read through the basis)."""
+    xg = measure_grid(c, bounds)
+    zt = torch.as_tensor(z, dtype=F64)
+    with torch.no_grad():
+        tau = p.basis.values(zt, xg).numpy()
+        grad = p.basis.gradients(zt, xg).numpy()
     cr = P.crossings(p, z)
     out: dict[str, Any] = dict(crossings=[x for x, _ in cr])
     up = [x for x, s in cr if s > 0]  # τ rises through 0: a top reached from the left (side B)
@@ -135,22 +152,18 @@ def side_measures(c: CT.Contact, p: P.Problem, z: T.Array) -> dict[str, Any]:
         t = tops[side]
         m: dict[str, Any] = dict(top=t, top_error_mm=None if t is None else t - true_face)
         if t is not None:
-            sel = (xs <= t) if side == "B" else (xs >= t)
+            sel = (xg <= t) if side == "B" else (xg >= t)
             sel &= tau < 0
-            tt = c.tau_true(xs[sel])
+            tt = c.tau_true(xg[sel])
             Amat = np.c_[tau[sel], np.ones(sel.sum())]
             (alpha, beta), *_ = np.linalg.lstsq(Amat, tt, rcond=None)
             m["map_alpha"] = float(alpha)
             m["map_beta"] = float(beta)
             m["tau_residual_max"] = float(np.max(np.abs(alpha * tau[sel] - tt + beta)))
-            idx = np.nonzero(sel)[0]
-            cells = idx[:-1] if side == "B" else idx[:-1]
-            cells = np.array([e for e in cells if sel[e] and sel[e + 1]], int)
-            v = np.abs((xs[cells + 1] - xs[cells]) / (tau[cells + 1] - tau[cells]))
-            mid = 0.5 * (xs[cells] + xs[cells + 1])
+            v = 1.0 / np.abs(grad[sel])
             m["speed_raw_minmax"] = [float(v.min()), float(v.max())]
-            m["speed_true"] = float(c.speed_true(np.array([mid[0]]))[0])
-            m["speed_mapped_error_max"] = float(np.max(np.abs(v / abs(alpha) - c.speed_true(mid))))
+            m["speed_true"] = float(c.speed_true(xg[sel][:1])[0])
+            m["speed_mapped_error_max"] = float(np.max(np.abs(v / abs(alpha) - c.speed_true(xg[sel]))))
         out[side] = m
     out["width"] = None if tops["A"] is None or tops["B"] is None else tops["A"] - tops["B"]
     out["width_true"] = 2 * c.g
@@ -184,23 +197,6 @@ def top_probability(c: CT.Contact, p: P.Problem, z: T.Array) -> dict[str, Any]:
 # ---------------------------------------------------------------- refinement (K5a)
 
 
-def refine_nodes(x: T.Array, r: int) -> T.Array:
-    """Bisect the cells r − 1 and r (at node r), then bisect cells until neighbouring cells
-    differ by at most a factor 2."""
-    mids = [0.5 * (x[r - 1] + x[r]), 0.5 * (x[r] + x[r + 1])]
-    x = np.sort(np.r_[x, mids])
-    while True:
-        L = np.diff(x)
-        bad = [e for e in range(len(L) - 1) if L[e] > 2 * L[e + 1] + 1e-15 or L[e + 1] > 2 * L[e] + 1e-15]
-        if not bad:
-            return x
-        add = []
-        for e in bad:
-            k = e if L[e] > L[e + 1] else e + 1
-            add.append(0.5 * (x[k] + x[k + 1]))
-        x = np.unique(np.r_[x, add])
-
-
 def run_refine(c: CT.Contact, x0: T.Array) -> dict[str, Any]:
     fB, fA = oracle_faces(c, x0)
     peak = x0[int(np.argmin(np.abs(x0 - 0.5 * (fA + fB))))]
@@ -217,16 +213,16 @@ def run_refine(c: CT.Contact, x0: T.Array) -> dict[str, Any]:
         p = base_problem(c, x)
         z, log = P.solve(p, z, deadline=deadline)
         sm = side_measures(c, p, z)
-        r = P.reversal_node(p, z)
+        r = P.reversal_x(p, z)
         rounds.append(dict(min_cell=float(np.diff(x).min()), n_nodes=len(x), newton=log.iterations,
-                           converged=log.converged, reason=log.reason, active=log.active[-1] if log.active else 0, reversal_x=None if r is None else float(x[r]),
+                           converged=log.converged, reason=log.reason, active=log.active[-1] if log.active else 0, reversal_x=r,
                            top_error_B=sm["B"]["top_error_mm"], top_error_A=sm["A"]["top_error_mm"],
                            width=sm["width"], energy=log.energy[-1]))
         if np.diff(x).min() <= c.g / 2 + 1e-12 or r is None:
             break
-        xn = refine_nodes(x, r)
-        z = np.interp(xn, x, z)
-        x = xn
+        fine = p.basis.refine(p.basis.cells_at(r))
+        z = p.basis.prolong(z, fine)
+        x = fine.x
     return dict(rounds=rounds, x=x, tau=z)
 
 

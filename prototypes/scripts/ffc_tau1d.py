@@ -40,6 +40,12 @@ At the minimum z* the posterior of the unknowns is approximated by N(z*, H⁻¹)
 the energy. τ(x) is linearised in z: σ²(x) = a(x)ᵀ H⁻¹ a(x), a(x) = ∂τ(x)/∂z. The probability
 that x is beyond the top is P(τ(x) > 0) = Φ(τ*(x) / σ(x)).
 
+The τ representation is behind the interface ffc_basis.TauBasis (the user's decision of
+2026-11-12): the energy, the feasibility rules and the readouts read τ only through it. The P1
+forms above are those of ffc_basis.P1Basis (the speed prior's two-point form is its
+`derived_norms`; the cut cells are its `integrate_cut`). The kink switch (`solve_kink`) is
+P1-only.
+
 Derivatives: Torch autograd (float64) on the quadrature-point energy, as ffc_solve1d. Newton
 with Levenberg damping and an Armijo line search; stop at a Newton decrement below NEWTON_TOL.
 """
@@ -53,53 +59,46 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import mfem.ser as mfem
 import numpy as np
+import scipy.linalg
 import torch
 from scipy.special import ndtr
 
 sys.path.insert(0, str(Path(__file__).parent))
 import ff_types as T  # noqa: E402
+import ffc_basis as B  # noqa: E402
 
 F64 = torch.float64
-QUAD_ORDER = 39  # 20 Gauss points on each part of a cell
+QUAD_ORDER = B.QUAD_ORDER
 NEWTON_TOL = 1e-14
 MAX_NEWTON = 200
 MAX_LINE = 60
 
 
-# ---------------------------------------------------------------- the mesh (MFEM)
-
-
-def mfem_nodes(x: T.Array) -> T.Array:
-    """Build MFEM's 1D mesh on the nodes x (a segment mesh, vertices moved to x) and return its
-    vertex positions; checks that the H1 order 1 dofs are the vertices in order."""
-    n = len(x) - 1
-    mesh = mfem.Mesh.MakeCartesian1D(n, 1.0)
-    for i, v in enumerate(mesh.GetVertexArray()):
-        v[0] = float(x[i])
-    xv = np.array([float(v[0]) for v in mesh.GetVertexArray()])
-    h1 = mfem.FiniteElementSpace(mesh, mfem.H1_FECollection(1, 1))
-    for e in range(n):
-        if list(h1.GetElementDofs(e)) != [e, e + 1]:
-            raise ValueError("unexpected H1 dof order")
-    return xv
-
-
-def gauss_rule() -> tuple[T.Array, T.Array]:
-    ir = mfem.IntRules.Get(mfem.Geometry.SEGMENT, QUAD_ORDER)
-    qx = np.array([ir.IntPoint(i).x for i in range(ir.GetNPoints())])
-    qw = np.array([ir.IntPoint(i).weight for i in range(ir.GetNPoints())])
-    return qx, qw
-
-
 # ---------------------------------------------------------------- the problem
+
+ENERGY_FORMS = ("speed", "equivolume_abs", "equivolume_convex")
+# The equivolume weight: the old speed prior's λA (1 / (speed_log_sd² ℓ) · VOXEL_MM² = 0.569),
+# a PROVISIONAL placeholder (the user's E5; a literature check runs separately).
+EQUIVOLUME_LAMBDA_A_PROVISIONAL = 1.0 / (T.DEFAULTS.speed_log_sd**2 * T.DEFAULTS.fem_length_mm) * T.VOXEL_MM**2
+MM_PULL_LOG_SD = math.log(2.0)  # the prior SD of log speed behind the mm pull (the user's E6)
+
+
+def mm_pull_coefficient(st: T.SolverSettings) -> float:
+    """c in c ∫ (|τ'| − 1)² dx: the old speed prior's mass-term normalisation (λA/2)/ℓ², with
+    speed_log_sd replaced by log 2: 0.5 · VOXEL_MM² / ((log 2)² ℓ³)."""
+    return 0.5 * T.VOXEL_MM**2 / (MM_PULL_LOG_SD**2 * st.fem_length_mm**3)
+
+
+mfem_nodes = B.mfem_nodes
+gauss_rule = B.gauss_rule
 
 
 @dataclass
 class Problem:
     """One 1D line in the S1 form. log_odds_t: the stop field's log-odds at x (Torch,
-    differentiable)."""
+    differentiable). τ is read only through `basis` (ffc_basis.TauBasis); by default the MFEM
+    P1 basis on the nodes x, enriched in `enrich_cell` (K3a′) if it is not None."""
 
     x: T.Array  # (n + 1,) the fixed nodes
     log_odds_t: Callable[[torch.Tensor], torch.Tensor]
@@ -107,60 +106,60 @@ class Problem:
     enrich_cell: int | None = None  # the cell with the extra free node (K3a′), or None
     roots: tuple[tuple[float, float], ...] = ()  # (x_root, n): the white surface's root and its normal (±1 along x)
     skip_reversal: bool = True
-    qx: T.Array = field(init=False)
-    qw: T.Array = field(init=False)
+    # "speed": the old speed prior. "equivolume_abs": equivolume in tissue + c (|τ'| − 1)² everywhere
+    # (non-convex in τ' at 0). "equivolume_convex": equivolume in tissue + c (n τ' − 1)² in tissue
+    # (n the orientation of the tissue's root) + c max(|τ'| − 1, 0)² beyond the top.
+    energy_form: str = "speed"
+    mm_scale: float = 1.0  # a factor on the mm-pull weight (an insensitivity check only)
+    slope_bounds: bool = False  # Q1 and Q3d as linear bounds in the active set (S1), not only line-search checks
+    basis: B.P1Basis = field(init=False)
 
     def __post_init__(self) -> None:
-        self.x = mfem_nodes(np.asarray(self.x, float))
-        self.qx, self.qw = gauss_rule()
+        if self.energy_form not in ENERGY_FORMS:
+            raise ValueError(f"energy_form: {self.energy_form!r}")
+        self.basis = B.P1Basis(np.asarray(self.x, float), self.enrich_cell)
+        self.x = self.basis.x
         st = self.settings
         lam = 1.0 / (st.speed_log_sd**2 * st.fem_length_mm)
         self.lam_a = lam * T.VOXEL_MM**2
         self.ell = st.fem_length_mm
         self.inv_hv = 1.0 / T.VOXEL_MM
+        # the equivolume model: the weights (module docstring)
+        self.eq_weight = EQUIVOLUME_LAMBDA_A_PROVISIONAL
+        self.mm_coeff = self.mm_scale * mm_pull_coefficient(st)
+
+    @property
+    def qx(self) -> T.Array:
+        return self.basis.qx
+
+    @property
+    def qw(self) -> T.Array:
+        return self.basis.qw
 
     @property
     def n_unknowns(self) -> int:
-        return len(self.x) + (2 if self.enrich_cell is not None else 0)
+        return self.basis.n_unknowns
 
     def split(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """(τ at all nodes, all node positions), the extra node inserted, from the unknowns z =
-        [τ at the fixed nodes, (τ_k, x_k) if enriched]."""
-        n1 = len(self.x)
-        tau = z[:n1]
-        xs = torch.as_tensor(self.x, dtype=F64)
-        if self.enrich_cell is not None:
-            c = self.enrich_cell + 1
-            tau = torch.cat([tau[:c], z[n1 : n1 + 1], tau[c:]])
-            xs = torch.cat([xs[:c], z[n1 + 1 : n1 + 2], xs[c:]])
-        return tau, xs
+        return self.basis.split(z)
 
     def pack(self, tau: T.Array, tau_k: float | None = None, x_k: float | None = None) -> T.Array:
-        """The unknowns from τ at the fixed nodes (and the extra node's value and position;
-        by default the cell's midpoint, on the line)."""
-        tau = np.asarray(tau, float)
-        if self.enrich_cell is None:
-            return tau.copy()
-        e = self.enrich_cell
-        if x_k is None:
-            x_k = 0.5 * (self.x[e] + self.x[e + 1])
-        if tau_k is None:
-            tau_k = float(np.interp(x_k, self.x[e : e + 2], tau[e : e + 2]))
-        return np.r_[tau, tau_k, x_k]
+        return self.basis.pack(tau, tau_k, x_k)
 
     def fixed_tau(self, z: T.Array) -> T.Array:
-        return np.asarray(z[: len(self.x)], float)
+        return self.basis.fixed_tau(z)
 
     # ---- the energy
 
     def _quad(self, a: torch.Tensor, b: torch.Tensor, sign: float) -> torch.Tensor:
+        """∫_a^b softplus(sign · ℓo) dx by the Gauss rule (a check of the cut quadrature)."""
         qx = torch.as_tensor(self.qx, dtype=F64)
         qw = torch.as_tensor(self.qw, dtype=F64)
         xs = a + (b - a) * qx
         return (b - a) * (qw * torch.nn.functional.softplus(sign * self.log_odds_t(xs))).sum()
 
     def _quad_v(self, a: torch.Tensor, b: torch.Tensor, sign: torch.Tensor) -> torch.Tensor:
-        """Per cell: ∫_a^b softplus(sign · ℓo) dx by the Gauss rule (vectors a, b, sign)."""
+        """Per interval: ∫_a^b softplus(sign · ℓo) dx by the Gauss rule (vectors a, b, sign)."""
         qx = torch.as_tensor(self.qx, dtype=F64)
         qw = torch.as_tensor(self.qw, dtype=F64)
         xq = a[:, None] + (b - a)[:, None] * qx[None, :]
@@ -168,71 +167,123 @@ class Problem:
         return (b - a) * (f * qw[None, :]).sum(1)
 
     def energy_terms(self, z: torch.Tensor) -> dict[str, torch.Tensor]:
-        tau, xs = self.split(z)
-        L = xs[1:] - xs[:-1]
-        g = (tau[1:] - tau[:-1]) / L
-        u = -torch.log(torch.abs(g))
-        e_u2 = (L * u * u).sum() / (self.ell * self.ell)
-        du = u[1:] - u[:-1]
-        d = 0.5 * (L[1:] + L[:-1])
-        keep = torch.ones_like(du)
-        if self.skip_reversal:
-            gs = g.detach()
-            keep = torch.where(gs[1:] * gs[:-1] < 0, torch.zeros_like(du), keep)
-        e_du = (keep * du * du / d).sum()
-        e_speed = 0.5 * self.lam_a * (e_u2 + e_du)
-        # the stop term, all cells at once: each cell is split at its crossing c (c = b when τ
-        # does not change sign); the first part has the sign of τ at a, the second the other
-        a_, b_ = xs[:-1], xs[1:]
-        ta, tb = tau[:-1], tau[1:]
-        cross = (ta.detach() < 0) != (tb.detach() < 0)
-        frac = torch.where(cross, -ta / torch.where(cross, tb - ta, torch.ones_like(ta)), torch.ones_like(ta))
-        c_ = a_ + (b_ - a_) * frac
-        s1 = torch.where(ta.detach() < 0, 1.0, -1.0).to(F64)  # moving (+ℓo) where τ < 0
-        e_stop = (self._quad_v(a_, c_, s1) + self._quad_v(c_, b_, -s1)).sum()
+        # the stop term (evidence): tissue (τ < 0) softplus(ℓo), beyond the top softplus(−ℓo),
+        # on the basis's quadrature split at τ = 0
+        if self.energy_form in ("equivolume_abs", "equivolume_convex"):
+            # equivolume in tissue: v = 1/τ' per cell, (λA/2) Σ frac (v_{e+1} − v_e)² / d
+            _, e_dv = self.basis.derived_norms(z, lambda g: 1.0 / g, self.skip_reversal, tissue_only=True)
+            e_eq = 0.5 * self.eq_weight * e_dv
+            if self.energy_form == "equivolume_abs":
+                # the mm pull everywhere: c ∫ (|τ'| − 1)² dx
+                e_pull, _ = self.basis.derived_norms(z, lambda g: torch.abs(g) - 1.0, False)
+            else:
+                n_of = self.orientation(z)
+
+                def pull(g: torch.Tensor, side: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+                    tissue = (n_of(x) * g - 1.0) ** 2
+                    beyond = torch.clamp(torch.abs(g) - 1.0, min=0.0) ** 2
+                    return torch.where(side < 0, tissue, beyond)
+
+                e_pull = self.basis.integrate_grad_cut(z, pull)
+            e_mm = self.mm_coeff * e_pull
+            e_stop = self.basis.integrate_cut(
+                z, lambda x, side: torch.nn.functional.softplus(-side * self.log_odds_t(x))) * self.inv_hv
+            return dict(equivolume=e_eq, mm_pull=e_mm, stop=e_stop, total=e_eq + e_mm + e_stop)
+        # the speed prior on the derived field u = −log |∇τ| (K1 over the whole line, K2
+        # sign-free, K4 the reversal parts left out)
+        e_u2, e_du = self.basis.derived_norms(z, lambda g: -torch.log(torch.abs(g)), self.skip_reversal)
+        e_speed = 0.5 * self.lam_a * (e_u2 / (self.ell * self.ell) + e_du)
+        e_stop = self.basis.integrate_cut(
+            z, lambda x, side: torch.nn.functional.softplus(-side * self.log_odds_t(x)))
         e_stop = e_stop * self.inv_hv
         return dict(speed=e_speed, stop=e_stop, total=e_speed + e_stop)
 
     def energy(self, z: torch.Tensor) -> torch.Tensor:
         return self.energy_terms(z)["total"]
 
+    def root_slopes(self, z: T.Array) -> T.Array:
+        """n · ∇τ at each root."""
+        if not self.roots:
+            return np.zeros(0)
+        xr = np.array([r for r, _ in self.roots])
+        nr = np.array([n for _, n in self.roots])
+        with torch.no_grad():
+            g = self.basis.gradients(torch.as_tensor(z, dtype=F64), xr).numpy()
+        return np.asarray(nr * g)
+
     def valid(self, z: T.Array) -> bool:
-        """The cells have positive length, no slope is 0, and n·∇τ > 0 on the root cells."""
-        tau, xs = self.split(torch.as_tensor(z, dtype=F64))
-        L = (xs[1:] - xs[:-1]).numpy()
-        dt = (tau[1:] - tau[:-1]).numpy()
-        ok = bool(np.all(L > 0) and np.all(dt != 0) and np.all(np.isfinite(dt)))
-        if ok:
-            # Q2c and Q3d (rules of the model): no interior local minimum of τ (columns start
-            # only at the roots), and a local maximum (a ridge) only where τ ≥ 0
-            tn = tau.numpy()
-            rev = np.nonzero(dt[1:] * dt[:-1] < 0)[0] + 1
-            if np.any(dt[rev - 1] < 0) or np.any(tn[rev] < 0):
+        """The field is admissible, n·∇τ > 0 at the roots (Q1), no interior local minimum
+        (Q3d) and every local maximum (a ridge) has τ ≥ 0 (Q2c)."""
+        if not self.basis.admissible(z, flat_beyond_top=self.energy_form != "speed"):
+            return False
+        for ex in self.basis.extrema(z):
+            if ex.kind == "min" or ex.value < 0:
                 return False
-            xn = xs.numpy()
-            for xr, nr in self.roots:
-                e = int(np.clip(np.searchsorted(xn, xr, side="right") - 1, 0, len(L) - 1))
-                if not nr * dt[e] / L[e] > 0:
-                    return False
-        return ok
+        return bool(np.all(self.root_slopes(z) > 0))
+
+    def ridge_x(self, z: T.Array) -> float | None:
+        mx = [ex.x for ex in self.basis.extrema(z) if ex.kind == "max"]
+        return mx[0] if mx else None
+
+    def orientation(self, z: torch.Tensor) -> Callable[[torch.Tensor], torch.Tensor]:
+        """n(x): the orientation of the column at x, from its root (the root on the same side
+        of the ridge; with one root, or with no ridge, the nearest root). A constant of the
+        energy's evaluation (from the detached field)."""
+        zd = z.detach().numpy()
+        xr = self.ridge_x(zd)
+        roots = sorted(self.roots)
+
+        def n_of(x: torch.Tensor) -> torch.Tensor:
+            xn = x.detach().numpy()
+            if len(roots) == 1:
+                return torch.full_like(x, roots[0][1])
+            if xr is None:
+                d = np.stack([np.abs(xn - r) for r, _ in roots])
+                k = np.argmin(d, axis=0)
+            else:
+                k = (xn > xr).astype(int)
+            return torch.as_tensor(np.array([n for _, n in roots])[k], dtype=F64)
+
+        return n_of
+
+    def bounds(self, z: T.Array) -> list[T.Array]:
+        """The linear bounds c·z ≥ 0: each ridge's τ ≥ 0 (Q2c); with slope_bounds also the slope
+        signs (Q1 and Q3d): each cell rises away from its root (n · (τ_end − τ_start) ≥ 0, the
+        side from the ridge), except the cells next to the ridge (their sign may change: the ridge
+        moves)."""
+        out = [ex.c for ex in self.basis.extrema(z) if ex.kind == "max"]
+        if not self.slope_bounds:
+            return out
+        mx = [ex for ex in self.basis.extrema(z) if ex.kind == "max"]
+        roots = sorted(self.roots)
+        tau, xs = self.basis.nodal(z)
+        lo, hi = len(xs), -1  # the nodes of the ridge (one node, or a flat run)
+        if mx:
+            i = int(np.argmin(np.abs(xs - mx[0].x)))
+            lo = hi = i
+            while lo > 0 and tau[lo - 1] == tau[i]:
+                lo -= 1
+            while hi < len(xs) - 1 and tau[hi + 1] == tau[i]:
+                hi += 1
+        for e, (xm, c) in enumerate(self.basis.cell_rise_forms()):
+            if lo - 1 <= e <= hi:
+                continue  # touches the ridge: free (the ridge may move)
+            if len(roots) == 1:
+                n = roots[0][1]
+            elif mx:
+                n = roots[0][1] if e < lo else roots[1][1]
+            else:
+                n = roots[0][1] if abs(xm - roots[0][0]) < abs(xm - roots[1][0]) else roots[1][1]
+            out.append(n * c)
+        return out
 
     def active_constraints(self, z: T.Array, tol: float = 1e-9) -> dict[str, int]:
-        """The constraints within tol of their bound at z (root slopes and reversal values)."""
-        tau, xs = self.split(torch.as_tensor(z, dtype=F64))
-        tn, xn = tau.numpy(), xs.numpy()
-        L = np.diff(xn)
-        dt = np.diff(tn)
-        rev = np.nonzero(dt[1:] * dt[:-1] < 0)[0] + 1
-        n_root = 0
-        for xr, nr in self.roots:
-            e = int(np.clip(np.searchsorted(xn, xr, side="right") - 1, 0, len(L) - 1))
-            n_root += int(nr * dt[e] / L[e] < tol)
-        return dict(root=n_root, reversal=int(np.sum(np.abs(tn[rev]) < tol)))
+        """The constraints within tol of their bound at z (root slopes and extremum values)."""
+        n_root = int(np.sum(self.root_slopes(z) < tol))
+        return dict(root=n_root, reversal=int(sum(abs(ex.value) < tol for ex in self.basis.extrema(z))))
 
     def n_reversals(self, z: T.Array) -> int:
-        tau, _ = self.split(torch.as_tensor(z, dtype=F64))
-        d = np.diff(tau.numpy())
-        return int(np.sum(d[1:] * d[:-1] < 0))
+        return len(self.basis.extrema(z))
 
     def total(self, z: T.Array) -> float:
         if not self.valid(z):
@@ -244,13 +295,8 @@ class Problem:
     # ---- the field at points
 
     def tau_at(self, z: torch.Tensor, xq: T.Array) -> torch.Tensor:
-        """The P1 interpolant at the points xq (Torch, differentiable in z)."""
-        tau, xs = self.split(z)
-        xsn = xs.detach().numpy()
-        e = np.clip(np.searchsorted(xsn, xq, side="right") - 1, 0, len(xsn) - 2)
-        xq_t = torch.as_tensor(xq, dtype=F64)
-        t = (xq_t - xs[e]) / (xs[e + 1] - xs[e])
-        return tau[e] * (1 - t) + tau[e + 1] * t
+        """τ at the points xq (Torch, differentiable in z)."""
+        return self.basis.values(z, xq)
 
 
 @dataclass
@@ -282,24 +328,26 @@ ACTIVE_TOL = 1e-12  # a ridge with |τ| below this is on its bound τ = 0
 
 
 def ridge_index(p: Problem, z: T.Array) -> int | None:
-    """The index in z of the τ value of the ridge (the node where the slope changes from + to
-    −), or None. The full node arrays hold the extra node at enrich_cell + 1."""
-    tau, _ = p.split(torch.as_tensor(z, dtype=F64))
-    d = np.diff(tau.numpy())
-    k = np.nonzero((d[:-1] > 0) & (d[1:] < 0))[0]
-    if len(k) == 0:
-        return None
-    i = int(k[0]) + 1
-    if p.enrich_cell is None:
-        return i
-    c = p.enrich_cell + 1
-    return i if i < c else (len(p.x) if i == c else i - 1)
+    """P1 (the kink switch): the index in z of the τ value of the first ridge, or None."""
+    for ex in p.basis.extrema(z):
+        if ex.kind == "max":
+            return int(np.argmax(ex.c))
+    return None
 
 
-def _newton_step(g: T.Array, H: T.Array, free: T.BoolArray) -> tuple[T.Array, float]:
-    """The Newton step on the free unknowns (0 on the others), with the Levenberg shift μ
-    that makes the free Hessian positive definite."""
-    gf, Hf = g[free], H[np.ix_(free, free)]
+def _newton_step(g: T.Array, H: T.Array, active: list[T.Array]) -> tuple[T.Array, float]:
+    """The Newton step in the null space of the active bounds (c·step = 0 for each), with the
+    Levenberg shift μ that makes the reduced Hessian positive definite. A bound on one unknown
+    (c a unit vector) fixes that unknown."""
+    n = len(g)
+    if all(np.count_nonzero(c) == 1 for c in active):
+        free = np.ones(n, bool)
+        for c in active:
+            free[int(np.flatnonzero(c)[0])] = False
+        Z = np.eye(n)[:, free]
+    else:
+        Z = scipy.linalg.null_space(np.array(active))
+    gf, Hf = Z.T @ g, Z.T @ H @ Z
     mu = 0.0
     scale = max(1e-12, float(np.max(np.abs(np.diag(Hf)))))
     while True:
@@ -308,21 +356,28 @@ def _newton_step(g: T.Array, H: T.Array, free: T.BoolArray) -> tuple[T.Array, fl
             break
         except np.linalg.LinAlgError:
             mu = max(2.0 * mu, 1e-10 * scale)
-    step = np.zeros(len(g))
-    step[free] = -np.linalg.solve(C.T, np.linalg.solve(C, gf))
-    return step, mu
+    return Z @ -np.linalg.solve(C.T, np.linalg.solve(C, gf)), mu
+
+
+def _project(z: T.Array, c: T.Array) -> T.Array:
+    """z moved onto the bound c·z = 0 (for a unit vector c: that unknown set to 0)."""
+    out = z - (c @ z) / (c @ c) * c
+    if np.count_nonzero(c) == 1:
+        out[int(np.flatnonzero(c)[0])] = 0.0
+    return out
 
 
 def solve(p: Problem, z0: T.Array, deadline: float | None = None) -> tuple[T.Array, SolveLog]:
-    """Newton from z0 (module docstring), with an active set for the ridge's bound τ ≥ 0.
+    """Newton from z0 (module docstring), with an active set for the ridge bounds c·z ≥ 0.
 
-    Each iteration: if the ridge's τ is on its bound (|τ| < ACTIVE_TOL) and the gradient
-    pushes it down (∂E/∂τ_r > 0, the multiplier is positive) or the free Newton step would move
-    it below 0, τ_r is fixed at 0 and Newton runs
-    on the other unknowns; else it is free. A step that would make the ridge's τ negative is
-    cut at the bound (the fraction to the boundary), and τ_r is set to 0 exactly there. The
-    other constraints (the root slopes, no interior minimum) are feasibility checks in the
-    line search. deadline: a time.time() value; the solve stops there ("wall time")."""
+    Each iteration: a bound on its boundary (|c·z| < ACTIVE_TOL) is active if the gradient
+    pushes it out (c·g > 0, the multiplier is positive) or the Newton step on the other
+    unknowns would (c·step < 0); Newton then runs in the null space of the active bounds. A
+    step that would break an inactive bound is cut at the bound (the fraction to the boundary),
+    and z is put on the bound exactly there. The other constraints (the root slopes, no interior
+    minimum) are feasibility checks in the line search; the basis limits the step for its
+    geometry (`step_limit`). deadline: a time.time() value; the solve stops there ("wall
+    time")."""
     z = np.asarray(z0, float).copy()
     E = p.total(z)
     if not math.isfinite(E):
@@ -333,47 +388,51 @@ def solve(p: Problem, z0: T.Array, deadline: float | None = None) -> tuple[T.Arr
             log.reason = "wall time"
             break
         g, H = gradient_hessian(p, z)
-        free = np.ones(len(z), bool)
-        r = ridge_index(p, z)
-        if r is not None and abs(z[r]) < ACTIVE_TOL and g[r] > 0:
-            free[r] = False
-            z[r] = 0.0
-        step, mu = _newton_step(g, H, free)
-        if r is not None and free[r] and abs(z[r]) < ACTIVE_TOL and step[r] < 0:
-            # on the bound and the free step leaves it: the bound is active for this step
-            free[r] = False
-            z[r] = 0.0
-            step, mu = _newton_step(g, H, free)
+        cons = p.bounds(z)
+        active: list[T.Array] = []
+        for c in cons:
+            if abs(c @ z) < ACTIVE_TOL and c @ g > 0:
+                active.append(c)
+                z = _project(z, c)
+        step, mu = _newton_step(g, H, active)
+        late = [c for c in cons if not any(c is a for a in active) and abs(c @ z) < ACTIVE_TOL and c @ step < 0]
+        if late:
+            # on the bound and the step leaves it: the bound is active for this step
+            for c in late:
+                active.append(c)
+                z = _project(z, c)
+            step, mu = _newton_step(g, H, active)
         dec = 0.5 * float(-g @ step)
         log.decrement.append(dec)
         log.damping.append(mu)
-        log.active.append(int((~free).sum()))
+        log.active.append(len(active))
         if dec < NEWTON_TOL:
             log.converged, log.reason = True, "decrement"
             log.step.append(0.0)
             break
         t = 1.0
         t_bound = math.inf
-        if r is not None and free[r] and step[r] < 0 and z[r] >= 0:
-            t_bound = z[r] / -step[r]
-            t = min(1.0, t_bound)
-        if p.enrich_cell is not None:
-            # the free node stays inside its cell: cut the step at FREE_NODE_CUT of the way to
-            # the cell end (the switch in solve_kink moves the node when it reaches an end)
-            e = p.enrich_cell
-            xk, dx = z[-1], step[-1]
-            room = (p.x[e + 1] - xk) if dx > 0 else (xk - p.x[e])
-            if dx != 0 and abs(dx) * t > FREE_NODE_CUT * room:
-                t = FREE_NODE_CUT * room / abs(dx)
-                t_bound = math.inf if t < t_bound else t_bound
+        c_bound: T.Array | None = None
+        for c in cons:
+            if any(c is a for a in active):
+                continue
+            if c @ step < 0 and c @ z >= 0:
+                tb = (c @ z) / -(c @ step)
+                if tb < t_bound:
+                    t_bound, c_bound = tb, c
+        t = min(1.0, t_bound)
+        t_geo = p.basis.step_limit(z, step, FREE_NODE_CUT)
+        if t_geo < t:
+            t = t_geo
+            t_bound = math.inf if t < t_bound else t_bound
         if t <= 0.0:
             log.reason = "zero step at a bound"
             log.step.append(0.0)
             break
         for _ls in range(MAX_LINE):
             zt = z + t * step
-            if t == t_bound:
-                zt[r] = 0.0
+            if t == t_bound and c_bound is not None:
+                zt = _project(zt, c_bound)
             Et = p.total(zt)
             if Et <= E + 1e-4 * t * float(g @ step):
                 break
@@ -389,12 +448,9 @@ def solve(p: Problem, z0: T.Array, deadline: float | None = None) -> tuple[T.Arr
         if t < MIN_STEP:
             log.reason = "stalled (step below MIN_STEP)"
             break
-        if p.enrich_cell is not None:
-            e = p.enrich_cell
-            L = p.x[e + 1] - p.x[e]
-            if min(z[-1] - p.x[e], p.x[e + 1] - z[-1]) < EDGE_TOL * L:
-                log.reason = "free node at a cell end"
-                break
+        if p.basis.free_node_at_end(z, EDGE_TOL):
+            log.reason = "free node at a cell end"
+            break
     else:
         log.reason = "max iterations"
     return z, log
@@ -406,14 +462,7 @@ def solve(p: Problem, z0: T.Array, deadline: float | None = None) -> tuple[T.Arr
 def crossings(p: Problem, z: T.Array) -> list[tuple[float, int]]:
     """The crossings of τ = 0: (position, sign of the slope there: +1 when τ rises through 0,
     that is a top reached from the left; −1 a top reached from the right)."""
-    tau, xs = (a.numpy() for a in p.split(torch.as_tensor(z, dtype=F64)))
-    out = []
-    for e in range(len(xs) - 1):
-        a, b = tau[e], tau[e + 1]
-        if (a < 0) != (b < 0):
-            c = xs[e] + (xs[e + 1] - xs[e]) * (-a) / (b - a)
-            out.append((float(c), 1 if b > a else -1))
-    return out
+    return p.basis.crossings(z)
 
 
 @dataclass
@@ -439,12 +488,10 @@ def laplace(p: Problem, z: T.Array, xq: T.Array) -> Laplace:
     return Laplace(np.asarray(xq), mean, sd, pb, float(w[0]))
 
 
-def reversal_node(p: Problem, z: T.Array) -> int | None:
-    """The node where the slope changes sign (the first one), or None."""
-    tau, _ = p.split(torch.as_tensor(z, dtype=F64))
-    d = np.diff(tau.numpy())
-    k = np.nonzero(d[1:] * d[:-1] < 0)[0]
-    return int(k[0]) + 1 if len(k) else None
+def reversal_x(p: Problem, z: T.Array) -> float | None:
+    """The position of the first extremum of τ (where ∇τ changes sign), or None."""
+    ex = p.basis.extrema(z)
+    return ex[0].x if ex else None
 
 
 # ---------------------------------------------------------------- the kink enrichment (K3a′)
@@ -463,7 +510,8 @@ class KinkLog:
 
 def _with_cell(p: Problem, cell: int | None) -> Problem:
     return Problem(p.x, p.log_odds_t, p.settings, enrich_cell=cell, roots=p.roots,
-                   skip_reversal=p.skip_reversal)
+                   skip_reversal=p.skip_reversal, energy_form=p.energy_form, mm_scale=p.mm_scale,
+                   slope_bounds=p.slope_bounds)
 
 
 def _field(p: Problem, z: T.Array) -> tuple[T.Array, T.Array]:
