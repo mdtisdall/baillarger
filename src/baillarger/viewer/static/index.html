@@ -16,6 +16,7 @@
                    padding: 2px 7px; font: inherit; cursor: pointer; }
   #sync { font-size: 11px; color: var(--mute); }
   #main { flex: 1; min-height: 0; display: grid; gap: 8px; padding: 8px; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); }
+  .pane.off { display: none !important; }   /* a pane toggled off (the bar's pane buttons); its own display stays as it was */
   .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; min-height: 0; display: flex;
           flex-direction: column; overflow: hidden; }
   .pane > h2 { margin: 0; padding: 4px 8px; font-size: 12px; font-weight: 600; color: var(--mute); flex: none;
@@ -38,8 +39,12 @@
   <button id="newwin" title="open another window with these panes">new window</button>
   <label title="a true vertex of the white surface: Enter makes it the WM selection and turns the 3D view to it (also ?v= in the address)">go to vertex
     <input id="goto" type="text" inputmode="numeric" size="10" placeholder="true vertex"></label>
+  <span id="panebtns"><label>panes</label>
+    <button data-pane="volume" title="show or hide the volume pane (this window only; ?panes= in the address)">volume</button>
+    <button data-pane="surface" title="show or hide the surface pane, or the review pane in its place (this window only; ?panes= in the address)">surface</button>
+    <button data-pane="columns" title="show or hide the columns pane (this window only; ?panes= in the address)">columns</button>
+    <button data-pane="log" id="logbtn" title="show or hide the log at the bottom (this window only; ?panes= in the address); a red dot: an error since the log was last shown">log<span id="logdot" style="display:none;color:#ff4b3b;margin-left:3px">●</span></button></span>
   <span id="sync">connecting…</span>
-  <button id="logbtn" title="show or hide the log at the bottom (this window only); a red dot: an error since the log was last shown">log<span id="logdot" style="display:none;color:#ff4b3b;margin-left:3px">●</span></button>
 </div>
 <div id="main">
   <div class="pane" id="p-volume">
@@ -73,16 +78,7 @@ const q = new URLSearchParams(location.search);
 let OVTXT = "";   // what the info line says with no selection
 let PANES = ["volume", "surface"];
 async function get(u) { const r = await fetch(u); const j = await r.json(); if (j.error) { log("error: " + j.error, true); throw new Error(j.error); } return j; }
-// the log: shown or hidden per window (localStorage, not the shared state); while it is hidden, an error marks the toggle
-const LOGKEY = "baillarger.viewer.log";
-function logShown() { try { return localStorage.getItem(LOGKEY) !== "hidden"; } catch (e) { return true; } }
-function showLog(on) {
-  $("log").style.display = on ? "" : "none"; $("logbtn").style.opacity = on ? "1" : "0.6";
-  if (on) $("logdot").style.display = "none";
-  try { localStorage.setItem(LOGKEY, on ? "shown" : "hidden"); } catch (e) { /* no storage: this page only */ }
-}
-// the panes take the freed height (the bricks pane follows its own size)
-$("logbtn").onclick = () => { showLog($("log").style.display === "none"); draw3d(); vHook("resize"); };
+// the log (at the bottom) is a pane too: its button is with the others (layout); while it is hidden, an error marks the button
 function log(m, err = false) {
   const el = $("log"); el.textContent = new Date().toLocaleTimeString() + "  " + m + "\n" + el.textContent;
   if ((err || /^error\b/i.test(m)) && el.style.display === "none") $("logdot").style.display = "";
@@ -90,15 +86,37 @@ function log(m, err = false) {
 const has = p => PANES.includes(p);
 
 // ---------------------------------------------------------------- layout
+// PANES: the panes of the grid this page has (each is started); SHOWN: the ones on screen, and "log" for the log, toggled by
+// the bar's pane buttons (this window only: ?panes= in the address, so a reload or a new window keeps them). The review pane
+// (static/review.js) takes the surface pane's place, so the surface button shows or hides whichever of the two is there.
+const ALL = ["volume", "surface", "columns"];
+const WANT = (q.get("panes") || "").split(",").filter(p => p);   // ?panes=, checked against PANES at the start
+let SHOWN = new Set(WANT.length ? WANT.filter(p => p === "log") : ["log"]);
+const paneEls = p => [$("p-" + p), p === "surface" ? $("p-review") : null].filter(Boolean);
 function layout() {
-  for (const p of ["volume", "surface", "columns"]) $("p-" + p).style.display = has(p) ? "" : "none";
-  const n = PANES.length, m = $("main");
-  m.style.setProperty("--cols", n >= 3 ? 2 : n);
-  m.style.gridTemplateRows = n >= 3 ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(0, 1fr)";
-  // three panes on two columns: the last one spans the bottom row, so no quarter stays empty
-  for (const p of ["volume", "surface", "columns"]) $("p-" + p).style.gridColumn = "";
-  if (n === 3) $("p-" + PANES[2]).style.gridColumn = "1 / -1";
+  for (const p of ALL) for (const el of paneEls(p)) el.classList.toggle("off", !(has(p) && SHOWN.has(p)));
+  const logOn = SHOWN.has("log"); $("log").style.display = logOn ? "" : "none"; if (logOn) $("logdot").style.display = "none";
+  const n = ALL.filter(p => has(p) && SHOWN.has(p)).length, m = $("main");
+  // volume and surface side by side in the top row; the columns pane always the full width, in a row of its own below them
+  const top = ["volume", "surface"].filter(p => has(p) && SHOWN.has(p)).length, cols = has("columns") && SHOWN.has("columns");
+  m.style.setProperty("--cols", Math.max(1, top));
+  m.style.gridTemplateRows = top && cols ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(0, 1fr)";
+  $("p-columns").style.gridColumn = "1 / -1";
+  // the buttons: a grid pane's only when the page has more than one; the last grid pane on screen cannot be hidden
+  for (const b of $("panebtns").querySelectorAll("button")) {
+    const p = b.dataset.pane, on = SHOWN.has(p), grid = p !== "log";
+    b.style.display = !grid || (has(p) && PANES.length > 1) ? "" : "none"; b.style.opacity = on ? "1" : "0.6";
+    b.setAttribute("aria-pressed", String(on)); b.disabled = grid && on && n === 1;
+  }
 }
+function togglePane(p) {
+  if (!SHOWN.has(p)) SHOWN.add(p); else if (p === "log" || ALL.filter(x => has(x) && SHOWN.has(x)).length > 1) SHOWN.delete(p);
+  layout();
+  q.set("panes", ALL.concat(["log"]).filter(x => SHOWN.has(x)).join(","));
+  history.replaceState(null, "", location.pathname + "?" + q.toString().replace(/%2C/gi, ",") + location.hash);
+  draw3d(); vHook("resize");   // the panes on screen take the freed space (the volume pane follows its own size)
+}
+for (const b of $("panebtns").querySelectorAll("button")) b.onclick = () => togglePane(b.dataset.pane);
 $("newwin").onclick = () => window.open(location.pathname + "?" + q.toString(), "_blank", "width=1100,height=800");
 
 // ---------------------------------------------------------------- shared state (the server keeps it; every window gets every change)
@@ -668,9 +686,10 @@ function bvEvents() {
 // VIEWER.points(g, mvp, xyz, rgb, size, lift) draws discs at the points xyz (Float32Array, box mm) in a draw3d hook (rgb: one
 // colour as an Array, or a Float32Array of one for each point). VIEWER.log(m, err) adds a line to the log (err: an error,
 // which marks the log toggle while the log is hidden). VIEWER.hide(h) hides blocks of the surface at level 0 (hideBlocks).
+// VIEWER.layout() applies the panes' toggles again (after a pane takes another's place: static/review.js).
 // VIEWER.ready resolves when the page has started.
 let viewerReady;
-const VIEWER = window.VIEWER = { $, get, log, share, GL, mvp, program, points, draw3d: () => draw3d(), has, hide: h => hideBlocks(h),
+const VIEWER = window.VIEWER = { $, get, log, share, GL, mvp, program, points, draw3d: () => draw3d(), has, layout, hide: h => hideBlocks(h),
   selectVertex: v => selectVertex(v, null), select: (sel, frame) => selectHere(sel, frame), screenFrame: () => screenFrame(), turnTo,
   recolour: () => { colour3d(); draw3d(); }, get selection() { return SELN; }, get frame() { return FRAME; },
   get meta() { return META; }, hooks: { selection: [], state: [], draw3d: [], resize: [], colour: [] },
@@ -680,14 +699,15 @@ function vHook(name, ...a) { for (const h of VIEWER.hooks[name]) try { h(...a); 
 // ---------------------------------------------------------------- start
 window.addEventListener("resize", () => { draw3d(); vHook("resize"); });
 (async () => {
-  showLog(logShown());
   layout();
   META = await get("/meta");
   // the white surface: its overview, and the volume pane on the whole volume (?vol=bricks of old links is ignored)
-  if (!(await fetch("/volume")).ok) { PANES = ["surface"]; layout(); }   // no volume: the overview alone
-  if (q.get("columns") !== "0" && (await fetch("/columns/meta")).ok) {   // static/columns.js; ?panes= picks among the three
-    const want = (q.get("panes") || "").split(",").filter(p => ["volume", "surface", "columns"].includes(p));
-    PANES = want.length ? want : PANES.concat(["columns"]); }
+  if (!(await fetch("/volume")).ok) PANES = ["surface"];   // no volume: the overview alone
+  if (q.get("columns") !== "0" && (await fetch("/columns/meta")).ok) PANES = PANES.concat(["columns"]);   // static/columns.js
+  // ?panes= picks the panes on screen among those the page has (and "log"); the others are started too, hidden, for
+  // their buttons. No grid pane in it: all of them.
+  const want = WANT.filter(has);
+  for (const p of want.length ? want : PANES) SHOWN.add(p);
   layout();
   const o = META.overview;
   OVTXT = `White surface ${META.site}: overview of ${o.faces.toLocaleString()} faces (true surface ${o.true_faces.toLocaleString()}), ` +

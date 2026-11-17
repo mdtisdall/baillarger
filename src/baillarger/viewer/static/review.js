@@ -117,6 +117,7 @@ function pane() {
     <span style="color:${COL.pending}">□</span> pending edits (not yet in the dseg), filled in their label's colour ·
     <span style="color:${SURF_COL.cut}">—</span> the surface preview's cut</div>`;
   const surf = $("p-surface"); surf.style.display = "none"; surf.parentElement.insertBefore(p, surf.nextSibling);
+  if (window.VIEWER) window.VIEWER.layout();   // the review pane in the surface pane's place: shown or hidden with it
   for (const b of p.querySelectorAll("button[data-choice]")) b.onclick = () => choose(b.dataset.choice);
   $("rvthick").onchange = () => R.choice === "thicken" && choose("thicken");
   $("rvsubmit").onclick = submit; $("rvskip").onclick = skip;
