@@ -97,8 +97,8 @@ answer.
    and are disabled with NiiVue (NiiVue goes under its own plan).
 3. A "section roots" checkbox in each of those bars, apart from the menu: the 3D view as before; bricks, the roots
    within half a voxel of a tile's slice. The picked root stays white.
-4. A "log" toggle in the header, per window (localStorage). While the log is hidden, an error puts a red dot on the
-   toggle until the log is shown. The information line stays.
+4. A "log" toggle among the header's pane buttons, per window (`log` in `?panes=`). While the log is hidden, an
+   error puts a red dot on the toggle until the log is shown. The information line stays.
 5. The section's roots are coloured by their step's place along the section (plasma, 0.12 to 0.95 of it, with a
    dark rim in the slices only: in the 3D view the roots are too close for rims), and the same colours run in a
    thin bar along the top of the section. Mean across: every root of a step has that step's colour.
