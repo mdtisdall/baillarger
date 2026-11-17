@@ -26,9 +26,8 @@
   .fill canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   .help { position: absolute; right: 6px; bottom: 4px; font-size: 11px; color: var(--mute); background: #000a; padding: 1px 6px;
           border-radius: 4px; pointer-events: none; }
-  #info { font-size: 12px; white-space: pre-wrap; padding: 4px 8px; max-height: 6.2em; overflow-y: auto; flex: none;
-          border-top: 1px solid var(--line); }
-  #log { font-size: 11px; color: var(--mute); white-space: pre-wrap; padding: 2px 8px 4px; max-height: 4.5em; overflow-y: auto; flex: none; }
+  #selinfo { font-size: 12px; font-variant-numeric: tabular-nums; }
+  #log { border-top: 1px solid var(--line); font-size: 11px; color: var(--mute); white-space: pre-wrap; padding: 2px 8px 4px; max-height: 4.5em; overflow-y: auto; flex: none; }
   .key span { display: inline-block; margin-right: 10px; font-size: 11px; }
   .sw { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 3px; }
   #vstat { position: absolute; left: 6px; top: 4px; font-size: 11px; background: #000a; padding: 1px 6px; border-radius: 4px;
@@ -39,6 +38,7 @@
   <button id="newwin" title="open another window with these panes">new window</button>
   <label title="a true vertex of the white surface: Enter makes it the WM selection and turns the 3D view to it (also ?v= in the address)">go to vertex
     <input id="goto" type="text" inputmode="numeric" size="10" placeholder="true vertex"></label>
+  <span id="selinfo" title="the WM selection: a vertex of the white surface (the columns, the markers). The other point is the crosshair (the slices). In each pane a click moves that pane's own point and a shift-click moves the other one.">no WM selection</span>
   <span id="panebtns"><label>panes</label>
     <button data-pane="volume" title="show or hide the volume pane (this window only; ?panes= in the address)">volume</button>
     <button data-pane="surface" title="show or hide the surface pane, or the review pane in its place (this window only; ?panes= in the address)">surface</button>
@@ -66,7 +66,6 @@
   </div>
   <div class="pane" id="p-columns"></div>
 </div>
-<div id="info">Two points: the crosshair (the slices) and the WM selection (a vertex of the white surface: the columns). In each pane a click moves that pane's own point and a shift-click moves the other one.</div>
 <div id="log"></div>
 <script type="module" src="/static/overlays.js"></script>
 <script type="module" src="/static/review.js"></script>
@@ -75,7 +74,6 @@ const $ = id => document.getElementById(id);
 const ME = Math.random().toString(36).slice(2);
 let META = null, FRAME = null, SELN = null, CROSS = null;
 const q = new URLSearchParams(location.search);
-let OVTXT = "";   // what the info line says with no selection
 let PANES = ["volume", "surface"];
 async function get(u) { const r = await fetch(u); const j = await r.json(); if (j.error) { log("error: " + j.error, true); throw new Error(j.error); } return j; }
 // the log (at the bottom) is a pane too: its button is with the others (layout); while it is hidden, an error marks the button
@@ -146,7 +144,11 @@ function connect() {
 async function setSelection(sel, frame, how) {
   SELN = sel; FRAME = frame;
   if (BV.on) bvDraw();
-  $("info").textContent = !sel ? OVTXT : `WM selection: true vertex ${sel.true_vertex} (overview vertex ${sel.vertex}) at (${sel.world_mm}) mm`;
+  // the header's readout: the selection's true vertex and world point (the overview vertex in its tooltip)
+  const si = $("selinfo"); si.dataset.help = si.dataset.help || si.title;
+  si.title = si.dataset.help + (sel ? `\n\noverview vertex ${sel.vertex} (the 3D view's simplified mesh)` : "");
+  si.textContent = !sel ? "no WM selection" :
+    `selection: true vertex ${sel.true_vertex} at (${sel.world_mm.map(x => (+x).toFixed(2)).join(", ")}) mm`;
   draw3d();
   vHook("selection", sel, frame, how);
 }
@@ -710,9 +712,8 @@ window.addEventListener("resize", () => { draw3d(); vHook("resize"); });
   for (const p of want.length ? want : PANES) SHOWN.add(p);
   layout();
   const o = META.overview;
-  OVTXT = `White surface ${META.site}: overview of ${o.faces.toLocaleString()} faces (true surface ${o.true_faces.toLocaleString()}), ` +
-    `every true vertex within ${o.max_distance_mm} mm of it (eps ${o.eps_mm} mm). Click: WM selection (its true vertex below); drag: turn; shift-drag: move; wheel: zoom.`;
-  $("info").textContent = OVTXT;
+  log(`white surface ${META.site}: overview of ${o.faces.toLocaleString()} faces (true surface ${o.true_faces.toLocaleString()}), ` +
+    `every true vertex within ${o.max_distance_mm} mm of it (eps ${o.eps_mm} mm)`);
   $("title").textContent = `Column viewer — ${META.site}`; document.title = `Column viewer ${META.site}`;
   META.levels.forEach((n, k) => { const o = document.createElement("option"); o.value = k; o.textContent = n; $("level").appendChild(o); });
   if (has("surface")) { initGL(); const lv = Math.min(2, META.levels.length - 1); $("level").value = lv; await loadMesh(lv, true);
