@@ -97,12 +97,11 @@ function layout() {
   for (const p of ALL) for (const el of paneEls(p)) el.classList.toggle("off", !(has(p) && SHOWN.has(p)));
   const logOn = SHOWN.has("log"); $("log").style.display = logOn ? "" : "none"; if (logOn) $("logdot").style.display = "none";
   const n = ALL.filter(p => has(p) && SHOWN.has(p)).length, m = $("main");
-  m.style.setProperty("--cols", n >= 3 ? 2 : Math.max(1, n));
-  m.style.gridTemplateRows = n >= 3 ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(0, 1fr)";
-  // three panes on two columns: the last one on screen spans the bottom row, so no quarter stays empty
-  const els = [...m.children].filter(el => el.classList.contains("pane"));
-  for (const el of els) el.style.gridColumn = "";
-  if (n === 3) { const last = els.filter(el => getComputedStyle(el).display !== "none").pop(); if (last) last.style.gridColumn = "1 / -1"; }
+  // volume and surface side by side in the top row; the columns pane always the full width, in a row of its own below them
+  const top = ["volume", "surface"].filter(p => has(p) && SHOWN.has(p)).length, cols = has("columns") && SHOWN.has("columns");
+  m.style.setProperty("--cols", Math.max(1, top));
+  m.style.gridTemplateRows = top && cols ? "minmax(0, 1fr) minmax(0, 1fr)" : "minmax(0, 1fr)";
+  $("p-columns").style.gridColumn = "1 / -1";
   // the buttons: a grid pane's only when the page has more than one; the last grid pane on screen cannot be hidden
   for (const b of $("panebtns").querySelectorAll("button")) {
     const p = b.dataset.pane, on = SHOWN.has(p), grid = p !== "log";
