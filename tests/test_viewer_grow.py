@@ -173,3 +173,18 @@ def test_the_grow_log(files: dict[str, Path], tmp_path: Path) -> None:
     )
     side = read_sidecar(sidecar_path(path), VR.GROW_LOG_SPEC)
     assert side["Edits"] == str(files["edits"]) and side["Hemisphere"] == "R"
+
+
+def test_a_paint_back_to_the_dseg_s_own_edit_is_written(files: dict[str, Path]) -> None:
+    """The dseg was made with the edit (14, 6, 5): 0, and the current diff
+    does not have it (the screen shows the input label 41 there). A paint of
+    0 there is an edit, as the screen shows a change."""
+    v = (14, 6, 5)
+    lab = np.asarray(nib.nifti1.load(files["dseg"]).dataobj).copy()
+    lab[v] = 0
+    nib.save(nib.nifti1.Nifti1Image(lab, A), files["dseg"])
+    write_edits(files["copy"], edits({v: 0}, SHAPE), SHAPE, A)
+    write_edits(files["edits"], edits({}, SHAPE), SHAPE, A)
+    rv = paint_only(files)
+    out = rv.post("/review/paint", dict(strokes=paint_strokes((0, [v]))))
+    assert out == dict(voxels=1, undo_depth=1) and diff(files) == {v: 0}

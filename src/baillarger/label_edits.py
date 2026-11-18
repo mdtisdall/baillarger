@@ -552,6 +552,7 @@ def paint(
     dseg: npt.ArrayLike | None = None,
     offset: npt.ArrayLike = (0, 0, 0),
     shape: tuple[int, ...] | None = None,
+    dseg_edits: Edits | None = None,
 ) -> tuple[Edits, Edits]:
     """Paint voxels (N, 3) of the grid with new (a label per voxel, or INPUT
     for the eraser). labels are the input labels and dseg the dseg's labels
@@ -561,8 +562,10 @@ def paint(
     means that the dseg is the input labels (no correction).
 
     Only the voxels whose label changes are written. A paint compares with
-    the voxel's current label: its entry in the diff if it has one, else its
-    dseg label. A painted voxel whose new label is not its current label gets
+    the voxel's current label: its entry in the diff if it has one; else its
+    input label if dseg_edits (the edits that the dseg was made with) has an
+    entry there (the next dseg gives it its input label); else its dseg
+    label. A painted voxel whose new label is not its current label gets
     an entry with its new label, also when the new label is its input label
     (a paint back to the input label, against the correction). The eraser
     removes the entry of a voxel that has one, and changes no other voxel.
@@ -595,6 +598,9 @@ def paint(
     if len(np.unique(idx)) != len(idx):
         raise ValueError("a voxel is given twice")
     shown = d[tuple((v - off).T)].astype(np.int64) if len(v) else idx
+    if dseg_edits is not None and len(v):
+        made = _entries(dseg_edits, idx) != INPUT
+        shown = np.where(made, a[tuple((v - off).T)].astype(np.int64), shown)
     earlier = _entries(edits, idx)
     current = np.where(earlier == INPUT, shown, earlier)
     ch = np.where(nl == INPUT, earlier != INPUT, nl != current)

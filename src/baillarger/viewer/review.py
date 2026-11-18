@@ -59,8 +59,8 @@ Routes (Review.get, Review.post), JSON:
   in the request.
 - POST /review/answer {site, choice, params, reviewer_seconds}: the choice's
   voxels and labels at the site, written into the label edits
-  (label_edits.paint: only the voxels whose label changes from the dseg's
-  label with the edits applied), then appended to the log. If the log refuses
+  (label_edits.paint: only the voxels whose label changes from the label
+  that the user sees, as for a paint), then appended to the log. If the log refuses
   the answer, the edits are written back as they were. {answer, kind, how, rank, voxels,
   edited}: edited is the number of voxels written into the edits.
 - POST /review/scribble {strokes: [{class, voxels}], reviewer_seconds}:
@@ -170,9 +170,10 @@ label_edits.INPUT) and its voxels. The strokes become voxels with the same
 function as a scribble's (stroke_voxels: a voxel in two strokes keeps the
 later one). A label that is not in the menu, or a voxel off the grid, refuses
 the whole paint, and nothing is written. Only the voxels whose label changes
-are written (label_edits.paint: from the dseg's labels, the labels that the
-user sees, with the edits applied). A paint back to a voxel's input label,
-against the automatic correction, is an edit.
+are written (label_edits.paint: from the labels that the user sees, the
+dseg's labels with the pending edits; a voxel that the dseg's own edits
+changed and the edits no longer have is at its input label). A paint back to
+a voxel's input label, against the automatic correction, is an edit.
 
 Undo. Every write into the edits of this viewer run (a paint, and a site
 answer of any choice: accept-fix and manual-paint too) pushes the earlier
@@ -1276,11 +1277,12 @@ class Review:
         self, edits: label_edits.Edits, voxels: Arr, labels: Arr
     ) -> tuple[label_edits.Edits, label_edits.Edits, Arr]:
         """The edits with the voxels painted with the labels (label_edits.paint,
-        against the dseg's labels from labels(); label_edits.INPUT for the
-        eraser), the undo: the earlier entries of the voxels whose label
-        changes, and the input labels of the voxels (int64). Only the voxels
-        are read, not their box. Raises ValueError for a voxel off the grid
-        or a label not in label-set/1."""
+        against the dseg's labels from labels() and the dseg's copy of the
+        edits that it used; label_edits.INPUT for the eraser), the undo: the
+        earlier entries of the voxels whose label changes, and the input
+        labels of the voxels (int64). Only the voxels are read, not their
+        box. Raises ValueError for a voxel off the grid or a label not in
+        label-set/1."""
         v = np.asarray(voxels, np.int64).reshape(-1, 3)
         if not len(v):
             return edits, label_edits.empty(), np.zeros(0, np.int64)
@@ -1295,8 +1297,17 @@ class Review:
             np.asarray(labels, np.int64),
             dseg=self.labels(),
             shape=self.shape,
+            dseg_edits=self._dseg_edits_or_none(),
         )
         return new, undo, grid[tuple(v.T)].astype(np.int64)
+
+    def _dseg_edits_or_none(self) -> label_edits.Edits | None:
+        """The dseg's copy of the edits that it used (_dseg_edits), or None
+        if the dseg has none."""
+        try:
+            return self._dseg_edits()
+        except ValueError:
+            return None
 
     def _on_grid(self, v: Arr) -> None:
         if len(v) and not np.all((v >= 0) & (v < self.shape)):
