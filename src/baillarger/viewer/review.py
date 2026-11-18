@@ -254,6 +254,16 @@ a request for another key stops the running job at its next group
 (surface_preview.Stopped). Each group is atomic, so the state that a
 stopped job leaves is valid, and the next job continues from it.
 
+Grow. The grow brush (docs/plans/label-editing.md, Part 6). POST
+/review/grow {strokes} (as /review/paint; no eraser) runs label_grow.grow as
+a job (Review.gjobs) on echoes 2 and 3 (memory-mapped, read for the box only)
+and the labels that the user sees (the dseg's labels with the diff's
+entries). Its answer, polled with GET /review/grow?job=, is the proposal:
+{voxels, labels, box, settings}. It writes nothing. The page shows the
+proposal; an accepted proposal is a POST /review/paint of its voxels, so it
+is one write and one undo. Without echoes 2 and 3 the route refuses, and
+/review/queue says why (grow_off).
+
 Paint only. With no queue and no log (sites and log None; the viewer's
 --edits alone), the review has the paint routes only; the hemisphere comes
 from the dseg's sidecar (wm-dseg/1).
@@ -278,7 +288,7 @@ from typing import Any, Protocol
 import numpy as np
 import numpy.typing as npt
 
-from baillarger import blocks, label_edits, white_dseg
+from baillarger import blocks, label_edits, label_grow, white_dseg
 from baillarger.bids import derivative_path, entities, file_sha256
 from baillarger.labels import CORTEX_LABEL, LUT_NAMES, WM_LABEL
 from baillarger.viewer import surface_preview as SP
@@ -795,6 +805,7 @@ class Review:
         regenerate: Sequence[str] = REGENERATE,
         surface: Path | None = None,
         device: str | None = None,
+        echoes: Sequence[Path] | None = None,
     ) -> None:
         import nibabel as nib
 
@@ -889,6 +900,14 @@ class Review:
         self._sp: SP.SurfacePreview | None = None
         self._sstops = 0
         self._splock = threading.Lock()  # a surface preview request's stop and start
+        #: the grow brush (module docstring, Grow): echoes 2 and 3, opened at
+        #: the first grow, and its jobs
+        self.echo_paths = None if echoes is None else [Path(e) for e in echoes]
+        self._echo_maps: list[Arr] | None = None
+        self._echo_srcs: list[Any] = []
+        self.gjobs: Jobs[dict[str, Any]] = Jobs(
+            log=lambda m: None, keep_in_memory=PREVIEWS_KEPT
+        )
         #: the regenerate run (module docstring, Regenerate)
         self.regenerate_command = list(regenerate)
         self.regen = Regeneration()
@@ -1023,6 +1042,8 @@ class Review:
             hemisphere=self.hemi,
             paint_only=self.paint_only,
             undo_depth=len(self.undo),
+            grow=self.grow_off() is None,
+            grow_off=self.grow_off(),
         )
 
     def _find(self, site: Site) -> dict[str, Any]:
@@ -1270,6 +1291,113 @@ class Review:
         with self.lock:
             undo, _ = self._commit(v, lab)
             return dict(voxels=len(undo), undo_depth=len(self.undo))
+
+    # -------------------------------------------------------------- grow
+    def grow_off(self) -> str | None:
+        """Why the grow brush is off (no echoes 2 and 3), or None."""
+        if self.echo_paths is None or len(self.echo_paths) != 2:
+            return "the grow brush needs echoes 2 and 3 (--echo-dir)"
+        missing = [p.name for p in self.echo_paths if not p.is_file()]
+        if missing:
+            return f"the grow brush needs echoes 2 and 3: {', '.join(missing)} missing"
+        return None
+
+    def _echoes(self) -> list[Arr]:
+        """Echoes 2 and 3 of the whole grid, memory-mapped, opened once
+        (blocks.open_volume, as _input_labels). Raises ValueError if they are
+        not on the review's grid."""
+        if self._echo_maps is None:
+            assert self.echo_paths is not None
+            maps, srcs = [], []
+            for p in self.echo_paths:
+                src = blocks.open_volume(p)
+                if tuple(src.shape[:3]) != self.shape:
+                    raise ValueError(
+                        f"{p.name}: the echo is not on the grid {self.shape}"
+                    )
+                m = np.asarray(src.img.dataobj)
+                maps.append(m.reshape(m.shape[:3]))
+                srcs.append(src)
+            self._echo_maps, self._echo_srcs = maps, srcs
+        return self._echo_maps
+
+    def _current_box(self, edits: label_edits.Edits, box: label_grow.Box) -> Arr:
+        """The labels that the user sees in a box: the dseg's labels with the
+        diff's entries."""
+        (a0, b0, c0), (a1, b1, c1) = box
+        crop = np.asarray(self.labels()[a0:a1, b0:b1, c0:c1])
+        return label_edits.apply(crop, edits, offset=box[0], shape=self.shape)
+
+    def grow(self, strokes: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        """The grow brush's proposal of the strokes (module docstring, Grow),
+        or a job that computes it: {status, job}, and when done {voxels,
+        labels, box, settings}. It writes nothing. Raises ValueError as a
+        paint does for the strokes, for the eraser, if the grow brush is off,
+        and if the outputs were replaced."""
+        off = self.grow_off()
+        if off is not None:
+            raise ValueError(off)
+        if any(st.get("label") == ERASER for st in strokes):
+            raise ValueError("the eraser is not in grow mode")
+        self.paint_voxels(strokes)  # the labels and the grid, checked
+        seeds = [(int(lab), v) for lab, v in stroke_voxels(strokes, "label")]
+        with self.lock:
+            self._check_outputs()
+            edits = self._read_edits()
+        h = hashlib.sha256()
+        for lab, v in seeds:
+            h.update(str(lab).encode())
+            h.update(np.ascontiguousarray(v).tobytes())
+            h.update(b"|")
+        for a in (edits.index, edits.label):
+            h.update(np.ascontiguousarray(a).tobytes())
+        key = h.hexdigest()[:24]
+        wm = WM_LABEL[self.hemi]
+
+        def work(log: Any) -> dict[str, Any]:
+            t0 = time.perf_counter()
+            e2, e3 = self._echoes()
+
+            def echoes(b: label_grow.Box) -> tuple[Arr, Arr]:
+                sl = tuple(slice(x, y) for x, y in zip(b[0], b[1], strict=True))
+                return np.asarray(e2[sl]), np.asarray(e3[sl])
+
+            p = label_grow.grow(
+                seeds,
+                lambda b: self._current_box(edits, b),
+                echoes,
+                shape=self.shape,
+                wm=wm,
+            )
+            return dict(
+                voxels=p.voxels(self.shape).tolist(),
+                labels=p.label.tolist(),
+                box=[list(p.box[0]), list(p.box[1])],
+                settings=p.settings.as_dict(),
+                seconds=time.perf_counter() - t0,
+            )
+
+        out = self.gjobs.run(key, "grow", work)
+        if out["status"] == "error":
+            return dict(status="failed", job=key, error=out["error"])
+        return self._goutcome(key, self.gjobs.wait(key, WAIT_S))
+
+    def _goutcome(self, key: str, out: dict[str, Any]) -> dict[str, Any]:
+        if out["status"] == "error":
+            return dict(status="failed", job=key, error=out["error"])
+        if out["status"] == "running":
+            return dict(status="running", job=key)
+        if out["status"] != "done":
+            raise ValueError(f"no grow job {key}")
+        try:
+            r = self.gjobs.get(key)
+        except KeyError:
+            raise ValueError(f"no grow job {key}") from None
+        return dict(status="done", job=key, **r)
+
+    def grow_job(self, key: str) -> dict[str, Any]:
+        """The state of the grow job key (_goutcome)."""
+        return self._goutcome(key, self.gjobs.wait(key, 0))
 
     def undo_last(self) -> dict[str, Any]:
         """The last write into the edits undone (module docstring, Undo): its
@@ -1930,6 +2058,8 @@ class Review:
             return self.regen.status()
         if path == "/review/surface-preview":
             return self.surface_job(q["job"], int(q.get("since", -1)))
+        if path == "/review/grow":
+            return self.grow_job(q["job"])
         raise KeyError(path)
 
     def get_bytes(self, path: str, q: dict[str, str]) -> bytes | None:
@@ -1976,6 +2106,8 @@ class Review:
             return self.scribble(list(req["strokes"]), float(req["reviewer_seconds"]))
         if path == "/review/paint":
             return self.paint(list(req["strokes"]))
+        if path == "/review/grow":
+            return self.grow(list(req["strokes"]))
         if path == "/review/undo":
             return self.undo_last()
         if path == "/review/regenerate":
@@ -2053,15 +2185,19 @@ def for_white(
     dseg: Path,
     labels: Callable[[], Arr],
     affine: Arr,
+    echoes: Sequence[Path] | None = None,
 ) -> Review | None:
     """The review of --white mode: with --sites (--log and --edits are then
-    needed), or paint only with --edits alone; None with neither."""
+    needed), or paint only with --edits alone; None with neither. echoes:
+    echoes 2 and 3, for the grow brush (None: the grow brush is off)."""
     if a.sites is None:
         if a.log is not None:
             raise ValueError("--log needs --sites")
         if a.edits is None:
             return None
-        return Review(None, None, a.edits, dseg, labels, affine, None, surface=surf)
+        return Review(
+            None, None, a.edits, dseg, labels, affine, None, surface=surf, echoes=echoes
+        )
     if a.log is None:
         raise ValueError("--sites needs --log: the log's path (there is no default)")
     if a.edits is None:
@@ -2077,6 +2213,7 @@ def for_white(
         affine,
         lambda n, seed: read_random_sites(surf, n, seed),
         surface=surf,
+        echoes=echoes,
     )
 
 
