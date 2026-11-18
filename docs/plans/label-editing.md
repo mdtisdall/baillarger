@@ -304,18 +304,20 @@ smooth the WM" (26 thin voxels, Dice 0.87 against the user's own change).
    two strokes keeps the later one).
 2. **The current labels.** The dseg's labels with the diff's entries (the labels that
    the user sees).
-3. **The area.** The voxels within a distance D of a stroke voxel, with D = BAND + G/2.
-   G is the largest gap, in voxels, between two stroked slices that are next to each
-   other in one view. BAND = 3 voxels. The box is the area's bounding box. The area
-   is refused (an error, nothing proposed) above 2·10⁶ voxels.
+3. **The area.** The strokes' region and the voxels within BAND = 3 voxels of it. The
+   region fills the slices between stroked slices: between two stroked slices of one
+   view that are next to each other, the 2D signed distances of their strokes are
+   interpolated linearly. (A stroke is on a slice of a view when all its voxels lie
+   on one slice of exactly one axis.) The box is the strokes' bounding box with a
+   margin. The area is refused (an error, nothing proposed) above 2·10⁶ voxels.
 4. **Fixed seeds.** Outside the area, each voxel of the box keeps its current label.
 5. **The growth.** A random walker (`skimage.segmentation.random_walker`, BSD licence)
    on echoes 2 and 3 in the box: the log intensity of each echo, scaled by its 2nd and
-   98th percentiles in the area. β = 130, mode `cg_j`. The classes are the labels of
+   98th percentiles in the area. β = 130, mode `cg_j`, tolerance 10⁻⁵. The classes are the labels of
    the seeds. Each voxel of the area takes its most probable class.
 6. **The smoothing.** The WM mask after the growth is smoothed: a Gaussian of
    σ = 1 voxel on its signed distance, threshold 0. The smoothing changes only voxels
-   within ZONE = 4 voxels of a voxel that the growth changed. A voxel that leaves the
+   of the area within ZONE = 4 voxels of a voxel that the growth changed. A voxel that leaves the
    WM takes its most probable non-WM class from the growth. A voxel that joins the WM
    takes the WM label.
 7. **The proposal.** The voxels of the box whose new label is not their current label.
@@ -465,9 +467,10 @@ The joins use these interfaces. A core must keep them, or change this plan first
   `GET /review/regenerate` gives its state. Both: `{status (idle | running | done |
   failed), log, overrides, error, outputs_changed, cap_gb, viewer_gb, command,
   seconds}`. While it runs, each write into the edits is refused.
-- `label_grow.grow(strokes, current, echoes, *, box_limit=2_000_000) -> Proposal`:
-  `strokes` a list of (label, voxels) in stroke order; `current` a callable that gives
-  the current labels of a box; `echoes` a callable that gives echoes 2 and 3 of a box.
+- `label_grow.grow(strokes, current, echoes, *, shape, wm, settings=DEFAULT,
+  box_limit=2_000_000) -> Proposal`: `strokes` a list of (label, voxels (N, 3)) in
+  stroke order; `current(box)` the current labels of a box; `echoes(box)` echoes 2 and
+  3 of a box; a box is ((lo), (hi)), hi exclusive; `shape` the grid; `wm` the WM label.
   `Proposal`: `index` (int64, sorted, unique), `label` (int32), `box` (lo, hi), and
   `settings` (BAND, β, σ, ZONE). It raises `ValueError` for an area above the limit.
 - `POST /review/grow {strokes}` (the strokes as for `/review/paint`, no eraser) answers
