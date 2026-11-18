@@ -47,6 +47,7 @@ from baillarger.blocks import EmbeddedSource, PatchedSource, Source, open_volume
 from baillarger.gifti import DataArray, write_external
 from baillarger.handles import kuhn_betti
 from baillarger.mesh import BLOCK, MeshBlocks, marching_tetrahedra_blocks, topology
+from baillarger.mesh_checks import FOLD_COS, check_mesh
 from baillarger.mesh_torch import MeshOps
 from baillarger.timing import Laps, log, log_to_stderr
 from baillarger.white_dseg import DSEG_SPEC
@@ -377,6 +378,15 @@ def write_white_surface(
     lap("block index")
     pieces = mesh_pieces(v, f, (vox[0], vox[1], vox[2]))
     lap("pieces")
+    # the written surface's checks, in the log only (no sidecar field)
+    chk = check_mesh(v_mm, f).counts()
+    log.info(
+        f"mesh checks: {chk['intersecting_pairs']} crossing pairs, "
+        f"{chk['shared_vertex_fold_pairs']} shared-vertex folds, "
+        f"{chk['creases']} creases (edge-neighbour faces folded back past "
+        f"{np.degrees(np.arccos(FOLD_COS)):.0f} degrees)"
+    )
+    lap("mesh checks")
     write_sidecar(
         paths["sidecar"],
         SURF_SPEC,
