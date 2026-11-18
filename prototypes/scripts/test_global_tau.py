@@ -502,6 +502,23 @@ def test_ridge_two_sheets_with_medium_between() -> None:
     assert np.all(c[gt.ridges["beyond"][:, 0], 2] == 12)
 
 
+def test_ridge_seeded_tau0(tmp_path) -> None:  # noqa: ANN001
+    # two sheets with no label 0: the midplane faces as τ0 seeds give
+    # τ0 = -(distance to the midplane), -h/2 next to it on both sides
+    nx = 6
+    site, cv = flat_site(two_banks=True, nx=nx)
+    pt = TP.make_patches(site)
+    X, Y = np.meshgrid(np.arange(nx), np.arange(nx), indexing="ij")
+    f = np.c_[X.ravel(), Y.ravel(), np.full(nx * nx, 12), np.full(nx * nx, 2)]
+    np.savez(tmp_path / "seed.npz", faces=f)
+    s = GS.Settings(contacts="ridge", tau0_faces=str(tmp_path / "seed.npz"))
+    gt = GS.GlobalTau(site, pt, s, cv)
+    c = gt.G.coords - GS.PAD
+    assert gt.n_seed_faces == nx * nx and len(gt.faces) == 0
+    for z, d in [(12, 0.5), (13, 0.5), (10, 2.5), (15, 2.5)]:
+        assert np.allclose(gt.tau[c[:, 2] == z], -d * H)
+
+
 def test_snapshots_round_trip(tmp_path) -> None:  # noqa: ANN001
     import global_tau_movie as GM
 

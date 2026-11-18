@@ -45,7 +45,8 @@ after the first site-1 run): a contact is not decided before the solve.
   neighbour beyond the top adds nothing.
 - The stop term, the pull (convex beyond the top) and the other terms are
   unchanged.
-- τ0 = -(distance to label 0), with no contact seeds.
+- τ0 = -(distance to label 0), with no contact seeds; or, with
+  Settings.tau0_faces, also -(distance to given faces), as a start only.
 - Upwind ownership along -∇τ with no 5 mm restriction; the owners set only
   the equivolume weight (the owner patch's area) and the diagnostics.
 - After each solve the ridge faces are found from τ (ridge_faces): 6-faces
@@ -103,6 +104,9 @@ class Settings:
     region_mm: float = 12.0  # A
     face_test: bool = True
     contacts: str = "faces"  # "faces" (first prototype) or "ridge" (2026-11-18)
+    #: ridge form only: an npz whose "faces" (minus voxel x, y, z and the axis,
+    #: as result.npz) are τ = 0 seeds of τ0, a start only (user, 2026-11-18)
+    tau0_faces: str = ""
     snapshots: bool = False  # global_tau_run.py: write RUN_DIR/snapshots
 
 
@@ -381,9 +385,12 @@ class GlobalTau:
         }
         if self.ridge:
             self.faces = np.zeros((0, 3), np.int64)
+            seeds = self.seed_faces(s.tau0_faces) if s.tau0_faces else self.faces
+            self.tau = self.tau_init(seeds)
         else:
             self.faces = self.contact_faces(self.owner)
-        self.tau = self.tau_init(self.faces)
+            self.tau = self.tau_init(self.faces)
+        self.n_seed_faces = len(seeds) if self.ridge else 0
         self.tau0 = self.tau.copy()
 
     # ------------------------------------------------------------ ownership
@@ -429,6 +436,17 @@ class GlobalTau:
         return K.contact_faces(
             G.slot_flat, G.slot_of, G.strides, owner, self.same_ptr, self.same_idx
         )
+
+    def seed_faces(self, path: str) -> np.ndarray:
+        """Faces (minus voxel, axis) from an npz as (minus slot, plus slot,
+        axis); faces with a voxel outside the domain are dropped."""
+        G = self.G
+        f = np.load(path)["faces"].astype(np.int64)
+        cm = f[:, :3] + PAD
+        cp = cm + np.eye(3, dtype=np.int64)[f[:, 3]]
+        sm, sp = G.slot_of[cm @ G.strides], G.slot_of[cp @ G.strides]
+        ok = (sm >= 0) & (sp >= 0)
+        return np.c_[sm[ok], sp[ok], f[ok, 3]]
 
     def same(self, a: int, b: int) -> bool:
         return bool(K.same_bank(a, b, self.same_ptr, self.same_idx))

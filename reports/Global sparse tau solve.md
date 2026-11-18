@@ -400,6 +400,30 @@ Two causes are possible from these numbers. Neither is tested on its own.
 Cost of v3: 98 s for 2 outer iterations (peak 2.9 GB); median CG 2
 iterations, because λ was large.
 
+**v3 from a start with the contact.** The v3 start had no contact at the
+kissing interface: τ0 there is the distance to label 0 in other places
+(median −1.30 mm), and τ0 falls away on both sides at only 4% of the first
+run's contact faces. So v3 tested whether a contact forms, not whether it
+stays. The user asked for one run from a τ0 with the first run's 8,851
+contact faces as τ = 0 seeds (`tau0_faces`; a start only, the solver is
+v3).
+
+- τ at those faces stays at −0.08 mm (−h/2, the seed value) in every
+  snapshot. τ falls away on both sides at 70% of them at the end.
+- But τ does not move anywhere. The median change from τ0 is 8e-6 mm.
+  Only 441 of 221,739 voxels move more than 0.05 mm (largest 5.7 mm).
+- E = 5.2e10, and 99.9% of it is equivolume in about 1,000 voxels with
+  |∇τ| close to 0. 728 of them are voxels at the seeded faces. LM ended
+  with λ = 1e6.
+- The ridge test classes 138 faces as contact, 2,749 as below and 150 as
+  beyond. With τ = −h/2 on both sides, the half-voxel extrapolation is
+  exactly 0, the limit of the test, and on oblique faces the axis condition
+  fails. So the classes are not reliable at this limit.
+
+So this run does not show whether a contact is stable. It shows that the
+equivolume term at ridge voxels stops the solve from both starts: without
+the contact (v3) and with it.
+
 ## Tests
 
 `prototypes/scripts/test_global_tau.py`, 18 tests, about 20 s:
@@ -433,7 +457,8 @@ iterations, because λ was large.
   makes a top where the labels are cortex on both sides. Evidence from
   image contrast (the user's rule) is the candidate. Its form is open.
 - **Equivolume at a ridge.** v = ∇τ/|∇τ|² is not defined at a ridge voxel
-  in tissue. A discretisation with the ridge between cells, not on a voxel
+  in tissue. From both starts (no contact, and the seeded contact) it stops
+  the solve. A discretisation with the ridge between cells, not on a voxel
   (finite elements with a kink, as in the 1D study with MFEM, or gradients
   on the cells of the voxel grid), avoids this. Both change the
   discretisation and need a decision.
