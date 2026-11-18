@@ -124,3 +124,52 @@ def test_grow_sees_the_labels_on_the_screen(files: dict[str, Path]) -> None:
     want = lab[10:18, 3:9, 3:8].copy()
     want[v[0] - lo[0], v[1] - lo[1], v[2] - lo[2]] = 41
     assert np.array_equal(got, want)
+
+
+def test_the_grow_log(files: dict[str, Path], tmp_path: Path) -> None:
+    """A grow, its accept and an undo each write one line of the grow log;
+    the sidecar is written with the first line. Without echoes there is no
+    log."""
+    import json
+
+    from baillarger.bids import read_sidecar, sidecar_path
+
+    rv = grow_review(files, None)
+    assert rv.grow_log is None
+    rv = VR.Review(
+        None,
+        None,
+        files["edits"],
+        files["dseg"],
+        lambda: np.asarray(nib.nifti1.load(files["dseg"]).dataobj),
+        A,
+        None,
+        echoes=write_echoes(tmp_path),
+    )
+    assert rv.grow_log is not None
+    path = VR.grow_log_path(files["edits"])
+    assert path.name.endswith("_growlog.jsonl") and not path.exists()
+    out = wait(rv, rv.post("/review/grow", dict(strokes=strokes())))
+    acc = [
+        dict(
+            label=lab,
+            voxels=[
+                v for v, b in zip(out["voxels"], out["labels"], strict=True) if b == lab
+            ],
+        )
+        for lab in sorted(set(out["labels"]))
+    ]
+    rv.post("/review/paint", dict(strokes=acc, grow_job=out["job"]))
+    rv.post("/review/undo", {})
+    lines = [json.loads(x) for x in path.read_text().splitlines()]
+    assert [x["event"] for x in lines] == ["grow", "paint", "undo"]
+    g, p, u = lines
+    assert g["job"] == out["job"] and g["proposal"]["voxels"] == out["voxels"]
+    assert g["proposal"]["labels"] == out["labels"]
+    assert sum(len(s["voxels"]) for s in g["strokes"]) == 3 * 2 * 8
+    assert p["grow_job"] == out["job"] and p["voxels"] == len(out["voxels"])
+    assert p["undo_depth"] == 1 and u == dict(
+        u, voxels=len(out["voxels"]), undo_depth=0
+    )
+    side = read_sidecar(sidecar_path(path), VR.GROW_LOG_SPEC)
+    assert side["Edits"] == str(files["edits"]) and side["Hemisphere"] == "R"

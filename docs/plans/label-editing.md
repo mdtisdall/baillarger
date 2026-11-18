@@ -476,6 +476,11 @@ The joins use these interfaces. A core must keep them, or change this plan first
 - `POST /review/grow {strokes}` (the strokes as for `/review/paint`, no eraser) answers
   as a job (`{status, job}`), polled with `GET /review/grow?job=`. When done:
   `{voxels, labels, box, settings}`, or `{error}`. It writes nothing.
+- The grow log (`review.grow_log_path`: next to the edits, suffix `growlog`, `.jsonl`;
+  sidecar `grow-log/1`): with the grow brush on, one JSON line for each grow (strokes,
+  proposal or error), paint (strokes, and the accepted proposal's `grow_job`), undo and
+  surface preview (the summaries of its solves). It is for diagnosis and replay only.
+  An accept is `POST /review/paint {strokes, grow_job}`.
 - The command: `python -m baillarger.regenerate INPUT --edits EDITS --root ROOT`. INPUT
   is the input labels (the excised dseg). It writes the dseg, the white surface, the
   overview and the queue of sites, replaces the outputs in ROOT, and prints the

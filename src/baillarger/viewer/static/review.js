@@ -26,7 +26,7 @@
 // Grow (key g, a sub-mode of paint; docs/plans/label-editing.md, Part 6): the strokes are seeds. Submit (x) sends them to
 // /review/grow (a job, polled). The server grows them from echoes 2 and 3 and smooths the WM near the change, and answers
 // with a proposal, drawn like the pending edits with a yellow outline; the surface preview takes the proposal as its strokes.
-// Accept (key a) sends the proposal to /review/paint: one write, one undo. Escape discards the proposal and the strokes; a
+// Accept (key a) sends the proposal to /review/paint with its grow job (for the grow log): one write, one undo. Escape discards the proposal and the strokes; a
 // new stroke discards the proposal. The eraser is not in grow mode. Without echoes 2 and 3, grow is off (/review/queue).
 //
 // A plug-in of the brick pane (window.BVP, as static/overlays.js): it draws the previews and the strokes on #bvo, takes the
@@ -170,7 +170,7 @@ async function growStrokes() {
   }
   if (seq !== R.growSeq) return;
   if (r.status !== "done") { say(`grow: ${r.error || r.status}`, true); return; }
-  R.proposal = { voxels: r.voxels, labels: r.labels, by: bySlice(r.voxels.map((v, i) => [r.labels[i], v])) };
+  R.proposal = { job: r.job, voxels: r.voxels, labels: r.labels, by: bySlice(r.voxels.map((v, i) => [r.labels[i], v])) };
   $("rvaccept").disabled = !r.voxels.length;
   say(r.voxels.length ? `grow: the proposal changes ${r.voxels.length} voxels (${(r.seconds ?? 0).toFixed(1)} s). a: accept as one paint · Esc: discard · a new stroke: discard and grow again`
     : "grow: the proposal changes no voxel");
@@ -179,7 +179,7 @@ async function growStrokes() {
 async function accept() {
   if (!R.proposal || !R.proposal.voxels.length) { say("no proposal to accept", true); return; }
   const n = R.proposal.voxels.length;
-  let r; try { r = await post("/review/paint", { strokes: proposalStrokes() }); } catch (e) { say(e.message, true); return; }
+  let r; try { r = await post("/review/paint", { strokes: proposalStrokes(), grow_job: R.proposal.job }); } catch (e) { say(e.message, true); return; }
   R.undoDepth = r.undo_depth; R.strokes = []; dropProposal();
   say(`grow: the proposal written: ${r.voxels} of ${n} voxels changed their label in the label edits (one paint: u undoes it)`);
   strokesInfo(); R.api.draw(); pending(); surfacePreview();
