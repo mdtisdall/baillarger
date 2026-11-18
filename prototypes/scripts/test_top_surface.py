@@ -88,7 +88,7 @@ def test_collapse_short_edges_stays_flat_and_manifold() -> None:
     v[:, :2] += rng.uniform(-0.3, 0.3, (len(v), 2)) * (~TS.boundary_vertices(f, len(v)))[:, None]
     m = TS.Mesh(v * H, f, v * H, np.zeros(len(v), np.int64), np.zeros(len(v)))
     nf0 = len(m.F)
-    s, c = TS.remesh(m, 0.25 * H, 10 * H, 0.6 * H)
+    s, c, _, _ = TS.remesh(m, 0.25 * H, 10 * H, 0.6 * H)
     assert s == 0 and c > 0
     assert len(m.F) == nf0 - 2 * c
     np.testing.assert_allclose(m.V[:, 2], 5.0 * H)
@@ -184,6 +184,39 @@ def test_refused_but_not_facing_retries() -> None:
     v = np.r_[v1, v2]
     f = np.r_[f1, f2 + len(v1)]
     m = TS.start_mesh(site_of(lab, v, f))
-    disp, info = TS.expand_step(m, site_of(lab, v, f), TS.StartSettings(), H)
+    chk = TS.Checker(m, m.V, 0.25 * H, slack=0.25 * H)
+    disp, info = TS.expand_step(m, site_of(lab, v, f), TS.StartSettings(), H, chk)
     assert info["refused"] > 0 and info["blocked"] == 0
     assert not (m.state == TS.BLOCKED).any()
+
+
+def test_checker_matches_mesh_intersect_and_full_check() -> None:
+    """The checker's triangle test finds the same pairs as
+    mesh_intersect.intersecting_faces on two sheets that cross; a check of
+    the changed vertices only finds the same violations at them as a whole
+    check, with the grid reused after the move."""
+    v1, f1 = grid_sheet(8, 5.0, True)
+    v2, f2 = grid_sheet(8, 5.0, True, shift=0.37)
+    v2[:, 2] += 0.3 * (v2[:, 0] - 5.5)  # tilted: crosses the first sheet
+    V = np.r_[v1, v2] * H
+    F = np.r_[f1, f2 + len(v1)]
+    m = TS.Mesh(V, F, V, np.zeros(len(V), np.int64), np.zeros(len(V)))
+    mask, n = MI.intersecting_faces(V, F)
+    bad, ng, ni, _ = TS.Checker(m, V, 0.25 * H).check(V)
+    assert n > 0 and ni == n  # no folds here: the sheets share no vertex
+    # move a few vertices of sheet 2 toward sheet 1 (no crossing yet in the
+    # flat part); the local check agrees with the whole check at them
+    v2b, _ = grid_sheet(8, 6.0, False, shift=0.37)
+    W = np.r_[v1, v2b] * H
+    Fw = np.r_[f1, f2[:, ::-1] + len(v1)]
+    mw = TS.Mesh(W, Fw, W, np.zeros(len(W), np.int64), np.zeros(len(W)))
+    c = TS.Checker(mw, W, 0.25 * H, slack=0.25 * H)
+    assert c.check(W)[1] == 0
+    ch = np.zeros(len(W), bool)
+    ch[len(v1) + np.arange(20, 30)] = True
+    W2 = W.copy()
+    W2[ch, 2] -= 0.9 * H  # 0.1 voxel above sheet 1: inside the gap
+    b_loc, ng_loc, ni_loc, _ = c.check(W2, ch)
+    b_all, ng_all, ni_all, _ = TS.Checker(mw, W2, 0.25 * H).check(W2)
+    assert ng_loc == ng_all > 0 and ni_loc == ni_all
+    np.testing.assert_array_equal(b_loc, b_all)

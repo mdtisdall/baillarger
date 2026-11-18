@@ -48,6 +48,7 @@ from baillarger import mesh_intersect as MI
 MOVING, TOP, WM, EDGE, BLOCKED = 0, 1, 2, 3, 4
 STATE_NAMES = ("moving", "top", "wm", "edge", "blocked")
 HALVINGS = 4  # T5: a step is halved until it keeps the gap (h/2 ... h/64 here)
+LOCAL_SHARE = 0.25  # speed only: above this share of changed vertices, the checks run on the whole mesh
 RELAX = 0.5  # T7: the fraction of the tangential move toward the neighbours' centroid
 
 
@@ -87,20 +88,32 @@ class Mesh:
 # ------------------------------------------------------------ mesh helpers
 
 
+def _edge_keys(F: np.ndarray, n: int, directed: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    """The distinct edges as keys a × n + b (a < b, or both directions when
+    directed), sorted, and how often each occurs. 1-D keys: much faster to
+    sort than rows."""
+    a = np.r_[F[:, 0], F[:, 1], F[:, 2]].astype(np.int64)
+    b = np.r_[F[:, 1], F[:, 2], F[:, 0]].astype(np.int64)
+    if directed:
+        a, b = np.r_[a, b], np.r_[b, a]
+    else:
+        a, b = np.minimum(a, b), np.maximum(a, b)
+    return np.unique(a * n + b, return_counts=True)
+
+
 def vertex_neighbours(F: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
-    e = np.r_[F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]
-    e = np.r_[e, e[:, ::-1]]
-    e = np.unique(e, axis=0)
+    k, _ = _edge_keys(F, n, directed=True)
     ptr = np.zeros(n + 1, np.int64)
-    np.add.at(ptr, e[:, 0] + 1, 1)
-    return np.cumsum(ptr), e[:, 1].astype(np.int64)
+    np.add.at(ptr, k // n + 1, 1)
+    return np.cumsum(ptr), k % n
 
 
 def boundary_vertices(F: np.ndarray, n: int) -> np.ndarray:
-    e = np.sort(np.r_[F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]], 1)
-    u, c = np.unique(e, axis=0, return_counts=True)
+    k, c = _edge_keys(F, n)
     b = np.zeros(n, bool)
-    b[u[c == 1].ravel()] = True
+    kb = k[c == 1]
+    b[kb // n] = True
+    b[kb % n] = True
     return b
 
 
@@ -251,12 +264,21 @@ def _gap_kernel(
     inf if none). Returns the number of pairs."""
     n = V.shape[0]
     stamp = np.full(n, -1, np.int64)
+    ring = np.full(n, -1, np.int64)
     queue = np.empty(n, np.int64)
     npairs = 0
     q = np.empty(3, np.int64)
     for p in range(n):
         if not check[p]:
             continue
+        # p and its 1-ring: a face with one of these vertices that is closer
+        # than rloc is in p's patch, so pass 0 need not look at it
+        ring[p] = p
+        for k in range(vf_ptr[p], vf_ptr[p + 1]):
+            g = vf[k]
+            ring[F[g, 0]] = p
+            ring[F[g, 1]] = p
+            ring[F[g, 2]] = p
         for a in range(3):
             q[a] = int(np.floor((V[p, a] - lo[a]) / cell))
         built = False
@@ -285,6 +307,8 @@ def _gap_kernel(
                             if not all_moved and not (moved[p] or moved[a] or moved[b] or moved[c]):
                                 continue
                             if built and (stamp[a] == p or stamp[b] == p or stamp[c] == p):
+                                continue
+                            if not built and not want_dmin and (ring[a] == p or ring[b] == p or ring[c] == p):
                                 continue
                             d = _ptd(V, p, a, b, c)
                             if not built:
@@ -390,61 +414,208 @@ def foldovers(m: Mesh, V: np.ndarray, moved: np.ndarray | None = None) -> tuple[
     return out, n
 
 
+@nb.njit(cache=True)
+def _tri_kernel(
+    T: np.ndarray,
+    F: np.ndarray,
+    order: np.ndarray,
+    skeys: np.ndarray,
+    lo: np.ndarray,
+    cell: float,
+    dims: np.ndarray,
+    rad: int,
+    fchg: np.ndarray,
+    all_chg: bool,
+    out: np.ndarray,
+) -> int:
+    """Intersecting face pairs (mesh_intersect's pair test _tt, rel_tol
+    1e-4; pairs that share a vertex are skipped, as in
+    mesh_intersect.intersecting_faces) with at least one changed face
+    (all_chg: every pair). Candidates: faces whose grid centroid is within
+    rad cells of the face's centroid (rad × cell ≥ twice the largest face
+    radius + the largest move since the grid was built). Marks both faces in
+    out; returns the number of pairs."""
+    n = 0
+    for f in range(F.shape[0]):
+        if not (all_chg or fchg[f]):
+            continue
+        cx = (T[f, 0, 0] + T[f, 1, 0] + T[f, 2, 0]) / 3.0
+        cy = (T[f, 0, 1] + T[f, 1, 1] + T[f, 2, 1]) / 3.0
+        cz = (T[f, 0, 2] + T[f, 1, 2] + T[f, 2, 2]) / 3.0
+        q0 = int(np.floor((cx - lo[0]) / cell))
+        q1 = int(np.floor((cy - lo[1]) / cell))
+        q2 = int(np.floor((cz - lo[2]) / cell))
+        for i0 in range(q0 - rad, q0 + rad + 1):
+            if i0 < 0 or i0 >= dims[0]:
+                continue
+            for j0 in range(q1 - rad, q1 + rad + 1):
+                if j0 < 0 or j0 >= dims[1]:
+                    continue
+                for k0 in range(q2 - rad, q2 + rad + 1):
+                    if k0 < 0 or k0 >= dims[2]:
+                        continue
+                    key = (i0 * dims[1] + j0) * dims[2] + k0
+                    s0 = np.searchsorted(skeys, key)
+                    s1 = np.searchsorted(skeys, key + 1)
+                    for t in range(s0, s1):
+                        g = order[t]
+                        if g == f:
+                            continue
+                        if (all_chg or fchg[g]) and g < f:
+                            continue  # each pair once
+                        sh = False
+                        for a in range(3):
+                            for b in range(3):
+                                if F[f, a] == F[g, b]:
+                                    sh = True
+                        if sh:
+                            continue
+                        ov = True
+                        for a in range(3):
+                            flo = min(T[f, 0, a], T[f, 1, a], T[f, 2, a])
+                            fhi = max(T[f, 0, a], T[f, 1, a], T[f, 2, a])
+                            glo = min(T[g, 0, a], T[g, 1, a], T[g, 2, a])
+                            ghi = max(T[g, 0, a], T[g, 1, a], T[g, 2, a])
+                            if fhi < glo or ghi < flo:
+                                ov = False
+                        if not ov:
+                            continue
+                        if MI._tt(T, f, T, g, 1e-4):
+                            out[f] = True
+                            out[g] = True
+                            n += 1
+    return n
+
+
+class Checker:
+    """The gap, triangle and fold checks for one mesh topology, with one
+    face grid (centroids, cell = gap + the largest face radius + slack)
+    reused while the vertices move: a check at new positions is exact while
+    gap + the largest face radius + the largest move since the grid was
+    built ≤ cell (else the grid is built again at the new positions)."""
+
+    def __init__(self, m: Mesh, V: np.ndarray, gap: float, slack: float = 0.0) -> None:
+        self.m, self.gap, self.slack = m, gap, slack
+        self._build(V)
+
+    def _build(self, V: np.ndarray) -> None:
+        T = V[self.m.F]
+        C = T.mean(1)
+        R = float(np.sqrt(((T - C[:, None]) ** 2).sum(-1)).max())
+        self.V0 = V.copy()
+        self.cell = cell = self.gap + R + self.slack
+        self.lo = lo = C.min(0) - cell
+        self.dims = dims = (np.floor((C.max(0) + cell - lo) / cell) + 1).astype(np.int64)
+        key = _cells(C, lo, cell, dims)
+        self.order = np.argsort(key, kind="stable").astype(np.int64)
+        self.skeys = key[self.order]
+
+    def _ready(self, V: np.ndarray) -> tuple[np.ndarray, int]:
+        T = V[self.m.F]
+        C = T.mean(1)
+        R = float(np.sqrt(((T - C[:, None]) ** 2).sum(-1)).max())
+        dmax = float(np.sqrt(((V - self.V0) ** 2).sum(1)).max()) if len(V) else 0.0
+        if self.gap + R + dmax > self.cell:
+            self._build(V)
+            dmax = 0.0
+        rad = int(np.ceil((2 * R + dmax) / self.cell))
+        return T, max(rad, 1)
+
+    def near(self, V: np.ndarray, changed: np.ndarray) -> np.ndarray:
+        """Vertices whose cell is within two cells of a changed vertex's
+        cell: every vertex closer than 2 × cell ≥ gap + an edge length to a
+        changed vertex, so every vertex within gap of a changed face."""
+        keys = _cells(V, self.lo, self.cell, self.dims)
+        q = np.floor((V[changed] - self.lo) / self.cell).astype(np.int64)
+        r = range(-2, 3)
+        off = np.array([(a, b, c) for a in r for b in r for c in r])
+        Q = (q[:, None, :] + off[None]).reshape(-1, 3)
+        ok = np.all((Q >= 0) & (Q < self.dims), 1)
+        Q = Q[ok]
+        mk = np.unique((Q[:, 0] * self.dims[1] + Q[:, 1]) * self.dims[2] + Q[:, 2])
+        pos = np.clip(np.searchsorted(mk, keys), 0, max(len(mk) - 1, 0))
+        return (keys >= 0) & (len(mk) > 0) & (mk[pos] == keys) if len(mk) else np.zeros(len(V), bool)
+
+    def check(
+        self,
+        V: np.ndarray,
+        changed: np.ndarray | None = None,
+        facing: np.ndarray | None = None,
+        want_dmin: bool = False,
+    ) -> tuple[np.ndarray, int, int, np.ndarray]:
+        """Vertices in a gap violation or on an intersecting face (or fold),
+        the numbers of gap pairs and intersecting pairs, and dmin (see
+        gap_check). With `changed`, only the pairs with a changed vertex
+        are tested: exact for the new violations when the other vertices
+        did not move since a check that found none among them."""
+        m = self.m
+        T, rad = self._ready(V)
+        n = len(V)
+        allc = changed is None
+        chg = np.ones(n, bool) if allc else changed
+        # when most vertices changed, the whole-mesh paths are faster (the
+        # extra pairs among unchanged vertices only add to `bad` there, which
+        # the callers mask with the changed vertices)
+        wide = allc or chg.mean() > LOCAL_SHARE
+        chk = np.ones(n, bool) if wide else self.near(V, chg)
+        bad = np.zeros(n, bool)
+        fac = np.zeros(n, bool) if facing is None else facing
+        dmin = np.full(n, np.inf)
+        VN = normals(V, m.F)
+        FN = np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0])
+        ng = _gap_kernel(
+            V, m.F, m.vf_ptr, m.vf, self.order, self.skeys, self.lo, self.cell, self.dims, self.gap,
+            2 * self.gap, chk, chg, allc, want_dmin, VN, FN, bad, fac, dmin,
+        )
+        if wide:  # mesh_intersect's own box grid is faster for many faces
+            fm, ni = MI.intersecting_faces(V, m.F)
+        else:
+            fm = np.zeros(len(m.F), bool)
+            ni = _tri_kernel(
+                np.ascontiguousarray(T), m.F, self.order, self.skeys, self.lo, self.cell, self.dims, rad,
+                chg[m.F].any(1), False, fm,
+            )
+        fo, nf = foldovers(m, V, None if allc else chg)
+        fm |= fo
+        ni += nf
+        if ni:
+            bad[m.F[fm].ravel()] = True
+        return bad, ng, ni, dmin
+
+
 def gap_check(
     m: Mesh,
     V: np.ndarray,
     gap: float,
-    check: np.ndarray | None = None,
     facing: np.ndarray | None = None,
-    moved: np.ndarray | None = None,
     want_dmin: bool = False,
 ) -> tuple[np.ndarray, int, np.ndarray]:
-    """Vertices in a gap violation (the point and the face's vertices), the
-    number of violating pairs, and (want_dmin) each checked vertex's
-    distance to the nearest other part within gap + the largest face radius
-    (inf beyond, and inf everywhere without want_dmin). If `facing` is
-    given, it is set True at the vertices of the violations between sheets
-    that face each other (normals opposed). With `moved`, only the pairs
-    with a moved vertex are tested."""
-    F = m.F
-    T = V[F]
-    C = T.mean(1)
-    R = float(np.sqrt(((T - C[:, None]) ** 2).sum(-1)).max())
-    cell = gap + R
-    lo = C.min(0) - cell
-    dims = (np.floor((C.max(0) + cell - lo) / cell) + 1).astype(np.int64)
-    key = _cells(C, lo, cell, dims)
-    order = np.argsort(key, kind="stable").astype(np.int64)
-    skeys = key[order]
+    """The gap test alone on the whole mesh: vertices in a gap violation
+    (the point and the face's vertices), the number of violating pairs, and
+    (want_dmin) each vertex's distance to the nearest other part within gap
+    + the largest face radius (inf beyond, and everywhere without
+    want_dmin). `facing` is set True at the vertices of the violations
+    between sheets that face each other (normals opposed)."""
+    c = Checker(m, V, gap)
+    T = V[m.F]
     n = len(V)
-    chk = np.ones(n, bool) if check is None else check
     bad = np.zeros(n, bool)
     fac = np.zeros(n, bool) if facing is None else facing
     dmin = np.full(n, np.inf)
-    VN = normals(V, F)
-    FN = np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0])
-    mv = np.ones(n, bool) if moved is None else moved
-    npairs = _gap_kernel(
-        V, F, m.vf_ptr, m.vf, order, skeys, lo, cell, dims, gap, 2 * gap, chk, mv, moved is None,
-        want_dmin, VN, FN, bad, fac, dmin,
+    one = np.ones(n, bool)
+    ng = _gap_kernel(
+        V, m.F, m.vf_ptr, m.vf, c.order, c.skeys, c.lo, c.cell, c.dims, gap, 2 * gap, one, one, True,
+        want_dmin, normals(V, m.F), np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), bad, fac, dmin,
     )
-    return bad, npairs, dmin
+    return bad, ng, dmin
 
 
 def violations(
-    m: Mesh, V: np.ndarray, gap: float, facing: np.ndarray | None = None, moved: np.ndarray | None = None
+    m: Mesh, V: np.ndarray, gap: float, facing: np.ndarray | None = None
 ) -> tuple[np.ndarray, int, int]:
-    """Vertices in a gap violation or on an intersecting face; the numbers
-    of gap pairs and intersecting pairs. `facing`: as for gap_check. With
-    `moved`, the gap and fold tests count only the pairs with a moved vertex
-    (the triangle test is always on the whole mesh)."""
-    bad, ng, _ = gap_check(m, V, gap, facing=facing, moved=moved)
-    fm, ni = MI.intersecting_faces(V, m.F)
-    fo, nf = foldovers(m, V, moved)
-    fm |= fo
-    ni += nf
-    if ni:
-        bad[m.F[fm].ravel()] = True
+    """Whole-mesh check: vertices in a gap violation or on an intersecting
+    face (or fold); the numbers of gap pairs and intersecting pairs."""
+    bad, ng, ni, _ = Checker(m, V, gap).check(V, facing=facing)
     return bad, ng, ni
 
 
@@ -471,9 +642,11 @@ def stop_by_label(lab: np.ndarray, travel: np.ndarray, wm_limit: float) -> np.nd
 
 
 def expand_step(
-    m: Mesh, site: TP.Site, s: StartSettings, h: float
+    m: Mesh, site: TP.Site, s: StartSettings, h: float, chk: Checker
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """One start step; returns the displacement of each vertex and counts."""
+    """One start step; returns the displacement of each vertex and counts.
+    The first check tests the pairs with a moving vertex; each later check
+    only the pairs with a vertex whose step changed (halved or refused)."""
     gap, d = s.gap_vox * h, s.step_vox * h
     N = normals(m.V, m.F)
     # a BLOCKED vertex tries again in each step (user, 2026-11-18)
@@ -490,10 +663,15 @@ def expand_step(
     V0 = m.V.copy()
     refused = np.zeros(len(m.V), bool)
     contact = np.zeros(len(m.V), bool)
-    for k in range(HALVINGS + 1):
+    changed = step > 0
+    k = 0
+    # halve up to HALVINGS times, then refuse; a refusal can leave a violation
+    # with a vertex that still moves: refuse those too, until none is left
+    # (each pass changes at least one vertex)
+    while changed.any():
         Vn = V0 + step[:, None] * N
         fac = np.zeros(len(m.V), bool)
-        bad, _, _ = violations(m, Vn, gap, fac, moved=step > 0)
+        bad, _, _, _ = chk.check(Vn, changed, fac)
         badm = bad & (step > 0)
         if not badm.any():
             break
@@ -504,19 +682,9 @@ def expand_step(
             step[badm] = 0.0
             refused |= badm
             contact[badm] = fac[badm]
+        changed = badm
+        k += 1
     Vn = V0 + step[:, None] * N
-    # a revert can leave a violation with a vertex that still moves: stop those
-    # too, until none is left (each pass stops at least one vertex)
-    while True:
-        fac = np.zeros(len(m.V), bool)
-        bad, _, _ = violations(m, Vn, gap, fac, moved=step > 0)
-        badm = bad & (step > 0)
-        if not badm.any():
-            break
-        step[badm] = 0.0
-        refused |= badm
-        contact[badm] = fac[badm]
-        Vn = V0 + step[:, None] * N
     # a refused vertex is a contact (BLOCKED) only where the sheets face each
     # other (user, 2026-11-18); otherwise it stays MOVING and tries again
     m.state[refused & contact] = BLOCKED
@@ -536,10 +704,11 @@ def expand_step(
 # ------------------------------------------------------------ mesh quality (T7)
 
 
-def relax(m: Mesh, gap: float) -> tuple[np.ndarray, int]:
+def relax(m: Mesh, chk: Checker) -> tuple[np.ndarray, int]:
     """One tangential relaxation step for the interior vertices; moves that
-    break the gap or make an intersection are undone. Returns the
-    displacement length and the number of vertices moved."""
+    break the gap or make an intersection are undone (later checks test
+    only the undone vertices). Returns the displacement length and the
+    number of vertices moved."""
     n = len(m.V)
     N = normals(m.V, m.F)
     cnt = np.diff(m.ptr)
@@ -551,18 +720,20 @@ def relax(m: Mesh, gap: float) -> tuple[np.ndarray, int]:
     dlt *= RELAX
     dlt[m.boundary | (cnt == 0)] = 0.0
     V0 = m.V.copy()
-    while True:  # each pass undoes at least one move
+    changed = np.abs(dlt).sum(1) > 0
+    while changed.any():  # each pass undoes at least one move
         Vn = V0 + dlt
-        bad, _, _ = violations(m, Vn, gap, moved=np.abs(dlt).sum(1) > 0)
+        bad, _, _, _ = chk.check(Vn, changed)
         badm = bad & (np.abs(dlt).sum(1) > 0)
         if not badm.any():
             break
         dlt[badm] = 0.0
+        changed = badm
     m.V = V0 + dlt
     return np.linalg.norm(dlt, axis=1), int((np.abs(dlt).sum(1) > 0).sum())
 
 
-def remesh(m: Mesh, gap: float, lmax: float, lmin: float) -> tuple[int, int]:
+def remesh(m: Mesh, gap: float, lmax: float, lmin: float) -> tuple[int, int, int, int]:
     """One batch of edge splits (longer than lmax, at the midpoint: the
     shape does not change), then one batch of collapses (shorter than lmin,
     to the midpoint). Each batch takes edges that are the longest (splits)
@@ -572,7 +743,9 @@ def remesh(m: Mesh, gap: float, lmax: float, lmin: float) -> tuple[int, int]:
     than 90 degrees. The gap, the intersections and the folds are checked on
     the result: if the batch adds gap pairs or intersecting pairs, it is
     undone and done again without the collapses near the violations (at
-    most 3 times; then no collapse in this pass)."""
+    most 3 times; then no collapse in this pass). Returns the numbers of
+    splits and collapses, and the gap pairs and intersecting pairs of the
+    result."""
     splits = _split(m, lmax)
     _, ng0, ni0 = violations(m, m.V, gap)
     exclude = np.zeros(len(m.V), bool)
@@ -580,10 +753,10 @@ def remesh(m: Mesh, gap: float, lmax: float, lmin: float) -> tuple[int, int]:
         keep = (m.V.copy(), m.F.copy(), m.origin.copy(), m.state.copy(), m.travel.copy(), m.last.copy())
         col, newid = _collapse(m, lmin, exclude)
         if col == 0:
-            return splits, 0
+            return splits, 0, ng0, ni0
         bad, ng, ni = violations(m, m.V, gap)
         if ng <= ng0 and ni <= ni0:
-            return splits, col
+            return splits, col, ng, ni
         old = np.flatnonzero(newid >= 0)
         hit = np.zeros(len(newid), bool)
         hit[old] = bad[newid[old]]
@@ -593,12 +766,13 @@ def remesh(m: Mesh, gap: float, lmax: float, lmin: float) -> tuple[int, int]:
         nb = np.repeat(np.arange(len(m.V)), np.diff(m.ptr))
         exclude |= hit
         exclude[m.nbr[hit[nb]]] = True
-    return splits, 0
+    return splits, 0, ng0, ni0
 
 
 def _edges(F: np.ndarray) -> np.ndarray:
-    e = np.sort(np.r_[F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]], 1)
-    return np.unique(e, axis=0)
+    n = int(F.max()) + 1
+    k, _ = _edge_keys(F, n)
+    return np.c_[k // n, k % n]
 
 
 def _local_best(E: np.ndarray, rank: np.ndarray, n: int, ptr: np.ndarray | None, nbr: np.ndarray | None) -> np.ndarray:
@@ -742,8 +916,7 @@ class StartRun:
         h = float(site.vox.mean())
         gap = s.gap_vox * h
         m = start_mesh(site)
-        e = np.sort(np.r_[m.F[:, [0, 1]], m.F[:, [1, 2]], m.F[:, [2, 0]]], 1)
-        u = np.unique(e, axis=0)
+        u = _edges(m.F)
         med = float(np.median(np.linalg.norm(m.V[u[:, 0]] - m.V[u[:, 1]], axis=1)))
         self.median_edge = med
         lmax, lmin = s.split_ratio * med, s.collapse_ratio * med
@@ -751,8 +924,7 @@ class StartRun:
         lab0 = label_at(site, m.V + 0.5 * h * normals(m.V, m.F))
         m.state[lab0 == TP.OUTSIDE] = TOP
         t0 = time.time()
-        sp, co = remesh(m, gap, lmax, lmin)
-        bad, ng, ni = violations(m, m.V, gap)
+        sp, co, ng, ni = remesh(m, gap, lmax, lmin)
         self.initial = {
             "vertices": len(m.V),
             "faces": len(m.F),
@@ -767,15 +939,17 @@ class StartRun:
             self.snapshot("start-00", m, np.zeros(len(m.V)), {"step": 0, **self.initial})
         for k in range(1, s.max_steps + 1):
             t0 = time.time()
-            disp, info = expand_step(m, site, s, h)
+            # one face grid for the step's checks (no vertex moves more than
+            # h/4 along the normal; the relaxation is covered by the rebuild test)
+            chk = Checker(m, m.V, gap, slack=s.step_vox * h)
+            disp, info = expand_step(m, site, s, h, chk)
             moved_any = info["moved"] > 0
-            r, nrel = relax(m, gap)
+            r, nrel = relax(m, chk)
             # displacement shown per vertex: the normal step plus the relaxation;
             # carried through the remeshing (new vertices: the mean of the edge's ends)
             m.last = np.sqrt(disp**2 + r**2)
-            sp, co = remesh(m, gap, lmax, lmin)
+            sp, co, ng, ni = remesh(m, gap, lmax, lmin)
             disp = m.last
-            bad, ng, ni = violations(m, m.V, gap)
             states = {nm: int((m.state == i).sum()) for i, nm in enumerate(STATE_NAMES)}
             rec = {
                 "step": k,
