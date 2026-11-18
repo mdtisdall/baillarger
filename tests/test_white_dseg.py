@@ -104,16 +104,38 @@ def test_a_fill_that_joins_two_pieces_into_a_handle_is_refused() -> None:
     so a fill of one piece can touch another. Here a WM plate has a 7 x 7 hole
     (cheaper to fill than to cut), and a second piece of WM, a U, passes both
     legs through it: the plug touches both legs, and plate, plug and U make a
-    handle. wm_topo refuses the result rather than write it."""
+    handle. wm_topo refuses the result rather than write it. The U is above
+    CRUMB_MM3, so it is not removed as a small piece before the handles."""
     a = np.zeros((40, 40, 40), np.int16)
     a[2:38, 2:38, 18:22] = 41  # the plate, 4 thick
     a[16:23, 16:23, 18:22] = 42  # the hole, cortex
-    a[18, 19, 14:26] = 41  # the U's legs, 2 voxels from the hole's walls
-    a[20, 19, 14:26] = 41
-    a[18:21, 19, 25] = 41  # joined 3 voxels above the plate
+    a[18, 19, 14:28] = 41  # the U's legs, 2 voxels from the hole's walls
+    a[20, 19, 14:28] = 41
+    a[14:25, 14:25, 27:30] = 41  # joined by a block (363 voxels) above the plate
+    assert int(np.sum(a[14:25, 14:25, 27:30] == 41)) * np.prod(VOX) > 1.0
     assert kuhn_betti(np.isin(a, FILLED)) == (2, 1, 0)
     with pytest.raises(RuntimeError, match=r"Betti numbers \(1, 1, 0\)"):
         white_dseg.wm_topo(a, VOX)
+
+
+def test_a_crumb_next_to_a_handle_fill_is_removed_first() -> None:
+    """The plate and hole of the test above, with a crumb (a piece below
+    CRUMB_MM3) over the hole: a bridge whose two feet rest on the hole's
+    top. The plug would touch both feet and make a handle; the crumb is
+    removed before the handles, so the result is one piece with no handle,
+    and the crumb is a small_piece fix."""
+    a = np.zeros((40, 40, 40), np.int16)
+    a[2:38, 2:38, 18:22] = 41
+    a[16:23, 16:23, 18:22] = 42
+    a[17, 19, 22:25] = 41  # the bridge's feet, on the hole's top
+    a[21, 19, 22:25] = 41
+    a[17:22, 19, 24] = 41  # its span
+    assert kuhn_betti(np.isin(a, FILLED)) == (2, 1, 0)
+    t = white_dseg.wm_topo(a, VOX)
+    assert t.betti_after == (1, 0, 0)
+    assert t.dseg[19, 19, 24] != 41 and t.dseg[19, 19, 21] == 41  # crumb out, hole shut
+    kinds = sorted(f.kind for f in t.fix_list)
+    assert "small_piece" in kinds and "handle_fill" in kinds
 
 
 def test_cuts_take_the_nearest_donor_in_mm() -> None:
