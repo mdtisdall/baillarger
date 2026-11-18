@@ -36,8 +36,13 @@ Repair: the distance bound lets faces that stand for two sheets of the input
 closer than about 2 eps cross (on the hemisphere white surface at 0.1 mm, its
 sheets come within 0.05 to 0.2 mm of each other at necks and thin passages: 251
 crossing faces). So decimate finds the faces of its result that intersect
-(baillarger.mesh_intersect) and pins, as locked, the input vertices that they
-stand for (corners and carried), then decimates again, until none intersect.
+(baillarger.mesh_checks: faces with no common vertex that cross, and faces that
+share one vertex and cross beyond it, which the first test skips; 32 such
+shared-vertex folds were in the hemisphere overview of site 1 before this test)
+and pins, as locked, the input vertices that they stand for (corners and
+carried), then decimates again, until none intersect. Creases (edge-neighbour
+faces folded back past mesh_checks.FOLD_COS) are counted in the repair records
+only, not pinned.
 Pinned vertices are never collapsed, so a pinned region keeps its input faces,
 which do not intersect; each round pins more, so the rounds end. A block whose
 inputs did not change is not run again (its result is reused by a hash of its
@@ -93,7 +98,7 @@ import numpy as np
 import numpy.typing as npt
 
 from baillarger._jit import njit
-from baillarger.mesh_intersect import intersecting_faces
+from baillarger.mesh_checks import check_mesh
 from baillarger.mesh_smoothing import boundary_vertices
 
 type Float = npt.NDArray[np.float64]
@@ -1211,7 +1216,8 @@ def decimate(
     `block`: `passes` passes, on the grid shifted by half a block in every
     other pass, each with `workers` processes (default: the CPU count).
     pinned: input vertices kept. repair: rounds of finding faces of the result
-    that intersect and pinning what they stand for, until none do (a block
+    that intersect (mesh_checks: crossings and shared-vertex folds) and
+    pinning what they stand for, until none do (a block
     whose inputs did not change is reused, not run); RuntimeError after
     max_rounds."""
     lap = _Laps(log)
@@ -1264,21 +1270,30 @@ def decimate(
         if not repair:
             break
         loc = np.searchsorted(vid, M.f)
-        hit, pairs = intersecting_faces(V[vid], loc)
+        chk = check_mesh(V[vid], loc)
+        hit = chk.intersecting | chk.vertex_folds
         repairs.append(
             dict(
                 round=rnd,
-                intersecting_faces=int(hit.sum()),
-                pairs=int(pairs),
+                intersecting_faces=int(chk.intersecting.sum()),
+                pairs=chk.intersecting_pairs,
+                shared_vertex_fold_faces=int(chk.vertex_folds.sum()),
+                shared_vertex_fold_pairs=chk.vertex_fold_pairs,
+                creases=chk.edge_fold_pairs,
                 pinned=int(pin.sum()),
             )
         )
-        lap(f"round {rnd}: {int(hit.sum())} intersecting faces")
+        lap(
+            f"round {rnd}: {int(chk.intersecting.sum())} intersecting faces, "
+            f"{int(chk.vertex_folds.sum())} in shared-vertex folds, "
+            f"{chk.edge_fold_pairs} creases (counted, not pinned)"
+        )
         if not hit.any():
             break
         # pin what the crossing faces stand for: their corners and their
         # carried vertices (a ring of faces round them as well pinned about ten
-        # times as many vertices on the hemisphere, for two rounds fewer)
+        # times as many vertices on the hemisphere, for two rounds fewer).
+        # Creases are only counted (the user's choice, 2026-11-18).
         rows = np.flatnonzero(hit)
         pin[M.f[rows].ravel()] = True
         pin[csr_take(M.cptr, M.cids, rows)[1]] = True
