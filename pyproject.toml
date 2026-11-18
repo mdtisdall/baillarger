@@ -86,6 +86,7 @@ testpaths = [
   "prototypes/scripts/test_pial_height.py",
   "prototypes/scripts/test_pial_solver.py",
   "prototypes/scripts/test_top_stage_lib.py",
+  "prototypes/scripts/test_top_surface.py",
   "prototypes/scripts/test_warp_cut.py",
   "prototypes/scripts/test_warp_qpbo.py",
 ]

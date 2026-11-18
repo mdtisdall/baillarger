@@ -51,8 +51,14 @@ The user's choices of 2026-11-18 (T1–T8).
 - **T2. Gap.** Two parts of Σ keep a minimum gap of h/4 (0.04 mm at
   0.16 mm, 12.5 µm at 0.05 mm). The triangle test's tolerance is 1e-4 ×
   the mean edge length, and the edges stay about one voxel long (T7), so
-  the gap is about 2,500 × the tolerance at each resolution. A contact is
-  two parts of Σ with no voxel centre between them along their normals.
+  the gap is about 2,500 × the tolerance at each resolution. "Another
+  part" of Σ for a point: a face outside the point's local patch, which is
+  the part of Σ inside the ball of radius h/2 that is connected to the
+  point (faces reached from the point's own faces across shared vertices,
+  each closer than h/2). The no-crossing rule also tests faces that share
+  one vertex (a fold at the vertex), which the triangle test skips. A
+  contact is two parts of Σ with no voxel centre between them along their
+  normals.
   The gap is a numerical margin, not a statement about tissue: at 0.05 mm
   a fused line can be several voxels wide, and the stop evidence then
   decides between a contact and a gap with medium.
@@ -74,10 +80,15 @@ The user's choices of 2026-11-18 (T1–T8).
   intersection (FreeSurfer's rule). Repeat until Σ and τ do not change.
 - **T6. Start.** Expand Σ from the white surface along the vertex normals
   in steps of h/4, driven only by the stop term of T4 (out in the cortex
-  label, stop at label 0). Each step keeps the gap and is checked for
-  intersections. A vertex whose move would break the gap stops there:
-  these are the first contacts. A vertex whose white face faces label 0
-  directly does not move (zero thickness at an excision).
+  label, stop at label 0). The white mesh lies inside the WM voxels, so a
+  vertex in WM keeps moving; it stops as "wm" after 3 voxels still in WM.
+  Each step keeps the gap and is checked for intersections. A move that
+  breaks either is halved up to 4 times (h/4 to h/64), then refused for
+  that step. A refused vertex tries again in each step. It is a first
+  contact (BLOCKED) only while the near face of the other part points
+  against its normal (two sheets that face each other). A vertex whose
+  white face faces label 0 directly does not move (zero thickness at an
+  excision).
 - **T7. Mesh quality.** After each Σ step, a tangential relaxation (each
   vertex moves only in its tangent plane, toward the centroid of its
   neighbours). Edges longer than 2 × the white mesh's median edge are
@@ -100,7 +111,7 @@ the optimization (2026-11-18). Every run can write snapshots
   displacement of each vertex in that step, the contacts, and the energy
   by term.
 - **Frames.** Three slices through the site: echo 2, τ in colour, the white
-  surface and Σ as cut lines (white and red), the contacts in cyan. The
+  surface and Σ as cut lines (blue and red), the contacts in cyan. The
   title gives the snapshot name, the energy and the number of contacts.
 - **3D view.** Beside the slices, Σ in the crop, coloured by how far each
   vertex moved in that step, with the contacts marked. It can be rotated,
