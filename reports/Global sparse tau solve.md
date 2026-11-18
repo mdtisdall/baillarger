@@ -2,8 +2,8 @@
 
 **Question.** Can one global sparse solve give the τ field of the
 continuous model (top anchor, equivolume, tangential smoothness, a weak pull
-toward mm), with the contacts between banks from an ownership field, at a
-cost per iteration that is linear in the number of voxels?
+toward mm), with the contacts from an ownership field, at a cost per
+iteration that is linear in the number of voxels?
 
 **Status.** First prototype, tried on site 1 (kissing cortex, the fixed
 labels, 10 mm crop) on 2026-11-17/18. The prototype replaces the tube
@@ -27,6 +27,10 @@ report before any fix is made.
 - The outer loop does not reach a fixed point in 10 iterations. The owner
   changes fall from 126,910 to 63. Then the same voxels flip back and forth
   (a period-2 pattern).
+- The prototype decides the contacts before it solves τ, from the
+  ownership field and a 5 mm "same bank" test. This is wrong. A contact is
+  a property of the top, and it must come from the τ solution (see
+  *Contacts without banks*).
 - The face test (G9) is too expensive at the agreed unit (about 8 h for
   the 710 units of one outer iteration). On a sample of 40 units, none of
   the 280 local solves converged in 30 LM iterations, so its moves and
@@ -48,14 +52,13 @@ after the first site-1 checks (marked *changed*).
    the echo 2 and 3 structure tensor (the laminar normal, the column
    direction). A tangential step costs up to 3× more where the contrast is
    coherent. The user proposed this metric.
-3. **Contact faces.** A face between two 6-neighbour voxels whose owner
-   patches are more than 5 mm apart on the cropped patch graph is a contact
-   face. "Same bank" in this report means only this pairwise relation
-   (≤ 5 mm, from the tube solver). The prototype does not define a bank as
-   a set of patches. The relation is not transitive, so it does not divide
-   the patches into banks (see *Open questions*). The face carries the ghost value τ = 0 (G7). The first
-   derivative across the face is (0 − τ)/(h/2). The second-level
-   derivatives are one-sided there.
+3. **Contact faces (*replaced*, see *Contacts without banks*).** A face
+   between two 6-neighbour voxels whose owner patches are more than 5 mm
+   apart on the cropped patch graph is a contact face. In the code, "same
+   bank" means only this pairwise relation (≤ 5 mm, from the tube solver).
+   The face carries the ghost value τ = 0 (G7). The first derivative across
+   the face is (0 − τ)/(h/2). The second-level derivatives are one-sided
+   there.
 4. **Initial τ (G3).** τ0 = −(distance to the nearest label-0 voxel or
    contact face), and τ0 > 0 in label 0.
 5. **Solve (G4–G6).** Levenberg–Marquardt. The step solves
@@ -66,14 +69,15 @@ after the first site-1 checks (marked *changed*).
    inverse of JᵀJ on column lines (chains of voxels along ∇τ, at most 32
    voxels).
 6. **Upwind ownership (G8).** The voxels in increasing τ take the owner of
-   the lower 26-neighbour that is best aligned with −∇τ, in the same bank.
+   the lower 26-neighbour that is best aligned with −∇τ, with an owner
+   patch at most 5 mm from its own (the same 5 mm relation).
 7. **Face test (G9, *changed*).** A face unit is the set of contact faces
    between one pair of 1 mm coarse patches. The user chose this unit
    because the one-axis patches of G9 gave 3,629 patches on site 1, median
    1 face. Each unit is tried at the offsets −3…+3 voxels by a local LM
    solve. The move of −1, 0 or +1 with the smallest sum of both sides'
-   energies is kept. The bank disagreement is (B's best offset − A's best
-   offset) × h. A positive value is a gap. A negative value means that the
+   energies is kept. The disagreement of the two sides is (B's best offset
+   − A's best offset) × h. A positive value is a gap. A negative value means that the
    two sides' evidence disagrees. It is never read as overlap.
 8. **Topology (G10).** After each solve, the Euler number of each component
    of {τ < 0}, cut at the contact faces, against the Euler number of its
@@ -95,6 +99,41 @@ Two parts stay custom: LM, because the energy is not a sum of squares (the
 stop term and log t), and the coloured Jacobian. Possible replacements are
 in *Open questions*.
 
+## Contacts without banks
+
+The user does not want a concept of "bank" (a set of patches on one side of
+a contact). The prototype has none as a set. It uses only the pairwise 5 mm
+relation, which is not transitive and depends on the crop. That relation is
+an arbitrary constant, and it is wrong in principle:
+
+- **One sheet can meet itself at its top.** On the concave side of a bend,
+  the columns converge. In a tight fundus, neighbouring columns of one sheet
+  meet at the top obliquely or almost head-on. The change is continuous,
+  from slight convergence to antiparallel walls. So no distance, angle or
+  direction test on ownership borders can separate "one sheet" from "two
+  sheets".
+- **Where the columns meet decides it.** If they meet at the top, the stop
+  set is reached from two directions. That is a contact, whether the
+  columns come from one folded sheet or from two (for example a fused
+  fundus). Below the top, columns must not meet: they do not cross in
+  tissue. There, τ and ∇τ stay continuous across an ownership border, and
+  nothing stops.
+- **So a contact is a property of the top.** It is a stop set with tissue on
+  both sides, reached from both sides. It needs no bank and no sheet.
+
+The prototype does the opposite. It takes the contact faces from the
+ownership march before τ is solved, and the ghost value then forces τ = 0
+on them. A bend whose columns cross an ownership border below the top can
+get a false stop there. It is possible that this causes part of items 3
+and 4 of *What failed*. This is not tested.
+
+A better order: the ownership field gives only a first guess. A face
+becomes a contact only where the solved τ reaches 0 from both sides. The
+stencil is cut there, and the outer loop checks it again. How to decide
+"τ reaches 0 from both sides" on the grid is an open design choice (see
+*Open questions*). The topology check and the sides of the face test then
+also use these contacts, not the 5 mm relation.
+
 ## Site 1: inputs
 
 - Crop `scratch/tube-sites/site1-fixed/c10mm/site.npz` (65³ voxels at
@@ -103,7 +142,7 @@ in *Open questions*.
   spacing median 0.424 mm). 27 colours. Every voxel has an owner.
 - The cropped white surface is 3 pieces (1,043, 633 and 64 patches). On the
   full hemisphere mesh, pieces 0 and 1 are more than 12 mm apart: they are
-  the two sides of the kissing pair. Pieces 1 and 2 join 1.5 mm outside the
+  the two sheets of the kissing pair. Pieces 1 and 2 join 1.5 mm outside the
   crop, but on the cropped patch graph their patches are more than 5 mm
   apart.
   At the first ownership, 8,387 contact faces are between pieces 0 and 1,
@@ -197,7 +236,8 @@ beyond the top (|∇τ| up to about 10; the 99th percentile is 9.6).
    becomes negative from the fifth voxel. Each side stops some voxels short
    of the contact. This is a consequence of item 2. It is possible that the
    energy also prefers this state: the gradient terms are large next to a
-   ghost face. This is not tested.
+   ghost face. This is not tested. A third possible cause: some of these
+   faces are not contacts at all (see *Contacts without banks*).
 4. **No fixed point.** In outer iterations 5–9 the contact-face count
    alternates between 8,851 and 8,886. The state after outer 8 and the
    final state differ in 22 voxels, but outer 8 and outer 9 each change
@@ -234,7 +274,7 @@ tested, with 7 local LM solves for each unit (offsets −3…+3).
   0 offset is also unconverged.
 - **Disagreement.** From −0.96 to +0.80 mm. 23 of 40 units are at 0. 15 of
   40 are censored (one side's best offset is at ±3).
-- On the synthetic two-bank slab (LM limit 8), only k = 0 converged
+- On the synthetic two-sheet slab (LM limit 8), only k = 0 converged
   (2 iterations), and the other offsets stopped at the limit. Both sides
   then preferred k = 0 in every unit. That is a bias of the test, not a
   measurement.
@@ -261,7 +301,7 @@ only the top. The site-1 run with snapshots repeats the run above.
 `prototypes/scripts/test_global_tau.py`, 10 tests, about 40 s:
 
 - the colouring (27 colours separate every pair of voxels within L1 4);
-- the same-bank lookup;
+- the 5 mm lookup between owner patches (`same_bank` in the code);
 - the ghost gradient at a contact face (both sides, and one-sided);
 - the coloured stencil Jacobian against the dense JAX Jacobian (Jv, Jᵀu,
   the diagonal and single entries of JᵀJ);
@@ -270,23 +310,22 @@ only the top. The site-1 run with snapshots repeats the run above.
 - the contact faces and the upwind owners (no owner goes to a patch more
   than 5 mm away);
 - the anisotropic march (a step across n̂ costs 3× at coh 1);
-- a one-bank slab: the top stays at the label face, τ steps ≈ 0.16 mm per
+- a one-sheet slab: the top stays at the label face, τ steps ≈ 0.16 mm per
   voxel, no contact, no topology event;
-- a two-bank slab with no label 0: one flat contact, the ±2 move, the face
+- a two-sheet slab with no label 0: one flat contact, the ±2 move, the face
   test runs;
 - the snapshots: one before and after each LM iteration and one after the
   ownership update, and τ read back equals the solver's τ.
 
 ## Open questions
 
-- **What is a bank?** The prototype has no bank as a set. It has only the
-  pairwise relation "owner patches ≤ 5 mm apart on the cropped patch
-  graph". This relation is not transitive. Three parts depend on it: the
-  contact faces (448 faces at site 1 are inside one white-surface piece),
-  the topology check (restated per component of {τ < 0} cut at the contact
-  faces, because "each bank" is not a set), and the sides of the face test
-  (a voxel can be "same bank" as both sides; the code then puts it on side
-  A). It is possible that the non-transitive relation causes part of the
+- **Contacts from the τ solution.** How to decide on the grid that τ
+  reaches 0 from both sides of a face, and how the stencil is cut there
+  (see *Contacts without banks*). Three parts now use the 5 mm relation
+  and must change with it: the contact faces (448 faces at site 1 are
+  inside one white-surface piece), the upwind ownership, and the sides of
+  the face test (a voxel can be within 5 mm of both sides; the code then
+  puts it on side A). It is possible that the relation causes part of the
   face-count oscillation (item 4 of *What failed*). This is not tested.
 - **Checkerboard.** A stencil without the odd–even null space. One option
   is face-centred first differences (the energy on the voxel faces). This
@@ -298,13 +337,10 @@ only the top. The site-1 run with snapshots repeats the run above.
 - **Stop term beyond the ramp.** With f = clip(0.5 − τ/h, 0, 1), a voxel
   beyond the ramp gets no force from the stop evidence. A smooth f (for
   example a logistic ramp) gives a force at every τ. This changes choice C.
-- **Contacts.** Does the energy prefer a gap next to a ghost face? A test on
-  the two-bank slab with no large steps answers this.
+- **Gap at a contact.** Does the energy prefer a gap next to a ghost face?
+  A test on the two-sheet slab with no large steps answers this.
 - **Fixed point.** The oscillation check needs a test that is not exact
   equality (for example the same voxels flipping in two iterations).
-- **Banks in a crop.** The same-bank test uses the cropped patch graph. At
-  site 1 this joins pieces that the crop separates in 1 contact face only.
-  At other sites a geodesic on the full mesh can be necessary.
 - **Libraries.** pyamg (MIT, already a dependency) can give an algebraic
   multigrid preconditioner for JᵀJ. It needs the explicit sparse JᵀJ.
   Optimistix (Apache-2.0) has LM with CG, but only for a sum of squares.
