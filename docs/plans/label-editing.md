@@ -2,7 +2,8 @@
 
 Status: every part is built and merged: Part 1 (#168, #175), Part 2 (#181), Part 3
 (#195), Part 4a (#197), Part 4b (core #171, join #198) and Part 5 (core #167, #172,
-#177, join #196). Not yet checked in a browser on a whole hemisphere.
+#177, join #196). Not yet checked in a browser on a whole hemisphere. Part 6 (the grow
+brush) is planned, not built.
 
 ## Goal
 
@@ -42,6 +43,10 @@ not come from that log.
   eraser: it removes the voxels from the diff, so they take the input label again).
 - Brush: a 2D disc on the slice under the pointer, as the scribble brush now. A 3D
   edit is painted slice by slice.
+- The grow brush (Part 6): the strokes are seeds. The server grows them in 3D from the
+  echoes, smooths the WM boundary near the change, and shows the result as a proposal.
+  The user accepts it (it is then a plain paint) or discards it. Plain paint stays
+  exact, voxel for voxel. (User, 2026-11-17, from the replay of site 1.)
 - An edit records only the voxels whose label it changes. A voxel's current label is
   its entry in the diff if it has one, else its label in the dseg (the labels that the
   user sees, after the correction), not its input label. Painting a voxel with its
@@ -270,6 +275,75 @@ Tests: the command on a phantom gives the same files as the four commands run by
 if a step fails, the old outputs are unchanged; an edit that the correction must change
 is reported.
 
+## Part 6: the grow brush
+
+**Why.** A 2D brush, slice by slice, leaves a spiky WM boundary: islands and notches of
+one voxel between the painted slices. At site 1 (near vertex 12403800), the WM within 4
+voxels of the edit had 604 thin voxels (removed by a 6-connected opening) against 74
+before the edit, and the regeneration kept 324. An offline replay of that edit
+(`scratch/smart-brush/`) compared four forms. The user chose "grow from seeds, then
+smooth the WM" (26 thin voxels, Dice 0.87 against the user's own change).
+
+**The mode.**
+
+- Paint mode gets a sub-mode, grow (key g toggles it). The label menu is the same:
+  outside, WM and cortex. The eraser is not in grow mode.
+- The user paints strokes on a few slices, in any view, as in paint mode. Submit (x or
+  Enter) sends them to `POST /review/grow`. The server returns a proposal: voxels and
+  their labels.
+- The pane draws the proposal on the slice tiles, in its own colour. The 4a and 4b
+  previews take the proposal as their strokes.
+- Accept (key a) sends the proposal to `POST /review/paint`, as strokes. So an accepted
+  proposal is one paint: it goes into the diff, and one undo removes it. Escape
+  discards the proposal and the strokes. A new stroke discards the proposal and keeps
+  the strokes.
+
+**The proposal** (`label_grow.grow`, a new core module):
+
+1. **Seeds.** The stroke voxels with their labels (`review.stroke_voxels`: a voxel in
+   two strokes keeps the later one).
+2. **The current labels.** The dseg's labels with the diff's entries (the labels that
+   the user sees).
+3. **The area.** The voxels within a distance D of a stroke voxel, with D = BAND + G/2.
+   G is the largest gap, in voxels, between two stroked slices that are next to each
+   other in one view. BAND = 3 voxels. The box is the area's bounding box. The area
+   is refused (an error, nothing proposed) above 2·10⁶ voxels.
+4. **Fixed seeds.** Outside the area, each voxel of the box keeps its current label.
+5. **The growth.** A random walker (`skimage.segmentation.random_walker`, BSD licence)
+   on echoes 2 and 3 in the box: the log intensity of each echo, scaled by its 2nd and
+   98th percentiles in the area. β = 130, mode `cg_j`. The classes are the labels of
+   the seeds. Each voxel of the area takes its most probable class.
+6. **The smoothing.** The WM mask after the growth is smoothed: a Gaussian of
+   σ = 1 voxel on its signed distance, threshold 0. The smoothing changes only voxels
+   within ZONE = 4 voxels of a voxel that the growth changed. A voxel that leaves the
+   WM takes its most probable non-WM class from the growth. A voxel that joins the WM
+   takes the WM label.
+7. **The proposal.** The voxels of the box whose new label is not their current label.
+
+BAND, β, σ and ZONE are first values from site 1. The response gives them. A scan of a
+value is a finding to report, not a setting to tune.
+
+**The echoes.** The echoes that the viewer shows (`--echo-dir`), read for the box only,
+at full resolution. Without echoes 2 and 3, grow mode is off, and the pane says why.
+
+**The cost.** The area of site 1 was about 10⁵ voxels, and the growth and smoothing took
+about 1 s on the CPU. The growth runs as a viewer job (`baillarger.viewer.jobs`), with a
+progress state, so a large area does not block the pane.
+
+Tests (on a synthetic image, not the site):
+
+- Two classes of different contrast, with a bump of the WM label into the cortex. Cortex
+  strokes on one slice in four, over the bump: the proposal moves the WM boundary to the
+  true boundary, within one voxel, and changes no voxel outside the area.
+- After the proposal, the WM within ZONE of the change has no voxel that a 6-connected
+  opening removes, where the true boundary has none.
+- Strokes on voxels that already have their label, in a region where the image agrees
+  with the labels: an empty proposal.
+- The same strokes give the same proposal (determinism).
+- An area above the limit is refused, and nothing is written.
+- An accepted proposal gives the same diff as `/review/paint` with the same voxels, and
+  one undo restores the diff before it.
+
 ## Order of the PRs
 
 The joins merge in this order. The cores can merge earlier (see Parallel work).
@@ -280,6 +354,7 @@ The joins merge in this order. The cores can merge earlier (see Parallel work).
 4. Part 4a.
 5. Part 4b.
 6. Part 5.
+7. Part 6: its core, then its join.
 
 ## Parallel work
 
@@ -294,6 +369,7 @@ the cores into the routes and the pane, and they meet in a few shared files.
 | 4a | none | `viewer/review.py` (`/review/preview` takes voxels), `static/review.js` | the paint request |
 | 4b | `antialias.py` (start, held), `white_surf.py` (the field derivative, the blocks' re-march), its format doc, their tests | `viewer/review.py` (route, working field), the 3D view and the slices (blocks) | the preview contract |
 | 5 | a new `regenerate` command, its tests | `viewer/review.py` (the subprocess), `static/review.js` (state, message) | the command's arguments |
+| 6 | `label_grow.py` (new), `tests/test_label_grow.py` | `viewer/review.py` (`/review/grow`, the echoes), `static/review.js` (grow mode, the proposal, accept) | the `label_grow` contract |
 
 Waves:
 
@@ -389,6 +465,14 @@ The joins use these interfaces. A core must keep them, or change this plan first
   `GET /review/regenerate` gives its state. Both: `{status (idle | running | done |
   failed), log, overrides, error, outputs_changed, cap_gb, viewer_gb, command,
   seconds}`. While it runs, each write into the edits is refused.
+- `label_grow.grow(strokes, current, echoes, *, box_limit=2_000_000) -> Proposal`:
+  `strokes` a list of (label, voxels) in stroke order; `current` a callable that gives
+  the current labels of a box; `echoes` a callable that gives echoes 2 and 3 of a box.
+  `Proposal`: `index` (int64, sorted, unique), `label` (int32), `box` (lo, hi), and
+  `settings` (BAND, β, σ, ZONE). It raises `ValueError` for an area above the limit.
+- `POST /review/grow {strokes}` (the strokes as for `/review/paint`, no eraser) answers
+  as a job (`{status, job}`), polled with `GET /review/grow?job=`. When done:
+  `{voxels, labels, box, settings}`, or `{error}`. It writes nothing.
 - The command: `python -m baillarger.regenerate INPUT --edits EDITS --root ROOT`. INPUT
   is the input labels (the excised dseg). It writes the dseg, the white surface, the
   overview and the queue of sites, replaces the outputs in ROOT, and prints the
@@ -400,6 +484,7 @@ The joins use these interfaces. A core must keep them, or change this plan first
 - The success measure, and the queue's answer log apart from what Part 1 changes.
 - A history of edits.
 - Denser roots in the profile section.
-- A 3D brush, and labels other than outside, WM and cortex.
+- A 3D brush, and labels other than outside, WM and cortex. (The grow brush grows in
+  3D from 2D strokes.)
 - The excision map: corrections to it are paint edits with the label outside.
 - A brick volume that changes while the viewer runs.
