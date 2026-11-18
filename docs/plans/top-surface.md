@@ -146,6 +146,13 @@ For a person to read, not pass/fail:
   sides' evidence disagrees; never read as overlap);
 - intersections of Σ (must stay 0) and the minimum distance between parts
   of Σ that are not contacts;
+- isolated TOP vertices (user, 2026-11-18): a review list of the vertices
+  stopped at label 0, most isolated first, so that a person can correct
+  label errors as they appear. For each: how far its neighbours moved past
+  it, the size of the label-0 region that stopped it, whether that region
+  reaches the crop edge, and the label-0 voxels around the stopping voxel.
+  A TOP vertex is final in the start; a small region with a large lag is a
+  likely label error in the cortex;
 - equivolume: the largest |v| and the share of the energy in the top 1% of
   voxels;
 - thickness per patch; at the abrasion site, the thickness against the

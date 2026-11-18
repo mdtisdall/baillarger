@@ -51,7 +51,9 @@ def main() -> None:
     t1 = time.time()
     m = run.run()
     total = time.time() - t1
-    np.savez(out / "result.npz", V=m.V, F=m.F, state=m.state, travel=m.travel, origin=m.origin)
+    np.savez(
+        out / "result.npz", V=m.V, F=m.F, state=m.state, travel=m.travel, origin=m.origin, stopvox=m.stopvox
+    )
     log = {
         "settings": asdict(s),
         "halvings": TS.HALVINGS,

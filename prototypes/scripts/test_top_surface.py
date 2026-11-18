@@ -220,3 +220,24 @@ def test_checker_matches_mesh_intersect_and_full_check() -> None:
     b_all, ng_all, ni_all, _ = TS.Checker(mw, W2, 0.25 * H).check(W2)
     assert ng_loc == ng_all > 0 and ni_loc == ni_all
     np.testing.assert_array_equal(b_loc, b_all)
+
+
+def test_isolated_top_finds_a_single_label0_voxel() -> None:
+    """One label-0 voxel inside the cortex of a slab stops the vertex under
+    it early: it heads the review list, with a large lag and a one-voxel
+    label-0 region; the vertices that stop at the real top have no lag."""
+    lab = np.zeros((14, 14, 20), np.int16)
+    lab[..., :5] = TP.WM
+    lab[..., 5:15] = TP.CORTEX
+    lab[6, 6, 8] = 0  # a label error in the cortex
+    v, f = grid_sheet(10, 4.6, True)
+    run = TS.StartRun(site_of(lab, v, f), TS.StartSettings(collapse_ratio=0.0))
+    m = run.run()
+    iso = TS.isolated_top(m, lab)
+    first = iso["vertex"][0]
+    assert np.allclose(m.V[first, :2] / H, (6, 6), atol=0.5)
+    assert iso["lag_mm"][0] > 4 * H
+    assert iso["comp_voxels"][0] == 1 and not iso["comp_at_crop_edge"][0]
+    assert iso["label0_3x3x3"][0] == 1
+    big = iso["comp_voxels"] > 1
+    assert big.any() and iso["comp_at_crop_edge"][big].all()

@@ -1,6 +1,6 @@
 """Measures of a Σ start run (top_surface_run.py), for a person to read.
 
-usage: top_surface_measures.py SITE_NPZ RUN_DIR [CONTACT_FACES_NPZ] [FIG_DIR]
+usage: top_surface_measures.py SITE_NPZ RUN_DIR [CONTACT_FACES_NPZ|-] [FIG_DIR]
 Prints JSON: the vertices and area by state; the distance moved (travel)
 by state; the minimum distance between parts of Σ and the intersections;
 the time per step; with CONTACT_FACES_NPZ (a global τ result.npz with
@@ -8,7 +8,10 @@ the time per step; with CONTACT_FACES_NPZ (a global τ result.npz with
 neighbour), the distance from each BLOCKED vertex to the nearest contact
 face, and from each contact face to the nearest BLOCKED vertex (mm). With
 FIG_DIR, writes three slices of Σ coloured by state, and a histogram of the
-travel by state.
+travel by state. Always writes RUN_DIR/isolated_top.tsv, the review list of
+the TOP vertices, most isolated first (top_surface.isolated_top): vertex,
+position (mm), the stopping voxel, lag_mm, comp_voxels, comp_at_crop_edge,
+label0_3x3x3.
 """
 
 import json
@@ -42,6 +45,8 @@ def main() -> None:
     log = json.loads((run / "log.json").read_text())
     V, F, st, tr = r["V"], r["F"], r["state"], r["travel"]
     m = TS.Mesh(V, F, r["origin"], st, tr)
+    if "stopvox" in r:
+        m.stopvox = r["stopvox"]
     _, area = TP.vertex_normals_areas(V, F)
     out: dict = {"vertices": len(V), "faces": len(F), "steps": len(log["steps"]), "s": log["s"]}
     out["by_state"] = {
@@ -57,6 +62,22 @@ def main() -> None:
     out["intersections"] = int(MI.intersecting_faces(V, F)[1])
     out["step_s"] = q(np.array([s["s"] for s in log["steps"]]))
     out["initial"] = log["initial"]
+    iso = TS.isolated_top(m, z["labels"])
+    with open(run / "isolated_top.tsv", "w") as fh:
+        fh.write("vertex\tx_mm\ty_mm\tz_mm\ti\tj\tk\tlag_mm\tcomp_voxels\tcomp_at_crop_edge\tlabel0_3x3x3\n")
+        for r_ in range(len(iso["vertex"])):
+            v = iso["vertex"][r_]
+            i, j, k = iso["stopvox"][r_]
+            fh.write(
+                f"{v}\t{V[v, 0]:.3f}\t{V[v, 1]:.3f}\t{V[v, 2]:.3f}\t{i}\t{j}\t{k}\t{iso['lag_mm'][r_]:.3f}\t"
+                f"{iso['comp_voxels'][r_]}\t{int(iso['comp_at_crop_edge'][r_])}\t{iso['label0_3x3x3'][r_]}\n"
+            )
+    out["isolated_top"] = {
+        "top_vertices": int(len(iso["vertex"])),
+        "lag_mm": q(iso["lag_mm"]),
+        "comp_voxels": q(iso["comp_voxels"].astype(float)),
+        "lag_over_one_step": int((iso["lag_mm"] > log["settings"]["step_vox"] * h).sum()),
+    }
     if cf is not None:
         fc = np.load(cf)["faces"]
         c_vox = fc[:, :3].astype(float)

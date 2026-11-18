@@ -70,11 +70,15 @@ class Mesh:
     state: np.ndarray  # (n,)
     travel: np.ndarray  # (n,) mm moved along the normals since the start
     last: np.ndarray = field(default_factory=lambda: np.zeros(0))  # (n,) mm moved in the last step (display)
+    # (n, 3) voxel whose label stopped a TOP vertex (-1: none), for the isolated-TOP review list
+    stopvox: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), np.int64))
     boundary: np.ndarray = field(default_factory=lambda: np.zeros(0, bool))
 
     def __post_init__(self) -> None:
         if len(self.last) != len(self.V):
             self.last = np.zeros(len(self.V))
+        if len(self.stopvox) != len(self.V):
+            self.stopvox = np.full((len(self.V), 3), -1, np.int64)
         self.update_topology()
 
     def update_topology(self) -> None:
@@ -655,6 +659,8 @@ def expand_step(
     lab = label_at(site, m.V + d * N)
     st = stop_by_label(lab, m.travel + d, s.wm_limit_vox * h)
     stop = act & (st != MOVING)
+    top = stop & (st == TOP)
+    m.stopvox[top] = np.round((m.V[top] + d * N[top]) / site.vox).astype(np.int64)
     stopped = {STATE_NAMES[k]: int((stop & (st == k)).sum()) for k in (TOP, WM, EDGE)}
     m.state[stop] = st[stop]
     mov = act & ~stop
@@ -750,7 +756,10 @@ def remesh(m: Mesh, gap: float, lmax: float, lmin: float) -> tuple[int, int, int
     _, ng0, ni0 = violations(m, m.V, gap)
     exclude = np.zeros(len(m.V), bool)
     for _ in range(3):
-        keep = (m.V.copy(), m.F.copy(), m.origin.copy(), m.state.copy(), m.travel.copy(), m.last.copy())
+        keep = (
+            m.V.copy(), m.F.copy(), m.origin.copy(), m.state.copy(), m.travel.copy(), m.last.copy(),
+            m.stopvox.copy(),
+        )
         col, newid = _collapse(m, lmin, exclude)
         if col == 0:
             return splits, 0, ng0, ni0
@@ -760,7 +769,7 @@ def remesh(m: Mesh, gap: float, lmax: float, lmin: float) -> tuple[int, int, int
         old = np.flatnonzero(newid >= 0)
         hit = np.zeros(len(newid), bool)
         hit[old] = bad[newid[old]]
-        m.V, m.F, m.origin, m.state, m.travel, m.last = keep
+        m.V, m.F, m.origin, m.state, m.travel, m.last, m.stopvox = keep
         m.update_topology()
         # exclude the bad vertices and their neighbours
         nb = np.repeat(np.arange(len(m.V)), np.diff(m.ptr))
@@ -827,6 +836,7 @@ def _split(m: Mesh, lmax: float) -> int:
         setattr(m, nm, np.r_[x, 0.5 * (x[sel[:, 0]] + x[sel[:, 1]])])
     sa, sb = m.state[sel[:, 0]], m.state[sel[:, 1]]
     m.state = np.r_[m.state, np.where((sa == MOVING) | (sb == MOVING), MOVING, sa)]
+    m.stopvox = np.r_[m.stopvox, np.where((m.stopvox[sel[:, 0]] >= 0), m.stopvox[sel[:, 0]], m.stopvox[sel[:, 1]])]
     m.F = np.concatenate(newF).astype(np.int64)
     m.update_topology()
     return k
@@ -893,11 +903,58 @@ def _collapse(m: Mesh, lmin: float, exclude: np.ndarray) -> tuple[int, np.ndarra
     newid = -np.ones(n, np.int64)
     newid[used] = np.arange(int(used.sum()))
     m.V = V2[used]
-    m.origin, m.travel, m.last = m.origin[used], m.travel[used], m.last[used]
+    m.origin, m.travel, m.last, m.stopvox = m.origin[used], m.travel[used], m.last[used], m.stopvox[used]
     m.state = m.state[used]
     m.F = newid[F2[~gone]]
     m.update_topology()
     return len(E), newid
+
+
+# ------------------------------------------------------------ review: isolated TOP vertices
+
+
+def isolated_top(m: Mesh, labels: np.ndarray) -> dict[str, np.ndarray]:
+    """A review list of the TOP vertices, most isolated first: no rule, only
+    measures for a person (user, 2026-11-18). For each TOP vertex:
+      lag_mm: the median distance moved by its mesh neighbours minus its own
+        (large: the neighbours moved on past it, a pit at a TOP vertex);
+      comp_voxels: the size of the 6-connected label-0 region that holds the
+        voxel that stopped it (small: maybe a label error in the cortex);
+      comp_at_crop_edge: whether that region reaches the edge of the array
+        (then its size is cut by the crop);
+      label0_3x3x3: label-0 voxels in the 3 × 3 × 3 box around that voxel.
+    Returns the vertex ids and these arrays, sorted by lag_mm, largest first."""
+    from scipy import ndimage as ndi
+
+    top = np.flatnonzero((m.state == TOP) & (m.stopvox[:, 0] >= 0))
+    lag = np.zeros(len(top))
+    for i, v in enumerate(top):
+        nb_ = m.nbr[m.ptr[v] : m.ptr[v + 1]]
+        lag[i] = np.median(m.travel[nb_]) - m.travel[v] if len(nb_) else 0.0
+    zero = labels == TP.OUTSIDE
+    comp, ncomp = ndi.label(zero)
+    size = np.bincount(comp.ravel(), minlength=ncomp + 1)
+    edge = np.zeros(ncomp + 1, bool)
+    for ax in range(3):
+        for k in (0, labels.shape[ax] - 1):
+            edge[np.unique(np.take(comp, k, axis=ax))] = True
+    sv = np.clip(m.stopvox[top], 0, np.array(labels.shape) - 1)
+    c = comp[sv[:, 0], sv[:, 1], sv[:, 2]]
+    pad = np.pad(zero, 1)
+    box = np.zeros(len(top), np.int64)
+    for di in range(3):
+        for dj in range(3):
+            for dk in range(3):
+                box += pad[sv[:, 0] + di, sv[:, 1] + dj, sv[:, 2] + dk]
+    o = np.argsort(-lag, kind="stable")
+    return {
+        "vertex": top[o],
+        "lag_mm": lag[o],
+        "comp_voxels": np.where(c > 0, size[c], 0)[o],
+        "comp_at_crop_edge": np.where(c > 0, edge[c], False)[o],
+        "label0_3x3x3": box[o],
+        "stopvox": sv[o],
+    }
 
 
 # ------------------------------------------------------------ the whole start
@@ -921,8 +978,10 @@ class StartRun:
         self.median_edge = med
         lmax, lmin = s.split_ratio * med, s.collapse_ratio * med
         # vertices whose white face meets label 0 directly do not move (excision)
-        lab0 = label_at(site, m.V + 0.5 * h * normals(m.V, m.F))
-        m.state[lab0 == TP.OUTSIDE] = TOP
+        p0 = m.V + 0.5 * h * normals(m.V, m.F)
+        z0 = label_at(site, p0) == TP.OUTSIDE
+        m.state[z0] = TOP
+        m.stopvox[z0] = np.round(p0[z0] / site.vox).astype(np.int64)
         t0 = time.time()
         sp, co, ng, ni = remesh(m, gap, lmax, lmin)
         self.initial = {
