@@ -46,6 +46,11 @@ def main() -> None:
         coarse=np.stack(pt.coarse), colour=solver.colour, stopped=solver.stopped, centre_vox=centre_vox,
         same_ptr=pt.same_ptr, same_idx=pt.same_idx, adj=pt.adj, H=site.H, vertex_vox=site.v,
     )
+    np.savez_compressed(
+        out / "sweeps_dtau.npz", step=np.array([x[0] for x in solver.sweep_dtau]),
+        full=np.array([x[1] for x in solver.sweep_dtau]),
+        dtau=np.stack([x[2] for x in solver.sweep_dtau]) if solver.sweep_dtau else np.zeros((0, solver.ntube)),
+    )
     log = {"settings": asdict(s), "w_eq_provisional": True, "beta": solver.beta,
            "patches": len(pt.centre), "patch_spacing_median_mm": float(np.median(sp)),
            "steps": solver.log.steps, "events": solver.log.events, "seconds": time.time() - t0}

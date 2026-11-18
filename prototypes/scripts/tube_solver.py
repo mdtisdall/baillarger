@@ -92,6 +92,8 @@ class TubeSolver:
     def __init__(self, site: TP.Site, pt: TP.Patches, s: Settings, centre_vox: np.ndarray):
         self.site, self.pt, self.s = site, pt, s
         self.log = Log()
+        self.progress: Any = lambda m: None
+        self.on_sweep: Any = lambda name: None  # run(): a snapshot after each sweep
         shape = np.array(site.labels.shape)
         self.shape_p = shape + 2 * PAD
         sp = self.shape_p
@@ -184,6 +186,8 @@ class TubeSolver:
         self.wq_tube = s.w_eq / (2 * self.area)
         self.stopped = np.zeros(self.ntube, bool)
         self.step = 0
+        #: per sweep: (step, full depth, mean Δτ of each tube's unknowns; nan if not solved)
+        self.sweep_dtau: list[tuple[int, bool, np.ndarray]] = []
         self._merge_thin()
         self._rebuild_shell()
         self._index()
@@ -371,6 +375,12 @@ class TubeSolver:
                         self.log.events["topology_reject"].append({"step": self.step, "tubes": [int(x) for x in g]})
                         continue
                     alpha, newv = acc
+                    if hasattr(self, "_dt"):
+                        own_t = self.owner[gidx]
+                        for t in g:
+                            mt = own_t == t
+                            if mt.any():
+                                self._dt[t] = float(np.mean(newv[mt] - old[mt]))
                     ch = np.abs(newv - old)
                     stats["max_change"] = max(stats["max_change"], float(ch.max()) if len(ch) else 0.0)
                     self.tau[gidx] = newv
@@ -438,7 +448,10 @@ class TubeSolver:
     def sweeps(self, depth: float) -> list[dict[str, Any]]:
         out = []
         for _ in range(self.s.sweep_max):
+            self._dt = np.full(self.ntube, np.nan)
             st = self.sweep(depth)
+            self.sweep_dtau.append((self.step, bool(np.isinf(depth)), self._dt.astype(np.float32)))
+            del self._dt
             clamped = self._rebuild_shell()
             self._colour()
             st["shell_clamped"] = clamped
@@ -446,6 +459,9 @@ class TubeSolver:
             st["newton_mean"] = float(np.mean(its)) if its else 0.0
             st["newton_max"] = int(np.max(its)) if its else 0
             out.append(st)
+            self.progress(f"  step {self.step} {'full' if np.isinf(depth) else 'window'} sweep {len(out)}: "
+                          f"max |dtau| {st['max_change']:.4f} mm, newton mean {st['newton_mean']:.1f} max {st['newton_max']}")
+            self.on_sweep(f"step-{self.step:03d}-{'full' if np.isinf(depth) else 'win'}-{len(out):02d}")
             if st["max_change"] < self.s.sweep_tol_mm:
                 break
         return out
@@ -572,6 +588,8 @@ class TubeSolver:
             if snap_dir is not None:
                 self.snapshot(snap_dir / f"{name}.npz")
 
+        self.progress = progress
+        self.on_sweep = snap
         s = self.s
         seen: set[tuple[int, int]] = set()
         self._index()

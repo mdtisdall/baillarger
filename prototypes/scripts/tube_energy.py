@@ -224,3 +224,43 @@ def shift_batch(P: dict[str, Array], iters: int = 20, tol: Array = 1e-6) -> tupl
         return s, e0, e1, jnp.stack([p0[k] for k in TERMS]), jnp.stack([p1[k] for k in TERMS])
 
     return jax.vmap(one)(P)
+
+
+def ls_residuals(x: Array, P: dict[str, Array], g0hat: Array, fw: Array, tw: Array) -> Array:
+    """Least-squares residuals of the energy with frozen weights, for
+    Gauss-Newton diagnostics: fw (S,) the tissue fraction f and tw (T, K) the
+    Student-t IRLS weights w = (ν + 1) / (ν s² + d²), both from the current
+    iterate. Σ r² equals the energy without the stop term, without the
+    log-normal's log t, and with each Student-t term replaced by its IRLS
+    quadratic w d² / 2 (same gradient at the iterate when f is constant)."""
+    nb, nbv, h = P["nb"], P["nbv"], P["h"]
+    g = gradient(x, P)
+    s2 = jnp.sum(g * g, -1) + EPS
+    s = jnp.sqrt(s2)
+    gh = g / s[:, None]
+    v = g / s2[:, None]
+    divv = sum(_deriv(v[:, a], nb, nbv, h, a) for a in range(3))
+    J = jnp.stack([_deriv(gh, nb, nbv, h, a) for a in range(3)], -1)
+    Pm = jnp.eye(3)[None] - gh[:, :, None] * gh[:, None, :]
+    JP = jnp.einsum("sia,sab->sib", J, Pm)
+    ev = P["evalw"] * P["valid"]
+    tis = ev * (1.0 - P["inner"])
+    r_al = jnp.sqrt(tis * fw * KAPPA * P["coh"])[:, None] * jnp.cross(gh, P["nhat"])
+    r_sm = jnp.sqrt(tis * fw / (2 * SIGMA_T**2))[:, None, None] * JP
+    r_eq = jnp.sqrt(tis * fw * P["wq"]) * divv
+    r_pi = jnp.sqrt(ev * fw / (2 * SIGMA_P**2)) * (jnp.sum(g0hat * g, -1) - 1.0)
+    r_po = jnp.sqrt(ev * (1 - fw) / (2 * SIGMA_P**2)) * jnp.maximum(s - 1.0, 0.0)
+    t = jnp.maximum(thickness(x, P), 0.02)
+    r = jnp.log(t) - P["logmed"]
+    r_th = P["hasroot"] * r / (jnp.sqrt(2.0) * THICK_SD)
+    r_ts = jnp.sqrt(P["hasroot"][:, None] * P["mj"] * tw / 2) * (r[:, None] - P["rj"])
+    return jnp.concatenate([r_al.ravel(), r_sm.ravel(), r_eq, r_pi, r_po, r_th, r_ts.ravel()])
+
+
+def irls_weights(x: Array, P: dict[str, Array]) -> tuple[Array, Array]:
+    """fw = f(τ) and the Student-t IRLS weights at x."""
+    fw = jnp.clip(0.5 - x / P["htau"], 0.0, 1.0)
+    t = jnp.maximum(thickness(x, P), 0.02)
+    d = (jnp.log(t) - P["logmed"])[:, None] - P["rj"]
+    tw = (NU + 1) / (NU * P["sj"] ** 2 + d**2)
+    return fw, tw

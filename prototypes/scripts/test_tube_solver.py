@@ -194,3 +194,29 @@ def test_inner_voxels_carry_pull_only():
     for k in ("stop", "align", "smooth", "equi"):
         assert np.all(np.asarray(inn[k]) == 0), k
     assert np.allclose(inn["pull"], out["pull"]) and np.asarray(out["pull"]).max() > 0
+
+
+def test_ls_residuals_match_energy_where_f_is_constant():
+    """Deep tissue (f = 1): Σ r² = E - stop - log t terms; gradients equal."""
+    import jax
+    import jax.numpy as jnp
+
+    rng = np.random.default_rng(4)
+    x = np.indices((7, 7, 9))[2] * H * 1.2 - 3.0 + rng.normal(0, 0.03, (7, 7, 9))
+    P, sl, _, _ = grid_problem(x)
+    P["c"][:] = 0.0
+    P["coh"][:] = 0.7
+    P["nhat"][:, 0] = 0.6
+    P["nhat"][:, 2] = 0.8
+    P = {k: jnp.asarray(v) for k, v in P.items()}
+    g0 = TE.g0_of(P["x0"], P)
+    fw, tw = TE.irls_weights(P["x0"], P)
+    assert float(jnp.min(fw[:-1])) == 1.0
+
+    def e_ls(x):
+        parts = TE.energy_parts(x, P, g0)
+        return sum(parts[k] for k in ("align", "smooth", "equi", "pull"))
+
+    rs = lambda x: jnp.sum(TE.ls_residuals(x, P, g0, fw, tw) ** 2)  # noqa: E731
+    assert np.isclose(float(rs(P["x0"])), float(e_ls(P["x0"])), rtol=1e-8)  # EPS: |ĝ| < 1
+    assert np.allclose(jax.grad(rs)(P["x0"]), jax.grad(e_ls)(P["x0"]), atol=1e-8)
