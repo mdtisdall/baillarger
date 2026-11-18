@@ -2,11 +2,12 @@
 patches, the distances between patch centres, and the vertex where a path
 that ended inside the surface crossed it.
 
-The column traces use these on the white mesh (baillarger.column_traces) to
-tell a trace that crosses a contact to the far bank from one that returns to
-its own bank: the two ends' patches are far apart along the white surface,
-or near. Distances along the mesh go round a thin WM blade's tip, so its two
-sides are far apart even where they are a voxel apart in space.
+The box column traces (baillarger.column_traces, now removed) used these on
+the white mesh to tell a trace that crosses a contact to the far bank from
+one that returns to its own bank: the two ends' patches are far apart along
+the white surface, or near. Distances along the mesh go round a thin WM
+blade's tip, so its two sides are far apart even where they are a voxel
+apart in space.
 
 Graph distances are shortest paths (Dijkstra) along the mesh's edges and
 across each pair of neighbouring triangles (the edge between their far
