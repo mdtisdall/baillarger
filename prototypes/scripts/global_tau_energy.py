@@ -22,7 +22,23 @@ same as tube_energy.py):
   equi   = f wq (div v)², v = ∇τ / |∇τ|², wq = W_EQ / (2 A_owner) (I)
   pull   = [f (ĝ₀·∇τ - 1)² + (1 - f) max(|∇τ| - 1, 0)²] / (2 σ_p²) (J)
 The gradient terms count only where the slot has a neighbour or a ghost on
-all three axes (valid). Inner slots (inside the white surface) carry the mm
+all three axes (valid).
+
+Ridge form (P["ridge"] = 1; settings contacts="ridge", user decisions
+2026-11-18): no contact faces and no ghosts.
+  - The first derivative on each axis is the continuous upwind split
+    max(D-, 0) + min(D+, 0) (Engquist-Osher), D- and D+ the one-sided
+    differences: the backward difference where τ rises along the axis, the
+    forward one where it falls, 0 at a symmetric ridge or minimum. It is
+    continuous in τ, and a voxel-to-voxel alternation changes it. (A first
+    version switched between D- and D+ by the lower neighbour. That energy
+    jumps where the choice switches, because the direction terms use ∇τ's
+    sign; it diverged on site 1.)
+  - div v uses each neighbour's v weighted by the neighbour's tissue
+    fraction f: w v_nb + (1 - w) v_self. A neighbour beyond the top (f = 0)
+    then adds nothing (equivolume in tissue only, as in the 1D convex form),
+    and the term is continuous in τ.
+In the faces form (P["ridge"] = 0) the energy is unchanged. Inner slots (inside the white surface) carry the mm
 pull only (R1). wq comes from the area of the slot's owner patch.
 
 Per patch (F, E): t = -τ(root) (trilinear over the root's corners in the
@@ -71,7 +87,8 @@ def _deriv(F: Array, nb: Array, nbv: Array, h: Array, a: int) -> Array:
 
 
 def _grad_axis(x: Array, P: dict[str, Array], a: int) -> Array:
-    """dτ/dx_a with the ghost value τ = 0 at h/2 across a contact face."""
+    """dτ/dx_a with the ghost value τ = 0 at h/2 across a contact face, or
+    in the ridge form the continuous upwind split."""
     nb, nbv, gh, h = P["nb"], P["nbv"], P["ghost"], P["h"]
     m, p = nb[:, a, 0], nb[:, a, 1]
     gm, gp = gh[:, a, 0], gh[:, a, 1]
@@ -83,11 +100,28 @@ def _grad_axis(x: Array, P: dict[str, Array], a: int) -> Array:
     both = (Fp - Fm) / (dm + dp)
     plus = (Fp - x) / dp
     minus = (x - Fm) / dm
-    return jnp.where(vp & vm, both, jnp.where(vp, plus, jnp.where(vm, minus, 0.0)))
+    one = jnp.where(vp, plus, jnp.where(vm, minus, 0.0))
+    base = jnp.where(vp & vm, both, one)
+    split = jnp.where(
+        vp & vm, jnp.maximum(minus, 0.0) + jnp.minimum(plus, 0.0), one
+    )
+    return jnp.where(P["ridge"] > 0, split, base)
 
 
 def gradient(x: Array, P: dict[str, Array]) -> Array:
     return jnp.stack([_grad_axis(x, P, a) for a in range(3)], -1)
+
+
+def _deriv_w(F: Array, w: Array, nb: Array, nbv: Array, h: Array, a: int) -> Array:
+    """_deriv of F (S,) with each neighbour's value blended toward the
+    slot's own: w_nb F_nb + (1 - w_nb) F."""
+    m, p = nb[:, a, 0], nb[:, a, 1]
+    Fe = jnp.stack([w[m] * F[m] + (1 - w[m]) * F, w[p] * F[p] + (1 - w[p]) * F], 1)
+    vm, vp = nbv[:, a, 0], nbv[:, a, 1]
+    both = (Fe[:, 1] - Fe[:, 0]) / (2 * h[a])
+    plus = (Fe[:, 1] - F) / h[a]
+    minus = (F - Fe[:, 0]) / h[a]
+    return jnp.where(vp & vm, both, jnp.where(vp, plus, jnp.where(vm, minus, 0.0)))
 
 
 def _fields(x: Array, P: dict[str, Array]) -> tuple[Array, ...]:
@@ -97,7 +131,9 @@ def _fields(x: Array, P: dict[str, Array]) -> tuple[Array, ...]:
     s = jnp.sqrt(s2)
     gh = g / s[:, None]
     v = g / s2[:, None]
-    divv = sum(_deriv(v[:, a], nb, nbv, h, a) for a in range(3))
+    ftis = jnp.clip(0.5 - x / P["htau"], 0.0, 1.0)
+    w = jnp.where(P["ridge"] > 0, ftis, 1.0)
+    divv = sum(_deriv_w(v[:, a], w, nb, nbv, h, a) for a in range(3))
     J = jnp.stack([_deriv(gh, nb, nbv, h, a) for a in range(3)], -1)  # (S, comp, axis)
     Pm = jnp.eye(3)[None] - gh[:, :, None] * gh[:, None, :]
     JP = jnp.einsum("sia,sab->sib", J, Pm)

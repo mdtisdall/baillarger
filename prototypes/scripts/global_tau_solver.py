@@ -28,6 +28,33 @@
 The outer loop (G11) stops when no owner changes and no face moves, after
 10 outer iterations, or when a state repeats (an oscillation, reported, not
 damped).
+
+Ridge form (Settings.contacts = "ridge"; the user's decisions 2026-11-18,
+after the first site-1 run): a contact is not decided before the solve.
+- No contact faces, no ghost values, no 5 mm relation, no face test.
+- The first derivatives are the continuous upwind split
+  max(D-, 0) + min(D+, 0) on each axis (global_tau_energy). (The first
+  ridge version switched between D- and D+ by the lower neighbour, fixed
+  per LM iteration. That energy jumps at every switch; on site 1 it
+  diverged, and with the acceptance on the true energy LM could not take
+  one step. User decision 2026-11-18: the continuous split.)
+- The rim voxels (no neighbour on some axis, valid = 0) are fixed at τ0
+  (user decision 2026-11-18: in the first ridge version a rim voxel above
+  its neighbours was in no term and jumped 1.8e5 mm).
+- div v counts each neighbour's v weighted by its tissue fraction f, so a
+  neighbour beyond the top adds nothing.
+- The stop term, the pull (convex beyond the top) and the other terms are
+  unchanged.
+- τ0 = -(distance to label 0), with no contact seeds.
+- Upwind ownership along -∇τ with no 5 mm restriction; the owners set only
+  the equivolume weight (the owner patch's area) and the diagnostics.
+- After each solve the ridge faces are found from τ (ridge_faces): 6-faces
+  where τ falls away on both sides. A ridge face whose two voxels are in
+  tissue (τ < 0) and whose two one-sided extrapolations to the face reach
+  τ >= 0 is a contact face (the top reached from both sides). The other
+  ridge faces are reported: "below" (both voxels in tissue, the top not
+  reached at the face: columns meet in tissue) and "beyond" (a voxel at
+  τ >= 0).
 """
 
 from __future__ import annotations
@@ -75,6 +102,7 @@ class Settings:
     corr_mm: float = 10.0  # F
     region_mm: float = 12.0  # A
     face_test: bool = True
+    contacts: str = "faces"  # "faces" (first prototype) or "ridge" (2026-11-18)
     snapshots: bool = False  # global_tau_run.py: write RUN_DIR/snapshots
 
 
@@ -196,6 +224,62 @@ def stencil_jacobian(
     return Jst
 
 
+def upwind_stencil(x: np.ndarray, nbr: np.ndarray, nbv: np.ndarray) -> np.ndarray:
+    """Which side τ falls to, from τ = x (S1,), for the ridge test only:
+    up (S1, 3), -1 / +1 = the minus / plus neighbour is the lower one and is
+    below τ (both neighbours real; ties: minus), 0 otherwise."""
+    up = np.zeros((len(x), 3), np.int32)
+    for a in range(3):
+        m, p = nbr[:, a, 0], nbr[:, a, 1]
+        both = nbv[:, a, 0] & nbv[:, a, 1]
+        tm, tp = x[m], x[p]
+        lm = tm <= tp
+        up[:, a] = np.where(
+            both & lm & (tm < x), -1, np.where(both & ~lm & (tp < x), 1, 0)
+        )
+    return up
+
+
+RIDGE_CLASSES = ("contact", "below", "beyond")
+
+
+def ridge_faces(
+    x: np.ndarray,
+    nbr: np.ndarray,
+    nbv: np.ndarray,
+    up: np.ndarray,
+    S: int,
+    grad: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """6-faces between slots s (minus side) and u (plus side) where τ falls
+    away on both sides: s uses its minus neighbour (up = -1) and u its plus
+    neighbour (up = +1), and the face's axis is the largest component of
+    the upwind gradient grad (S, 3) at both s and u (so a face between two
+    voxels of one level set, where τ differs by rounding only, is not a
+    ridge). Each side's τ is extrapolated half a voxel to the
+    face with its own one-sided slope. Classes: "contact" (both τ < 0, both
+    extrapolations >= 0), "below" (both τ < 0, an extrapolation < 0),
+    "beyond" (a voxel at τ >= 0). Each class is (n, 3): s, u, axis."""
+    out: dict[str, list[np.ndarray]] = {k: [] for k in RIDGE_CLASSES}
+    ss = np.arange(S)
+    for a in range(3):
+        u = nbr[:S, a, 1]
+        dom = np.argmax(np.abs(grad[:S]), 1) == a
+        r = nbv[:S, a, 1] & (up[:S, a] == -1) & (up[u, a] == 1) & dom
+        r &= dom[np.minimum(u, S - 1)]
+        s_, u_ = ss[r], u[r]
+        ts, tu = x[s_], x[u_]
+        es = ts + 0.5 * (ts - x[nbr[s_, a, 0]])
+        eu = tu + 0.5 * (tu - x[nbr[u_, a, 1]])
+        tis = (ts < 0) & (tu < 0)
+        reach = (es >= 0) & (eu >= 0)
+        f = np.c_[s_, u_, np.full(len(s_), a)]
+        out["contact"].append(f[tis & reach])
+        out["below"].append(f[tis & ~reach])
+        out["beyond"].append(f[~tis])
+    return {k: np.concatenate(v).astype(np.int64) for k, v in out.items()}
+
+
 def make_domain(site: TP.Site, s: Settings) -> tuple[np.ndarray, np.ndarray]:
     lab = site.labels
     ctx = lab == TP.CORTEX
@@ -223,6 +307,8 @@ class Problem:
     faces: np.ndarray  # local
     patch_ids: np.ndarray  # global patch id of each patch row
     pair_ids: np.ndarray
+    nbr: np.ndarray | None = None  # (S1, 3, 2), numpy copies for the ridge stencil
+    nbv: np.ndarray | None = None
 
 
 class GlobalTau:
@@ -289,7 +375,14 @@ class GlobalTau:
         self.march_cost, self.owner = self.first_ownership()
         self.owner_march = self.owner.copy()
         self.timing["march_s"] = time.time() - t1
-        self.faces = self.contact_faces(self.owner)
+        self.ridge = s.contacts == "ridge"
+        self.ridges: dict[str, np.ndarray] = {
+            k: np.zeros((0, 3), np.int64) for k in RIDGE_CLASSES
+        }
+        if self.ridge:
+            self.faces = np.zeros((0, 3), np.int64)
+        else:
+            self.faces = self.contact_faces(self.owner)
         self.tau = self.tau_init(self.faces)
         self.tau0 = self.tau.copy()
 
@@ -388,7 +481,12 @@ class GlobalTau:
         so = G.sub_index(sub) if len(sub) < G.S else G.slot_of
         sf = G.slot_flat[sub]
         own = owner[sub]
-        faces = K.contact_faces(sf, so, G.strides, own, self.same_ptr, self.same_idx)
+        if self.ridge:
+            faces = np.zeros((0, 3), np.int64)
+        else:
+            faces = K.contact_faces(
+                sf, so, G.strides, own, self.same_ptr, self.same_idx
+            )
         S = len(sub)
         S1 = _pow2(S + 1)
         nbr, nbv, gh = K.neighbours(sf, so, G.strides, faces)
@@ -437,6 +535,7 @@ class GlobalTau:
         P = {
             "nb": nbr_p,
             "nbv": nbv_p,
+            "ridge": np.float64(1.0 if self.ridge else 0.0),
             "ghost": gh_p,
             "h": self.h,
             "htau": self.htau,
@@ -474,7 +573,18 @@ class GlobalTau:
             faces,
             pid,
             qid,
+            nbr_p,
+            nbv_p,
         )
+
+    def find_ridges(self, pb: Problem, x: np.ndarray) -> dict[str, np.ndarray]:
+        assert pb.nbr is not None and pb.nbv is not None
+        up = upwind_stencil(x, pb.nbr, pb.nbv)
+        g = np.asarray(GE.gradient(jnp.asarray(x), pb.P))
+        return ridge_faces(x, pb.nbr, pb.nbv, up, pb.S, g)
+
+    def _snap_faces(self, pb: Problem, x: np.ndarray) -> np.ndarray:
+        return self.find_ridges(pb, x)["contact"] if self.ridge else pb.faces
 
     # ------------------------------------------------------------ LM + PCG
 
@@ -529,7 +639,8 @@ class GlobalTau:
             if e_first is None:
                 e_first = e
                 if snap:
-                    self.snapshot(f"{tag}-lm00", x, self.owner, pb.faces, {"tag": tag, "lm_iter": 0, "energy": e})
+                    self.snapshot(f"{tag}-lm00", x, self.owner, self._snap_faces(pb, x),
+                                  {"tag": tag, "lm_iter": 0, "energy": e})
             grad = np.where(unk, np.asarray(grad), 0.0)
             fw, tw = GE.j_weights(xj, P)
             Jst = stencil_jacobian(
@@ -665,7 +776,7 @@ class GlobalTau:
                 self.log.events["lm_stall"].append({"tag": tag, "iter": it, "e": e})
                 break
             if snap:
-                self.snapshot(f"{tag}-lm{it + 1:02d}", x, self.owner, pb.faces,
+                self.snapshot(f"{tag}-lm{it + 1:02d}", x, self.owner, self._snap_faces(pb, x),
                               {"tag": tag, "lm_iter": it + 1, "energy": tries[-1]["e_trial"], "lambda": lam})
             if e - tries[-1]["e_trial"] < s.lm_tol * nunk:
                 break
@@ -683,7 +794,10 @@ class GlobalTau:
 
     def global_problem(self, owner: np.ndarray) -> Problem:
         allm = np.ones(self.G.S, bool)
-        return self.build(np.arange(self.G.S), allm, allm, owner)
+        pb = self.build(np.arange(self.G.S), allm, allm, owner)
+        if self.ridge:  # the rim voxels stay at τ0
+            pb.unk[: pb.S] &= np.asarray(pb.P["valid"])[: pb.S] > 0
+        return pb
 
     def solve_global(
         self, tag: str, g0: Any | None = None
@@ -695,7 +809,11 @@ class GlobalTau:
             g0 = GE.j_g0(jnp.asarray(x), pb.P)
         x, info = self.lm_solve(pb, x, g0, tag)
         self.tau = x[: pb.S].copy()
-        self.faces = pb.faces
+        if self.ridge:
+            self.ridges = self.find_ridges(pb, x)
+            self.faces = self.ridges["contact"]
+        else:
+            self.faces = pb.faces
         self._pb, self._g0 = pb, g0
         return info, g0
 
@@ -727,6 +845,7 @@ class GlobalTau:
             self.inner,
             self.same_ptr,
             self.same_idx,
+            not self.ridge,
         )
 
     # ------------------------------------------------------------ topology (G10)
@@ -736,7 +855,11 @@ class GlobalTau:
         obj = np.zeros(pb.S1, bool)
         obj[: pb.S] = self.tau < 0
         nbr = np.asarray(pb.P["nb"])[: pb.S]
-        nbv = np.asarray(pb.P["nbv"])[: pb.S]
+        nbv = np.asarray(pb.P["nbv"])[: pb.S].copy()
+        if self.ridge:  # cut at the contact faces of the ridge form
+            for s_, u_, a_ in self.faces:
+                nbv[s_, a_, 1] = False
+                nbv[u_, a_, 0] = False
         o = obj[: pb.S]
         ss, aa, kk = np.nonzero(nbv & o[:, None, None])
         uu = nbr[ss, aa, kk]
@@ -970,12 +1093,15 @@ class GlobalTau:
 
     # ------------------------------------------------------------ outer loop
 
-    def state_hash(self, owner: np.ndarray) -> str:
-        return hashlib.sha1(owner.astype(np.int64).tobytes()).hexdigest()
+    def state_hash(self, owner: np.ndarray, faces: np.ndarray | None = None) -> str:
+        hs = hashlib.sha1(owner.astype(np.int64).tobytes())
+        if faces is not None and self.ridge:
+            hs.update(np.ascontiguousarray(faces, np.int64).tobytes())
+        return hs.hexdigest()
 
     def run(self) -> list[dict[str, Any]]:
         s = self.s
-        seen = {self.state_hash(self.owner): 0}
+        seen = {self.state_hash(self.owner, self.faces): 0}
         self.face_records: list[dict[str, Any]] = []
         self.snapshots: list[dict[str, np.ndarray]] = []
         for k in range(s.outer_iters):
@@ -987,24 +1113,29 @@ class GlobalTau:
             t1 = time.time()
             own_u = self.upwind()
             n_up = int((own_u != self.owner).sum())
-            bank_up = int(
-                sum(
-                    not self.same(int(a), int(b))
-                    for a, b in zip(
-                        self.owner[own_u != self.owner], own_u[own_u != self.owner]
+            bank_up = (
+                None
+                if self.ridge
+                else int(
+                    sum(
+                        not self.same(int(a), int(b))
+                        for a, b in zip(
+                            self.owner[own_u != self.owner],
+                            own_u[own_u != self.owner],
+                        )
                     )
                 )
             )
             t_up = time.time() - t1
             t2 = time.time()
-            if s.face_test:
+            if s.face_test and not self.ridge:
                 own_f, recs = self.face_test(own_u, g0, f"outer{k}")
             else:
                 own_f, recs = own_u, []
             self.face_records.extend(recs)
             t_face = time.time() - t2
             n_face = int((own_f != own_u).sum())
-            faces_new = self.contact_faces(own_f)
+            faces_new = self.faces if self.ridge else self.contact_faces(own_f)
             self.snapshot(f"outer{k}-owner", self.tau, own_f, faces_new,
                           {"tag": f"outer{k}", "owner_changes_upwind": n_up, "owner_changes_face": n_face})
             self.snapshots.append(
@@ -1017,7 +1148,7 @@ class GlobalTau:
             prev = self.owner
             self.owner = own_f
             self.faces = faces_new
-            h = self.state_hash(own_f)
+            h = self.state_hash(own_f, faces_new)
             rec = {
                 "outer": k,
                 "solve_s": t_solve,
@@ -1042,12 +1173,16 @@ class GlobalTau:
                 "face_test_disabled": not s.face_test,
                 "owner_changes_total": int((own_f != prev).sum()),
                 "topology": topo,
+                "ridge_faces": {k: len(v) for k, v in self.ridges.items()}
+                if self.ridge
+                else None,
+
                 "tau_mm_pct": np.percentile(self.tau, [1, 50, 99]).tolist(),
             }
             self.log.outer.append(rec)
             self.progress(
                 f"outer {k}: solve {t_solve:.1f} s ({rec['lm_iters']} LM, E {info['e0']:.1f} -> {info['e1']:.1f}), "
-                f"upwind {n_up} changes ({bank_up} across banks), faces {nf0} -> {len(faces_new)}, "
+                f"upwind {n_up} changes ({bank_up} > 5 mm), faces {nf0} -> {len(faces_new)}, "
                 f"face moves {rec['face_moves']}/{len(recs)} ({n_face} voxels), topology events {topo['events']}, "
                 f"{rec['s']:.1f} s"
             )

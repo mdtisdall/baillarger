@@ -51,6 +51,7 @@ def small_problem(shape=(6, 6, 7), faces_z=None, seed=0):
     P = {
         "nb": nb_p,
         "nbv": nbv_p,
+        "ridge": np.float64(0.0),
         "ghost": gh_p,
         "h": np.full(3, H),
         "htau": H,
@@ -80,17 +81,21 @@ def small_problem(shape=(6, 6, 7), faces_z=None, seed=0):
 
 
 def flat_site(
-    two_banks: bool, nx: int = 14, nz: int = 26
+    two_banks: bool, nx: int = 14, nz: int = 26, gap: int = 0
 ) -> tuple[TP.Site, np.ndarray]:
-    """A synthetic slab site (voxel 0.16 mm). One bank: WM z <= 4, cortex
-    5..15, label 0 above. Two banks: WM at both ends, cortex between with no
-    label 0. White surface(s): flat grids half a voxel outside the WM."""
+    """A synthetic slab site (voxel 0.16 mm). One sheet: WM z <= 4, cortex
+    5..15, label 0 above. Two sheets: WM at both ends, cortex between with no
+    label 0, or with gap layers of label 0 in the middle. White surface(s):
+    flat grids half a voxel outside the WM."""
     lab = np.full((nx, nx, nz), TP.OUTSIDE, np.int16)
     vox = np.full(3, H)
     lab[:, :, :5] = TP.WM
     if two_banks:
         lab[:, :, 5 : nz - 5] = TP.CORTEX
         lab[:, :, nz - 5 :] = TP.WM
+        if gap:
+            z0 = nz // 2 - gap // 2
+            lab[:, :, z0 : z0 + gap] = TP.OUTSIDE
     else:
         lab[:, :, 5:16] = TP.CORTEX
 
@@ -186,8 +191,19 @@ def test_ghost_gradient_at_contact() -> None:
     assert g[0, 2] == pytest.approx((0.0 - x[0]) / (0.5 * H))
 
 
-def test_stencil_jacobian_matches_dense() -> None:
-    G, P, x, unk, faces = small_problem(faces_z=3)
+def _ridge_P(P):  # noqa: ANN001, ANN202
+    Q = dict(P)
+    Q["ridge"] = jnp.asarray(1.0)
+    return Q
+
+
+@pytest.mark.parametrize("ridge", [False, True])
+def test_stencil_jacobian_matches_dense(ridge: bool) -> None:
+    G, P, x, unk, faces = small_problem(faces_z=None if ridge else 3)
+    if ridge:  # the ridge form: upwind split, div v weighted by f
+        x[: G.S] += 0.5
+        P = _ridge_P(P)
+        assert (x[: G.S] > 0).any() and (x[: G.S] < 0).any()
     xj = jnp.asarray(x)
     g0 = GE.j_g0(xj, P)
     fw, _ = GE.j_weights(xj, P)
@@ -213,6 +229,46 @@ def test_stencil_jacobian_matches_dense() -> None:
             i, j, Jst, col, G.slot_flat, G.slot_of, G.strides, K.OFFS, olut, G.coords
         )
         assert e == pytest.approx(A[i, j], abs=1e-9)
+
+
+def test_upwind_gradient_sees_the_checkerboard() -> None:
+    G, P, x, unk, _ = small_problem(shape=(6, 6, 8))
+    c = G.coords - GS.PAD
+    lin = np.zeros_like(x)
+    lin[: G.S] = c[:, 2] * H - 2.0
+    chk = np.zeros_like(x)
+    chk[: G.S] = 0.01 * (-1.0) ** c.sum(1)
+    inner = np.all((c > 0) & (c < np.array([5, 5, 7])), 1)
+    gl = np.asarray(GE.gradient(jnp.asarray(lin), P))[: G.S]
+    gc = np.asarray(GE.gradient(jnp.asarray(lin + chk), P))[: G.S]
+    assert np.allclose(gc[inner], gl[inner])  # central differences: blind to it
+    Pu = _ridge_P(P)
+    gu = np.asarray(GE.gradient(jnp.asarray(lin + chk), Pu))[: G.S]
+    assert not np.allclose(gu[inner], gl[inner])
+    s = int(np.flatnonzero(inner)[0])
+    m = G.slot_of[G.slot_flat[s] - G.strides[2]]
+    t = lin + chk
+    assert gu[s, 2] == pytest.approx((t[s] - t[m]) / H)
+
+
+@pytest.mark.parametrize(
+    "peak,cls", [(0.05, "contact"), (-0.3, "below"), (H, "beyond")]
+)
+def test_ridge_classes(peak: float, cls: str) -> None:
+    # τ is a tent along z with its peak on the face between z = 4 and z = 5
+    G = GS.Grid(np.ones((3, 3, 10), bool))
+    c = G.coords - GS.PAD
+    nbr, nbv, _ = K.neighbours(
+        G.slot_flat, G.slot_of, G.strides, np.zeros((0, 3), np.int64)
+    )
+    x = np.zeros(G.S + 1)
+    x[: G.S] = peak - np.abs(c[:, 2] - 4.5) * H
+    up = GS.upwind_stencil(x, nbr, nbv)
+    g = np.zeros((G.S, 3))
+    g[:, 2] = np.where(c[:, 2] <= 4, 1.0, -1.0)  # the upwind gradient of the tent
+    r = GS.ridge_faces(x, nbr, nbv, up, G.S, g)
+    assert len(r[cls]) == 9 and sum(len(v) for v in r.values()) == 9
+    assert np.all(c[r[cls][:, 0], 2] == 4) and np.all(r[cls][:, 2] == 2)
 
 
 def test_line_preconditioner_is_exact_on_the_lines() -> None:
@@ -386,6 +442,64 @@ def test_two_banks_meet_at_a_contact() -> None:
     assert len(gt.face_records) == len(units) and all(
         r["move"] in (-1, 0, 1) for r in gt.face_records
     )
+
+
+def test_ridge_one_sheet_slab() -> None:
+    site, cv = flat_site(two_banks=False, nx=6)
+    pt = TP.make_patches(site)
+    s = GS.Settings(outer_iters=1, lm_iters=8, contacts="ridge")
+    gt = GS.GlobalTau(site, pt, s, cv)
+    assert len(gt.faces) == 0
+    gt.run()
+    c = gt.G.coords - GS.PAD
+    assert np.all(gt.tau[c[:, 2] == 15] < 0) and np.all(gt.tau[c[:, 2] == 16] > 0)
+    rec = gt.log.outer[0]
+    assert rec["ridge_faces"] == {"contact": 0, "below": 0, "beyond": 0}
+    assert rec["owner_changes_upwind_bank"] is None and rec["face_patches"] == 0
+
+
+def test_ridge_energy_is_continuous_and_rim_fixed() -> None:
+    # τ is a tent along z with its peak on the voxel plane z = 3 (exact ties of
+    # the two neighbours): the ridge-form energy changes by O(ε) under a step ε
+    G, P, x, unk, _ = small_problem(shape=(5, 5, 8))
+    c = G.coords - GS.PAD
+    x[: G.S] = -0.1 - np.abs(c[:, 2] - 3) * H
+    P = _ridge_P(P)
+    g0 = GE.j_g0(jnp.asarray(x), P)
+    e = float(GE.j_energy(jnp.asarray(x), P, g0))
+    d = np.zeros_like(x)
+    d[: G.S] = np.random.default_rng(0).normal(size=G.S)
+    de = [
+        abs(float(GE.j_energy(jnp.asarray(x + eps * d), P, g0)) - e)
+        for eps in (1e-9, 1e-15)
+    ]
+    # continuous, but very steep: at the ridge plane the split gives ∇τ = 0,
+    # and v = ∇τ / (|∇τ|² + EPS) has a spike of height ~1/(2 √EPS) there
+    # (site 1, 2026-11-18: a step of 1e-5 mm raises E by 8e10 in this tent)
+    assert de[0] > 0 and de[1] < 1e-3 * de[0]
+    # the rim voxels are not unknowns in the ridge form
+    site, cv = flat_site(two_banks=False, nx=6)
+    pt = TP.make_patches(site)
+    gt = GS.GlobalTau(site, pt, GS.Settings(contacts="ridge"), cv)
+    pb = gt.global_problem(gt.owner)
+    valid = np.asarray(pb.P["valid"])[: pb.S] > 0
+    assert np.array_equal(pb.unk[: pb.S], valid)  # the slab has no rim voxel
+
+
+def test_ridge_two_sheets_with_medium_between() -> None:
+    # two sheets with 2 layers of label 0 between them: a ridge of τ in the
+    # medium (beyond the top), no contact
+    site, cv = flat_site(two_banks=True, nx=6, gap=2)
+    pt = TP.make_patches(site)
+    s = GS.Settings(outer_iters=1, lm_iters=8, contacts="ridge")
+    gt = GS.GlobalTau(site, pt, s, cv)
+    gt.run()
+    c = gt.G.coords - GS.PAD
+    assert np.all(gt.tau[c[:, 2] == 11] < 0) and np.all(gt.tau[c[:, 2] == 14] < 0)
+    assert np.all(gt.tau[(c[:, 2] == 12) | (c[:, 2] == 13)] > 0)
+    r = gt.log.outer[0]["ridge_faces"]
+    assert r["contact"] == 0 and r["beyond"] == 36
+    assert np.all(c[gt.ridges["beyond"][:, 0], 2] == 12)
 
 
 def test_snapshots_round_trip(tmp_path) -> None:  # noqa: ANN001

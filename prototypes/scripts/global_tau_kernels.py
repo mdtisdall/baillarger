@@ -147,12 +147,14 @@ def upwind_owner(
     fixed: np.ndarray,
     ptr: np.ndarray,
     idx: np.ndarray,
+    use_bank: bool = True,
 ) -> np.ndarray:
     """Owners by one pass in increasing τ (order): each free slot takes the
-    owner of the 26-neighbour with lower τ best aligned with -ĝ. A neighbour
-    whose owner before the pass is not in the same bank as this slot's owner
-    before the pass is across a contact and is not used. Fixed slots and
-    slots without a candidate keep their owner."""
+    owner of the 26-neighbour with lower τ best aligned with -ĝ. With
+    use_bank (the faces form), a neighbour whose owner before the pass is
+    more than 5 mm (the same_bank relation) from this slot's owner before the
+    pass is not used. Fixed slots and slots without a candidate keep their
+    owner."""
     own = owner0.copy()
     no = len(o26)
     for i in range(len(order)):
@@ -170,7 +172,7 @@ def upwind_owner(
             ]
             if u < 0 or tau[u] >= tau[s]:
                 continue
-            if not same_bank(owner0[s], owner0[u], ptr, idx):
+            if use_bank and not same_bank(owner0[s], owner0[u], ptr, idx):
                 continue
             dx = o26[j, 0] * h[0]
             dy = o26[j, 1] * h[1]

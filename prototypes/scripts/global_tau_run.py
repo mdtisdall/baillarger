@@ -1,7 +1,8 @@
 """Run the global sparse τ solve on one cropped site (tube_crop.py npz).
 
 usage: global_tau_run.py SITE_NPZ OUT_DIR [key=value ...]   (Settings fields)
-Writes OUT_DIR/result.npz (τ, owners, faces, patches, per-outer snapshots),
+Writes OUT_DIR/result.npz (τ, owners, faces, patches, per-outer snapshots;
+with contacts=ridge also ridge_contact, ridge_below and ridge_beyond),
 OUT_DIR/log.json (settings, outer iterations, LM/CG solves, events, face
 patches) and prints one progress line for each outer iteration.
 """
@@ -67,6 +68,12 @@ def main() -> None:
         faces=np.c_[G.coords[gt.faces[:, 0]] - GS.PAD, gt.faces[:, 2]]
         if len(gt.faces)
         else np.zeros((0, 4), int),
+        **{
+            f"ridge_{k}": np.c_[G.coords[f[:, 0]] - GS.PAD, f[:, 2]]
+            if len(f)
+            else np.zeros((0, 4), int)
+            for k, f in gt.ridges.items()
+        },
         snap_tau=np.stack([grid(q["tau"]).astype(np.float32) for q in snaps]),
         snap_owner=np.stack([grid(q["owner"], -2).astype(np.int32) for q in snaps]),
         vpatch=pt.vpatch,

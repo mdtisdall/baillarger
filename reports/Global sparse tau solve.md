@@ -8,8 +8,9 @@ iteration that is linear in the number of voxels?
 **Status.** First prototype, tried on site 1 (kissing cortex, the fixed
 labels, 10 mm crop) on 2026-11-17/18. The prototype replaces the tube
 front-growth solver (PR mdtisdall/baillarger#218), which was too slow. The
-code is in `prototypes/scripts/global_tau_*.py`. The user chose to read this
-report before any fix is made.
+code is in `prototypes/scripts/global_tau_*.py`. On 2026-11-18 a second
+trial, the ridge form, removed the contacts that are decided before the
+solve (see *Ridge form*). It is in the same code (`contacts=ridge`).
 
 **Short answer.**
 
@@ -31,6 +32,13 @@ report before any fix is made.
   ownership field and a 5 mm "same bank" test. This is wrong. A contact is
   a property of the top, and it must come from the τ solution (see
   *Contacts without banks*).
+- The ridge form (second trial) finds contacts from τ, with upwind
+  differences and no ownership faces. Its third version reaches a stable
+  state on site 1 with a much cleaner τ: 462 cortex voxels at τ > 0
+  (first run: 45,868), 3 topology events (first run: 1,560). But no
+  contact forms at the kissing interface: τ stays at its start value there
+  (median −1.28 mm, τ0 −1.29 mm). The labels give no stop evidence at a
+  fused contact, and the equivolume term is very steep at a ridge voxel.
 - The face test (G9) is too expensive at the agreed unit (about 8 h for
   the 710 units of one outer iteration). On a sample of 40 units, none of
   the 280 local solves converged in 30 LM iterations, so its moves and
@@ -129,10 +137,7 @@ and 4 of *What failed*. This is not tested.
 
 A better order: the ownership field gives only a first guess. A face
 becomes a contact only where the solved τ reaches 0 from both sides. The
-stencil is cut there, and the outer loop checks it again. How to decide
-"τ reaches 0 from both sides" on the grid is an open design choice (see
-*Open questions*). The topology check and the sides of the face test then
-also use these contacts, not the 5 mm relation.
+second trial, the ridge form, does this (see *Ridge form*).
 
 ## Site 1: inputs
 
@@ -296,9 +301,108 @@ and a play button. Outside the domain, τ is filled from the side (inside
 the white surface: below the top, the rest: above it), so the red line is
 only the top. The site-1 run with snapshots repeats the run above.
 
+## Ridge form (second trial)
+
+**Design.** The user's decisions of 2026-11-18, after the first run:
+
+- No contact faces, no ghost values, no 5 mm relation and no face test.
+- First derivatives that are one-sided toward the lower τ (upwind, as in
+  fast marching). A face is a ridge face where τ falls away on both sides
+  of it.
+- The energy terms of the first run. They already had the convex form of
+  the 1D study (contact1d, branch `feature/ff-mfem-study`): the pull
+  (ĝ₀·∇τ − 1)² in tissue and max(|∇τ| − 1, 0)² beyond the top, and
+  equivolume weighted by the tissue fraction f. The stop term is the ramp f,
+  as in 1D. One change: div v takes no v from a neighbour beyond the top.
+- τ0 = −(distance to label 0), with no contact seeds.
+- Owners from the upwind pass, with no 5 mm restriction. They set only the
+  equivolume weight and the diagnostics.
+
+**Ridge classes.** After each solve, a 6-face is a ridge face when τ falls
+away on both sides of it and the face's axis is the largest component of
+∇τ at both voxels. (Without the second condition, a flat slab gave ridges
+from rounding differences of 1e-16 mm.) Each side's τ is extrapolated half
+a voxel to the face with its own slope.
+
+- *Contact*: both voxels in tissue (τ < 0), and both extrapolations reach
+  τ ≥ 0. This is the top reached from both sides.
+- *Below*: both voxels in tissue, and the top is not reached at the face.
+  Columns meet inside tissue. This is not allowed, so each one is an error
+  to report.
+- *Beyond*: a voxel at τ ≥ 0, for example a ridge of τ in the outside
+  medium between two banks.
+
+Contacts are reported, not imposed. The topology check cuts at the contact
+faces.
+
+**Three versions on site 1.**
+
+| Version | Change | Result |
+|---|---|---|
+| v1 | One-sided difference to the lower neighbour, the choice fixed at the start of each LM iteration | Diverged. E 2.9e8 → 3.9e12 in 10 outer iterations. τ reached −243 and +294 mm (1st and 99th percentiles). Ridge faces after outer 9: contact 115, below 1,413, beyond 2,172. |
+| v2 | v1, and LM accepts a step only if the energy with the trial τ's own stencil falls; the 208 rim voxels fixed at τ0 | No step accepted (0 of 20 trials), τ stays at τ0. |
+| v3 | The continuous split max(D−, 0) + min(D+, 0) on each axis; div v weights each neighbour's v by its f | A stable state after 2 outer iterations (no owner changes). E 6.3e9 → 3.3e5. |
+
+![v1 after outer 7: τ diverges](figures/global-tau/ridge_v1_outer7.png)
+
+*v1.* The energy that LM minimised was not the energy at the new τ. The
+choice of difference was fixed during each iteration. In 13 of the 60 LM
+steps of outer iterations 1 and 2, the energy fell with the fixed choice
+but rose with the choice of the new τ. Also, 18 voxels at the rim of the
+domain (no neighbour on one axis, so their own gradient terms are off)
+were in no term: no neighbour used them, because each neighbour uses only
+its lower neighbour. One of them moved 1.8e5 mm in one step.
+
+*v2.* The energy jumps when the choice of difference changes. At a ridge
+both neighbours are lower, and the choice changes the sign of the gradient
+component, so the terms that use the direction of ∇τ (the pull, the
+alignment, div v) jump. At τ0, 6,209 voxel axes are ridges, and on 5,801
+of them the two neighbours are equal. A steepest-descent step of 1e-8
+voxel changed 1,489 choices and increased E by 2.7e8 (E(τ0) = 2.9e8). The
+energy with the fixed choice decreased by 3,079. So LM can find no step
+that lowers the energy.
+
+![τ0 of the ridge form](figures/global-tau/ridge_tau0.png)
+
+![v3, the final τ](figures/global-tau/ridge_v3_final.png)
+
+*v3.* The energy is continuous, but it is very steep at a ridge voxel. The
+split gives ∇τ = 0 at a symmetric ridge. There, v = ∇τ / (|∇τ|² + ε) has a
+peak of about 1/(2√ε) ≈ 1.6e4 within |∇τ| ≈ 3e-5. In a test with a tent
+of τ, a step of 1e-5 mm increased the equivolume energy by 8e10. On site 1,
+LM ended with λ = 1e2 to 1e3 and very small steps. The stable state is a
+stall, not a measured minimum. The results:
+
+- Cortex voxels at τ > 0: 462 of 201,136 (τ0: 0; first run: 45,868).
+- Topology events: 3 (first run: 1,560). No checkerboard is visible.
+- Thickness median 3.09 mm (first run 2.87 mm).
+- Ridge faces: contact 1, below 67, beyond 144.
+- **At the kissing interface no contact forms.** At the 8,851 contact-face
+  voxels of the first run, τ has median −1.28 mm (10–90%: −3.35 to
+  −0.13). τ0 there has median −1.29 mm. The ridge stays where τ0 put it,
+  about 1.3 mm below the top. This is the result of the 1D study (a ridge
+  away from the true sheet does not move), now in 3D.
+
+Two causes are possible from these numbers. Neither is tested on its own.
+
+1. *No evidence at a fused contact.* The stop term uses the labels. At the
+   kissing interface both sides are cortex (label 42), so the stop term
+   prefers tissue there. No term pushes τ up to 0. The 3D neighbours do not
+   help, because the whole interface has no evidence: there is nothing to
+   spread. The user's rule that a column's top comes from image contrast,
+   not from the labels, is not in the energy yet.
+2. *The steep equivolume term.* At a ridge voxel in tissue, v has no
+   defined value. In 1D the kink was on an element boundary, at τ = 0, and
+   v was evaluated only inside the elements, where the slope is not 0. On
+   the voxel grid a ridge in tissue always has a voxel with ∇τ = 0 (or an
+   ambiguous ∇τ).
+
+Cost of v3: 98 s for 2 outer iterations (peak 2.9 GB); median CG 2
+iterations, because λ was large.
+
 ## Tests
 
-`prototypes/scripts/test_global_tau.py`, 10 tests, about 40 s:
+`prototypes/scripts/test_global_tau.py`, 18 tests, about 20 s:
 
 - the colouring (27 colours separate every pair of voxels within L1 4);
 - the 5 mm lookup between owner patches (`same_bank` in the code);
@@ -315,18 +419,27 @@ only the top. The site-1 run with snapshots repeats the run above.
 - a two-sheet slab with no label 0: one flat contact, the ±2 move, the face
   test runs;
 - the snapshots: one before and after each LM iteration and one after the
-  ownership update, and τ read back equals the solver's τ.
+  ownership update, and τ read back equals the solver's τ;
+- the ridge form: the upwind split sees a voxel-to-voxel alternation that
+  central differences do not; the three ridge classes on a tent of τ; the
+  stencil Jacobian against the dense one with the split; the energy is
+  continuous at a ridge plane with equal neighbours; a one-sheet slab
+  keeps its top and has no ridge face; two sheets with 2 layers of
+  label 0 between them give 36 "beyond" ridge faces and no contact.
 
 ## Open questions
 
-- **Contacts from the τ solution.** How to decide on the grid that τ
-  reaches 0 from both sides of a face, and how the stencil is cut there
-  (see *Contacts without banks*). Three parts now use the 5 mm relation
-  and must change with it: the contact faces (448 faces at site 1 are
-  inside one white-surface piece), the upwind ownership, and the sides of
-  the face test (a voxel can be within 5 mm of both sides; the code then
-  puts it on side A). It is possible that the relation causes part of the
-  face-count oscillation (item 4 of *What failed*). This is not tested.
+- **Stop evidence at a fused contact.** The ridge form has no force that
+  makes a top where the labels are cortex on both sides. Evidence from
+  image contrast (the user's rule) is the candidate. Its form is open.
+- **Equivolume at a ridge.** v = ∇τ/|∇τ|² is not defined at a ridge voxel
+  in tissue. A discretisation with the ridge between cells, not on a voxel
+  (finite elements with a kink, as in the 1D study with MFEM, or gradients
+  on the cells of the voxel grid), avoids this. Both change the
+  discretisation and need a decision.
+- **The 5 mm relation** is still in the faces form (the first run): the
+  contact faces, the upwind ownership and the sides of the face test. The
+  ridge form does not use it.
 - **Checkerboard.** A stencil without the odd–even null space. One option
   is face-centred first differences (the energy on the voxel faces). This
   changes the energy's discretisation and needs a decision.
@@ -348,4 +461,6 @@ only the top. The site-1 run with snapshots repeats the run above.
 
 ## Next step
 
-The user chooses the fixes after reading this report.
+The user chooses the next step after reading this report. The open
+choices are the stop evidence at a fused contact and the discretisation
+of equivolume at a ridge.
