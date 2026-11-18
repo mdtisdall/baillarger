@@ -87,6 +87,28 @@ The user's choices of 2026-11-18 (T1–T8).
   sees the neighbour-consistency terms on their own.
 - **T8. Abrasion site.** Chosen later, when steps 1–3 work on site 1.
 
+## Watching the optimization
+
+The user wants to see how Σ and τ evolve, to understand the behaviour of
+the optimization (2026-11-18). Every run can write snapshots
+(`snapshots=true`), and a movie page shows them while the run goes on.
+
+- **Snapshots.** One after each step of the start (T6), one before the
+  first and after each accepted LM iteration of each τ solve, and one after
+  each Σ step (T5) and each remeshing (T7). Each snapshot has τ in the
+  domain, Σ (vertices and faces, because remeshing changes them), the
+  displacement of each vertex in that step, the contacts, and the energy
+  by term.
+- **Frames.** Three slices through the site: echo 2, τ in colour, the white
+  surface and Σ as cut lines (white and red), the contacts in cyan. The
+  title gives the snapshot name, the energy and the number of contacts.
+- **3D view.** Beside the slices, Σ in the crop, coloured by how far each
+  vertex moved in that step, with the contacts marked. It can be rotated,
+  and it keeps its angle from frame to frame.
+- **Page.** One page with a slider, play, and "follow the newest", as for
+  the global τ movie, served on 127.0.0.1. The 3D view uses three.js (MIT),
+  loaded with an exact version.
+
 ## Steps
 
 1. Σ start (T6) on site 1 (`scratch/tube-sites/site1-fixed/c10mm/site.npz`):
