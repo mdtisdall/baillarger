@@ -41,7 +41,7 @@ from typing import Any
 import global_tau_prep as TP
 import numba as nb
 import numpy as np
-from scipy.spatial import cKDTree
+from scipy import sparse
 
 from baillarger import mesh_intersect as MI
 
@@ -562,40 +562,23 @@ def relax(m: Mesh, gap: float) -> tuple[np.ndarray, int]:
     return np.linalg.norm(dlt, axis=1), int((np.abs(dlt).sum(1) > 0).sum())
 
 
-def _fan_ok(
-    V: np.ndarray, F: np.ndarray, faces_new: np.ndarray, gap: float, tree_C: cKDTree, R: float
-) -> bool:
-    """The new faces of a fan make no intersection with nearby faces (pairs
-    that share a vertex are skipped)."""
-    T = V[F[faces_new]]
-    C = T.mean(1)
-    Rn = max(R, float(np.sqrt(((T - C[:, None]) ** 2).sum(-1)).max()))  # a new face can be larger
-    near = tree_C.query_ball_point(C, R + Rn + gap)
-    ii = np.repeat(np.arange(len(near)), [len(li) for li in near])
-    jj = np.concatenate([np.asarray(li, np.int64) for li in near]) if len(ii) else np.zeros(0, np.int64)
-    Fi, Fj = F[faces_new[ii]], F[jj]
-    shared = (Fi[:, :, None] == Fj[:, None, :]).any((1, 2))
-    keep = ~shared & (jj != faces_new[ii])
-    if not keep.any():
-        return True
-    return not bool(MI.tri_tri(T[ii[keep]], V[Fj[keep]]).any())
-
-
 def remesh(m: Mesh, gap: float, lmax: float, lmin: float) -> tuple[int, int]:
-    """Edge splits (longer than lmax, at the midpoint: the shape does not
-    change) and collapses (shorter than lmin, to the midpoint) on an
-    independent set of edges. A collapse needs: interior edge, both ends in
-    the same state, the link condition, no face normal turned by more than
-    90 degrees, and no new intersection. The gap and the intersections are
-    checked after the pass: if the pass adds gap pairs or intersecting
-    pairs, it is undone and done again without the collapses near the
-    violations (at most 3 times; then no collapse in this pass)."""
+    """One batch of edge splits (longer than lmax, at the midpoint: the
+    shape does not change), then one batch of collapses (shorter than lmin,
+    to the midpoint). Each batch takes edges that are the longest (splits)
+    or shortest (collapses) among the candidates near them, so the changes
+    do not touch each other. A collapse needs: interior edge, both ends in
+    the same state, the link condition, and no face normal turned by more
+    than 90 degrees. The gap, the intersections and the folds are checked on
+    the result: if the batch adds gap pairs or intersecting pairs, it is
+    undone and done again without the collapses near the violations (at
+    most 3 times; then no collapse in this pass)."""
     splits = _split(m, lmax)
     _, ng0, ni0 = violations(m, m.V, gap)
     exclude = np.zeros(len(m.V), bool)
     for _ in range(3):
         keep = (m.V.copy(), m.F.copy(), m.origin.copy(), m.state.copy(), m.travel.copy(), m.last.copy())
-        col, newid = _collapse(m, gap, lmin, exclude)
+        col, newid = _collapse(m, lmin, exclude)
         if col == 0:
             return splits, 0
         bad, ng, ni = violations(m, m.V, gap)
@@ -613,133 +596,134 @@ def remesh(m: Mesh, gap: float, lmax: float, lmin: float) -> tuple[int, int]:
     return splits, 0
 
 
+def _edges(F: np.ndarray) -> np.ndarray:
+    e = np.sort(np.r_[F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]], 1)
+    return np.unique(e, axis=0)
+
+
+def _local_best(E: np.ndarray, rank: np.ndarray, n: int, ptr: np.ndarray | None, nbr: np.ndarray | None) -> np.ndarray:
+    """Edges whose rank (smaller is better, all distinct) is the best among
+    the candidate edges at their two ends (ptr is None), or at any vertex
+    of the closed 1-rings of their ends (ptr, nbr given)."""
+    best = np.full(n, np.iinfo(np.int64).max)
+    np.minimum.at(best, E[:, 0], rank)
+    np.minimum.at(best, E[:, 1], rank)
+    if ptr is not None and nbr is not None:
+        src = np.repeat(np.arange(n), np.diff(ptr))
+        b2 = best.copy()
+        np.minimum.at(b2, src, best[nbr])
+        best = b2
+    return (best[E[:, 0]] == rank) & (best[E[:, 1]] == rank)
+
+
 def _split(m: Mesh, lmax: float) -> int:
+    """Splits the edges longer than lmax that are the longest candidate at
+    both ends (so each face has at most one split edge)."""
     F, V = m.F, m.V
-    e = np.sort(np.r_[F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]], 1)
-    u = np.unique(e, axis=0)
-    L = np.linalg.norm(V[u[:, 0]] - V[u[:, 1]], axis=1)
-    long_ = u[L > lmax]
-    if len(long_) == 0:
-        return 0
-    # independent set: each face gets at most one split per pass
-    used = np.zeros(len(V), bool)
-    sel = []
-    for a, b in long_[np.argsort(-L[L > lmax])]:
-        if used[a] or used[b]:
-            continue
-        used[a] = used[b] = True
-        sel.append((a, b))
-    sel_a = np.array(sel, np.int64)
     n0 = len(V)
-    mid = n0 + np.arange(len(sel_a))
-    key = {(int(a), int(b)): int(k) for (a, b), k in zip(sel_a, mid)}
-    newF = []
-    for f in F:
-        done = False
-        for j in range(3):
-            a, b, c = int(f[j]), int(f[(j + 1) % 3]), int(f[(j + 2) % 3])
-            k = key.get((min(a, b), max(a, b)))
-            if k is not None:
-                newF.append((a, k, c))
-                newF.append((k, b, c))
-                done = True
-                break
-        if not done:
-            newF.append(tuple(int(x) for x in f))
-    m.V = np.r_[V, 0.5 * (V[sel_a[:, 0]] + V[sel_a[:, 1]])]
-    m.origin = np.r_[m.origin, 0.5 * (m.origin[sel_a[:, 0]] + m.origin[sel_a[:, 1]])]
-    m.travel = np.r_[m.travel, 0.5 * (m.travel[sel_a[:, 0]] + m.travel[sel_a[:, 1]])]
-    m.last = np.r_[m.last, 0.5 * (m.last[sel_a[:, 0]] + m.last[sel_a[:, 1]])]
-    sa, sb = m.state[sel_a[:, 0]], m.state[sel_a[:, 1]]
-    m.state = np.r_[m.state, np.where((sa == MOVING) | (sb == MOVING), MOVING, sa)]
-    m.F = np.array(newF, np.int64)
-    m.update_topology()
-    return len(sel_a)
-
-
-def _collapse(
-    m: Mesh, gap: float, lmin: float, exclude: np.ndarray
-) -> tuple[int, np.ndarray]:
-    F, V = m.F, m.V
-    e = np.sort(np.r_[F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]], 1)
-    u = np.unique(e, axis=0)
+    u = _edges(F)
     L = np.linalg.norm(V[u[:, 0]] - V[u[:, 1]], axis=1)
-    cand = u[L < lmin]
-    if len(cand) == 0:
-        return 0, np.arange(len(V))
-    order = np.argsort(L[L < lmin])
-    # faces of each vertex
-    vf_ptr = np.zeros(len(V) + 1, np.int64)
-    np.add.at(vf_ptr, F.ravel() + 1, 1)
-    vf_ptr = np.cumsum(vf_ptr)
-    vf = np.argsort(F.ravel(), kind="stable") // 3
-    T = V[F]
-    C = T.mean(1)
-    R = float(np.sqrt(((T - C[:, None]) ** 2).sum(-1)).max())
-    tree = cKDTree(C)
-    locked = np.zeros(len(V), bool)
-    alive = np.ones(len(F), bool)
-    Fw = F.copy()
-    Vw = V.copy()
-    n_col = 0
-
-    def nbrs(x: int) -> set[int]:
-        return set(m.nbr[m.ptr[x] : m.ptr[x + 1]].tolist())
-
-    for a, b in cand[order]:
-        a, b = int(a), int(b)
-        if locked[a] or locked[b] or m.boundary[a] or m.boundary[b] or exclude[a] or exclude[b]:
-            continue
-        if m.state[a] != m.state[b]:
-            continue
-        common = nbrs(a) & nbrs(b)
-        if len(common) != 2:  # the link condition for an interior edge
-            continue
-        fa = vf[vf_ptr[a] : vf_ptr[a + 1]]
-        fb = vf[vf_ptr[b] : vf_ptr[b + 1]]
-        fan = np.unique(np.r_[fa, fb])
-        gone = np.array([f for f in fan if a in Fw[f] and b in Fw[f]], np.int64)
-        keep = np.array([f for f in fan if f not in gone], np.int64)
-        if len(gone) != 2 or len(keep) == 0:
-            continue
-        p = 0.5 * (Vw[a] + Vw[b])
-        Fk = Fw[keep].copy()
-        Fk[Fk == b] = a
-        if np.any((Fk[:, 0] == Fk[:, 1]) | (Fk[:, 1] == Fk[:, 2]) | (Fk[:, 0] == Fk[:, 2])):
-            continue
-        V2 = Vw.copy()
-        V2[a] = p
-        n_old = np.cross(Vw[Fw[keep, 1]] - Vw[Fw[keep, 0]], Vw[Fw[keep, 2]] - Vw[Fw[keep, 0]])
-        n_new = np.cross(V2[Fk[:, 1]] - V2[Fk[:, 0]], V2[Fk[:, 2]] - V2[Fk[:, 0]])
-        if np.any((n_old * n_new).sum(1) <= 0):
-            continue
-        Ftmp = Fw.copy()
-        Ftmp[keep] = Fk
-        if not _fan_ok(V2, Ftmp, keep, gap, tree, R):
-            continue
-        Fw = Ftmp
-        Vw = V2
-        alive[gone] = False
-        m.origin[a] = 0.5 * (m.origin[a] + m.origin[b])
-        m.travel[a] = 0.5 * (m.travel[a] + m.travel[b])
-        m.last[a] = 0.5 * (m.last[a] + m.last[b])
-        locked[list(nbrs(a) | nbrs(b) | {a, b})] = True
-        n_col += 1
-    if n_col == 0:
-        return 0, np.arange(len(V))
-    used = np.zeros(len(V), bool)
-    Fn = Fw[alive]
-    used[Fn.ravel()] = True
-    newid = -np.ones(len(V), np.int64)
-    newid[used] = np.arange(int(used.sum()))
-    m.V = Vw[used]
-    m.origin = m.origin[used]
-    m.travel = m.travel[used]
-    m.last = m.last[used]
-    m.state = m.state[used]
-    m.F = newid[Fn]
+    c = L > lmax
+    if not c.any():
+        return 0
+    E = u[c]
+    rank = np.empty(len(E), np.int64)
+    rank[np.lexsort((np.arange(len(E)), -L[c]))] = np.arange(len(E))
+    sel = E[_local_best(E, rank, n0, None, None)]
+    k = len(sel)
+    mid = n0 + np.arange(k)
+    skey = sel[:, 0] * n0 + sel[:, 1]
+    srt = np.argsort(skey)
+    skey, mid = skey[srt], mid[srt]
+    newF = [F]
+    hit = np.zeros(len(F), bool)
+    for j in range(3):
+        a, b, cc = F[:, j], F[:, (j + 1) % 3], F[:, (j + 2) % 3]
+        key = np.minimum(a, b) * n0 + np.maximum(a, b)
+        pos = np.clip(np.searchsorted(skey, key), 0, k - 1)
+        h = skey[pos] == key
+        if h.any():
+            kk = mid[pos[h]]
+            newF += [np.c_[a[h], kk, cc[h]], np.c_[kk, b[h], cc[h]]]
+            hit |= h
+    newF[0] = F[~hit]
+    m.V = np.r_[V, 0.5 * (V[sel[:, 0]] + V[sel[:, 1]])]
+    for nm in ("origin", "travel", "last"):
+        x = getattr(m, nm)
+        setattr(m, nm, np.r_[x, 0.5 * (x[sel[:, 0]] + x[sel[:, 1]])])
+    sa, sb = m.state[sel[:, 0]], m.state[sel[:, 1]]
+    m.state = np.r_[m.state, np.where((sa == MOVING) | (sb == MOVING), MOVING, sa)]
+    m.F = np.concatenate(newF).astype(np.int64)
     m.update_topology()
-    return n_col, newid
+    return k
+
+
+def _collapse(m: Mesh, lmin: float, exclude: np.ndarray) -> tuple[int, np.ndarray]:
+    """Collapses, to the midpoint, the interior edges shorter than lmin with
+    both ends in the same state that are the shortest candidate in the
+    closed 1-rings of both ends (so no two collapses touch the same face),
+    pass the link condition (exactly two common neighbours), and turn no
+    face normal by more than 90 degrees. Returns the number of collapses
+    and the new index of each old vertex (-1: removed)."""
+    F, V = m.F, m.V
+    n = len(V)
+    ident = np.arange(n)
+    u = _edges(F)
+    L = np.linalg.norm(V[u[:, 0]] - V[u[:, 1]], axis=1)
+    a, b = u[:, 0], u[:, 1]
+    c = (L < lmin) & ~m.boundary[a] & ~m.boundary[b] & ~exclude[a] & ~exclude[b] & (m.state[a] == m.state[b])
+    if not c.any():
+        return 0, ident
+    E, Lc = u[c], L[c]
+    rank = np.empty(len(E), np.int64)
+    rank[np.lexsort((np.arange(len(E)), Lc))] = np.arange(len(E))
+    E = E[_local_best(E, rank, n, m.ptr, m.nbr)]
+    # link condition: exactly two common neighbours
+    A = sparse.csr_matrix((np.ones(len(m.nbr)), m.nbr, m.ptr), shape=(n, n))
+    common = np.asarray(A[E[:, 0]].multiply(A[E[:, 1]]).sum(1)).ravel()
+    E = E[common == 2]
+    if len(E) == 0:
+        return 0, ident
+    remap = ident.copy()
+    remap[E[:, 1]] = E[:, 0]
+    V2 = V.copy()
+    V2[E[:, 0]] = 0.5 * (V[E[:, 0]] + V[E[:, 1]])
+    F2 = remap[F]
+    gone = (F2[:, 0] == F2[:, 1]) | (F2[:, 1] == F2[:, 2]) | (F2[:, 0] == F2[:, 2])
+    # no flipped face: an edge whose fan has a face turned by > 90 degrees is not collapsed
+    owner = np.full(n, -1, np.int64)
+    owner[E[:, 0]] = np.arange(len(E))
+    owner[E[:, 1]] = np.arange(len(E))
+    fo = owner[F].max(1)  # the collapse that changes this face (at most one)
+    ch = (fo >= 0) & ~gone
+    n_old = np.cross(V[F[ch, 1]] - V[F[ch, 0]], V[F[ch, 2]] - V[F[ch, 0]])
+    n_new = np.cross(V2[F2[ch, 1]] - V2[F2[ch, 0]], V2[F2[ch, 2]] - V2[F2[ch, 0]])
+    flip = np.zeros(len(E), bool)
+    flip[fo[ch][(n_old * n_new).sum(1) <= 0]] = True
+    if flip.any():
+        E = E[~flip]
+        if len(E) == 0:
+            return 0, ident
+        remap = ident.copy()
+        remap[E[:, 1]] = E[:, 0]
+        V2 = V.copy()
+        V2[E[:, 0]] = 0.5 * (V[E[:, 0]] + V[E[:, 1]])
+        F2 = remap[F]
+        gone = (F2[:, 0] == F2[:, 1]) | (F2[:, 1] == F2[:, 2]) | (F2[:, 0] == F2[:, 2])
+    for nm in ("origin", "travel", "last"):
+        x = getattr(m, nm).copy()
+        x[E[:, 0]] = 0.5 * (x[E[:, 0]] + x[E[:, 1]])
+        setattr(m, nm, x)
+    used = np.ones(n, bool)
+    used[E[:, 1]] = False
+    newid = -np.ones(n, np.int64)
+    newid[used] = np.arange(int(used.sum()))
+    m.V = V2[used]
+    m.origin, m.travel, m.last = m.origin[used], m.travel[used], m.last[used]
+    m.state = m.state[used]
+    m.F = newid[F2[~gone]]
+    m.update_topology()
+    return len(E), newid
 
 
 # ------------------------------------------------------------ the whole start
