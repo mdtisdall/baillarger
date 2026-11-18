@@ -8,6 +8,7 @@ from typing import Any
 import nibabel as nib
 import numpy as np
 import pytest
+from edits_helpers import edits, write_edits
 from test_viewer_review import SHAPE, A, diff, files, paint_only, paint_strokes
 
 from baillarger.viewer import review as VR
@@ -105,3 +106,21 @@ def test_grow_is_off_without_echoes_and_refuses_the_eraser(
         rv.post("/review/grow", dict(strokes=paint_strokes(("input", [(13, 6, 5)]))))
     with pytest.raises(ValueError, match="paint menu"):
         rv.post("/review/grow", dict(strokes=paint_strokes((7, [(13, 6, 5)]))))
+
+
+def test_grow_sees_the_labels_on_the_screen(files: dict[str, Path]) -> None:
+    """The current labels of a grow are the dseg's labels with the pending
+    edits: a voxel of the dseg's copy of the edits that the current edits
+    do not have (left out, or removed by the eraser) has its input label."""
+    v = (14, 6, 5)  # input 41
+    lab = np.asarray(nib.nifti1.load(files["dseg"]).dataobj).copy()
+    lab[v] = 0  # the dseg was made with the edit (14, 6, 5): 0
+    nib.save(nib.nifti1.Nifti1Image(lab, A), files["dseg"])
+    write_edits(files["copy"], edits({v: 0}, SHAPE), SHAPE, A)
+    write_edits(files["edits"], edits({}, SHAPE), SHAPE, A)
+    rv = paint_only(files)
+    lo = (10, 3, 3)
+    got = rv._current_box(rv._pending(rv._read_edits()), (lo, (18, 9, 8)))
+    want = lab[10:18, 3:9, 3:8].copy()
+    want[v[0] - lo[0], v[1] - lo[1], v[2] - lo[2]] = 41
+    assert np.array_equal(got, want)

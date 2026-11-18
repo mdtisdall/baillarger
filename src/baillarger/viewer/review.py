@@ -254,15 +254,15 @@ a request for another key stops the running job at its next group
 (surface_preview.Stopped). Each group is atomic, so the state that a
 stopped job leaves is valid, and the next job continues from it.
 
-Grow. The grow brush (docs/plans/label-editing.md, Part 6). POST
-/review/grow {strokes} (as /review/paint; no eraser) runs label_grow.grow as
-a job (Review.gjobs) on echoes 2 and 3 (memory-mapped, read for the box only)
-and the labels that the user sees (the dseg's labels with the diff's
-entries). Its answer, polled with GET /review/grow?job=, is the proposal:
-{voxels, labels, box, settings}. It writes nothing. The page shows the
-proposal; an accepted proposal is a POST /review/paint of its voxels, so it
-is one write and one undo. Without echoes 2 and 3 the route refuses, and
-/review/queue says why (grow_off).
+Grow. The grow brush (docs/plans/label-editing.md, Part 6). POST /review/grow
+{strokes} (as /review/paint; no eraser) runs label_grow.grow as a job
+(Review.gjobs) on echoes 2 and 3 (memory-mapped, read for the box only) and
+the labels that the user sees (the dseg's labels with the pending edits, as
+the slice tiles draw them). Its answer, polled with GET /review/grow?job=, is
+the proposal: {voxels, labels, box, settings}. It writes nothing. The page
+shows the proposal; an accepted proposal is a POST /review/paint of its
+voxels, so it is one write and one undo. Without echoes 2 and 3 the route
+refuses, and /review/queue says why (grow_off).
 
 Paint only. With no queue and no log (sites and log None; the viewer's
 --edits alone), the review has the paint routes only; the hemisphere comes
@@ -1321,12 +1321,16 @@ class Review:
             self._echo_maps, self._echo_srcs = maps, srcs
         return self._echo_maps
 
-    def _current_box(self, edits: label_edits.Edits, box: label_grow.Box) -> Arr:
+    def _current_box(self, pending: tuple[Arr, Arr], box: label_grow.Box) -> Arr:
         """The labels that the user sees in a box: the dseg's labels with the
-        diff's entries."""
+        pending edits (_pending: the voxels and their labels) written in."""
         (a0, b0, c0), (a1, b1, c1) = box
-        crop = np.asarray(self.labels()[a0:a1, b0:b1, c0:c1])
-        return label_edits.apply(crop, edits, offset=box[0], shape=self.shape)
+        crop = np.array(self.labels()[a0:a1, b0:b1, c0:c1])
+        v, lab = pending
+        q = v - np.asarray(box[0], np.int64)
+        ok = np.all((q >= 0) & (q < np.asarray(crop.shape)), axis=1)
+        crop[tuple(q[ok].T)] = lab[ok]
+        return crop
 
     def grow(self, strokes: Sequence[dict[str, Any]]) -> dict[str, Any]:
         """The grow brush's proposal of the strokes (module docstring, Grow),
@@ -1344,6 +1348,7 @@ class Review:
         with self.lock:
             self._check_outputs()
             edits = self._read_edits()
+            pending = self._pending(edits)
         h = hashlib.sha256()
         for lab, v in seeds:
             h.update(str(lab).encode())
@@ -1364,7 +1369,7 @@ class Review:
 
             p = label_grow.grow(
                 seeds,
-                lambda b: self._current_box(edits, b),
+                lambda b: self._current_box(pending, b),
                 echoes,
                 shape=self.shape,
                 wm=wm,
