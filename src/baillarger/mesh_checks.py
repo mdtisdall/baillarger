@@ -25,10 +25,11 @@ The checks, each per face (or per vertex for the gap) with a count of pairs:
   reached from the point's own faces across shared vertices, each closer
   than 2 × gap to the point).
 
-check_mesh runs them on a whole mesh. Checker keeps a face grid for one
-topology while the vertices move and checks only the pairs with a changed
-vertex. link_condition is the edge-collapse test of exactly two common
-neighbours.
+check_mesh runs them on a whole mesh. Checker keeps a live copy of a mesh
+that changes by local edits (moved vertices; faces and vertices added and
+removed) and checks each edit in time proportional to the faces near it, not
+to the mesh: an edit is proposed, checked, then committed or rolled back.
+link_condition is the edge-collapse test of exactly two common neighbours.
 """
 
 from dataclasses import dataclass
@@ -175,35 +176,38 @@ def vertex_normals(V: Float, F: Int) -> Float:
 
 
 @njit(cache=True, inline="always")
-def _ptd(V: Float, p: int, ia: int, ib: int, ic: int) -> float:
-    """Distance from vertex p to the triangle of vertices ia, ib, ic
-    (Ericson, closest point), in scalars: no temporary arrays."""
-    ax, ay, az = V[ia, 0], V[ia, 1], V[ia, 2]
-    abx, aby, abz = V[ib, 0] - ax, V[ib, 1] - ay, V[ib, 2] - az
-    acx, acy, acz = V[ic, 0] - ax, V[ic, 1] - ay, V[ic, 2] - az
-    px, py, pz = V[p, 0], V[p, 1], V[p, 2]
+def _ptd_xyz(
+    px: float, py: float, pz: float,
+    ax: float, ay: float, az: float,
+    bx: float, by: float, bz: float,
+    cx: float, cy: float, cz: float,
+) -> float:  # fmt: skip
+    """Distance from the point p to the triangle a, b, c (Ericson, closest
+    point), in scalars: no temporary arrays."""
+    abx, aby, abz = bx - ax, by - ay, bz - az
+    acx, acy, acz = cx - ax, cy - ay, cz - az
     apx, apy, apz = px - ax, py - ay, pz - az
     d1 = abx * apx + aby * apy + abz * apz
     d2 = acx * apx + acy * apy + acz * apz
     if d1 <= 0 and d2 <= 0:
         qx, qy, qz = ax, ay, az
     else:
-        bpx, bpy, bpz = px - V[ib, 0], py - V[ib, 1], pz - V[ib, 2]
+        bpx, bpy, bpz = px - bx, py - by, pz - bz
         d3 = abx * bpx + aby * bpy + abz * bpz
         d4 = acx * bpx + acy * bpy + acz * bpz
         if d3 >= 0 and d4 <= d3:
-            qx, qy, qz = V[ib, 0], V[ib, 1], V[ib, 2]
+            qx, qy, qz = bx, by, bz
         else:
             vc = d1 * d4 - d3 * d2
             if vc <= 0 and d1 >= 0 and d3 <= 0:
                 t = d1 / (d1 - d3)
                 qx, qy, qz = ax + t * abx, ay + t * aby, az + t * abz
             else:
-                cpx, cpy, cpz = px - V[ic, 0], py - V[ic, 1], pz - V[ic, 2]
+                cpx, cpy, cpz = px - cx, py - cy, pz - cz
                 d5 = abx * cpx + aby * cpy + abz * cpz
                 d6 = acx * cpx + acy * cpy + acz * cpz
                 if d6 >= 0 and d5 <= d6:
-                    qx, qy, qz = V[ic, 0], V[ic, 1], V[ic, 2]
+                    qx, qy, qz = cx, cy, cz
                 else:
                     vb = d5 * d2 - d1 * d6
                     if vb <= 0 and d2 >= 0 and d6 <= 0:
@@ -213,10 +217,9 @@ def _ptd(V: Float, p: int, ia: int, ib: int, ic: int) -> float:
                         va = d3 * d6 - d5 * d4
                         if va <= 0 and (d4 - d3) >= 0 and (d5 - d6) >= 0:
                             t = (d4 - d3) / ((d4 - d3) + (d5 - d6))
-                            bx, by, bz = V[ib, 0], V[ib, 1], V[ib, 2]
-                            qx = bx + t * (V[ic, 0] - bx)
-                            qy = by + t * (V[ic, 1] - by)
-                            qz = bz + t * (V[ic, 2] - bz)
+                            qx = bx + t * (cx - bx)
+                            qy = by + t * (cy - by)
+                            qz = bz + t * (cz - bz)
                         else:
                             den = 1.0 / (va + vb + vc)
                             v_, w_ = vb * den, vc * den
@@ -226,6 +229,15 @@ def _ptd(V: Float, p: int, ia: int, ib: int, ic: int) -> float:
     dx, dy, dz = px - qx, py - qy, pz - qz
     d: float = np.sqrt(dx * dx + dy * dy + dz * dz)
     return d
+
+
+@njit(cache=True, inline="always")
+def _ptd(V: Float, p: int, ia: int, ib: int, ic: int) -> float:
+    """Distance from vertex p to the triangle of vertices ia, ib, ic."""
+    return _ptd_xyz(
+        V[p, 0], V[p, 1], V[p, 2], V[ia, 0], V[ia, 1], V[ia, 2],
+        V[ib, 0], V[ib, 1], V[ib, 2], V[ic, 0], V[ic, 1], V[ic, 2],
+    )  # fmt: skip
 
 
 @njit(cache=True, inline="always")
@@ -377,304 +389,1046 @@ def turned_faces(V: npt.ArrayLike, F: npt.ArrayLike, reference: Float) -> Bool:
     return out
 
 
-# ------------------------------------------------------------ the gap
+# ------------------------------------------------------------ the live mesh
+#
+# Checker keeps its own copy of the mesh as arrays that change in place:
+#
+# - V (capacity × 3) and F (capacity × 3); a free face has F[f] = -1, a free
+#   vertex has no corner (vhead[v] = -1). Free ids are on stacks (vfree,
+#   ffree) and are used again.
+# - the faces round each vertex: corner c = 3 f + k (vertex F[f, k]) in a
+#   doubly linked list per vertex (vhead, cnext, cprev).
+# - a grid of the face centroids, cells of size `cell`, as a hash table of
+#   the occupied cells (hkey, hhead; open addressing, linear probes) with a
+#   doubly linked list of faces per cell (gnext, gprev; fcell = the face's
+#   slot).
+#
+# Each operation costs O(1) per face it touches (expected, for the hash), so
+# an edit and its check cost O(the faces near the edit), not O(n).
+
+#: cell coordinates: 21 bits per axis, offset so that -2**20 .. 2**20 - 1 fit
+_KOFF = 1 << 20
+_KMAX = (1 << 21) - 1
+#: Fibonacci hashing: 2**64 / the golden ratio
+_HMUL = np.uint64(11400714819323198485)
+#: the counters array: high-water marks of vertex and face ids, sizes of the
+#: free stacks, occupied hash slots, the last marker
+_NV, _NF, _NVFREE, _NFFREE, _HUSED, _MARK = 0, 1, 2, 3, 4, 5
+#: the live mesh as one tuple for the kernels (see Checker._M)
+type _Live = tuple[
+    Float, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Float, Float
+]
+#: the marker arrays (see Checker._K)
+type _Marks = tuple[Int, Int, Int, Int, Int, Int, Int, Int, Int, Int]
+#: the parameters array: cell size, largest face radius (a bound), gap, the
+#: patch radius, the crease cut-off
+_CELL, _RMAX, _GAP, _RLOC, _FOLD = 0, 1, 2, 3, 4
+
+
+@njit(cache=True, inline="always")
+def _q(x: float, lo: float, cell: float) -> int:
+    """The cell coordinate of x (offset, clipped to the key range)."""
+    q = int(np.floor((x - lo) / cell)) + _KOFF
+    return min(max(q, 0), _KMAX)
+
+
+@njit(cache=True, inline="always")
+def _pack(i: int, j: int, k: int) -> int:
+    """The key of cell (i, j, k)."""
+    return (i << 42) | (j << 21) | k
+
+
+@njit(cache=True, inline="always")
+def _hslot(hkey: Int, key: int) -> int:
+    """The slot that holds key, or the empty slot where it goes."""
+    mask = len(hkey) - 1
+    s = int((np.uint64(key) * _HMUL) >> np.uint64(32)) & mask
+    while hkey[s] != key and hkey[s] != -1:
+        s = (s + 1) & mask
+    return s
+
+
+@njit(cache=True, inline="always")
+def _centre(V: Float, F: Int, f: int) -> tuple[float, float, float]:
+    """The centroid of face f."""
+    a, b, c = F[f, 0], F[f, 1], F[f, 2]
+    return (
+        (V[a, 0] + V[b, 0] + V[c, 0]) / 3.0,
+        (V[a, 1] + V[b, 1] + V[c, 1]) / 3.0,
+        (V[a, 2] + V[b, 2] + V[c, 2]) / 3.0,
+    )
+
+
+@njit(cache=True, inline="always")
+def _radius(V: Float, F: Int, f: int) -> float:
+    """The largest distance from face f's centroid to its vertices."""
+    cx, cy, cz = _centre(V, F, f)
+    r = 0.0
+    for k in range(3):
+        v = F[f, k]
+        dx, dy, dz = V[v, 0] - cx, V[v, 1] - cy, V[v, 2] - cz
+        r = max(r, np.sqrt(dx * dx + dy * dy + dz * dz))
+    return r
 
 
 @njit(cache=True)
-def _cells(P: Float, lo: Float, cell: float, dims: Int) -> Int:
-    """Cell key of each point (cells of size `cell` from lo; -1 outside)."""
-    out = np.empty(P.shape[0], np.int64)
-    for i in range(P.shape[0]):
-        k = 0
-        ok = True
-        for a in range(3):
-            q = int(np.floor((P[i, a] - lo[a]) / cell))
-            if q < 0 or q >= dims[a]:
-                ok = False
-            k = k * dims[a] + q
-        out[i] = k if ok else -1
-    return out
+def _glink(
+    V: Float, F: Int, fcell: Int, gnext: Int, gprev: Int, hkey: Int,
+    hhead: Int, cnt: Int, prm: Float, lo: Float, f: int,
+) -> None:  # fmt: skip
+    """Put face f in the grid cell of its centroid; raise the radius bound."""
+    cell = prm[_CELL]
+    cx, cy, cz = _centre(V, F, f)
+    key = _pack(_q(cx, lo[0], cell), _q(cy, lo[1], cell), _q(cz, lo[2], cell))
+    s = _hslot(hkey, key)
+    if hkey[s] == -1:
+        hkey[s] = key
+        hhead[s] = -1
+        cnt[_HUSED] += 1
+    h = hhead[s]
+    gprev[f] = -1
+    gnext[f] = h
+    if h >= 0:
+        gprev[h] = f
+    hhead[s] = f
+    fcell[f] = s
+    r = _radius(V, F, f)
+    if r > prm[_RMAX]:
+        prm[_RMAX] = r
+
+
+@njit(cache=True, inline="always")
+def _gunlink(fcell: Int, gnext: Int, gprev: Int, hhead: Int, f: int) -> None:
+    """Take face f out of its grid cell (the cell's key stays)."""
+    p, n = gprev[f], gnext[f]
+    if p >= 0:
+        gnext[p] = n
+    else:
+        hhead[fcell[f]] = n
+    if n >= 0:
+        gprev[n] = p
+    fcell[f] = -1
+
+
+@njit(cache=True, inline="always")
+def _clink(F: Int, vhead: Int, cnext: Int, cprev: Int, f: int) -> None:
+    """Add face f's corners to its vertices' lists."""
+    for k in range(3):
+        c = 3 * f + k
+        v = F[f, k]
+        h = vhead[v]
+        cprev[c] = -1
+        cnext[c] = h
+        if h >= 0:
+            cprev[h] = c
+        vhead[v] = c
+
+
+@njit(cache=True, inline="always")
+def _cunlink(F: Int, vhead: Int, cnext: Int, cprev: Int, f: int) -> None:
+    """Take face f's corners out of its vertices' lists."""
+    for k in range(3):
+        c = 3 * f + k
+        p, n = cprev[c], cnext[c]
+        if p >= 0:
+            cnext[p] = n
+        else:
+            vhead[F[f, k]] = n
+        if n >= 0:
+            cprev[n] = p
+
+
+@njit(cache=True)
+def _link_all(
+    V: Float, F: Int, vhead: Int, cnext: Int, cprev: Int, fcell: Int,
+    gnext: Int, gprev: Int, hkey: Int, hhead: Int, cnt: Int, prm: Float,
+    lo: Float, corners: bool,
+) -> None:  # fmt: skip
+    """Put every face (F[f, 0] ≥ 0, f < the high-water mark) in the grid,
+    and (corners) in the vertices' lists."""
+    for f in range(cnt[_NF]):
+        if F[f, 0] < 0:
+            continue
+        if corners:
+            _clink(F, vhead, cnext, cprev, f)
+        _glink(V, F, fcell, gnext, gprev, hkey, hhead, cnt, prm, lo, f)
+
+
+@njit(cache=True)
+def _links_of(F: Int, vhead: Int, cnext: Int, vs: Int) -> int:
+    """The number of faces round the vertices vs (with repeats): a bound on
+    the grid links that moving them makes."""
+    n = 0
+    for v in vs:
+        c = vhead[v]
+        while c >= 0:
+            n += 1
+            c = cnext[c]
+    return n
+
+
+@njit(cache=True)
+def _apply(
+    M: _Live,
+    mv: Int, to: Float, rm: Int, add: Int, addv: Float,
+) -> tuple[Int, Int, Float, Int, Float]:  # fmt: skip
+    """Make an edit in place: new vertices at addv, faces rm removed, the
+    vertices mv moved to `to`, faces `add` added (a vertex -1 - j there is
+    new vertex j). Returns the new vertex and face ids, the moved vertices'
+    old positions, the removed faces' rows, and the old triangles of the
+    removed faces and of the faces round the moved vertices (k × 3 × 3, for
+    the region the edit changed)."""
+    (
+        V,
+        F,
+        vhead,
+        cnext,
+        cprev,
+        fcell,
+        gnext,
+        gprev,
+        hkey,
+        hhead,
+        vfree,
+        ffree,
+        cnt,
+        prm,
+        lo,
+    ) = M
+    newv = np.empty(len(addv), np.int64)
+    for j in range(len(addv)):
+        if cnt[_NVFREE] > 0:
+            cnt[_NVFREE] -= 1
+            v = vfree[cnt[_NVFREE]]
+        else:
+            v = cnt[_NV]
+            cnt[_NV] += 1
+        V[v] = addv[j]
+        vhead[v] = -1
+        newv[j] = v
+    # the old triangles
+    nt = len(rm) + _links_of(F, vhead, cnext, mv)
+    Told = np.empty((nt, 3, 3))
+    t = 0
+    for f in rm:
+        for k in range(3):
+            Told[t, k] = V[F[f, k]]
+        t += 1
+    for v in mv:
+        c = vhead[v]
+        while c >= 0:
+            g = c // 3
+            for k in range(3):
+                Told[t, k] = V[F[g, k]]
+            t += 1
+            c = cnext[c]
+    rows = np.empty((len(rm), 3), np.int64)
+    for i in range(len(rm)):
+        f = rm[i]
+        rows[i] = F[f]
+        _gunlink(fcell, gnext, gprev, hhead, f)
+        _cunlink(F, vhead, cnext, cprev, f)
+        F[f] = -1
+    old = np.empty((len(mv), 3))
+    for i in range(len(mv)):
+        v = mv[i]
+        old[i] = V[v]
+        V[v] = to[i]
+        c = vhead[v]
+        while c >= 0:
+            g = c // 3
+            _gunlink(fcell, gnext, gprev, hhead, g)
+            _glink(V, F, fcell, gnext, gprev, hkey, hhead, cnt, prm, lo, g)
+            c = cnext[c]
+    newf = np.empty(len(add), np.int64)
+    for i in range(len(add)):
+        if cnt[_NFFREE] > 0:
+            cnt[_NFFREE] -= 1
+            f = ffree[cnt[_NFFREE]]
+        else:
+            f = cnt[_NF]
+            cnt[_NF] += 1
+        for k in range(3):
+            u = add[i, k]
+            F[f, k] = newv[-1 - u] if u < 0 else u
+        _clink(F, vhead, cnext, cprev, f)
+        _glink(V, F, fcell, gnext, gprev, hkey, hhead, cnt, prm, lo, f)
+        newf[i] = f
+    return newv, newf, old, rows, Told
+
+
+@njit(cache=True)
+def _undo(
+    M: _Live,
+    mv: Int, old: Float, rm: Int, rows: Int, newv: Int, newf: Int,
+) -> None:  # fmt: skip
+    """Undo _apply: remove the new faces, put the moved vertices back,
+    restore the removed faces (same ids) and free the new vertices."""
+    (
+        V,
+        F,
+        vhead,
+        cnext,
+        cprev,
+        fcell,
+        gnext,
+        gprev,
+        hkey,
+        hhead,
+        vfree,
+        ffree,
+        cnt,
+        prm,
+        lo,
+    ) = M
+    for f in newf[::-1]:
+        _gunlink(fcell, gnext, gprev, hhead, f)
+        _cunlink(F, vhead, cnext, cprev, f)
+        F[f] = -1
+        ffree[cnt[_NFFREE]] = f
+        cnt[_NFFREE] += 1
+    for i in range(len(mv) - 1, -1, -1):
+        v = mv[i]
+        V[v] = old[i]
+        c = vhead[v]
+        while c >= 0:
+            g = c // 3
+            _gunlink(fcell, gnext, gprev, hhead, g)
+            _glink(V, F, fcell, gnext, gprev, hkey, hhead, cnt, prm, lo, g)
+            c = cnext[c]
+    for i in range(len(rm) - 1, -1, -1):
+        f = rm[i]
+        F[f] = rows[i]
+        _clink(F, vhead, cnext, cprev, f)
+        _glink(V, F, fcell, gnext, gprev, hkey, hhead, cnt, prm, lo, f)
+    for v in newv[::-1]:
+        vhead[v] = -1
+        vfree[cnt[_NVFREE]] = v
+        cnt[_NVFREE] += 1
+
+
+@njit(cache=True)
+def _settle(
+    M: _Live,
+    rm: Int, rows: Int, newv: Int,
+) -> Int:  # fmt: skip
+    """Keep an edit: the removed faces' ids are free, and so are the
+    vertices with no face left (of the removed faces, or new). Returns the
+    freed vertices."""
+    (
+        V,
+        F,
+        vhead,
+        cnext,
+        cprev,
+        fcell,
+        gnext,
+        gprev,
+        hkey,
+        hhead,
+        vfree,
+        ffree,
+        cnt,
+        prm,
+        lo,
+    ) = M
+    for f in rm:
+        ffree[cnt[_NFFREE]] = f
+        cnt[_NFFREE] += 1
+    out = [int(x) for x in range(0)]
+    for i in range(len(rows) + len(newv)):
+        for k in range(3 if i < len(rows) else 1):
+            v = rows[i, k] if i < len(rows) else newv[i - len(rows)]
+            if vhead[v] != -1:
+                continue
+            vhead[v] = -2  # freed: not seen again in this loop
+            out.append(v)
+    res = np.empty(len(out), np.int64)
+    for i in range(len(out)):
+        v = out[i]
+        vhead[v] = -1
+        V[v] = np.nan
+        vfree[cnt[_NVFREE]] = v
+        cnt[_NVFREE] += 1
+        res[i] = v
+    return res
+
+
+# ------------------------------------------------------------ the local checks
 
 
 @njit(cache=True)
 def _patch(
-    p: int,
-    V: Float,
-    F: Int,
-    vf_ptr: Int,
-    vf: Int,
-    rloc: float,
-    stamp: Int,
-    queue: Int,
-) -> None:
-    """Stamp p's local patch: the faces reached from p's own faces across
-    shared vertices, each closer than rloc to p."""
-    stamp[p] = p
+    p: int, V: Float, F: Int, vhead: Int, cnext: Int, rloc: float,
+    stamp: Int, mark: int, queue: Int,
+) -> None:  # fmt: skip
+    """Stamp p's local patch with mark: the faces reached from p's own faces
+    across shared vertices, each closer than rloc to p."""
+    stamp[p] = mark
     qh, qt = 0, 1
     queue[0] = p
     while qh < qt:
         u = queue[qh]
         qh += 1
-        for k in range(vf_ptr[u], vf_ptr[u + 1]):
-            g = vf[k]
-            a, b, c = F[g, 0], F[g, 1], F[g, 2]
-            if stamp[a] == p and stamp[b] == p and stamp[c] == p:
+        c = vhead[u]
+        while c >= 0:
+            g = c // 3
+            c = cnext[c]
+            a, b, cc = F[g, 0], F[g, 1], F[g, 2]
+            if stamp[a] == mark and stamp[b] == mark and stamp[cc] == mark:
                 continue
-            if _ptd(V, p, a, b, c) >= rloc:
+            if _ptd(V, p, a, b, cc) >= rloc:
                 continue
-            for w in (a, b, c):
-                if stamp[w] != p:
-                    stamp[w] = p
+            for w in (a, b, cc):
+                if stamp[w] != mark:
+                    stamp[w] = mark
                     queue[qt] = w
                     qt += 1
 
 
 @njit(cache=True)
-def _gap_kernel(
-    V: Float,
-    F: Int,
-    vf_ptr: Int,
-    vf: Int,
-    order: Int,
-    skeys: Int,
-    lo: Float,
-    cell: float,
-    dims: Int,
-    gap: float,
-    rloc: float,
-    check: Bool,
-    moved: Bool,
-    all_moved: bool,
-    want_dmin: bool,
-    VN: Float,
-    FN: Float,
-    bad: Bool,
-    facing: Bool,
-    dmin: Float,
-) -> int:
-    """For each vertex p with check[p]: the faces whose centroid is in the
-    27 cells around p (cell ≥ gap + the largest face radius, so every face
-    within gap is among them). p's local patch (_patch) is skipped: a face
-    with a vertex in the patch is in it or at least rloc > gap away. A face
-    closer than gap marks p and its three vertices bad, and also `facing`
-    when the face's normal points against p's normal (two sheets that face
-    each other: a contact). Unless all_moved, a pair counts only if p or a
-    vertex of the face moved (pairs of still vertices did not change). The
-    patch is built only when a face is closer than gap (or want_dmin: then
-    dmin[p] = the distance to the nearest other part among the candidates,
-    inf if none). Returns the number of pairs."""
-    n = V.shape[0]
-    stamp = np.full(n, -1, np.int64)
-    ring = np.full(n, -1, np.int64)
-    queue = np.empty(n, np.int64)
-    npairs = 0
-    q = np.empty(3, np.int64)
-    for p in range(n):
-        if not check[p]:
-            continue
-        # p and its 1-ring: a face with one of these vertices that is closer
-        # than rloc is in p's patch, so pass 0 need not look at it
-        ring[p] = p
-        for k in range(vf_ptr[p], vf_ptr[p + 1]):
-            g = vf[k]
-            ring[F[g, 0]] = p
-            ring[F[g, 1]] = p
-            ring[F[g, 2]] = p
-        for a in range(3):
-            q[a] = int(np.floor((V[p, a] - lo[a]) / cell))
+def _check_kernel(
+    M: _Live,
+    K: _Marks,
+    cv: Int, addf: Int, Told: Float, full: bool, cross: bool, want_dmin: bool,
+) -> tuple[Int, Int, int, Int, int, int, Int, int, Int, Float]:  # fmt: skip
+    """The checks of the live mesh near an edit.
+
+    Changed faces: addf and the faces round the changed vertices cv. The
+    affected vertices: cv and every vertex closer than the patch radius
+    (rloc = 2 × gap) to a changed face (now) or to a triangle of Told (the
+    faces as they were): a vertex's local patch and its distances to faces
+    change only there. full: every vertex and face instead.
+
+    - the gap, at each affected vertex p: the faces closer than gap that are
+      not in p's local patch (a pair (p, face) counts once per vertex).
+    - cross (not with full): the intersecting pairs with a changed face
+      (mesh_intersect's pair test, pairs that share a vertex skipped), and
+      the shared-vertex folds round the vertices of the changed faces.
+    - creases: the edges of the changed faces whose two faces are folded
+      back past the cut-off (edges with one face, or more than two, are
+      left out).
+
+    Returns: bad vertices (gap or cross), facing vertices (gap pairs whose
+    normals are opposed), the number of gap pairs, the cross faces, the
+    numbers of intersecting pairs and of shared-vertex folds, the crease
+    faces and the number of creases, and the affected vertices with dmin
+    (want_dmin: the distance to the nearest face of another part among the
+    candidates, inf if none)."""
+    (
+        V,
+        F,
+        vhead,
+        cnext,
+        cprev,
+        fcell,
+        gnext,
+        gprev,
+        hkey,
+        hhead,
+        vfree,
+        ffree,
+        cnt,
+        prm,
+        lo,
+    ) = M
+    vA, vbad, vfac, vx, stamp, ring, queue, fC, fbad, fcr = K
+    cell, Rmax, gap, rloc, fold_cos = (
+        prm[_CELL],
+        prm[_RMAX],
+        prm[_GAP],
+        prm[_RLOC],
+        prm[_FOLD],
+    )
+    cnt[_MARK] += 1
+    m = cnt[_MARK]
+    # the changed faces
+    cf = [int(x) for x in range(0)]
+    if full:
+        for f in range(cnt[_NF]):
+            if F[f, 0] >= 0:
+                fC[f] = m
+                cf.append(f)
+    else:
+        for f in addf:
+            if F[f, 0] >= 0 and fC[f] != m:
+                fC[f] = m
+                cf.append(f)
+        for v in cv:
+            c = vhead[v]
+            while c >= 0:
+                g = c // 3
+                c = cnext[c]
+                if fC[g] != m:
+                    fC[g] = m
+                    cf.append(g)
+    # the affected vertices
+    av = [int(x) for x in range(0)]
+    if full:
+        for v in range(cnt[_NV]):
+            if vhead[v] >= 0:
+                vA[v] = m
+                av.append(v)
+    else:
+        for v in cv:
+            if vhead[v] >= 0 and vA[v] != m:
+                vA[v] = m
+                av.append(v)
+        nT = len(Told) + len(cf)
+        for t in range(nT):
+            if t < len(Told):
+                ax, ay, az = Told[t, 0, 0], Told[t, 0, 1], Told[t, 0, 2]
+                bx, by, bz = Told[t, 1, 0], Told[t, 1, 1], Told[t, 1, 2]
+                qx, qy, qz = Told[t, 2, 0], Told[t, 2, 1], Told[t, 2, 2]
+            else:
+                f = cf[t - len(Told)]
+                a, b, c = F[f, 0], F[f, 1], F[f, 2]
+                ax, ay, az = V[a, 0], V[a, 1], V[a, 2]
+                bx, by, bz = V[b, 0], V[b, 1], V[b, 2]
+                qx, qy, qz = V[c, 0], V[c, 1], V[c, 2]
+            ox, oy, oz = (
+                (ax + bx + qx) / 3.0,
+                (ay + by + qy) / 3.0,
+                (az + bz + qz) / 3.0,
+            )
+            r = 0.0
+            for px, py, pz in ((ax, ay, az), (bx, by, bz), (qx, qy, qz)):
+                r = max(r, np.sqrt((px - ox) ** 2 + (py - oy) ** 2 + (pz - oz) ** 2))
+            # a vertex within rloc of the triangle: one of its faces has its
+            # centroid within rloc + r + Rmax of the triangle's centroid
+            rad = int(np.ceil((rloc + r + Rmax) / cell))
+            i0, j0, k0 = _q(ox, lo[0], cell), _q(oy, lo[1], cell), _q(oz, lo[2], cell)
+            for i in range(max(i0 - rad, 0), min(i0 + rad, _KMAX) + 1):
+                for j in range(max(j0 - rad, 0), min(j0 + rad, _KMAX) + 1):
+                    for k in range(max(k0 - rad, 0), min(k0 + rad, _KMAX) + 1):
+                        key = _pack(i, j, k)
+                        s = _hslot(hkey, key)
+                        if hkey[s] != key:
+                            continue
+                        g = hhead[s]
+                        while g >= 0:
+                            for w in range(3):
+                                u = F[g, w]
+                                if vA[u] == m:
+                                    continue
+                                d = _ptd_xyz(
+                                    V[u, 0], V[u, 1], V[u, 2], ax, ay, az,
+                                    bx, by, bz, qx, qy, qz,
+                                )  # fmt: skip
+                                if d < rloc:
+                                    vA[u] = m
+                                    av.append(u)
+                            g = gnext[g]
+    # the gap at each affected vertex
+    bad = [int(x) for x in range(0)]
+    fac = [int(x) for x in range(0)]
+    dmin = np.full(len(av), np.inf)
+    ng = 0
+    radg = int(np.ceil((gap + Rmax) / cell))
+    for ip in range(len(av)):
+        p = av[ip]
+        cnt[_MARK] += 1
+        mp = cnt[_MARK]
+        ring[p] = mp
+        c = vhead[p]
+        while c >= 0:
+            g = c // 3
+            c = cnext[c]
+            ring[F[g, 0]] = mp
+            ring[F[g, 1]] = mp
+            ring[F[g, 2]] = mp
+        i0, j0, k0 = (
+            _q(V[p, 0], lo[0], cell),
+            _q(V[p, 1], lo[1], cell),
+            _q(V[p, 2], lo[2], cell),
+        )
         built = False
+        nx = 0.0
+        ny = 0.0
+        nz = 0.0
+        normal = False
         for _rep in range(2):  # pass 0: is any face near? pass 1: with the patch
             near = False
-            for di in range(-1, 2):
-                i0 = q[0] + di
-                if i0 < 0 or i0 >= dims[0]:
-                    continue
-                for dj in range(-1, 2):
-                    j0 = q[1] + dj
-                    if j0 < 0 or j0 >= dims[1]:
-                        continue
-                    for dk in range(-1, 2):
-                        k0 = q[2] + dk
-                        if k0 < 0 or k0 >= dims[2]:
+            for i in range(max(i0 - radg, 0), min(i0 + radg, _KMAX) + 1):
+                for j in range(max(j0 - radg, 0), min(j0 + radg, _KMAX) + 1):
+                    for k in range(max(k0 - radg, 0), min(k0 + radg, _KMAX) + 1):
+                        key = _pack(i, j, k)
+                        s = _hslot(hkey, key)
+                        if hkey[s] != key:
                             continue
-                        key = (i0 * dims[1] + j0) * dims[2] + k0
-                        s0 = np.searchsorted(skeys, key)
-                        s1 = np.searchsorted(skeys, key + 1)
-                        for t in range(s0, s1):
-                            f = order[t]
-                            a, b, c = F[f, 0], F[f, 1], F[f, 2]
-                            if a == p or b == p or c == p:
-                                continue
-                            if not all_moved and not (
-                                moved[p] or moved[a] or moved[b] or moved[c]
-                            ):
+                        f = hhead[s]
+                        while f >= 0:
+                            g = f
+                            f = gnext[f]
+                            a, b, cc = F[g, 0], F[g, 1], F[g, 2]
+                            if a == p or b == p or cc == p:
                                 continue
                             if built and (
-                                stamp[a] == p or stamp[b] == p or stamp[c] == p
+                                stamp[a] == mp or stamp[b] == mp or stamp[cc] == mp
                             ):
                                 continue
                             if (
                                 not built
                                 and not want_dmin
-                                and (ring[a] == p or ring[b] == p or ring[c] == p)
+                                and (ring[a] == mp or ring[b] == mp or ring[cc] == mp)
                             ):
                                 continue
-                            d = _ptd(V, p, a, b, c)
+                            d = _ptd(V, p, a, b, cc)
                             if not built:
                                 if d < gap or want_dmin:
                                     near = True
                                 continue
-                            if d < dmin[p]:
-                                dmin[p] = d
+                            if d < dmin[ip]:
+                                dmin[ip] = d
                             if d < gap:
-                                bad[p] = True
-                                bad[a] = True
-                                bad[b] = True
-                                bad[c] = True
+                                ng += 1
+                                for w in (p, a, b, cc):
+                                    if vbad[w] != m:
+                                        vbad[w] = m
+                                        bad.append(w)
+                                if not normal:
+                                    cc2 = vhead[p]
+                                    while cc2 >= 0:
+                                        h = cc2 // 3
+                                        cc2 = cnext[cc2]
+                                        e0, e1, e2 = F[h, 0], F[h, 1], F[h, 2]
+                                        ux = V[e1, 0] - V[e0, 0]
+                                        uy = V[e1, 1] - V[e0, 1]
+                                        uz = V[e1, 2] - V[e0, 2]
+                                        wx = V[e2, 0] - V[e0, 0]
+                                        wy = V[e2, 1] - V[e0, 1]
+                                        wz = V[e2, 2] - V[e0, 2]
+                                        nx += uy * wz - uz * wy
+                                        ny += uz * wx - ux * wz
+                                        nz += ux * wy - uy * wx
+                                    normal = True
+                                ux = V[b, 0] - V[a, 0]
+                                uy = V[b, 1] - V[a, 1]
+                                uz = V[b, 2] - V[a, 2]
+                                wx = V[cc, 0] - V[a, 0]
+                                wy = V[cc, 1] - V[a, 1]
+                                wz = V[cc, 2] - V[a, 2]
                                 dot = (
-                                    VN[p, 0] * FN[f, 0]
-                                    + VN[p, 1] * FN[f, 1]
-                                    + VN[p, 2] * FN[f, 2]
+                                    nx * (uy * wz - uz * wy)
+                                    + ny * (uz * wx - ux * wz)
+                                    + nz * (ux * wy - uy * wx)
                                 )
                                 if dot < 0:
-                                    facing[p] = True
-                                    facing[a] = True
-                                    facing[b] = True
-                                    facing[c] = True
-                                npairs += 1
+                                    for w in (p, a, b, cc):
+                                        if vfac[w] != m:
+                                            vfac[w] = m
+                                            fac.append(w)
             if built or not near:
                 break
-            _patch(p, V, F, vf_ptr, vf, rloc, stamp, queue)
+            _patch(p, V, F, vhead, cnext, rloc, stamp, mp, queue)
             built = True
-    return npairs
-
-
-@njit(cache=True)
-def _tri_kernel(
-    T: Float,
-    F: Int,
-    order: Int,
-    skeys: Int,
-    lo: Float,
-    cell: float,
-    dims: Int,
-    rad: int,
-    fchg: Bool,
-    all_chg: bool,
-    out: Bool,
-) -> int:
-    """Intersecting face pairs (mesh_intersect's pair test _tt, rel_tol
-    1e-4; pairs that share a vertex are skipped, as in
-    mesh_intersect.intersecting_faces) with at least one changed face
-    (all_chg: every pair). Candidates: faces whose grid centroid is within
-    rad cells of the face's centroid (rad × cell ≥ twice the largest face
-    radius + the largest move since the grid was built). Marks both faces in
-    out; returns the number of pairs."""
-    n = 0
-    for f in range(F.shape[0]):
-        if not (all_chg or fchg[f]):
-            continue
-        cx = (T[f, 0, 0] + T[f, 1, 0] + T[f, 2, 0]) / 3.0
-        cy = (T[f, 0, 1] + T[f, 1, 1] + T[f, 2, 1]) / 3.0
-        cz = (T[f, 0, 2] + T[f, 1, 2] + T[f, 2, 2]) / 3.0
-        q0 = int(np.floor((cx - lo[0]) / cell))
-        q1 = int(np.floor((cy - lo[1]) / cell))
-        q2 = int(np.floor((cz - lo[2]) / cell))
-        for i0 in range(q0 - rad, q0 + rad + 1):
-            if i0 < 0 or i0 >= dims[0]:
-                continue
-            for j0 in range(q1 - rad, q1 + rad + 1):
-                if j0 < 0 or j0 >= dims[1]:
+    # crossings and shared-vertex folds
+    xf = [int(x) for x in range(0)]
+    ni = 0
+    nf = 0
+    if cross:
+        A = np.empty((1, 3, 3))
+        B = np.empty((1, 3, 3))
+        radt = int(np.ceil(2 * Rmax / cell))
+        for f in cf:
+            for w in range(3):
+                A[0, w] = V[F[f, w]]
+            ox, oy, oz = _centre(V, F, f)
+            i0, j0, k0 = _q(ox, lo[0], cell), _q(oy, lo[1], cell), _q(oz, lo[2], cell)
+            for i in range(max(i0 - radt, 0), min(i0 + radt, _KMAX) + 1):
+                for j in range(max(j0 - radt, 0), min(j0 + radt, _KMAX) + 1):
+                    for k in range(max(k0 - radt, 0), min(k0 + radt, _KMAX) + 1):
+                        key = _pack(i, j, k)
+                        s = _hslot(hkey, key)
+                        if hkey[s] != key:
+                            continue
+                        g = hhead[s]
+                        while g >= 0:
+                            h = g
+                            g = gnext[g]
+                            if h == f or (fC[h] == m and h < f):
+                                continue  # each pair once
+                            sh = False
+                            for a in range(3):
+                                for b in range(3):
+                                    if F[f, a] == F[h, b]:
+                                        sh = True
+                            if sh:
+                                continue
+                            ov = True
+                            for a in range(3):
+                                flo = min(A[0, 0, a], A[0, 1, a], A[0, 2, a])
+                                fhi = max(A[0, 0, a], A[0, 1, a], A[0, 2, a])
+                                glo = min(V[F[h, 0], a], V[F[h, 1], a], V[F[h, 2], a])
+                                ghi = max(V[F[h, 0], a], V[F[h, 1], a], V[F[h, 2], a])
+                                if fhi < glo or ghi < flo:
+                                    ov = False
+                            if not ov:
+                                continue
+                            for w in range(3):
+                                B[0, w] = V[F[h, w]]
+                            if MI._tt(A, 0, B, 0, 1e-4):
+                                ni += 1
+                                for e in (f, h):
+                                    if fbad[e] != m:
+                                        fbad[e] = m
+                                        xf.append(e)
+        # shared-vertex folds round the vertices of the changed faces
+        for f in cf:
+            for w in range(3):
+                x = F[f, w]
+                if vx[x] == m:
                     continue
-                for k0 in range(q2 - rad, q2 + rad + 1):
-                    if k0 < 0 or k0 >= dims[2]:
-                        continue
-                    key = (i0 * dims[1] + j0) * dims[2] + k0
-                    s0 = np.searchsorted(skeys, key)
-                    s1 = np.searchsorted(skeys, key + 1)
-                    for t in range(s0, s1):
-                        g = order[t]
-                        if g == f:
+                vx[x] = m
+                ci = vhead[x]
+                while ci >= 0:
+                    fi = ci // 3
+                    cj = cnext[ci]
+                    while cj >= 0:
+                        gj = cj // 3
+                        cj = cnext[cj]
+                        shared = 0
+                        for k in range(3):
+                            for k2 in range(3):
+                                if F[fi, k] == F[gj, k2]:
+                                    shared += 1
+                        if shared != 1:
                             continue
-                        if (all_chg or fchg[g]) and g < f:
-                            continue  # each pair once
-                        sh = False
-                        for a in range(3):
-                            for b in range(3):
-                                if F[f, a] == F[g, b]:
-                                    sh = True
-                        if sh:
-                            continue
-                        ov = True
-                        for a in range(3):
-                            flo = min(T[f, 0, a], T[f, 1, a], T[f, 2, a])
-                            fhi = max(T[f, 0, a], T[f, 1, a], T[f, 2, a])
-                            glo = min(T[g, 0, a], T[g, 1, a], T[g, 2, a])
-                            ghi = max(T[g, 0, a], T[g, 1, a], T[g, 2, a])
-                            if fhi < glo or ghi < flo:
-                                ov = False
-                        if not ov:
-                            continue
-                        if MI._tt(T, f, T, g, 1e-4):
-                            out[f] = True
-                            out[g] = True
-                            n += 1
-    return n
+                        k = 0
+                        while F[fi, k] != x:
+                            k += 1
+                        f0, f1 = F[fi, (k + 1) % 3], F[fi, (k + 2) % 3]
+                        k = 0
+                        while F[gj, k] != x:
+                            k += 1
+                        g0, g1 = F[gj, (k + 1) % 3], F[gj, (k + 2) % 3]
+                        hit = _seg_tri(V, f0, f1, F[gj, 0], F[gj, 1], F[gj, 2], SEG_TOL)
+                        if not hit:
+                            hit = _seg_tri(
+                                V, g0, g1, F[fi, 0], F[fi, 1], F[fi, 2], SEG_TOL
+                            )
+                        if hit:
+                            nf += 1
+                            for e in (fi, gj):
+                                if fbad[e] != m:
+                                    fbad[e] = m
+                                    xf.append(e)
+                    ci = cnext[ci]
+        for e in xf:
+            for w in range(3):
+                u = F[e, w]
+                if vbad[u] != m:
+                    vbad[u] = m
+                    bad.append(u)
+    # creases on the edges of the changed faces
+    crf = [int(x) for x in range(0)]
+    ncr = 0
+    for f in cf:
+        for w in range(3):
+            a, b = F[f, w], F[f, (w + 1) % 3]
+            other = -1
+            nface = 1
+            c = vhead[a]
+            while c >= 0:
+                h = c // 3
+                c = cnext[c]
+                if h == f:
+                    continue
+                if F[h, 0] == b or F[h, 1] == b or F[h, 2] == b:
+                    nface += 1
+                    other = h
+            if nface != 2 or (fC[other] == m and other < f):
+                continue
+            # the two normals (cross products)
+            e0, e1, e2 = F[f, 0], F[f, 1], F[f, 2]
+            ux, uy, uz = V[e1, 0] - V[e0, 0], V[e1, 1] - V[e0, 1], V[e1, 2] - V[e0, 2]
+            wx, wy, wz = V[e2, 0] - V[e0, 0], V[e2, 1] - V[e0, 1], V[e2, 2] - V[e0, 2]
+            n0, n1, n2 = uy * wz - uz * wy, uz * wx - ux * wz, ux * wy - uy * wx
+            e0, e1, e2 = F[other, 0], F[other, 1], F[other, 2]
+            ux, uy, uz = V[e1, 0] - V[e0, 0], V[e1, 1] - V[e0, 1], V[e1, 2] - V[e0, 2]
+            wx, wy, wz = V[e2, 0] - V[e0, 0], V[e2, 1] - V[e0, 1], V[e2, 2] - V[e0, 2]
+            m0, m1, m2 = uy * wz - uz * wy, uz * wx - ux * wz, ux * wy - uy * wx
+            den = np.sqrt(n0 * n0 + n1 * n1 + n2 * n2) * np.sqrt(
+                m0 * m0 + m1 * m1 + m2 * m2
+            )
+            if den > 0 and n0 * m0 + n1 * m1 + n2 * m2 <= fold_cos * den:
+                ncr += 1
+                for e in (f, other):
+                    if fcr[e] != m:
+                        fcr[e] = m
+                        crf.append(e)
+    out_bad = np.empty(len(bad), np.int64)
+    for i in range(len(bad)):
+        out_bad[i] = bad[i]
+    out_fac = np.empty(len(fac), np.int64)
+    for i in range(len(fac)):
+        out_fac[i] = fac[i]
+    out_xf = np.empty(len(xf), np.int64)
+    for i in range(len(xf)):
+        out_xf[i] = xf[i]
+    out_cr = np.empty(len(crf), np.int64)
+    for i in range(len(crf)):
+        out_cr[i] = crf[i]
+    out_av = np.empty(len(av), np.int64)
+    for i in range(len(av)):
+        out_av[i] = av[i]
+    return out_bad, out_fac, ng, out_xf, ni, nf, out_cr, ncr, out_av, dmin
+
+
+@dataclass
+class EditCheck:
+    """The checks near one edit (Checker.propose). Vertex and face ids are
+    the Checker's own (see Checker.V and Checker.F)."""
+
+    #: vertices in a gap violation or on a crossing or shared-vertex fold
+    bad: Int
+    #: vertices of gap violations between sheets that face each other
+    facing: Int
+    gap_pairs: int
+    #: faces in a crossing or a shared-vertex fold
+    cross_faces: Int
+    intersecting_pairs: int
+    vertex_fold_pairs: int
+    #: faces at a crease (shared-edge fold) on an edge of a changed face
+    crease_faces: Int
+    creases: int
+    #: the affected vertices (the gap was checked there) and their dmin
+    affected: Int
+    dmin: Float
+    #: the ids the edit gave to its new vertices and faces
+    new_vertices: Int
+    new_faces: Int
+
+    @property
+    def ok(self) -> bool:
+        """No violation of any check."""
+        return not (
+            self.gap_pairs
+            or self.intersecting_pairs
+            or self.vertex_fold_pairs
+            or self.creases
+        )
+
+
+def _grow[T: np.generic](a: npt.NDArray[T], n: int, fill: float) -> npt.NDArray[T]:
+    """a with its first axis at least n long (doubled), new rows = fill."""
+    if len(a) >= n:
+        return a
+    out: npt.NDArray[T] = np.full((max(n, 2 * len(a)), *a.shape[1:]), fill, a.dtype)
+    out[: len(a)] = a
+    return out
 
 
 class Checker:
-    """The gap, intersection and shared-vertex fold checks for one mesh
-    topology, with one face grid (centroids, cell = gap + the largest face
-    radius + slack) reused while the vertices move: a check at new positions
-    is exact while gap + the largest face radius + the largest move since
-    the grid was built ≤ cell (else the grid is built again at the new
-    positions)."""
+    """The gap, crossing, shared-vertex fold and crease checks of a mesh
+    that changes by local edits: moved vertices, and faces and vertices
+    added and removed. The Checker owns a live copy of the mesh (V, F, the
+    faces round each vertex, a hashed grid of the face centroids) and keeps
+    it current, so each check costs O(the faces near the edit), not O(n).
 
-    def __init__(self, top: Topology, V: Float, gap: float, slack: float = 0.0):
-        self.top, self.gap, self.slack = top, gap, slack
-        self._build(V)
+    An edit is tentative: propose() makes it and checks it, then commit()
+    keeps it or rollback() undoes it. check(V, changed) keeps the interface
+    of a fixed topology (positions in, masks out)."""
 
-    def _build(self, V: Float) -> None:
-        T = V[self.top.F]
+    def __init__(
+        self,
+        top: Topology,
+        V: Float,
+        gap: float,
+        slack: float = 0.0,
+        fold_cos: float = FOLD_COS,
+    ):
+        n, nf = len(V), len(top.F)
+        self.gap, self.slack = gap, slack
+        self._V: Float = np.full((n + n // 4 + 16, 3), np.nan)
+        self._V[:n] = V
+        self._F: Int = np.full((nf + nf // 4 + 16, 3), -1, np.int64)
+        self._F[:nf] = top.F
+        self._cnt: Int = np.array([n, nf, 0, 0, 0, 0], np.int64)
+        self._prm: Float = np.array([0.0, 0.0, gap, 2 * gap, fold_cos])
+        self._vfree: Int = np.zeros(len(self._V), np.int64)
+        self._ffree: Int = np.zeros(len(self._F), np.int64)
+        self._vhead: Int = np.full(len(self._V), -1, np.int64)
+        self._cnext: Int = np.full(3 * len(self._F), -1, np.int64)
+        self._cprev: Int = np.full(3 * len(self._F), -1, np.int64)
+        self._fcell: Int = np.full(len(self._F), -1, np.int64)
+        self._gnext: Int = np.full(len(self._F), -1, np.int64)
+        self._gprev: Int = np.full(len(self._F), -1, np.int64)
+        self._vmarks: list[Int] = [np.zeros(len(self._V), np.int64) for _ in range(7)]
+        self._fmarks: list[Int] = [np.zeros(len(self._F), np.int64) for _ in range(3)]
+        self._pending: tuple[Int, Float, Int, Int, Int, Int] | None = None
+        self._corners = False
+        self.rebuild()
+
+    # ---------------------------------------------------------- state
+
+    def _M(self) -> _Live:
+        return (
+            self._V, self._F, self._vhead, self._cnext, self._cprev, self._fcell,
+            self._gnext, self._gprev, self._hkey, self._hhead, self._vfree,
+            self._ffree, self._cnt, self._prm, self._lo,
+        )  # fmt: skip
+
+    def _K(self) -> _Marks:
+        return (*self._vmarks, *self._fmarks)  # type: ignore[return-value]
+
+    @property
+    def V(self) -> Float:
+        """The live positions (rows of free vertices are NaN)."""
+        return self._V[: self._cnt[_NV]]
+
+    @property
+    def F(self) -> Int:
+        """The live faces (rows of free faces are -1)."""
+        return self._F[: self._cnt[_NF]]
+
+    @property
+    def cell(self) -> float:
+        return float(self._prm[_CELL])
+
+    def faces_of(self, v: int) -> Int:
+        """The faces round vertex v."""
+        out = []
+        c = int(self._vhead[v])
+        while c >= 0:
+            out.append(c // 3)
+            c = int(self._cnext[c])
+        return np.array(out, np.int64)
+
+    def rebuild(self, links: int = 0) -> None:
+        """The grid again from the live faces: cell = gap + the largest face
+        radius + slack, a hash table of at least four slots per face and per
+        grid link to come."""
+        nf = int(self._cnt[_NF])
+        live = self._F[:nf, 0] >= 0
+        Fl = self._F[:nf][live]
+        T = self._V[Fl]
         C = T.mean(1)
-        R = float(np.sqrt(((T - C[:, None]) ** 2).sum(-1)).max())
-        self.V0 = V.copy()
-        self.cell = cell = self.gap + R + self.slack
-        self.lo: Float = C.min(0) - cell
-        self.dims: Int = (np.floor((C.max(0) + cell - self.lo) / cell) + 1).astype(
-            np.int64
+        R = float(np.sqrt(((T - C[:, None]) ** 2).sum(-1)).max()) if len(Fl) else 0.0
+        cell = self.gap + R + self.slack
+        self._prm[_CELL] = cell if cell > 0 else 1.0
+        self._prm[_RMAX] = R
+        self._lo = (C.min(0) if len(Fl) else np.zeros(3)) - self._prm[_CELL]
+        H = 1 << max(4, int(np.ceil(np.log2(4 * max(len(Fl) + links, 1)))))
+        self._hkey = np.full(H, -1, np.int64)
+        self._hhead = np.full(H, -1, np.int64)
+        self._cnt[_HUSED] = 0
+        _link_all(
+            self._V, self._F, self._vhead, self._cnext, self._cprev, self._fcell,
+            self._gnext, self._gprev, self._hkey, self._hhead, self._cnt,
+            self._prm, self._lo, not self._corners,
+        )  # fmt: skip
+        self._corners = True
+
+    def _reserve(self, nv: int, nf: int, links: int) -> None:
+        """Room for nv new vertices, nf new faces and `links` grid links."""
+        if self._cnt[_NVFREE] < nv:
+            need = int(self._cnt[_NV]) + nv
+            if need > len(self._V):
+                self._V = _grow(self._V, need, np.nan)
+                n = len(self._V)
+                self._vfree = _grow(self._vfree, n, 0)
+                self._vhead = _grow(self._vhead, n, -1)
+                self._vmarks = [_grow(a, n, 0) for a in self._vmarks]
+        if self._cnt[_NFFREE] < nf:
+            need = int(self._cnt[_NF]) + nf
+            if need > len(self._F):
+                self._F = _grow(self._F, need, -1)
+                n = len(self._F)
+                self._ffree = _grow(self._ffree, n, 0)
+                self._fcell = _grow(self._fcell, n, -1)
+                self._gnext = _grow(self._gnext, n, -1)
+                self._gprev = _grow(self._gprev, n, -1)
+                self._cnext = _grow(self._cnext, 3 * n, -1)
+                self._cprev = _grow(self._cprev, 3 * n, -1)
+                self._fmarks = [_grow(a, n, 0) for a in self._fmarks]
+        if 2 * (int(self._cnt[_HUSED]) + links) > len(self._hkey):
+            self.rebuild(links)
+
+    # ---------------------------------------------------------- edits
+
+    def propose(
+        self,
+        move: npt.ArrayLike | None = None,
+        to: npt.ArrayLike | None = None,
+        remove_faces: npt.ArrayLike | None = None,
+        add_faces: npt.ArrayLike | None = None,
+        add_vertices: npt.ArrayLike | None = None,
+        want_dmin: bool = False,
+    ) -> EditCheck:
+        """Make an edit and check it; commit() keeps it, rollback() undoes
+        it. In this order: add_vertices (positions) become new vertices,
+        remove_faces go, the vertices `move` go to `to`, add_faces come (a
+        vertex -1 - j in add_faces is new vertex j). A vertex left with no
+        face is freed at commit."""
+        if self._pending is not None:
+            raise RuntimeError("an edit is pending: commit() or rollback() first")
+        mv = np.asarray([] if move is None else move, np.int64).ravel()
+        P = np.asarray(np.zeros((0, 3)) if to is None else to, np.float64).reshape(
+            -1, 3
         )
-        key = _cells(C, self.lo, cell, self.dims)
-        self.order: Int = np.argsort(key, kind="stable").astype(np.int64)
-        self.skeys: Int = key[self.order]
+        rm = np.asarray([] if remove_faces is None else remove_faces, np.int64).ravel()
+        add = np.asarray(np.zeros((0, 3)) if add_faces is None else add_faces, np.int64)
+        add = add.reshape(-1, 3)
+        addv = np.asarray(
+            np.zeros((0, 3)) if add_vertices is None else add_vertices, np.float64
+        ).reshape(-1, 3)
+        if len(P) != len(mv):
+            raise ValueError("move and to differ in length")
+        self._reserve(
+            len(addv),
+            len(add),
+            len(add) + _links_of(self._F, self._vhead, self._cnext, mv),
+        )
+        newv, newf, old, rows, Told = _apply(self._M(), mv, P, rm, add, addv)
+        self._pending = (mv, old, rm, rows, newv, newf)
+        cv = np.r_[mv, newv]
+        return self._run(cv, newf, Told, False, True, want_dmin, newv, newf)
 
-    def _ready(self, V: Float) -> tuple[Float, int]:
-        T = V[self.top.F]
-        C = T.mean(1)
-        R = float(np.sqrt(((T - C[:, None]) ** 2).sum(-1)).max())
-        dmax = float(np.sqrt(((V - self.V0) ** 2).sum(1)).max()) if len(V) else 0.0
-        if self.gap + R + dmax > self.cell:
-            self._build(V)
-            dmax = 0.0
-        rad = int(np.ceil((2 * R + dmax) / self.cell))
-        return T, max(rad, 1)
+    def _run(
+        self, cv: Int, addf: Int, Told: Float, full: bool, cross: bool,
+        want_dmin: bool, newv: Int, newf: Int,
+    ) -> EditCheck:  # fmt: skip
+        r = _check_kernel(self._M(), self._K(), cv, addf, Told, full, cross, want_dmin)
+        bad, fac, ng, xf, ni, nf, crf, ncr, av, dmin = r
+        return EditCheck(bad, fac, ng, xf, ni, nf, crf, ncr, av, dmin, newv, newf)
 
-    def near(self, V: Float, changed: Bool) -> Bool:
-        """Vertices whose cell is within two cells of a changed vertex's
-        cell: every vertex closer than 2 × cell ≥ gap + an edge length to a
-        changed vertex, so every vertex within gap of a changed face."""
-        keys = _cells(V, self.lo, self.cell, self.dims)
-        q = np.floor((V[changed] - self.lo) / self.cell).astype(np.int64)
-        r = range(-2, 3)
-        off = np.array([(a, b, c) for a in r for b in r for c in r])
-        Q = (q[:, None, :] + off[None]).reshape(-1, 3)
-        Q = Q[np.all((Q >= 0) & (Q < self.dims), 1)]
-        mk = np.unique((Q[:, 0] * self.dims[1] + Q[:, 1]) * self.dims[2] + Q[:, 2])
-        if not len(mk):
-            return np.zeros(len(V), bool)
-        pos = np.clip(np.searchsorted(mk, keys), 0, len(mk) - 1)
-        out: Bool = (keys >= 0) & (mk[pos] == keys)
-        return out
+    def commit(self) -> Int:
+        """Keep the pending edit. Returns the vertices it freed."""
+        if self._pending is None:
+            raise RuntimeError("no edit is pending")
+        mv, old, rm, rows, newv, newf = self._pending
+        self._pending = None
+        freed = _settle(self._M(), rm, rows, newv)
+        if self.gap + self._prm[_RMAX] > 2 * self._prm[_CELL]:
+            self.rebuild()  # the faces grew: a larger cell
+        return freed
+
+    def rollback(self) -> None:
+        """Undo the pending edit."""
+        if self._pending is None:
+            raise RuntimeError("no edit is pending")
+        mv, old, rm, rows, newv, newf = self._pending
+        self._pending = None
+        _undo(self._M(), mv, old, rm, rows, newv, newf)
+
+    def check_all(self, want_dmin: bool = False) -> EditCheck:
+        """Every check on the whole live mesh (the crossings and folds with
+        mesh_intersect's own grid and shared_vertex_folds)."""
+        e = np.zeros(0, np.int64)
+        r = self._run(e, e, np.zeros((0, 3, 3)), True, False, want_dmin, e, e)
+        F = self.F
+        live = np.flatnonzero(F[:, 0] >= 0)
+        Fl = F[live]
+        V = np.where(np.isnan(self.V), 0.0, self.V)
+        im, ni = MI.intersecting_faces(V, Fl)
+        vm, nf = shared_vertex_folds(V, Fl)
+        xf = live[im | vm]
+        r.cross_faces, r.intersecting_pairs, r.vertex_fold_pairs = xf, int(ni), int(nf)
+        r.bad = np.union1d(r.bad, F[xf].ravel())
+        return r
+
+    # ---------------------------------------------------------- fixed topology
 
     def check(
         self,
@@ -683,47 +1437,67 @@ class Checker:
         facing: Bool | None = None,
         want_dmin: bool = False,
     ) -> tuple[Bool, int, int, Float]:
-        """Vertices in a gap violation or on an intersecting face (or a
-        shared-vertex fold), the numbers of gap pairs and of intersecting
-        pairs (folds included), and dmin (see gap_check). With `changed`,
-        only the pairs with a changed vertex are tested: exact for the new
-        violations when the other vertices did not move since a check that
-        found none among them. `facing` (if given) is set True at the
-        vertices of gap violations between sheets that face each other."""
-        t = self.top
-        T, rad = self._ready(V)
+        """For a fixed topology: the checks at positions V (all n vertices).
+        Vertices that differ from the live copy but are not in `changed` are
+        taken as they are (they passed an earlier check); then the changed
+        vertices are moved, checked, and moved back. Returns a mask of the
+        vertices in a gap violation or on a crossing or shared-vertex fold,
+        the numbers of gap pairs (at the affected vertices) and of crossing
+        pairs (folds included), and dmin (want_dmin; inf elsewhere).
+        `facing` (if given) is set True at the vertices of gap violations
+        between sheets that face each other. Without `changed`, or when more
+        than LOCAL_SHARE of the vertices changed, the whole mesh is checked
+        (faster then). Costs O(n) for the comparison and the masks; use
+        propose() for O(the edit)."""
         n = len(V)
-        allc = changed is None
-        chg = np.ones(n, bool) if changed is None else changed
-        # when most vertices changed, the whole-mesh paths are faster (the
-        # extra pairs among unchanged vertices only add to `bad` there, which
-        # the callers mask with the changed vertices)
-        wide = allc or float(chg.mean()) > LOCAL_SHARE
-        chk = np.ones(n, bool) if wide else self.near(V, chg)
+        if self._pending is not None:
+            raise RuntimeError("an edit is pending: commit() or rollback() first")
+        if n != self._cnt[_NV] or self._cnt[_NVFREE] or self._cnt[_NFFREE]:
+            raise ValueError("check() needs the Checker's original vertices and faces")
+        Vf = np.asarray(V, np.float64)
+        diff = (Vf != self._V[:n]).any(1)
+        chg = np.zeros(n, bool) if changed is None else np.asarray(changed, bool)
+        quiet = np.flatnonzero(diff & ~chg)
+        e, e3, p3 = np.zeros(0, np.int64), np.zeros((0, 3), np.int64), np.zeros((0, 3))
+        if len(quiet):  # earlier moves that the caller kept: no check
+            self._reserve(0, 0, _links_of(self._F, self._vhead, self._cnext, quiet))
+            _apply(self._M(), quiet, Vf[quiet], e, e3, p3)
+        mv = np.flatnonzero(chg) if changed is not None else np.zeros(0, np.int64)
+        wide = changed is None or float(chg.mean()) > LOCAL_SHARE
+        if wide:
+            mv = (
+                np.flatnonzero(diff & chg)
+                if changed is not None
+                else np.zeros(0, np.int64)
+            )
+        self._reserve(0, 0, _links_of(self._F, self._vhead, self._cnext, mv))
+        _, _, old, _, Told = _apply(self._M(), mv, Vf[mv], e, e3, p3)
+        try:
+            if wide:
+                r = self.check_all(want_dmin)
+            else:
+                r = self._run(mv, e, Told, False, True, want_dmin, e, e)
+        finally:
+            _undo(self._M(), mv, old, e, e3, e, e)
+        if self.gap + self._prm[_RMAX] > 2 * self._prm[_CELL]:
+            self.rebuild()
         bad = np.zeros(n, bool)
-        fac = np.zeros(n, bool) if facing is None else facing
+        bad[r.bad] = True
+        if facing is not None:
+            facing[r.facing] = True
         dmin = np.full(n, np.inf)
-        VN = vertex_normals(V, t.F)
-        FN = np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0])
-        ng = _gap_kernel(
-            V, t.F, t.vf_ptr, t.vf, self.order, self.skeys, self.lo, self.cell,
-            self.dims, self.gap, 2 * self.gap, chk, chg, allc, want_dmin, VN, FN,
-            bad, fac, dmin,
-        )  # fmt: skip
-        if wide:  # mesh_intersect's own box grid is faster for many faces
-            fm, ni = MI.intersecting_faces(V, t.F)
-        else:
-            fm = np.zeros(len(t.F), bool)
-            ni = _tri_kernel(
-                np.ascontiguousarray(T), t.F, self.order, self.skeys, self.lo,
-                self.cell, self.dims, rad, chg[t.F].any(1), False, fm,
-            )  # fmt: skip
-        fo, nf = shared_vertex_folds(V, t.F, t, None if allc else chg)
-        fm |= fo
-        ni += nf
-        if ni:
-            bad[t.F[fm].ravel()] = True
-        return bad, ng, ni, dmin
+        dmin[r.affected] = r.dmin
+        return bad, r.gap_pairs, r.intersecting_pairs + r.vertex_fold_pairs, dmin
+
+    def export(self) -> tuple[Float, Int, Int]:
+        """The live mesh compacted: positions, faces, and for each old
+        vertex id its new id (-1 if free)."""
+        F = self.F[self.F[:, 0] >= 0]
+        used = np.zeros(len(self.V), bool)
+        used[F.ravel()] = True
+        new = np.full(len(self.V), -1, np.int64)
+        new[used] = np.arange(int(used.sum()))
+        return self.V[used].copy(), new[F], new
 
 
 def gap_check(
@@ -740,18 +1514,16 @@ def gap_check(
     want_dmin). `facing` is set True at the vertices of the violations
     between sheets that face each other (normals opposed)."""
     c = Checker(top, V, gap)
-    T = V[top.F]
+    e = np.zeros(0, np.int64)
+    r = c._run(e, e, np.zeros((0, 3, 3)), True, False, want_dmin, e, e)
     n = len(V)
     bad = np.zeros(n, bool)
-    fac = np.zeros(n, bool) if facing is None else facing
+    bad[r.bad] = True
+    if facing is not None:
+        facing[r.facing] = True
     dmin = np.full(n, np.inf)
-    one = np.ones(n, bool)
-    ng = _gap_kernel(
-        V, top.F, top.vf_ptr, top.vf, c.order, c.skeys, c.lo, c.cell, c.dims, gap,
-        2 * gap, one, one, True, want_dmin, vertex_normals(V, top.F),
-        np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]), bad, fac, dmin,
-    )  # fmt: skip
-    return bad, ng, dmin
+    dmin[r.affected] = r.dmin
+    return bad, r.gap_pairs, dmin
 
 
 # ------------------------------------------------------------ all checks
