@@ -72,9 +72,16 @@ next to it. A T5 run with the new stencil is in progress (`t5-sw/`).
    with the old stencil. With the new stencil, the bias is still in the
    terms, but from offset 0 to 4 h the thickness pressure outweighs it
    (finding 7). The tissue terms grow from 559 to 14,642 as the domain
-   grows from 14,612 to 54,216 slots. The columns are still thin: the
-   median thickness at 4 h is 0.57 mm, against a prior median of 2.7 mm.
-   Whether the bias holds the thickness down there is not measured. The
+   grows from 14,612 to 54,216 slots. The median thickness at 4 h is
+   0.57 mm. That is about what the geometry gives: h is the voxel edge
+   (0.16 mm), so 4 h moves Σ only 0.64 mm out of the white surface, and
+   the columns can not be near the prior median of 2.7 mm yet. The
+   solved τ is close to a distance: the median |∇τ| at the voxels with a
+   central difference on every axis is 0.97, 1.11, 1.26, 1.26, 1.09 and
+   0.90 at 0, 0.25, 0.5, 1, 2 and 4 h (p10–p90 at 4 h: 0.59–1.07). So
+   at 4 h τ is compressed by about 10 % at the median. Part of that may
+   be the bias. Whether it grows as Σ moves farther out is not measured.
+   The
    lagged 1/|∇τ| weights (c5b0066, off) still diverge at 0.25 h: inside
    one round, a small patch next to Σ goes flat (|∇τ| ≈ 5 × 10⁻⁵), and
    the weight of the next round explodes. They are not needed to pass
