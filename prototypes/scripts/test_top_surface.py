@@ -1,7 +1,7 @@
 """Tests of the Σ start (top_surface.py) on small synthetic label arrays and
 meshes: the remeshing, the fold rule ("reference + dihedral"), and the
-start on a slab (stops at label 0), on two facing sheets (stop at the gap,
-no intersection: a first contact), in a narrow valley (no new fold), and at
+start on a slab (stops at label 0), on two facing sheets (they stop at the
+gap with no intersection, and the geometry gives a contact), in a narrow valley (no new fold), and at
 a zero-thickness face. The checks themselves are tested in
 tests/test_mesh_checks.py."""
 
@@ -89,8 +89,10 @@ def test_start_on_a_slab_stops_at_label_0() -> None:
 
 def test_start_two_sheets_stop_at_the_gap() -> None:
     """Two sheets facing each other in cortex, no label 0 between them: they
-    stop at the gap (h/4) as BLOCKED, the first contacts, with no
-    intersection."""
+    stop at the gap (h/4) with no intersection, the start ends because no
+    vertex takes a step, the inner vertices are still MOVING (there is no
+    contact state) and the measured contacts cover them: a facing sheet
+    within the gap plus one step, no voxel centre between, held at the end."""
     lab = np.full((14, 14, 20), TP.CORTEX, np.int16)
     lab[..., :5] = TP.WM
     lab[..., 15:] = TP.WM
@@ -105,7 +107,12 @@ def test_start_two_sheets_stop_at_the_gap() -> None:
     assert ng == 0
     assert MI.intersecting_faces(m.V, m.F)[1] == 0
     inner = ~m.boundary
-    assert (m.state[inner] == TS.BLOCKED).mean() > 0.9
+    assert run.ended == "no step"
+    assert (m.state[inner] == TS.MOVING).all()
+    c = run.contacts
+    assert c["contact"][inner].mean() > 0.9
+    assert (c["facing_mm"][inner & c["contact"]] < 2 * gap + 0.25 * H + 1e-9).all()
+    assert (m.held[inner & c["contact"]] >= 1).all()
     # they stopped close to the gap: within one step (h/4) above it
     d = dmin[inner & np.isfinite(dmin)]
     assert d.min() >= gap and np.median(d) < gap + 0.25 * H + 1e-9
@@ -134,8 +141,8 @@ def test_wm_pass_through_and_limit() -> None:
 
 def test_refused_but_not_facing_retries() -> None:
     """Two sheets side by side with the same normal (not facing): a move
-    that breaks the gap is refused, but the vertex is not BLOCKED (no
-    contact)."""
+    that breaks the gap is refused, the vertex stays MOVING with held = 1,
+    and the geometry finds no contact (no facing sheet)."""
     lab = np.full((14, 14, 20), TP.CORTEX, np.int16)
     lab[..., 17:] = 0
     v1, f1 = grid_sheet(6, 4.6, True)
@@ -145,8 +152,26 @@ def test_refused_but_not_facing_retries() -> None:
     m = TS.start_mesh(site_of(lab, v, f))
     chk = MC.Checker(m.top, m.V, 0.25 * H, slack=0.25 * H)
     disp, info = TS.expand_step(m, site_of(lab, v, f), TS.StartSettings(), H, chk)
-    assert info["refused"] > 0 and info["blocked"] == 0
-    assert not (m.state == TS.BLOCKED).any()
+    assert info["refused"] > 0
+    assert (m.state == TS.MOVING).all()
+    assert (m.held > 0).sum() == info["refused"]
+    assert not TS.contacts(m, np.full(3, H))["contact"].any()
+
+
+def test_contacts_need_no_voxel_centre_between() -> None:
+    """Two facing sheets 0.6 voxels apart (a real-tissue contact need not be
+    at the gap): a contact at z = 5.1 and 5.7 (no voxel centre between), not
+    at z = 4.7 and 5.3 (the centres at z = 5 lie between them)."""
+    for z1, z2, want in ((5.1, 5.7, True), (4.7, 5.3, False)):
+        v1, f1 = grid_sheet(6, z1, True)
+        v2, f2 = grid_sheet(6, z2, False, shift=0.3)
+        v = np.r_[v1, v2] * H
+        f = np.r_[f1, f2 + len(v1)]
+        m = TS.Mesh(v, f, v, np.zeros(len(v), np.int64), np.zeros(len(v)))
+        c = TS.contacts(m, np.full(3, H))
+        inner = ~m.boundary
+        np.testing.assert_allclose(c["facing_mm"][inner], 0.6 * H, rtol=1e-9)
+        assert (c["contact"][inner] == want).all()
 
 
 def test_checker_matches_mesh_intersect_and_full_check() -> None:
@@ -318,3 +343,51 @@ def test_remesh_undoes_a_failed_batch_and_excludes_it(monkeypatch) -> None:
     # travel was set to the vertex index: kept vertices keep their own
     kept = np.isclose(m.travel, np.round(m.travel))
     assert kept.sum() >= near.sum()
+
+
+# ------------------------------------------------------------ trough variants
+
+
+def test_smooth_normals_keep_a_flat_sheet_and_open_a_valley() -> None:
+    """Averaged normals stay unit length and stay +z on a flat sheet; in a
+    valley they turn toward +z (they converge less)."""
+    v, f = grid_sheet(6, 5.0, True)
+    m = TS.Mesh(v * H, f, v * H, np.zeros(len(v), np.int64), np.zeros(len(v)))
+    N = TS.smooth_normals(m, TS.normals(m.V, m.F), 3)
+    np.testing.assert_allclose(np.linalg.norm(N, axis=1), 1.0)
+    np.testing.assert_allclose(N[:, 2], 1.0, atol=1e-12)
+    site = valley(1.0)
+    m = TS.start_mesh(site)
+    N0 = TS.normals(m.V, m.F)
+    N3 = TS.smooth_normals(m, N0, 3)
+    inner = ~m.boundary
+    assert (N3[inner, 2] >= N0[inner, 2] - 1e-12).mean() > 0.8
+
+
+def test_relax_along_the_normal_lifts_a_lagging_vertex() -> None:
+    """With normal > 0, a MOVING vertex below its neighbours moves up toward
+    them and its travel grows by the same amount; with normal = 0 it moves
+    only in its tangent plane and its travel does not change."""
+    v, f = grid_sheet(5, 5.0, True)
+    V = v * H
+    c = 12
+    V[c, 2] -= 0.5 * H
+    for normal, lifts in ((0.0, False), (0.5, True)):
+        m = TS.Mesh(V.copy(), f, V.copy(), np.zeros(len(v), np.int64), np.zeros(len(v)))
+        chk = MC.Checker(m.top, m.V, 0.25 * H, slack=0.25 * H)
+        TS.relax(m, chk, MC.FOLD_COS, normal)
+        dz = m.V[c, 2] - V[c, 2]
+        if lifts:
+            assert dz > 0.1 * H and np.isclose(m.travel[c], dz, rtol=0.05)
+        else:
+            assert abs(m.travel[c]) < 1e-12
+
+
+def test_valley_with_each_variant_keeps_the_checks() -> None:
+    """The narrow valley with either variant: no crease, turned face,
+    crossing or gap pair at the end (the fold rule still holds)."""
+    for s in (TS.StartSettings(max_steps=16, normal_iters=3), TS.StartSettings(max_steps=16, normal_smooth=0.5)):
+        m = TS.StartRun(valley(), s).run()
+        c = TS.counts(m, 0.25 * H, MC.FOLD_COS)
+        assert c["creases"] == 0 and c["turned_faces"] == 0
+        assert c["intersecting_pairs"] == 0 and c["shared_vertex_fold_pairs"] == 0 and c["gap_pairs"] == 0

@@ -65,7 +65,7 @@ The user's choices of 2026-11-18 (T1–T8).
   `baillarger.mesh_checks`, shared with the WM side. Open point: on a
   synthetic slab with one label-0 voxel in the cortex, the fold rule keeps
   the neighbours of the stopped vertex as a narrow shaft that never stops
-  (not BLOCKED, not TOP). Whether this occurs in real tissue is not known;
+  (not TOP, and never at rest). Whether this occurs in real tissue is not known;
   the site-1 run decides (user, 2026-11-18). A
   contact is two parts of Σ with no voxel centre between them along their
   normals.
@@ -94,9 +94,18 @@ The user's choices of 2026-11-18 (T1–T8).
   vertex in WM keeps moving; it stops as "wm" after 3 voxels still in WM.
   Each step keeps the gap and is checked for intersections and new folds.
   A move that breaks one is halved up to 4 times (h/4 to h/64), then refused for
-  that step. A refused vertex tries again in each step. It is a first
-  contact (BLOCKED) only while the near face of the other part points
-  against its normal (two sheets that face each other). A vertex whose
+  that step. A refused vertex stays MOVING and tries again in each step;
+  `held` counts the steps in a row it was refused. There is no contact
+  state (user, 2026-11-18): a state set by the path (troughs, notches of
+  the white surface) is not a record of the tissue. The start ends when no
+  vertex takes a step (Σ no longer changes, an equilibrium of the push and
+  the constraints). The contacts are then measured from the geometry, with
+  the definition of T2: a vertex whose ray along its normal meets a facing
+  part of Σ (within 2 voxels) with no voxel centre between them (none whose
+  projection on the ray is between the two and whose distance from the ray
+  is at most half a voxel). Each contact has the facing distance and `held`
+  (how long the push pressed it). In T5 the same measure applies to the
+  equilibrium of the whole energy. A vertex whose
   white face faces label 0 directly does not move (zero thickness at an
   excision).
 - **T7. Mesh quality.** After each Σ step, a tangential relaxation (each

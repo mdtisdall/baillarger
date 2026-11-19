@@ -13,13 +13,14 @@ white matter (label 41). It stops for good at TOP, WM and EDGE:
     (user, 2026-11-18): the white mesh lies inside the WM voxels, and the
     stop term has c = 0 in WM;
   - EDGE: the new position is outside the crop;
-  - BLOCKED (for this step): the move breaks the gap or makes an
-    intersection even after the step is halved HALVINGS times (T5's rule),
-    and the near face of the other part points against the vertex's normal:
-    a first contact (T6). A refused vertex whose violation is not between
-    facing sheets stays MOVING. Both try again in each step (user,
-    2026-11-18), so a BLOCKED vertex is free again when the other part moves
-    away.
+A move that breaks a check even after it is halved HALVINGS times (T5's
+rule) is refused for that step; the vertex stays MOVING and tries again in
+the next step. There is no contact state (user, 2026-11-18): the start ends
+when no vertex takes a step (Σ does not change), and the contacts are then
+measured from the geometry (`contacts`): a vertex whose outward normal meets
+a facing part of Σ with no voxel centre between them. `held` counts the
+steps in a row in which a vertex was refused: how long the push has pressed
+it against the constraint.
 The checks are baillarger.mesh_checks, shared with the WM side:
   - the gap (T2): no point of Σ is closer than h/4 to a face of another part
     of Σ. "Another part": a face with no vertex in the local patch of the
@@ -48,15 +49,17 @@ from typing import Any
 
 import global_tau_prep as TP
 import numpy as np
+from scipy.spatial import cKDTree
 
 from baillarger import mesh_checks as MC
+from baillarger._jit import njit
 
-MOVING, TOP, WM, EDGE, BLOCKED = 0, 1, 2, 3, 4
-STATE_NAMES = ("moving", "top", "wm", "edge", "blocked")
+MOVING, TOP, WM, EDGE = 0, 1, 2, 3
+STATE_NAMES = ("moving", "top", "wm", "edge")
 HALVINGS = 4  # T5: a step of h/4 is halved until it keeps the gap (h/8 ... h/64 here)
 RELAX = 0.5  # T7: the fraction of the tangential move toward the neighbours' centroid
 #: the per-vertex fields of a Mesh (remeshing and save/restore handle them all)
-VERTEX_FIELDS = ("V", "origin", "state", "travel", "last", "stopvox")
+VERTEX_FIELDS = ("V", "origin", "state", "travel", "last", "stopvox", "held")
 
 
 @dataclass
@@ -68,6 +71,13 @@ class StartSettings:
     wm_limit_vox: float = 3.0  # user, 2026-11-18
     max_steps: int = 200  # a safety limit only (50 voxels); reported if reached
     fold_cos: float = MC.FOLD_COS  # the dihedral fold test (user, 2026-11-18)
+    # trough tests (user, 2026-11-19; both off by default): the vertex normals
+    # that drive the step are averaged over the 1-ring normal_iters times
+    # (variant 2); the relaxation also moves the active vertices along the
+    # normal, by normal_smooth × the normal part of the move toward the
+    # neighbours' centroid (variant 1: a smoothness term in the start only)
+    normal_iters: int = 0
+    normal_smooth: float = 0.0
 
 
 @dataclass
@@ -82,12 +92,16 @@ class Mesh:
     last: np.ndarray = field(default_factory=lambda: np.zeros(0))  # (n,) mm moved in the last step (display)
     # (n, 3) voxel whose label stopped a TOP vertex (-1: none), for the isolated-TOP review list
     stopvox: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), np.int64))
+    # (n,) the steps in a row in which the vertex's move was refused (0: it moved)
+    held: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
     def __post_init__(self) -> None:
         if len(self.last) != len(self.V):
             self.last = np.zeros(len(self.V))
         if len(self.stopvox) != len(self.V):
             self.stopvox = np.full((len(self.V), 3), -1, np.int64)
+        if len(self.held) != len(self.V):
+            self.held = np.zeros(len(self.V))
         self.update_topology()
 
     def update_topology(self) -> None:
@@ -117,6 +131,18 @@ class Mesh:
 def normals(V: np.ndarray, F: np.ndarray) -> np.ndarray:
     n, _ = TP.vertex_normals_areas(V, F)
     return n
+
+
+def smooth_normals(m: Mesh, N: np.ndarray, iters: int) -> np.ndarray:
+    """Unit normals averaged with their 1-ring `iters` times (each pass:
+    the vertex's own normal plus its neighbours', normalised)."""
+    n = len(N)
+    src = np.repeat(np.arange(n), np.diff(m.ptr))
+    for _ in range(iters):
+        S = N.copy()
+        np.add.at(S, src, N[m.nbr])
+        N = S / np.maximum(np.linalg.norm(S, axis=1, keepdims=True), 1e-12)
+    return N
 
 
 def _edges(F: np.ndarray) -> np.ndarray:
@@ -208,10 +234,8 @@ def expand_step(
     The first check tests the pairs with a moving vertex; each later check
     only the pairs with a vertex whose step changed (halved or refused)."""
     d = s.step_vox * h
-    N = normals(m.V, m.F)
-    # a BLOCKED vertex tries again in each step (user, 2026-11-18)
-    act = (m.state == MOVING) | (m.state == BLOCKED)
-    m.state[act] = MOVING
+    N = smooth_normals(m, normals(m.V, m.F), s.normal_iters)
+    act = m.state == MOVING
     lab = label_at(site, m.V + d * N)
     st = stop_by_label(lab, m.travel + d, s.wm_limit_vox * h)
     stop = act & (st != MOVING)
@@ -224,7 +248,6 @@ def expand_step(
     halved = np.zeros(len(m.V), bool)
     V0 = m.V.copy()
     refused = np.zeros(len(m.V), bool)
-    contact = np.zeros(len(m.V), bool)
     folded = np.zeros(len(m.V), bool)
     changed = step > 0
     k = 0
@@ -233,8 +256,7 @@ def expand_step(
     # (each pass changes at least one vertex)
     while changed.any():
         Vn = V0 + step[:, None] * N
-        fac = np.zeros(len(m.V), bool)
-        bad, _, _, _ = chk.check(Vn, changed, fac)
+        bad, _, _, _ = chk.check(Vn, changed, np.zeros(len(m.V), bool))
         fb, _, _ = new_folds(m, Vn, V0, changed, s.fold_cos)
         folded |= fb & (step > 0)
         badm = (bad | fb) & (step > 0)
@@ -246,13 +268,10 @@ def expand_step(
         else:
             step[badm] = 0.0
             refused |= badm
-            contact[badm] = fac[badm]
         changed = badm
         k += 1
     Vn = V0 + step[:, None] * N
-    # a refused vertex is a contact (BLOCKED) only where the sheets face each
-    # other (user, 2026-11-18); otherwise it stays MOVING and tries again
-    m.state[refused & contact] = BLOCKED
+    m.held = np.where(refused, m.held + 1, np.where(step > 0, 0.0, m.held))
     m.V = Vn
     m.travel = m.travel + step
     disp = step.copy()
@@ -260,21 +279,116 @@ def expand_step(
         "moved": int((step > 0).sum()),
         "halved": int(halved.sum()),
         "refused": int(refused.sum()),
-        "blocked": int((refused & contact).sum()),
         "fold_limited": int(folded.sum()),
         "stopped_new": stopped,
     }
     return disp, info
 
 
+# ------------------------------------------------------------ contacts, from the geometry
+
+#: how far along its normal a vertex looks for a facing part of Σ (voxels)
+FACING_SEARCH_VOX = 2.0
+
+
+@njit(cache=True)
+def _facing_hits(
+    V: np.ndarray, N: np.ndarray, F: np.ndarray, FN: np.ndarray, verts: np.ndarray, ptr: np.ndarray,
+    idx: np.ndarray, lmax: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """For each vertex in verts (candidate faces idx[ptr[r]:ptr[r + 1]] for
+    the r-th): the nearest face (not one of its own) that its ray
+    along +N meets within lmax and whose normal points against N (a facing
+    sheet); the distance (inf: none) and the face (-1)."""
+    n = len(verts)
+    best = np.full(n, np.inf)
+    hit = np.full(n, -1, np.int64)
+    for r in range(n):
+        i = verts[r]
+        o = V[i]
+        d = N[i]
+        for q in range(ptr[r], ptr[r + 1]):
+            f = idx[q]
+            a, b, c = F[f, 0], F[f, 1], F[f, 2]
+            if a == i or b == i or c == i:
+                continue
+            if FN[f, 0] * d[0] + FN[f, 1] * d[1] + FN[f, 2] * d[2] >= 0.0:
+                continue
+            # Möller-Trumbore
+            e1 = V[b] - V[a]
+            e2 = V[c] - V[a]
+            p = np.cross(d, e2)
+            det = e1 @ p
+            if abs(det) < 1e-18:
+                continue
+            tv = o - V[a]
+            u = (tv @ p) / det
+            if u < 0.0 or u > 1.0:
+                continue
+            qv = np.cross(tv, e1)
+            w = (d @ qv) / det
+            if w < 0.0 or u + w > 1.0:
+                continue
+            t = (e2 @ qv) / det
+            if 0.0 < t <= lmax and t < best[r]:
+                best[r] = t
+                hit[r] = f
+    return best, hit
+
+
+def contacts(m: Mesh, vox: np.ndarray) -> dict[str, np.ndarray]:
+    """The contacts of Σ, measured from the geometry (plan T2: two parts of
+    Σ with no voxel centre between them along their normals). For each
+    MOVING vertex: `facing_mm`, the distance along its outward normal to the
+    nearest facing part of Σ (a face whose normal points against it) within
+    FACING_SEARCH_VOX voxels (inf: none); `contact`, true where no voxel
+    centre lies between the two: none whose projection on the ray is inside
+    (0, facing_mm) and whose distance from the ray is at most half a voxel."""
+    h = float(vox.mean())
+    lmax = FACING_SEARCH_VOX * h
+    N = normals(m.V, m.F)
+    FN = MC.face_normals(m.V, m.F)
+    cen = m.V[m.F].mean(1)
+    rad = float(np.linalg.norm(m.V[m.F] - cen[:, None], axis=2).max())
+    act = np.flatnonzero(m.state == MOVING)
+    lists = cKDTree(cen).query_ball_point(m.V[act] + 0.5 * lmax * N[act], 0.5 * lmax + rad)
+    ptr = np.zeros(len(act) + 1, np.int64)
+    ptr[1:] = np.cumsum([len(x) for x in lists])
+    idx = np.fromiter((j for x in lists for j in x), np.int64, int(ptr[-1]))
+    best_a, _ = _facing_hits(m.V, N, m.F, FN, act, ptr, idx, lmax)
+    best = np.full(len(m.V), np.inf)
+    best[act] = best_a
+    contact = np.zeros(len(m.V), bool)
+    k = np.flatnonzero(np.isfinite(best))
+    if len(k):
+        o = m.V[k] / vox
+        d = N[k]
+        L = best[k] / h
+        base = np.floor(o).astype(np.int64)
+        free = np.ones(len(k), bool)
+        r = int(np.ceil(FACING_SEARCH_VOX)) + 1
+        for di in range(-r, r + 1):
+            for dj in range(-r, r + 1):
+                for dk in range(-r, r + 1):
+                    p = base + np.array([di, dj, dk]) - o  # voxel centre - ray origin (voxels)
+                    t = (p * d).sum(1)
+                    lat = np.linalg.norm(p - t[:, None] * d, axis=1)
+                    free &= ~((t > 0) & (t < L) & (lat <= 0.5))
+        contact[k] = free
+    return {"facing_mm": best, "contact": contact}
+
+
 # ------------------------------------------------------------ mesh quality (T7)
 
 
-def relax(m: Mesh, chk: MC.Checker, fold_cos: float) -> tuple[np.ndarray, int]:
-    """One tangential relaxation step for the interior vertices; moves that
-    break the gap, make an intersection or make a new fold are undone (later
-    checks test only the undone vertices). Returns the displacement length
-    and the number of vertices moved."""
+def relax(m: Mesh, chk: MC.Checker, fold_cos: float, normal: float = 0.0) -> tuple[np.ndarray, int]:
+    """One tangential relaxation step for the interior vertices; with
+    normal > 0, the MOVING vertices also move along
+    their normal by `normal` × the normal part of the move toward the
+    neighbours' centroid, and that part is added to their travel. Moves
+    that break the gap, make an intersection or make a new fold are undone
+    (later checks test only the undone vertices). Returns the displacement
+    length and the number of vertices moved."""
     n = len(m.V)
     N = normals(m.V, m.F)
     cnt = np.diff(m.ptr)
@@ -282,8 +396,12 @@ def relax(m: Mesh, chk: MC.Checker, fold_cos: float) -> tuple[np.ndarray, int]:
     np.add.at(S, np.repeat(np.arange(n), cnt), m.V[m.nbr])
     cen = S / np.maximum(cnt, 1)[:, None]
     dlt = cen - m.V
-    dlt -= (dlt * N).sum(1)[:, None] * N
+    dn = (dlt * N).sum(1)
+    dlt -= dn[:, None] * N
     dlt *= RELAX
+    if normal > 0:
+        act = m.state == MOVING
+        dlt += np.where(act, normal * dn, 0.0)[:, None] * N
     dlt[m.boundary | (cnt == 0)] = 0.0
     V0 = m.V.copy()
     changed = np.abs(dlt).sum(1) > 0
@@ -297,6 +415,7 @@ def relax(m: Mesh, chk: MC.Checker, fold_cos: float) -> tuple[np.ndarray, int]:
         dlt[badm] = 0.0
         changed = badm
     m.V = V0 + dlt
+    m.travel = m.travel + (dlt * N).sum(1)
     return np.linalg.norm(dlt, axis=1), int((np.abs(dlt).sum(1) > 0).sum())
 
 
@@ -525,6 +644,8 @@ class StartRun:
     progress: Any = None
     snapshot: Any = None  # callable(name, mesh, disp, meta)
     log: list[dict[str, Any]] = field(default_factory=list)
+    ended: str = ""  # "no step" (Σ no longer changes) or "max_steps"
+    contacts: dict[str, np.ndarray] = field(default_factory=dict)  # of the final Σ (`contacts`)
 
     def run(self) -> Mesh:
         site, s = self.site, self.s
@@ -563,7 +684,7 @@ class StartRun:
             chk = MC.Checker(m.top, m.V, gap, slack=s.step_vox * h)
             disp, info = expand_step(m, site, s, h, chk)
             moved_any = info["moved"] > 0
-            r, nrel = relax(m, chk, s.fold_cos)
+            r, nrel = relax(m, chk, s.fold_cos, s.normal_smooth)
             # displacement shown per vertex: the normal step plus the relaxation;
             # carried through the remeshing (new vertices: the mean of the edge's ends)
             m.last = np.sqrt(disp**2 + r**2)
@@ -587,12 +708,16 @@ class StartRun:
             self.log.append(rec)
             if self.progress:
                 self.progress(
-                    f"step {k}: moved {info['moved']}, halved {info['halved']}, refused {info['refused']} (blocked {info['blocked']}), "
+                    f"step {k}: moved {info['moved']}, halved {info['halved']}, refused {info['refused']}, "
                     f"fold-limited {info['fold_limited']}, stopped {info['stopped_new']}, splits {sp}, "
                     f"collapses {co}, checks {c}, {states}, {rec['s']:.1f} s"
                 )
             if self.snapshot:
                 self.snapshot(f"start-{k:02d}", m, disp, rec)
-            if not moved_any:  # nothing moved: the next step would be the same
+            if not moved_any:  # no vertex took a step: Σ no longer changes
+                self.ended = "no step"
                 break
+        else:
+            self.ended = "max_steps"
+        self.contacts = contacts(m, site.vox)
         return m

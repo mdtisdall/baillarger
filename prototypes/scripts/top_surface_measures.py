@@ -7,8 +7,11 @@ baillarger.mesh_checks (intersections, folds at shared vertices, creases,
 faces turned from the white surface they grew from, the gap); the time per
 step; with CONTACT_FACES_NPZ (a global τ result.npz with
 'faces', rows x, y, z, axis: the face between voxel (x, y, z) and its +axis
-neighbour), the distance from each BLOCKED vertex to the nearest contact
-face, and from each contact face to the nearest BLOCKED vertex (mm). With
+neighbour), the distance from each contact vertex to the nearest contact
+face, and from each contact face to the nearest contact vertex (mm). The
+contacts are top_surface.contacts of the final Σ: their number, how far
+apart the facing parts are (facing_mm) and how long the push held them
+(held, steps in a row refused). With
 FIG_DIR, writes three slices of Σ coloured by state, and a histogram of the
 travel by state. Always writes RUN_DIR/isolated_top.tsv, the review list of
 the TOP vertices, most isolated first (top_surface.isolated_top): vertex,
@@ -56,6 +59,17 @@ def main() -> None:
         for i, nm in enumerate(TS.STATE_NAMES)
     }
     out["travel_mm"] = {nm: q(tr[st == i]) for i, nm in enumerate(TS.STATE_NAMES)}
+    out["ended"] = log.get("ended")
+    ct = TS.contacts(m, vox)
+    cv = ct["contact"]
+    held = r["held"] if "held" in r else np.zeros(len(V))
+    out["contacts"] = {
+        "vertices": int(cv.sum()),
+        "area_mm2": float(area[cv].sum()),
+        "facing_mm": q(ct["facing_mm"][cv]),
+        "held_steps": q(held[cv].astype(float)),
+        "facing_not_contact": int((np.isfinite(ct["facing_mm"]) & ~cv).sum()),
+    }
     gap = log["settings"]["gap_vox"] * h
     _, _, dmin = MC.gap_check(m.top, V, 4 * gap, want_dmin=True)
     out["min_distance_other_part_mm"] = float(dmin[np.isfinite(dmin)].min()) if np.isfinite(dmin).any() else None
@@ -84,20 +98,20 @@ def main() -> None:
         c_vox = fc[:, :3].astype(float)
         c_vox[np.arange(len(fc)), fc[:, 3]] += 0.5
         c_mm = c_vox * vox
-        bl = V[st == TS.BLOCKED]
+        bl = V[cv]
         if len(bl):
             d1, _ = cKDTree(c_mm).query(bl)
             d2, _ = cKDTree(bl).query(c_mm)
-            out["blocked_to_contact_face_mm"] = q(d1)
-            out["contact_face_to_blocked_mm"] = q(d2)
-            out["contact_faces_within_1vox_of_blocked"] = float((d2 <= h).mean())
-            out["blocked_within_1vox_of_contact_face"] = float((d1 <= h).mean())
+            out["contact_vertex_to_contact_face_mm"] = q(d1)
+            out["contact_face_to_contact_vertex_mm"] = q(d2)
+            out["contact_faces_within_1vox_of_contact_vertex"] = float((d2 <= h).mean())
+            out["contact_vertices_within_1vox_of_contact_face"] = float((d1 <= h).mean())
     print(json.dumps(out, indent=1, default=float))
     if figd is not None:
-        figures(z, V, F, st, tr, vox, figd, h)
+        figures(z, V, F, st, cv, tr, vox, figd, h)
 
 
-def figures(z, V, F, st, tr, vox, figd: Path, h: float) -> None:
+def figures(z, V, F, st, cv, tr, vox, figd: Path, h: float) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -112,8 +126,10 @@ def figures(z, V, F, st, tr, vox, figd: Path, h: float) -> None:
     cv = np.round((np.linalg.inv(A) @ np.r_[z["site_mm"], 1])[:3]).astype(int)
     e2 = z["echoes"][1].astype(float)
     Vv = V / vox
-    cols = {TS.TOP: "red", TS.BLOCKED: "cyan", TS.WM: "orange", TS.EDGE: "yellow", TS.MOVING: "magenta"}
-    fstate = np.max(st[F], axis=1)  # a face takes the largest state code of its vertices (BLOCKED wins)
+    CONTACT = len(TS.STATE_NAMES)  # display code for a face with a contact vertex
+    cols = {TS.TOP: "red", CONTACT: "cyan", TS.WM: "orange", TS.EDGE: "yellow", TS.MOVING: "magenta"}
+    # a face takes the largest state code of its vertices; a contact vertex wins
+    fstate = np.max(np.where(cv, CONTACT, st)[F], axis=1)
     fig, axs = plt.subplots(1, 3, figsize=(15, 5.3))
     for ax in range(3):
         a = axs[ax]
@@ -127,7 +143,7 @@ def figures(z, V, F, st, tr, vox, figd: Path, h: float) -> None:
         a.set_title(f"{'xyz'[ax]} = {k}")
         a.set_xticks([])
         a.set_yticks([])
-    fig.suptitle("Σ after the start: red = stopped at label 0, cyan = blocked (first contact), "
+    fig.suptitle("Σ after the start: red = stopped at label 0, cyan = contact, "
                  "orange = WM limit, yellow = crop edge; blue = the white surface")
     fig.savefig(figd / "start_slices.png", dpi=80)
     plt.close(fig)

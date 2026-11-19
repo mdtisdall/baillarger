@@ -5,7 +5,10 @@ usage: top_surface_run.py SITE_NPZ OUT_DIR [snapshots=true] [max_steps=N]
 Writes OUT_DIR/result.npz (Σ: V, F, state, travel, origin; mm),
 OUT_DIR/log.json (settings, the start's counts, one record per step), and
 with snapshots=true OUT_DIR/snapshots/start-NN.npz after each step (V, F,
-the displacement of each vertex in that step, the state, meta).
+the displacement of each vertex in that step, the state, held, the
+contacts measured from the geometry (contact, facing_mm), meta).
+result.npz also has held, contact and facing_mm of the final Σ; log.json
+says why the start ended ("no step" or "max_steps").
 """
 
 import json
@@ -38,12 +41,17 @@ def main() -> None:
         sd.mkdir(exist_ok=True)
 
     def snapshot(name: str, m: TS.Mesh, disp: np.ndarray, meta: dict) -> None:
+        c = TS.contacts(m, site.vox)
+        meta = {**meta, "contact_vertices": int(c["contact"].sum())}
         np.savez(
             sd / f"{name}.npz",
             V=m.V.astype(np.float32),
             F=m.F.astype(np.int32),
             disp=disp.astype(np.float32),
             state=m.state.astype(np.int8),
+            held=m.held.astype(np.float32),
+            contact=c["contact"],
+            facing_mm=c["facing_mm"].astype(np.float32),
             meta=json.dumps(meta),
         )
 
@@ -52,7 +60,8 @@ def main() -> None:
     m = run.run()
     total = time.time() - t1
     np.savez(
-        out / "result.npz", V=m.V, F=m.F, state=m.state, travel=m.travel, origin=m.origin, stopvox=m.stopvox
+        out / "result.npz", V=m.V, F=m.F, state=m.state, travel=m.travel, origin=m.origin, stopvox=m.stopvox,
+        held=m.held, contact=run.contacts["contact"], facing_mm=run.contacts["facing_mm"],
     )
     log = {
         "settings": asdict(s),
@@ -60,6 +69,8 @@ def main() -> None:
         "median_edge_mm": run.median_edge,
         "initial": run.initial,
         "steps": run.log,
+        "ended": run.ended,
+        "contact_vertices": int(run.contacts["contact"].sum()),
         "s": total,
     }
     (out / "log.json").write_text(json.dumps(log, indent=1))
