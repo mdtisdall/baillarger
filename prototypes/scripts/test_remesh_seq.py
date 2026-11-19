@@ -1,0 +1,101 @@
+"""Tests for remesh_seq: a sphere, a U-shaped plate whose inner faces are
+closer than the target edge (the remesher must keep them apart), and an
+open sheet with a box rim (corners stay, the rim stays on the box)."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+import remesh_seq as RS
+
+from baillarger import mesh_checks as MC
+from baillarger.mesh import marching_tetrahedra
+
+GAP = 0.25
+
+
+def sphere() -> tuple[np.ndarray, np.ndarray]:
+    x = np.arange(30, dtype=float)
+    X, Y, Z = np.meshgrid(x, x, x, indexing="ij")
+    v, f = marching_tetrahedra(np.sqrt((X - 14.3) ** 2 + (Y - 15.1) ** 2 + (Z - 14.7) ** 2), 10.0)
+    return v.astype(np.float64), f.astype(np.int64)
+
+
+def u_plate() -> tuple[np.ndarray, np.ndarray]:
+    """A closed U: two plates joined at one end, their inner faces about
+    two voxels apart."""
+    a = np.zeros((36, 30, 24))
+    a[5:30, 5:25, 6:10] = 1
+    a[5:30, 5:25, 13:17] = 1
+    a[26:30, 5:25, 6:17] = 1
+    v, f = marching_tetrahedra(a, 0.5)
+    return v.astype(np.float64), f.astype(np.int64)
+
+
+def sheet() -> tuple[np.ndarray, np.ndarray]:
+    """A bumpy open sheet over the square [0, 20]², spacing 0.5."""
+    s = np.linspace(0.0, 20.0, 41)
+    X, Y = np.meshgrid(s, s, indexing="ij")
+    V = np.c_[X.ravel(), Y.ravel(), (5 + np.sin(X / 4) * np.cos(Y / 5)).ravel()]
+    n = len(s)
+    F = []
+    for i in range(n - 1):
+        for j in range(n - 1):
+            a, b, c, d = i * n + j, (i + 1) * n + j, (i + 1) * n + j + 1, i * n + j + 1
+            F += [[a, b, c], [a, c, d]]
+    return V, np.array(F, np.int64)
+
+
+def run(V: np.ndarray, F: np.ndarray, target: float, corner: np.ndarray | None = None
+        ) -> tuple[RS.Remesher, list[dict]]:
+    white = RS.White(V, F, np.full(len(V), target))
+    rm = RS.Remesher(white, V.copy(), F.copy(), GAP, corner=corner)
+    assert rm.chk.check_all().ok  # the start is valid
+    log = RS.remesh(rm, 1.0, max_passes=12)
+    return rm, log
+
+
+def assert_valid(rm: RS.Remesher) -> tuple[np.ndarray, np.ndarray]:
+    V, F, _ = rm.chk.export()
+    c = MC.check_mesh(V, F, gap=GAP)
+    assert c.counts()["intersecting_pairs"] == 0
+    assert c.vertex_fold_pairs == 0 and c.edge_fold_pairs == 0 and c.gap_pairs == 0
+    n = MC.face_normals(V, F)
+    _, _, wf = rm.white.project(V[F].mean(1))
+    assert ((n * rm.white.N[wf]).sum(1) > 0).all()  # none turned against white
+    return V, F
+
+
+@pytest.mark.parametrize(("mesh", "target"), [("sphere", 2.5), ("u_plate", 3.0)])
+def test_closed_meshes_reach_the_target_and_stay_valid(mesh: str, target: float) -> None:
+    V0, F0 = sphere() if mesh == "sphere" else u_plate()
+    rm, log = run(V0, F0, target)
+    V, F = assert_valid(rm)
+    last = log[-1]
+    assert last["edge_in_range"] > 0.85, last
+    assert len(F) < len(F0) / 4  # coarser
+    # every vertex is on the white surface
+    _, d, _ = rm.white.project(V)
+    assert d.max() < 1e-6
+    if mesh == "u_plate":
+        # the inner faces are closer than the target: some operations there
+        # were refused, and the two plates stay apart
+        assert sum(sum(r["refused"].values()) for r in log) > 0
+
+
+def test_an_open_sheet_keeps_its_corners_and_its_rim_on_the_box() -> None:
+    V0, F0 = sheet()
+    rim, E = RS.rim_of(F0, len(V0))
+    corner = RS.box_corners(V0, rim, E, np.array([0, 0, -100.0]), np.array([20, 20, 100.0]), 1e-9)
+    assert corner.sum() == 4
+    rm, log = run(V0, F0, 2.0, corner)
+    V, F = assert_valid(rm)
+    assert log[-1]["edge_in_range"] > 0.8, log[-1]
+    # the corners are where they were
+    for p in V0[corner]:
+        assert np.linalg.norm(V - p, axis=1).min() < 1e-12
+    # the rim is on the box
+    rim2, _ = RS.rim_of(F, len(V))
+    on_box = np.isclose(V[rim2, 0], 0) | np.isclose(V[rim2, 0], 20)
+    on_box |= np.isclose(V[rim2, 1], 0) | np.isclose(V[rim2, 1], 20)
+    assert on_box.all()
