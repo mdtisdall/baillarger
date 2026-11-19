@@ -32,9 +32,8 @@ One pass (isotropic remeshing, Botsch & Kobbelt 2004, with Σ's checks):
      projected back onto the white mesh (its closest point); moves that
      break a check (with the deviation) are undone.
 The passes stop when a pass makes no split, collapse or flip, or after
-max_passes. The crop's boundary vertices do not move; with a minimum
-edge above LMIN_VOX they are collapsed along the rim onto their
-neighbours (rim_corners: the rim keeps its turns between box faces). The result's origin is its own positions (the reference of the
+max_passes. The crop's boundary vertices do not move and are not
+collapsed. The result's origin is its own positions (the reference of the
 fold rule).
 """
 
@@ -309,22 +308,6 @@ def relax_project(
     return int((np.abs(Vn - V0).sum(1) > 0).sum()), float(d.max())
 
 
-def rim_corners(m: TS.Mesh, hi: np.ndarray) -> np.ndarray:
-    """The rim vertices that a rim collapse keeps: those not on exactly two
-    rim edges, and the ends of each rim edge whose two ends are nearest to
-    different planes of the crop box [0, hi] (where the rim turns from one
-    box face to another). So the coarsened rim stays on the box faces."""
-    n = len(m.V)
-    u = TS._edges(m.F)
-    re = u[TS.edge_face_counts(m.F, u) == 1]
-    d = np.abs(np.c_[m.V, hi - m.V])  # (n, 6) distance to each box plane
-    plane = np.argmin(d, 1)
-    corner = m.boundary & (np.bincount(re.ravel(), minlength=n) != 2)
-    turn = plane[re[:, 0]] != plane[re[:, 1]]
-    corner[re[turn].ravel()] = True
-    return corner
-
-
 def deviation_all(ref: Reference, V: np.ndarray, F: np.ndarray, k: int = 24) -> np.ndarray:
     """The distance (mm) from each white vertex to Σ (V, F)."""
     _, d, _ = closest_on(V, F, cKDTree(V[F].mean(1)), ref.V, k)
@@ -354,10 +337,6 @@ def coarse_start(
     gap = 0.25 * h
     ref = Reference(site, lmin_vox=lmin_vox)
     m = TS.start_mesh(site)
-    # with a larger minimum edge the crop rim is coarsened too (user,
-    # 2026-11-19: "Coarsen the rim")
-    hi = (np.array(site.labels.shape) - 1) * site.vox
-    rim = (lambda mm: rim_corners(mm, hi)) if lmin_vox > LMIN_VOX else None
     log = []
     for k in range(max_passes):
         t0 = time.time()
@@ -369,7 +348,6 @@ def coarse_start(
             fold_cos,
             size=ref.target,
             extra=lambda mm, mv: ref.deviation(mm.V, mm.F, mv),
-            rim=rim,
         )
         fl = flip_pass(m, ref, gap, fold_cos)
         nr, dmax = relax_project(m, ref, gap, fold_cos)

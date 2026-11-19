@@ -49,7 +49,6 @@ from typing import Any
 
 import global_tau_prep as TP
 import numpy as np
-from scipy import sparse
 from scipy.spatial import cKDTree
 
 from baillarger import mesh_checks as MC
@@ -155,22 +154,6 @@ def _edges(F: np.ndarray) -> np.ndarray:
     n = int(F.max()) + 1
     k, _ = MC.edge_keys(F, n)
     return np.c_[k // n, k % n]
-
-
-def edge_face_counts(F: np.ndarray, u: np.ndarray) -> np.ndarray:
-    """The number of faces at each edge u (k, 2), u from _edges(F): 1 on
-    the boundary."""
-    n = int(F.max()) + 1
-    h = np.sort(np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]), 1)
-    key, cnt = np.unique(h[:, 0] * n + h[:, 1], return_counts=True)
-    return cnt[np.searchsorted(key, u[:, 0] * n + u[:, 1])]
-
-
-def common_neighbours(ptr: np.ndarray, nbr: np.ndarray, E: np.ndarray) -> np.ndarray:
-    """The number of common neighbours of the two ends of each edge E."""
-    n = len(ptr) - 1
-    A = sparse.csr_matrix((np.ones(len(nbr), np.int32), nbr, ptr), shape=(n, n))
-    return np.asarray(A[E[:, 0]].multiply(A[E[:, 1]]).sum(1)).ravel()
 
 
 # ------------------------------------------------------------ the fold test
@@ -457,8 +440,7 @@ def relax(
 
 
 def remesh(
-    m: Mesh, gap: float, lmax: float, lmin: float, fold_cos: float, size: Any = None, extra: Any = None,
-    rim: Any = None,
+    m: Mesh, gap: float, lmax: float, lmin: float, fold_cos: float, size: Any = None, extra: Any = None
 ) -> tuple[int, int]:
     """One batch of edge splits (longer than lmax, at the midpoint: the
     shape does not change), then one batch of collapses (shorter than lmin,
@@ -475,18 +457,12 @@ def remesh(
     giving a target edge length per vertex), lmax and lmin are factors of
     the smaller target of an edge's two ends. With extra (a function of the
     mesh and the merged vertices giving failing vertices), its failures
-    count as check failures of the collapses. With rim (a function of the
-    mesh giving the rim corners, see _collapse), the crop rim is coarsened
-    too."""
+    count as check failures of the collapses."""
     splits = _split(m, lmax, None if size is None else size(m))
     exclude = np.zeros(len(m.V), bool)
     for _ in range(3):
         saved = m.save()
-        sz = None if size is None else size(m)
-        if rim is None:
-            col, newid, merged = _collapse(m, lmin, exclude, sz)
-        else:
-            col, newid, merged = _collapse(m, lmin, exclude, sz, rim_corner=rim(m))
+        col, newid, merged = _collapse(m, lmin, exclude, None if size is None else size(m))
         if col == 0:
             return splits, 0
         moved = np.zeros(len(m.V), bool)
@@ -576,8 +552,7 @@ def _split(m: Mesh, lmax: float, size: np.ndarray | None = None) -> int:
 
 
 def _collapse(
-    m: Mesh, lmin: float, exclude: np.ndarray, size: np.ndarray | None = None,
-    rim_corner: np.ndarray | None = None,
+    m: Mesh, lmin: float, exclude: np.ndarray, size: np.ndarray | None = None
 ) -> tuple[int, np.ndarray, np.ndarray]:
     """Collapses, to the midpoint, interior edges shorter than lmin with
     both ends in the same state that pass the link condition (exactly two
@@ -585,16 +560,7 @@ def _collapse(
     two in the closed 1-rings of each other's ends (so no two collapses
     touch the same face). They are chosen in rounds: the locally shortest
     candidates first; a picked edge that fails a condition leaves the
-    candidates, so it does not block its neighbours.
-
-    With rim_corner (a flag per vertex, for the coarse start of
-    sigma_mesh): the boundary (the crop rim) is coarsened too. An edge
-    with one boundary end collapses onto that end; an edge of the rim
-    collapses onto one of its ends (the corner end, if one is a corner;
-    never both corners), so the rim keeps its vertices' positions on the
-    crop box. Such a collapse needs one common neighbour on a rim edge and
-    two otherwise. An edge between two boundary vertices that is not on
-    the rim is not collapsed. Returns the number of collapses,
+    candidates, so it does not block its neighbours. Returns the number of collapses,
     the new index of each old vertex (-1: removed) and the old indices of
     the merged (kept) vertices."""
     F, V = m.F, m.V
@@ -605,41 +571,23 @@ def _collapse(
     L = np.linalg.norm(V[u[:, 0]] - V[u[:, 1]], axis=1)
     a, b = u[:, 0], u[:, 1]
     thr = lmin if size is None else lmin * np.minimum(size[a], size[b])
-    bd = m.boundary
-    c = (L < thr) & ~exclude[a] & ~exclude[b] & (m.state[a] == m.state[b])
-    inner = ~bd[a] & ~bd[b]
-    mid = inner.copy()  # interior edges collapse to the midpoint
-    need = np.full(len(u), 2)
-    if rim_corner is None:
-        c &= inner
-    else:
-        rim_e = edge_face_counts(F, u) == 1
-        one = bd[a] ^ bd[b]
-        both = bd[a] & bd[b] & rim_e & ~(rim_corner[a] & rim_corner[b])
-        c &= inner | one | both
-        need[both] = 1
-        # orient: the kept end first (the boundary end; on the rim the corner end)
-        flip_ab = (one & bd[b]) | (both & rim_corner[b])
-        u = np.where(flip_ab[:, None], u[:, ::-1], u)
+    c = (L < thr) & ~m.boundary[a] & ~m.boundary[b] & ~exclude[a] & ~exclude[b] & (m.state[a] == m.state[b])
     if not c.any():
         return 0, ident, none
 
-    def apply(Ii: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """The collapses of the candidate edges u[Ii] (an independent set)."""
-        E, Em = u[Ii], mid[Ii]
+    def apply(E: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         remap = ident.copy()
         remap[E[:, 1]] = E[:, 0]
         V2 = V.copy()
-        V2[E[:, 0]] = np.where(Em[:, None], 0.5 * (V[E[:, 0]] + V[E[:, 1]]), V[E[:, 0]])
+        V2[E[:, 0]] = 0.5 * (V[E[:, 0]] + V[E[:, 1]])
         F2 = remap[F]
         gone = (F2[:, 0] == F2[:, 1]) | (F2[:, 1] == F2[:, 2]) | (F2[:, 0] == F2[:, 2])
         return V2, F2, gone
 
-    def turned(Ii: np.ndarray) -> np.ndarray:
-        """Per edge u[Ii] of an independent set: its collapse turns a face
-        of its fan by 90 degrees or more."""
-        E = u[Ii]
-        V2, F2, gone = apply(Ii)
+    def turned(E: np.ndarray) -> np.ndarray:
+        """Per edge of an independent set: its collapse turns a face of
+        its fan by 90 degrees or more."""
+        V2, F2, gone = apply(E)
         owner = np.full(n, -1, np.int64)
         owner[E[:, 0]] = np.arange(len(E))
         owner[E[:, 1]] = np.arange(len(E))
@@ -664,30 +612,27 @@ def _collapse(
         rank = np.empty(len(Ec), np.int64)
         rank[np.lexsort((np.arange(len(Ec)), Lc))] = np.arange(len(Ec))
         pick = _local_best(Ec, rank, n, m.ptr, m.nbr)
-        Ip = cand[pick]
-        # the link condition: two common neighbours (one on a rim edge)
-        ok = common_neighbours(m.ptr, m.nbr, u[Ip]) == need[Ip]
+        Ep = Ec[pick]
+        ok = MC.link_condition(m.ptr, m.nbr, Ep)
         if ok.any():
-            ok[np.flatnonzero(ok)] = ~turned(Ip[ok])
-        keep.append(Ip[ok])
+            ok[np.flatnonzero(ok)] = ~turned(Ep[ok])
+        keep.append(Ep[ok])
         if ok.any():
             ring = np.zeros(n, bool)
-            ring[u[Ip[ok]].ravel()] = True
+            ring[Ep[ok].ravel()] = True
             blocked |= MC.near_vertices(m.ptr, m.nbr, ring)
         drop = np.zeros(len(cand), bool)
         drop[np.flatnonzero(pick)] = True  # picked: accepted or failed, either way done
         cand = cand[~drop]
         cand = cand[~blocked[u[cand, 0]] & ~blocked[u[cand, 1]]]
-    Ia = np.concatenate(keep) if keep else np.zeros(0, np.int64)
-    if len(Ia) == 0:
+    E = np.concatenate(keep) if keep else np.zeros((0, 2), np.int64)
+    if len(E) == 0:
         return 0, ident, none
-    E, Em = u[Ia], mid[Ia]
-    V2, F2, gone = apply(Ia)
+    V2, F2, gone = apply(E)
     m.V = V2
     for nm in ("origin", "travel", "last"):
         x = getattr(m, nm).copy()
-        w = Em if x.ndim == 1 else Em[:, None]
-        x[E[:, 0]] = np.where(w, 0.5 * (x[E[:, 0]] + x[E[:, 1]]), x[E[:, 0]])
+        x[E[:, 0]] = 0.5 * (x[E[:, 0]] + x[E[:, 1]])
         setattr(m, nm, x)
     used = np.ones(n, bool)
     used[E[:, 1]] = False

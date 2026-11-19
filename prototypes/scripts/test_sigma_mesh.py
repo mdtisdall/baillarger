@@ -179,33 +179,3 @@ def test_sizing_with_a_larger_minimum_edge() -> None:
     np.testing.assert_allclose(SM.sizing(site, 4.0), 5.0 * H, rtol=1e-12)
     assert SM.target_range(4.0) == (5.0, 5.0)
     assert SM.target_range(SM.LMIN_VOX) == (SM.LMIN_VOX, SM.LMAX_VOX)
-
-
-def test_rim_collapse_keeps_the_rim_on_the_box() -> None:
-    """A flat 6 × 6 grid (spacing h) across the box [0, 5h]² in x, y, at
-    z = 2.5 h. A rim edge on y = 0 is made short (0.3 h) and an interior
-    spoke from the rim on x = 0 too (0.3 h). With rim corners, both
-    collapse onto a rim vertex that keeps its place on its box face, the
-    box corners are kept, and no check fails. Without, neither collapses."""
-    V, F = _grid(6, H)
-    V[:, 2] = 2.5 * H
-    hi = np.array([5 * H, 5 * H, 5 * H])
-    r1, r2 = 2 * 6 + 0, 3 * 6 + 0  # (2, 0), (3, 0): on y = 0
-    V[r2, 0] = 2.3 * H
-    s1, s2 = 0 * 6 + 3, 1 * 6 + 3  # (0, 3) on x = 0, (1, 3) inside
-    V[s2, 0] = 0.3 * H
-    m0 = _mesh(V, F)
-    corners = SM.rim_corners(m0, hi)
-    assert corners[[0, 5, 30, 35]].all() and not corners[[r1, r2, s1]].any()
-    m = _mesh(V, F)
-    nc, _, _ = TS._collapse(m, 0.5 * H, np.zeros(len(V), bool))
-    assert nc == 0
-    m = _mesh(V, F)
-    nc, newid, merged = TS._collapse(m, 0.5 * H, np.zeros(len(V), bool), rim_corner=corners)
-    assert nc == 2
-    kept = sorted(V[merged].tolist())
-    assert kept == sorted([V[min(r1, r2)].tolist(), V[s1].tolist()]) or kept == sorted([V[max(r1, r2)].tolist(), V[s1].tolist()])
-    assert newid[s1] >= 0 and newid[s2] < 0
-    for c in (0, 5, 30, 35):
-        np.testing.assert_allclose(m.V[newid[c]], V[c])
-    assert sum(TS.counts(m, 0.25 * H, MC.FOLD_COS).values()) == 0
