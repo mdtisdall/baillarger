@@ -95,8 +95,18 @@ def _fade(P: dict[str, Array]) -> tuple[Array, Array] | None:
     return jnp.clip(-2.0 * sd / ht, 0.0, 1.0), 1.0 + jnp.clip(-sd, 0.0, 0.5 * ht) / ht
 
 
-def _one_sided(vm: Array, Fm: Array, dm: Array, vp: Array, Fp: Array, dp: Array, F: Array) -> Array:
-    both = (Fp - Fm) / (dm + dp)
+def _three_point(Fm: Array, dm: Array, Fp: Array, dp: Array, F: Array) -> Array:
+    """The first derivative at the slot from Fm at -dm, F at 0 and Fp at +dp
+    (Shortley-Weller): exact for a quadratic. With dm = dp it is the central
+    difference (F has the weight 0). With a ghost at θh on one side, F has
+    the weight ±(1 - θ)/(θh) (- for a ghost on the plus side), so the slot's own τ is in its gradient."""
+    return (-dp / (dm * (dm + dp))) * Fm + ((dp - dm) / (dm * dp)) * F + (dm / (dp * (dm + dp))) * Fp
+
+
+def _one_sided(
+    vm: Array, Fm: Array, dm: Array, vp: Array, Fp: Array, dp: Array, F: Array, sw: bool = False
+) -> Array:
+    both = _three_point(Fm, dm, Fp, dp, F) if sw else (Fp - Fm) / (dm + dp)
     plus = (Fp - F) / dp
     minus = (F - Fm) / dm
     return jnp.where(vp & vm, both, jnp.where(vp, plus, jnp.where(vm, minus, 0.0)))
@@ -148,7 +158,12 @@ def _grad_axis(x: Array, P: dict[str, Array], a: int) -> Array:
     gdp = 0.5 if gd is None else gd[:, a, 1]
     dm = jnp.where(gm, gdm * h[a], h[a])
     dp = jnp.where(gp, gdp * h[a], h[a])
-    both = (Fp - Fm) / (dm + dp)
+    # with a fixed top surface Σ (gdist given): the three-point derivative,
+    # so that a slot with a ghost on one side and a real neighbour on the
+    # other keeps its own τ in its gradient (user, 2026-11-19: "Option 1").
+    # A contact face (no gdist): the wide difference, as before.
+    sw = gd is not None
+    both = _three_point(Fm, dm, Fp, dp, x) if sw else (Fp - Fm) / (dm + dp)
     plus = (Fp - x) / dp
     minus = (x - Fm) / dm
     one = jnp.where(vp, plus, jnp.where(vm, minus, 0.0))
@@ -166,9 +181,9 @@ def _grad_axis(x: Array, P: dict[str, Array], a: int) -> Array:
         Fp2 = jnp.where(rp, 0.0, Fp)
         base = (
             wm * wp * base
-            + wm * (1 - wp) * _one_sided(vm, Fm, dm, vp, Fp2, dp2, x)
-            + (1 - wm) * wp * _one_sided(vm, Fm2, dm2, vp, Fp, dp, x)
-            + (1 - wm) * (1 - wp) * _one_sided(vm, Fm2, dm2, vp, Fp2, dp2, x)
+            + wm * (1 - wp) * _one_sided(vm, Fm, dm, vp, Fp2, dp2, x, sw)
+            + (1 - wm) * wp * _one_sided(vm, Fm2, dm2, vp, Fp, dp, x, sw)
+            + (1 - wm) * (1 - wp) * _one_sided(vm, Fm2, dm2, vp, Fp2, dp2, x, sw)
         )
     split = jnp.where(
         vp & vm, jnp.maximum(minus, 0.0) + jnp.minimum(plus, 0.0), one

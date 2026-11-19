@@ -565,12 +565,55 @@ def test_snapshots_round_trip(tmp_path) -> None:  # noqa: ANN001
 # ------------------------------------------------------------ lagged quadratic form
 
 
-def _lagged_problem():  # noqa: ANN202
-    G, P, x, unk, _ = small_problem()
+def _lagged_problem(ghosts: bool = False):  # noqa: ANN202
+    G, P, x, unk, _ = small_problem(faces_z=3 if ghosts else None)
     x[: G.S] -= H  # f = 1 everywhere, as inside a fixed Σ
     P = dict(P)
     P["c"] = jnp.zeros_like(P["c"])
+    if ghosts:  # a fixed Σ: ghosts at θh, θ in [THETA_MIN, 1]
+        th = np.random.default_rng(9).uniform(0.05, 1.0, size=(len(x), 3, 2))
+        P["gdist"] = jnp.asarray(th)
     return G, P, x, unk
+
+
+def test_three_point_gradient_at_a_sigma_ghost_is_exact() -> None:
+    """A fixed Σ (gdist given): a slot with its real minus neighbour at -h
+    and the ghost τ = 0 at +θh. For τ on each z line a quadratic
+    q(t) = (t - θh)(u + v t) (zero at the ghost), dτ/dz at the slot is
+    q'(0) = u - θ h v exactly, and the slot's own τ is in it. Without gdist
+    (a contact face) the wide difference stays: (0 - τ_m)/(1.5 h)."""
+    G, P, x, unk, _ = small_problem(faces_z=3)
+    P = dict(P)
+    c = G.coords - GS.PAD
+    rng = np.random.default_rng(3)
+    th = np.ones((len(x), 3, 2))
+    top = np.flatnonzero(c[:, 2] == 3)
+    th[top, 2, 1] = rng.uniform(0.05, 1.0, len(top))
+    P["gdist"] = jnp.asarray(th)
+    want = {}
+    for s in top:
+        u, v = rng.normal(size=2)
+        t0 = th[s, 2, 1] * H
+        line = np.flatnonzero((c[:, 0] == c[s, 0]) & (c[:, 1] == c[s, 1]) & (c[:, 2] <= 3))
+        t = (c[line, 2] - 3) * H
+        x[line] = (t - t0) * (u + v * t)
+        want[s] = u - t0 * v
+    g = np.asarray(GE.gradient(jnp.asarray(x), P))
+    for s, w in want.items():
+        assert g[s, 2] == pytest.approx(w, rel=1e-10, abs=1e-12)
+    # the slot's own τ has the weight -(1 - θ)/(θh) (the ghost on the plus side)
+    s = top[0]
+    J = np.asarray(jax.jacfwd(lambda y: GE.gradient(y, P)[s, 2])(jnp.asarray(x)))
+    assert J[s] == pytest.approx(-(1 - th[s, 2, 1]) / (th[s, 2, 1] * H))
+    # no ghost on the axis: the central difference, the own τ not in it
+    s2 = np.flatnonzero(c[:, 2] == 1)[0]
+    J2 = np.asarray(jax.jacfwd(lambda y: GE.gradient(y, P)[s2, 2])(jnp.asarray(x)))
+    assert J2[s2] == 0.0
+    # a contact face (no gdist): the wide difference, as before
+    del P["gdist"]
+    g = np.asarray(GE.gradient(jnp.asarray(x), P))
+    m = G.slot_of[G.slot_flat[s] - G.strides[2]]
+    assert g[s, 2] == pytest.approx((0.0 - x[m]) / (1.5 * H))
 
 
 def test_scaled_terms_against_the_original() -> None:
@@ -671,13 +714,14 @@ def test_lagged_stencil_jacobian_matches_dense() -> None:
     )
 
 
+@pytest.mark.parametrize("ghosts", [False, True])
 @pytest.mark.parametrize("weighted", [False, True])
-def test_scaled_stencil_jacobian_matches_dense(weighted: bool) -> None:
+def test_scaled_stencil_jacobian_matches_dense(weighted: bool, ghosts: bool) -> None:
     """The Jacobian of the scaled residuals with ĝ = ĝ(τ) (estimator
     "lm_scaled"), with and without the lagged 1/|∇τ| weights: the colouring
     stays exact (each residual depends on τ within L1 distance 2), and Σ r²
     is the voxel part of the scaled energy."""
-    G, P, x, unk = _lagged_problem()
+    G, P, x, unk = _lagged_problem(ghosts)
     xj = jnp.asarray(x)
     if weighted:
         P = {**P, "wlag": GE.j_lag_weights(xj, P) * (1.0 + 0.1 * jnp.sin(jnp.arange(len(x))))}
