@@ -34,8 +34,10 @@ Routes (Review.get, Review.post), JSON:
   classes of a scribble; the grid's affine; the log's path.
 - POST /review/session {random_share, seed} or {resume: true}.
 - GET /review/next[?site=i,j,k]: the next site not shown (or the site named);
-  the log records it as shown. {site: {id, kind, rank, voxel, mm}} or
-  {site: null} when the session has no site left.
+  the log records it as shown. {site: {id, kind, rank, voxel, mm,
+  proposal}} or {site: null} when the session has no site left. proposal is
+  the site's proposed choice (wm-sites/1, a site with creases), or null
+  (none, or a random site).
 - POST /review/skip {site}.
 - POST /review/preview {site, choice, params}, or {site, choice:
   manual-paint, strokes} (Preview of strokes, below): the answer's voxels,
@@ -1173,6 +1175,7 @@ class Review:
                 rank=None if rnd else r["rank"],
                 voxel=list(c),
                 mm=[float(x) for x in mm],
+                proposal=None if rnd else r.get("proposal"),
             )
         )
 

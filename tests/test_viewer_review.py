@@ -33,6 +33,8 @@ QUEUE = [
     (3, "handle-fix", (12, 9, 4)),
 ]
 RANDOM = [(3, 12, 10), (14, 4, 9), (6, 14, 12), (9, 9, 9)]
+#: the site with a crease and its proposal
+CREASED = (8, 6, 7)
 #: the fix of the override site, and the voxels that it changes to 0
 FIX = 1
 FIX_VOXELS = [(5, 5, 6), (5, 5, 7)]
@@ -42,7 +44,9 @@ def row(rank: int, kind: str, c: tuple[int, int, int]) -> dict[str, Any]:
     r: dict[str, Any] = {k: 0 for k in WS.COLUMNS}
     r.update(rank=rank, kind=kind, i=c[0], j=c[1], k=c[2], tissue="grey matter")
     r.update(fix=FIX if kind == "override" else 0)
-    r.update(wm_thickness=1.0, gap_width=0.0)
+    r.update(wm_thickness=1.0, gap_width=0.0, **WS.NO_CREASE)
+    if c == CREASED:
+        r.update(creases=1, crease_angle=160.0, proposal="remove-strand")
     return r
 
 
@@ -95,7 +99,7 @@ def files(tmp_path: Path) -> dict[str, Path]:
     with q.open("w") as fh:
         fh.write("\t".join(WS.COLUMNS) + "\n")
         for r in QUEUE:
-            fh.write("\t".join(str(row(*r)[c]) for c in WS.COLUMNS) + "\n")
+            fh.write("\t".join(WS._cell(row(*r)[c]) for c in WS.COLUMNS) + "\n")
     bids.write_sidecar(
         q.with_suffix(".json"),
         WS.SITES_SPEC,
@@ -107,6 +111,8 @@ def files(tmp_path: Path) -> dict[str, Path]:
             Hemisphere="R",
             FilledLabels=[41],
             MisfacingFaces=1,
+            CreaseEdges=1,
+            CreaseCosine=-0.9,
             Sites=len(QUEUE),
             GroupVoxels=3.0,
             FixVoxels=4,
@@ -1484,3 +1490,11 @@ def test_the_change_of_a_strokes_preview(server: Any) -> None:
     ):
         with pytest.raises(urllib.error.HTTPError):
             post(base + "/review/preview", body)
+
+
+def test_a_site_with_creases_shows_its_proposal(server: Any) -> None:
+    base, _, _ = server
+    post(base + "/review/session", dict(random_share=0.0, seed=1))
+    shown = [get(base + "/review/next")["site"] for _ in range(3)]
+    got = {x["id"]: x["proposal"] for x in shown}
+    assert got == {"5,5,5": None, "8,6,7": "remove-strand", "12,9,4": None}
