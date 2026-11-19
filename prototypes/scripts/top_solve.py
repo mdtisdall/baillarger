@@ -29,7 +29,8 @@ One step (T5, user, 2026-11-19):
   4. After an accepted step: the tangential relaxation and the remeshing
      (T7), then τ and E again (the relaxation changes E a little; logged).
 The run ends when the accepted step is below stop_vox × h for every
-vertex ("converged"), with "no decrease", or at max_steps.
+vertex ("step below stop_vox": not a test of convergence, α may only have
+become small), with "no decrease", or at max_steps.
 """
 
 from __future__ import annotations
@@ -67,6 +68,11 @@ class SolveSettings:
     tau_iters: int = 10  # lagged outer steps per τ solve (warm start)
     tau_tol_mm: float = 1e-3  # the lagged solve stops when max |Δτ| is below this
     rim_fixed: bool = True  # the crop-edge voxels at τ0 (global_tau_solver)
+    #: the tangential relaxation after an accepted step (T7): "all" vertices,
+    #: "none", or only the "flagged" ones (a face of theirs has its smallest
+    #: altitude below the step cap step_max_vox × h: one step could flip it)
+    relax: str = "all"
+    measure_relax: bool = False  # also E right after the relaxation (one more τ solve)
 
 
 def stop_weights(labels: np.ndarray) -> np.ndarray:
@@ -284,6 +290,34 @@ class Evaluator:
         return State(V.copy(), e_tau + e_stop, e_tau, e_stop, grad, tau, info)
 
 
+# ------------------------------------------------------------ mesh quality
+
+
+def min_altitude(V: np.ndarray, F: np.ndarray) -> np.ndarray:
+    """The smallest altitude of each face (2 × area / its longest edge)."""
+    e = np.stack([V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 1]], V[F[:, 0]] - V[F[:, 2]]], 1)
+    area2 = np.linalg.norm(np.cross(e[:, 0], -e[:, 2]), axis=1)
+    return area2 / np.maximum(np.linalg.norm(e, axis=2).max(1), 1e-300)
+
+
+def flagged_vertices(V: np.ndarray, F: np.ndarray, limit: float) -> tuple[np.ndarray, np.ndarray]:
+    """Vertices with a face whose smallest altitude is below limit; and the
+    altitudes."""
+    alt = min_altitude(V, F)
+    fl = np.zeros(len(V), bool)
+    fl[F[alt < limit].ravel()] = True
+    return fl, alt
+
+
+def quality(V: np.ndarray, F: np.ndarray, h: float, limit: float) -> dict[str, Any]:
+    fl, alt = flagged_vertices(V, F, limit)
+    return {
+        "alt_over_h_p1_5_50": [float(v) for v in np.percentile(alt / h, [1, 5, 50])],
+        "faces_below_limit": int((alt < limit).sum()),
+        "flagged_vertices": int(fl.sum()),
+    }
+
+
 # ------------------------------------------------------------ the constrained Σ step
 
 
@@ -316,7 +350,13 @@ def constrained_move(
         changed = badm
         k += 1
     m.held = np.where(refused, m.held + 1, np.where(mov & ~refused, 0.0, m.held))
-    return d, {"moved": int((np.abs(d).sum(1) > 0).sum()), "halved": int(halved.sum()), "refused": int(refused.sum())}
+    return d, {
+        "moved": int((np.abs(d).sum(1) > 0).sum()),
+        "halved": int(halved.sum()),
+        "refused": int(refused.sum()),
+        "_halved": halved,
+        "_refused": refused,
+    }
 
 
 @dataclass
@@ -345,7 +385,7 @@ class SolveRun:
         white = TS.counts(m, gap, s.fold_cos)
         sp, co = TS.remesh(m, gap, lmax, lmin, s.fold_cos)
         cur = ev(m.V, m.F, None)
-        self.initial = {"vertices": len(m.V), "faces": len(m.F), "white": white, "splits": sp,
+        self.initial = {"quality": quality(m.V, m.F, h, s.step_max_vox * h), "vertices": len(m.V), "faces": len(m.F), "white": white, "splits": sp,
                         "collapses": co, "E": cur.E, "E_tau": cur.E_tau, "E_stop": cur.E_stop,
                         "eval": cur.info, "s": time.time() - t0}
         if self.progress:
@@ -371,7 +411,11 @@ class SolveRun:
                 Vn = m.V + d
                 d[np.any((Vn < lo) | (Vn > hi), axis=1)] = 0.0  # never out of the crop
                 saved = m.save()
+                fl, _ = flagged_vertices(m.V, m.F, s.step_max_vox * h)
                 dd, cinfo = constrained_move(m, d, chk, s.fold_cos)
+                cinfo["halved_flagged"] = int((cinfo["_halved"] & fl).sum())
+                cinfo["refused_flagged"] = int((cinfo["_refused"] & fl).sum())
+                del cinfo["_halved"], cinfo["_refused"]
                 trial = ev(m.V + dd, m.F, cur.tau)
                 tries.append({"alpha": alpha, "E": trial.E, "E_tau": trial.E_tau, "E_stop": trial.E_stop,
                               "max_step_vox": float(np.linalg.norm(dd, axis=1).max() / h), **cinfo,
@@ -392,12 +436,22 @@ class SolveRun:
                     self.progress(f"step {k}: no decrease in {len(tries)} tries; E {cur.E:.1f}")
                 break
             e_trial = trial.E
-            r, nrel = TS.relax(m, chk, s.fold_cos)
+            q_before = quality(m.V, m.F, h, s.step_max_vox * h)
+            if s.relax == "none":
+                r, nrel = np.zeros(len(m.V)), 0
+            else:
+                only = flagged_vertices(m.V, m.F, s.step_max_vox * h)[0] if s.relax == "flagged" else None
+                r, nrel = TS.relax(m, chk, s.fold_cos, only=only)
             m.last = np.sqrt(disp**2 + r**2)
+            e_relax = None
+            if nrel and s.measure_relax:
+                e_relax = ev(m.V, m.F, trial.tau).E  # E after the relaxation alone (diagnostic)
             sp, co = TS.remesh(m, gap, lmax, lmin, s.fold_cos)
             cur = ev(m.V, m.F, trial.tau)
             c = TS.counts(m, gap, s.fold_cos)
-            rec = {"step": k, "tries": tries, "accepted": True, "E_trial": e_trial, "E": cur.E,
+            rec = {"step": k, "tries": tries, "accepted": True, "E_trial": e_trial, "E_relaxed": e_relax,
+                   "E": cur.E, "quality_before_relax": q_before,
+                   "quality": quality(m.V, m.F, h, s.step_max_vox * h),
                    "E_tau": cur.E_tau, "E_stop": cur.E_stop, "relaxed": nrel, "splits": sp, "collapses": co,
                    **c, "vertices": len(m.V), "faces": len(m.F), "eval": cur.info,
                    "max_step_vox": float(disp.max() / h), "s": time.time() - t1}
@@ -409,12 +463,17 @@ class SolveRun:
                     f"tries {len(tries)}, α {tries[-1]['alpha']:.3g}, max step {disp.max() / h:.3f} h, "
                     f"moved {tries[-1]['moved']} halved {tries[-1]['halved']} refused {tries[-1]['refused']}, "
                     f"τ: {ti.get('unknowns', 0)} unknowns, lag {ti.get('lag_iters', 0)} (last Δτ {ti.get('last_step_mm', 0):.1e} mm), "
-                    f"bound {ti.get('at_bound', 0)}, ramp {ti['ramp_voxels']}, checks {c}, {rec['s']:.1f} s"
+                    f"bound {ti.get('at_bound', 0)}, ramp {ti['ramp_voxels']}, "
+                    f"halved/refused at flagged {tries[-1]['halved_flagged']}/{tries[-1]['refused_flagged']}, "
+                    f"relaxed {nrel} (E after relax {e_relax}), splits {sp} collapses {co}, "
+                    f"quality before relax {q_before}, after remesh {rec['quality']}, "
+                    f"intersections {c['intersecting_faces']} gap {c['gap_vertices']}, {rec['s']:.1f} s"
                 )
             if self.snapshot:
                 self.snapshot(f"solve-{k:03d}", m, m.last, self._meta(k, cur, rec), cur.tau)
             if disp.max() < s.stop_vox * h:
-                self.ended = "converged"
+                # not a test of convergence: α may only have become small
+                self.ended = "step below stop_vox"
                 break
         self.contacts = TS.contacts(m, site.vox)
         self.final = cur

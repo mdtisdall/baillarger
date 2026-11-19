@@ -99,3 +99,14 @@ def test_constrained_move_keeps_the_gap() -> None:
     assert gapz >= 0.25 - 1e-9
     assert info["halved"] > 0 and info["refused"] == 0
     assert dd[: len(v1), 2].max() > 0
+
+
+def test_min_altitude_and_flags() -> None:
+    """A 3-4-5 right triangle: area 6, longest edge 5, smallest altitude
+    2.4; a sliver (altitude 0.1) flags its three vertices at limit 0.5."""
+    V = np.array([[0.0, 0, 0], [3, 0, 0], [0, 4, 0], [10, 0, 0], [20, 0, 0], [15, 0.1, 0]])
+    F = np.array([[0, 1, 2], [3, 4, 5]])
+    alt = TSV.min_altitude(V, F)
+    np.testing.assert_allclose(alt, [2.4, 0.1], rtol=1e-12)
+    fl, _ = TSV.flagged_vertices(V, F, 0.5)
+    assert fl.tolist() == [False, False, False, True, True, True]

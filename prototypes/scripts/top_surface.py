@@ -396,8 +396,11 @@ def contacts(m: Mesh, vox: np.ndarray) -> dict[str, np.ndarray]:
 # ------------------------------------------------------------ mesh quality (T7)
 
 
-def relax(m: Mesh, chk: MC.Checker, fold_cos: float, normal: float = 0.0) -> tuple[np.ndarray, int]:
-    """One tangential relaxation step for the interior vertices; with
+def relax(
+    m: Mesh, chk: MC.Checker, fold_cos: float, normal: float = 0.0, only: np.ndarray | None = None
+) -> tuple[np.ndarray, int]:
+    """One tangential relaxation step for the interior vertices (with only,
+    for those of them where only is True); with
     normal > 0, the MOVING vertices also move along
     their normal by `normal` × the normal part of the move toward the
     neighbours' centroid, and that part is added to their travel. Moves
@@ -418,6 +421,8 @@ def relax(m: Mesh, chk: MC.Checker, fold_cos: float, normal: float = 0.0) -> tup
         act = m.state == MOVING
         dlt += np.where(act, normal * dn, 0.0)[:, None] * N
     dlt[m.boundary | (cnt == 0)] = 0.0
+    if only is not None:
+        dlt[~only] = 0.0
     V0 = m.V.copy()
     changed = np.abs(dlt).sum(1) > 0
     while changed.any():  # each pass undoes at least one move
