@@ -78,6 +78,11 @@ class StartSettings:
     # neighbours' centroid (variant 1: a smoothness term in the start only)
     normal_iters: int = 0
     normal_smooth: float = 0.0
+    # ∇τ step (user, 2026-11-18): before each step, τ behind Σ (top_tau,
+    # at most tau_lm_iters LM iterations, warm start); a vertex steps along
+    # the mean ∇τ of the τ voxels inside Σ within one voxel, else its normal
+    tau_step: bool = False
+    tau_lm_iters: int = 3
 
 
 @dataclass
@@ -228,13 +233,23 @@ def stop_by_label(lab: np.ndarray, travel: np.ndarray, wm_limit: float) -> np.nd
 
 
 def expand_step(
-    m: Mesh, site: TP.Site, s: StartSettings, h: float, chk: MC.Checker
+    m: Mesh,
+    site: TP.Site,
+    s: StartSettings,
+    h: float,
+    chk: MC.Checker,
+    dirs: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """One start step; returns the displacement of each vertex and counts.
     The first check tests the pairs with a moving vertex; each later check
-    only the pairs with a vertex whose step changed (halved or refused)."""
+    only the pairs with a vertex whose step changed (halved or refused).
+    With dirs = (D, has): a vertex with has[i] steps along the unit D[i]
+    (∇τ, top_tau.TauBehind.directions), the others along the normal."""
     d = s.step_vox * h
     N = smooth_normals(m, normals(m.V, m.F), s.normal_iters)
+    if dirs is not None:
+        D, has = dirs
+        N[has] = D[has]
     act = m.state == MOVING
     lab = label_at(site, m.V + d * N)
     st = stop_by_label(lab, m.travel + d, s.wm_limit_vox * h)
@@ -646,6 +661,7 @@ class StartRun:
     log: list[dict[str, Any]] = field(default_factory=list)
     ended: str = ""  # "no step" (Σ no longer changes) or "max_steps"
     contacts: dict[str, np.ndarray] = field(default_factory=dict)  # of the final Σ (`contacts`)
+    tau_grid: np.ndarray | None = None  # with tau_step: the last τ behind Σ (nan off the domain)
 
     def run(self) -> Mesh:
         site, s = self.site, self.s
@@ -677,12 +693,24 @@ class StartRun:
         }
         if self.snapshot:
             self.snapshot("start-00", m, np.zeros(len(m.V)), {"step": 0, **self.initial})
+        tb = None
+        if s.tau_step:
+            import top_tau  # JAX: only for the ∇τ step
+
+            tb = top_tau.TauBehind(site, s.tau_lm_iters)
         for k in range(1, s.max_steps + 1):
             t0 = time.time()
             # one face grid for the step's checks (no vertex moves more than
             # h/4 along the normal; the relaxation is covered by the rebuild test)
             chk = MC.Checker(m.top, m.V, gap, slack=s.step_vox * h)
-            disp, info = expand_step(m, site, s, h, chk)
+            dirs = None
+            if tb is not None:
+                _, grad, _ = tb.solve(m.V, m.F)
+                dirs = tb.directions(m.V, grad)
+                self.tau_grid = tb.tau_grid
+            disp, info = expand_step(m, site, s, h, chk, dirs)
+            if tb is not None:
+                info["tau"] = {**tb.log[-1], "tau_directions": int(dirs[1].sum()) if dirs else 0}
             moved_any = info["moved"] > 0
             r, nrel = relax(m, chk, s.fold_cos, s.normal_smooth)
             # displacement shown per vertex: the normal step plus the relaxation;

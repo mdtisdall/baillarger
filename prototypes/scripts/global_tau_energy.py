@@ -87,16 +87,23 @@ def _deriv(F: Array, nb: Array, nbv: Array, h: Array, a: int) -> Array:
 
 
 def _grad_axis(x: Array, P: dict[str, Array], a: int) -> Array:
-    """dτ/dx_a with the ghost value τ = 0 at h/2 across a contact face, or
-    in the ridge form the continuous upwind split."""
+    """dτ/dx_a with the ghost value τ = 0 at gdist × h across a contact
+    face (h/2) or a crossing of a fixed top surface (θh), or in the ridge
+    form the continuous upwind split."""
     nb, nbv, gh, h = P["nb"], P["nbv"], P["ghost"], P["h"]
     m, p = nb[:, a, 0], nb[:, a, 1]
     gm, gp = gh[:, a, 0], gh[:, a, 1]
     vm, vp = nbv[:, a, 0] | gm, nbv[:, a, 1] | gp
     Fm = jnp.where(gm, 0.0, x[m])
     Fp = jnp.where(gp, 0.0, x[p])
-    dm = jnp.where(gm, 0.5 * h[a], h[a])
-    dp = jnp.where(gp, 0.5 * h[a], h[a])
+    # the ghost τ = 0 sits gdist × h from the slot: 0.5 at a contact face,
+    # θ (0 < θ ≤ 1) where the axis crosses a fixed top surface Σ (T3);
+    # without P["gdist"], 0.5 everywhere
+    gd = P.get("gdist")
+    gdm = 0.5 if gd is None else gd[:, a, 0]
+    gdp = 0.5 if gd is None else gd[:, a, 1]
+    dm = jnp.where(gm, gdm * h[a], h[a])
+    dp = jnp.where(gp, gdp * h[a], h[a])
     both = (Fp - Fm) / (dm + dp)
     plus = (Fp - x) / dp
     minus = (x - Fm) / dm

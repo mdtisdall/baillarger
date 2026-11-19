@@ -32,6 +32,7 @@ import numpy as np  # noqa: E402
 from matplotlib.collections import LineCollection  # noqa: E402
 
 CONTACT_CODE = 4  # the state code the 3D view shows in cyan (not a top_surface state)
+TAU_RANGE_MM = (-2.0, 0.0)  # the fixed colour scale of τ in the slices
 
 PAGE = """<!doctype html><meta charset="utf-8"><title>Top surface evolution</title>
 <style>body{font:14px system-ui;margin:16px;background:#111;color:#ddd}
@@ -121,6 +122,16 @@ def render(z: dict, wv: np.ndarray, wf: np.ndarray, snap: Path, out: Path, cv: n
         a = axs[ax]
         k = int(cv[ax])
         a.imshow(np.take(e2, k, axis=ax), cmap="gray", origin="lower", interpolation="nearest")
+        if "tau" in sn:
+            # one fixed scale for every frame: τ from TAU_RANGE_MM[0] (dark) to 0 (yellow);
+            # values outside it are clipped and marked (red: τ > 0, white: below the range)
+            tk = np.take(sn["tau"], k, axis=ax)
+            ti = a.imshow(tk, cmap="viridis", origin="lower", interpolation="nearest", alpha=0.6,
+                          vmin=TAU_RANGE_MM[0], vmax=TAU_RANGE_MM[1])
+            out_hi = np.where(tk > TAU_RANGE_MM[1], 1.0, np.nan)
+            out_lo = np.where(tk < TAU_RANGE_MM[0], 1.0, np.nan)
+            a.imshow(out_hi, cmap="autumn", origin="lower", interpolation="nearest", vmin=0, vmax=1)
+            a.imshow(out_lo, cmap="gray", origin="lower", interpolation="nearest", vmin=0, vmax=1)
         rest = [b for b in range(3) if b != ax]
         a.add_collection(LineCollection(cut_segments(wv, wf, ax, k), colors="deepskyblue", linewidths=0.8))
         a.add_collection(LineCollection(cut_segments(V, Fs, ax, k), colors="red", linewidths=1.0))
@@ -129,6 +140,8 @@ def render(z: dict, wv: np.ndarray, wf: np.ndarray, snap: Path, out: Path, cv: n
         a.set_title(f"{'xyz'[ax]} = {k}")
         a.set_xticks([])
         a.set_yticks([])
+    if "tau" in sn:
+        fig.colorbar(ti, ax=axs, shrink=0.8, label="τ (mm); red = τ > 0, white = below −2 mm")
     states = meta.get("states", {})
     fig.suptitle(
         f"{snap.stem}   moving {states.get('moving', '-')}   top {states.get('top', '-')}   "

@@ -6,7 +6,8 @@ Writes OUT_DIR/result.npz (Σ: V, F, state, travel, origin; mm),
 OUT_DIR/log.json (settings, the start's counts, one record per step), and
 with snapshots=true OUT_DIR/snapshots/start-NN.npz after each step (V, F,
 the displacement of each vertex in that step, the state, held, the
-contacts measured from the geometry (contact, facing_mm), meta).
+contacts measured from the geometry (contact, facing_mm), with tau_step=true
+the τ behind Σ that drove the step (tau), meta).
 result.npz also has held, contact and facing_mm of the final Σ; log.json
 says why the start ended ("no step" or "max_steps").
 """
@@ -53,6 +54,8 @@ def main() -> None:
             contact=c["contact"],
             facing_mm=c["facing_mm"].astype(np.float32),
             meta=json.dumps(meta),
+            # with tau_step: the τ behind Σ that drove this step (nan off the domain)
+            **({"tau": run.tau_grid.astype(np.float32)} if run.tau_grid is not None else {}),
         )
 
     run = TS.StartRun(site, s, progress=lambda t: print(t, flush=True), snapshot=snapshot if snaps else None)
