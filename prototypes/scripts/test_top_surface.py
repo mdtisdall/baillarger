@@ -433,3 +433,27 @@ def test_collapse_is_not_blocked_by_an_edge_that_cannot_collapse() -> None:
     # rounds: Y1 Z1 collapses, AB stays
     nc, newid, merged = TS._collapse(m, 0.45, np.zeros(len(V), bool))
     assert nc == 1 and merged.tolist() == [min(Y1, Z1)] and newid[A] >= 0 and newid[B] >= 0
+
+
+def test_remesh_retries_until_a_batch_passes(monkeypatch) -> None:  # noqa: ANN001
+    """Batches that fail three times (each at one merged vertex) do not
+    end the pass: the fourth batch, without the collapses near the
+    failures, is kept."""
+    v, f = grid_sheet(8, 5.0, True)
+    rng = np.random.default_rng(1)
+    v[:, :2] += rng.uniform(-0.3, 0.3, (len(v), 2)) * (~MC.boundary_vertices(f, len(v)))[:, None]
+    m = TS.Mesh(v * H, f, v * H, np.zeros(len(v), np.int64), np.zeros(len(v)))
+    real_folds = TS.new_folds
+    calls = []
+
+    def folds(m_, V, V0, ch, fc):  # noqa: ANN001, ANN202
+        calls.append(1)
+        if len(calls) <= 3:  # fail at one merged vertex
+            out = np.zeros(len(V), bool)
+            out[np.flatnonzero(ch)[0]] = True
+            return out, 0, 0
+        return real_folds(m_, V, V0, ch, fc)
+
+    monkeypatch.setattr(TS, "new_folds", folds)
+    s, c = TS.remesh(m, 0.25 * H, 10 * H, 0.9 * H, MC.FOLD_COS)
+    assert len(calls) == 4 and c > 0

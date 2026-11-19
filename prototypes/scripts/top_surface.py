@@ -470,7 +470,10 @@ def remesh(
     faces: the gap, the intersections and the folds (turned from the
     reference, or folded back on a neighbour). If a check fails there, the
     batch is undone and done again without the collapses near the failing
-    vertices (at most 3 times; then no collapse in this pass). Returns the
+    vertices, until a batch passes or a failure excludes no new vertex
+    (then no collapse in this pass). (A cap of 3 attempts let batches of
+    about 1,000 collapses fail in every pass of the 4 h start: each retry
+    picks a slightly different batch, which can fail somewhere new.) Returns the
     numbers of splits and collapses. With size (a function of the mesh
     giving a target edge length per vertex), lmax and lmin are factors of
     the smaller target of an edge's two ends. With extra (a function of the
@@ -480,7 +483,7 @@ def remesh(
     too."""
     splits = _split(m, lmax, None if size is None else size(m))
     exclude = np.zeros(len(m.V), bool)
-    for _ in range(3):
+    while True:  # each failed attempt excludes new vertices, so this ends
         saved = m.save()
         sz = None if size is None else size(m)
         if rim is None:
@@ -507,8 +510,10 @@ def remesh(
         m.restore(saved)
         # exclude the failing vertices and their neighbours (the removed end
         # of a merged edge is a neighbour of the kept end)
-        exclude |= MC.near_vertices(m.ptr, m.nbr, hit)
-    return splits, 0
+        new = MC.near_vertices(m.ptr, m.nbr, hit)
+        if not (new & ~exclude).any():
+            return splits, 0
+        exclude |= new
 
 
 def _local_best(E: np.ndarray, rank: np.ndarray, n: int, ptr: np.ndarray | None, nbr: np.ndarray | None) -> np.ndarray:
