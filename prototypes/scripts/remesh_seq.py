@@ -26,6 +26,17 @@ The fold reference (user, 2026-11-19: "White normal"): a face is turned
 when its normal is at 90 degrees or more to the normal of the white face
 at the closest point to its centroid.
 
+The no-cut check (user, 2026-11-19: "No-cut check only", after the review
+of the thin WM fingers that the coarsening cut off): with eps given, an
+operation is also refused when it leaves a white vertex more than eps from
+Σ with Σ on its WM side (Σ cuts into the white surface). Σ may lie farther
+than eps on the outer side (across a sulcus). Each white vertex keeps its
+signed distance to Σ (+ outside, - inside; 0 at the start, where Σ is the
+white mesh); after an edit, the white vertices near the old and the new
+faces get theirs again (Checker.closest, within a search radius of twice
+the largest edge). A white vertex with no Σ within that radius keeps its
+old distance if it was more than eps outside, else it is cut.
+
 The rim (the crop's boundary) does not relax. Corners stay where they are.
 A collapse of a rim edge or of a spoke (one end on the rim) moves the
 other end onto the kept end; an edge between two rim vertices that is not
@@ -137,8 +148,13 @@ class Remesher:
     """The sequential remesher on a live mesh (V, F) over a White."""
 
     def __init__(self, white: White, V: np.ndarray, F: np.ndarray, gap: float,
-                 fold_cos: float = MC.FOLD_COS, corner: np.ndarray | None = None):
-        self.white, self.gap = white, gap
+                 fold_cos: float = MC.FOLD_COS, corner: np.ndarray | None = None,
+                 eps: float | None = None):
+        self.white, self.gap, self.eps = white, gap, eps
+        #: the white vertices' signed distances to Σ (the no-cut check)
+        self.wd = np.zeros(len(white.V))
+        self.wn = MC.vertex_normals(white.V, white.F)
+        self.rs = 2.0 * HI * float(white.size.max())
         top = MC.Topology.of(F, len(V))
         self.chk = MC.Checker(top, np.asarray(V, np.float64), gap, fold_cos=fold_cos)
         rim, E = rim_of(top.F, len(V))
@@ -175,9 +191,41 @@ class Remesher:
         _, _, wf = self.white.project(V[F].mean(1))
         return bool(((n * self.white.N[wf]).sum(1) <= 0).any())
 
+    def _tris(self, faces: np.ndarray) -> np.ndarray:
+        return self.chk.V[self.chk.F[faces]]
+
+    def _near_white(self, T: np.ndarray) -> np.ndarray:
+        """The white vertices within eps of the triangles T (a superset:
+        within eps + the triangle's radius of its centroid)."""
+        if not len(T):
+            return np.zeros(0, np.int64)
+        C = T.mean(1)
+        R = np.linalg.norm(T - C[:, None], axis=2).max(1) + self.eps
+        lists = self.white.vtree.query_ball_point(C, R)
+        return np.unique(np.fromiter((j for x in lists for j in x), np.int64))
+
+    def _cut(self, old: np.ndarray, new: np.ndarray) -> tuple[bool, np.ndarray, np.ndarray]:
+        """The no-cut check after an edit: (cut, the white vertices
+        checked, their new signed distances)."""
+        w = np.union1d(self._near_white(old), self._near_white(new))
+        if not len(w):
+            return False, w, np.zeros(0)
+        W = self.white.V[w]
+        Q, d, _ = self.chk.closest(W, self.rs)
+        found = np.isfinite(d)
+        side = np.where(found, ((Q - W) * self.wn[w]).sum(1), 0.0)
+        sd = np.where(found, np.where(side >= 0, d, -d), self.wd[w])
+        cut = (found & (d > self.eps) & (side < 0)) | (~found & (self.wd[w] <= self.eps))
+        return bool(cut.any()), w, sd
+
     def _try(self, kind: str, **edit: Any) -> MC.EditCheck | None:
         """Propose an edit; keep it if every check passes (returns its
         check), else undo it (None)."""
+        mv0 = [int(v) for v in edit.get("move", [])]
+        if self.eps is not None:
+            ofaces = np.unique(np.r_[np.asarray(edit.get("remove_faces", []), np.int64),
+                                     *[self.chk.faces_of(v) for v in mv0]]).astype(np.int64)
+            old = self._tris(ofaces)
         r = self.chk.propose(**edit)
         reason = ""
         if r.gap_pairs:
@@ -191,11 +239,17 @@ class Remesher:
             faces = np.r_[r.new_faces, *[self.chk.faces_of(int(v)) for v in mv]].astype(np.int64)
             if self.turned(np.unique(faces)):
                 reason = "turned"
+            elif self.eps is not None:
+                cut, w, sd = self._cut(old, self._tris(np.unique(faces)))
+                if cut:
+                    reason = "nocut"
         if reason:
             self.chk.rollback()
             self.refused[f"{kind}_{reason}"] += 1
             return None
         self.chk.commit()
+        if self.eps is not None:
+            self.wd[w] = sd
         self._grow()
         return r
 
@@ -388,7 +442,9 @@ class Remesher:
         nb = MC.vertex_neighbours(F, len(V))[0]
         deg = np.diff(nb)
         ang = np.degrees(SM._angles(V, F).min(1))
-        _, dev, _ = SM.closest_on(V, F, cKDTree(V[F].mean(1)), self.white.V, 24)
+        q, dev, _ = SM.closest_on(V, F, cKDTree(V[F].mean(1)), self.white.V, 24)
+        inside = ((q - self.white.V) * self.wn).sum(1) < 0
+        din = np.where(inside, dev, 0.0) / h
         return {
             "vertices": len(V),
             "faces": len(F),
@@ -398,6 +454,8 @@ class Remesher:
             "min_angle_deg_p1_5_50": [round(float(x), 1) for x in np.percentile(ang, [1, 5, 50])],
             "deviation_max_vox": round(float(dev.max()) / h, 3),
             "deviation_p99_vox": round(float(np.percentile(dev, 99)) / h, 3),
+            "inside_max_vox": round(float(din.max()), 3),
+            "inside_over_0.5_1_2_4_vox": [int((din > t).sum()) for t in (0.5, 1, 2, 4)],
         }
 
 
@@ -422,7 +480,7 @@ def remesh(rm: Remesher, h: float, max_passes: int = 20, progress: Any = None) -
 
 
 def coarse_start(site: TP.Site, lmin_vox: float, max_passes: int = 20,
-                 progress: Any = None) -> tuple[TS.Mesh, list[dict[str, Any]], dict[str, Any]]:
+                 progress: Any = None, eps_vox: float | None = None) -> tuple[TS.Mesh, list[dict[str, Any]], dict[str, Any]]:
     """The coarse Σ start of a site, sequentially remeshed; returns the
     mesh, the pass log and the checks of the start (the white mesh)."""
     h = float(site.vox.mean())
@@ -432,7 +490,7 @@ def coarse_start(site: TP.Site, lmin_vox: float, max_passes: int = 20,
     rim, E = rim_of(F, len(V))
     hi = (np.array(site.labels.shape) - 1) * site.vox
     corner = box_corners(V, rim, E, np.zeros(3), hi, 1e-6 * h)
-    rm = Remesher(white, V, F, gap, corner=corner)
+    rm = Remesher(white, V, F, gap, corner=corner, eps=None if eps_vox is None else eps_vox * h)
     start = rm.chk.check_all()
     start_info = {"gap_pairs": start.gap_pairs, "intersecting_pairs": start.intersecting_pairs,
                   "vertex_fold_pairs": start.vertex_fold_pairs, "creases": start.creases,
@@ -446,14 +504,17 @@ def coarse_start(site: TP.Site, lmin_vox: float, max_passes: int = 20,
 
 
 def main() -> None:
-    """usage: remesh_seq.py SITE_NPZ OUT_NPZ [max_passes] [lmin_vox]"""
+    """usage: remesh_seq.py SITE_NPZ OUT_NPZ [max_passes] [lmin_vox] [eps_vox]
+    (eps_vox: the no-cut check's eps in voxels; none: no check)"""
     import json
     import sys
 
     site = TP.load_site(sys.argv[1])
     mp = int(sys.argv[3]) if len(sys.argv) > 3 else 20
     lv = float(sys.argv[4]) if len(sys.argv) > 4 else 4.0
-    m, log, start = coarse_start(site, lv, mp, progress=lambda r: print(json.dumps(r), flush=True))
+    ev = float(sys.argv[5]) if len(sys.argv) > 5 else None
+    m, log, start = coarse_start(site, lv, mp, progress=lambda r: print(json.dumps(r), flush=True),
+                                 eps_vox=ev)
     np.savez(sys.argv[2], V=m.V, F=m.F, log=json.dumps(log), start=json.dumps(start))
 
 

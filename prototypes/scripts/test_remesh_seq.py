@@ -99,3 +99,31 @@ def test_an_open_sheet_keeps_its_corners_and_its_rim_on_the_box() -> None:
     on_box = np.isclose(V[rim2, 0], 0) | np.isclose(V[rim2, 0], 20)
     on_box |= np.isclose(V[rim2, 1], 0) | np.isclose(V[rim2, 1], 20)
     assert on_box.all()
+
+
+def finger() -> tuple[np.ndarray, np.ndarray]:
+    """A slab with a thin fin on top (3 voxels thick, 9 tall): the fin is
+    narrower than the target edge."""
+    a = np.zeros((34, 30, 30))
+    a[4:30, 4:26, 4:10] = 1
+    a[10:24, 13:16, 10:19] = 1
+    v, f = marching_tetrahedra(a, 0.5)
+    return v.astype(np.float64), f.astype(np.int64)
+
+
+@pytest.mark.parametrize("eps", [None, 0.5])
+def test_the_no_cut_check_keeps_a_thin_fin(eps: float | None) -> None:
+    """Target 5 on a slab with a fin 3 voxels thick: without the check, Σ
+    cuts into the fin by more than a voxel; with it, no white vertex is
+    more than eps inside Σ, and Σ stays valid."""
+    V0, F0 = finger()
+    white = RS.White(V0, F0, np.full(len(V0), 5.0))
+    rm = RS.Remesher(white, V0.copy(), F0.copy(), GAP, eps=eps)
+    log = RS.remesh(rm, 1.0, max_passes=10)
+    assert_valid(rm)
+    inside = log[-1]["inside_max_vox"]
+    if eps is None:
+        assert inside > 1.0, log[-1]
+    else:
+        assert inside <= eps + 1e-9, log[-1]
+        assert any("nocut" in k for r in log for k in r["refused"])
