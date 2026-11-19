@@ -466,7 +466,14 @@ def point_residuals(
     nhat, wq) and the optional lagged weights. The voxel solve gets g and H
     from its stencils (scaled_voxel_residuals); another representation of τ
     (prototypes/scripts/tau_field.py, a meshfree basis) passes its own
-    analytic g and H, so both use the same terms."""
+    analytic g and H, so both use the same terms.
+
+    Units of ev: the voxel solve sums its terms over voxels with ev = 1
+    per valid voxel (times the fade ω), so ev is a volume in voxels. A
+    representation with quadrature points must pass ev = (the point's
+    quadrature volume) / h³, times its own validity. Else the τ terms
+    change their weight against the per-patch thickness terms and the
+    stop term."""
     tis = ev * (1.0 - inner)
     r_al = _ssqrt(tis * KAPPA * coh)[:, None] * jnp.cross(g, nhat)
     PHP = jnp.einsum("sij,sja,sab->sib", Pm, H, Pm)
