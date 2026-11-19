@@ -452,19 +452,32 @@ def scaled_voxel_residuals(x: Array, P: dict[str, Array], gh: Array, Pm: Array) 
     if fd is not None:
         om = fd[0]
         ev = ev * om  # the slot's own residuals fade in with ω
-    tis = ev * (1.0 - P["inner"])
-    r_al = _ssqrt(tis * KAPPA * P["coh"])[:, None] * jnp.cross(g, P["nhat"])
     H = jnp.stack([_deriv(g, nb, nbv, h, a, om) for a in range(3)], -1)  # (S, comp, axis)
+    return point_residuals(g, H, gh, Pm, ev, P["inner"], P["coh"], P["nhat"], P["wq"], P.get("wlag"))
+
+
+def point_residuals(
+    g: Array, H: Array, gh: Array, Pm: Array, ev: Array, inner: Array, coh: Array, nhat: Array,
+    wq: Array, wlag: Array | None = None,
+) -> Array:
+    """(n, NRES_L) residuals of the scaled terms at n points, from ∇τ g
+    (n, 3), the Hessian H (n, 3, 3), the column direction gh and its
+    projector Pm, the point weights ev (n,), the inner flag, the data (coh,
+    nhat, wq) and the optional lagged weights. The voxel solve gets g and H
+    from its stencils (scaled_voxel_residuals); another representation of τ
+    (prototypes/scripts/tau_field.py, a meshfree basis) passes its own
+    analytic g and H, so both use the same terms."""
+    tis = ev * (1.0 - inner)
+    r_al = _ssqrt(tis * KAPPA * coh)[:, None] * jnp.cross(g, nhat)
     PHP = jnp.einsum("sij,sja,sab->sib", Pm, H, Pm)
     r_sm = _ssqrt(tis / (2 * SIGMA_T**2))[:, None, None] * PHP
     lap = H[:, 0, 0] + H[:, 1, 1] + H[:, 2, 2]
-    r_eq = _ssqrt(tis * P["wq"]) * (lap - 2.0 * jnp.einsum("si,sij,sj->s", gh, H, gh))
+    r_eq = _ssqrt(tis * wq) * (lap - 2.0 * jnp.einsum("si,sij,sj->s", gh, H, gh))
     r_pi = _ssqrt(ev / (2 * SIGMA_P**2))[:, None] * (g - gh)
-    if "wlag" in P:  # the lagged 1/s0 weights (see "Lagged scale weights" above)
-        w = P["wlag"]
-        r_al = r_al * w[:, None]
-        r_sm = r_sm * w[:, None, None]
-        r_eq = r_eq * w**2
+    if wlag is not None:  # the lagged 1/s0 weights (see "Lagged scale weights" above)
+        r_al = r_al * wlag[:, None]
+        r_sm = r_sm * wlag[:, None, None]
+        r_eq = r_eq * wlag**2
     return jnp.concatenate([r_al, r_sm.reshape(-1, 9), r_eq[:, None], r_pi], axis=1)
 
 
@@ -473,10 +486,14 @@ def lagged_voxel_residuals(x: Array, P: dict[str, Array], L: dict[str, Array]) -
     return scaled_voxel_residuals(x, P, L["gh"], L["Pm"])
 
 
-def _gh_Pm(x: Array, P: dict[str, Array]) -> tuple[Array, Array]:
-    g = gradient(x, P)
+def gh_Pm(g: Array) -> tuple[Array, Array]:
+    """ĝ = g/|g| (EPS in |g|²) and its projector I - ĝĝᵀ."""
     gh = g / jnp.sqrt(jnp.sum(g * g, -1) + EPS)[:, None]
     return gh, jnp.eye(3)[None] - gh[:, :, None] * gh[:, None, :]
+
+
+def _gh_Pm(x: Array, P: dict[str, Array]) -> tuple[Array, Array]:
+    return gh_Pm(gradient(x, P))
 
 
 def scaled_parts(x: Array, P: dict[str, Array]) -> dict[str, Array]:
