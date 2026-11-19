@@ -347,6 +347,9 @@ class SigmaTop:
     ghost: np.ndarray
     gdist: np.ndarray
     tau0: np.ndarray
+    #: top_tau.sigma_top: the crossings of every voxel within one voxel
+    #: (inside, cross, theta, face), for the stop term and ∂E/∂Σ
+    geo: dict[str, np.ndarray] | None = None
 
 
 class GlobalTau:
@@ -792,7 +795,8 @@ class GlobalTau:
                 tc = time.time()
                 # Gauss-Newton: E = Σ r² (+ the log t term), ∇E = 2 Jᵀr and
                 # the Hessian ≈ 2 JᵀJ, so (JᵀJ + λD) dx = -∇E / 2
-                b = -0.5 * grad
+                # the held voxels (at the bound) are not unknowns of this step
+                b = np.where(free, -0.5 * grad, 0.0)
                 n_it = [0]
                 A_op = spla.LinearOperator(
                     (pb.S1, pb.S1), matvec=lambda v, lam_=lam: Av(v, lam_), dtype=float
@@ -906,8 +910,9 @@ class GlobalTau:
         and tw0 at x (GE.lag_state), and minimises the quadratic model Q by
         one PCG solve of (JᵀJ) dx = -∇Q / 2 (J is exact: the residuals are
         affine in x) with the column-line preconditioner; then τ ≤ 0 by
-        projection. Each step logs the original energy (g0 as in lm_solve)
-        and Q before and after."""
+        projection. Each step logs the scaled energy (GE.scaled_energy: the
+        energy this estimator is for), the original energy (g0 as in
+        lm_solve) and Q before and after."""
         s = self.s
         unk = pb.unk
         P = pb.P
@@ -919,7 +924,7 @@ class GlobalTau:
             olut[a + 2, b + 2, c + 2] = o
         its: list[dict[str, Any]] = []
         t_solve = time.time()
-        e_first = float(GE.j_energy(jnp.asarray(x), P, g0))
+        e_first = float(GE.j_scaled_energy(jnp.asarray(x), P))
         for it in range(s.lag_iters):
             ti = time.time()
             xj = jnp.asarray(x)
@@ -973,7 +978,8 @@ class GlobalTau:
                 z[: pb.S] = K.line_solve(lptr2, lsl2, B, bptr, np.where(free, r, 0.0)[: pb.S])
                 return np.where(free, z, 0.0)
 
-            b = -0.5 * gq
+            # the held voxels (at the bound) are not unknowns of this step
+            b = np.where(free, -0.5 * gq, 0.0)
             n_it = [0]
             tc = time.time()
             dx, _ = spla.cg(
@@ -986,10 +992,11 @@ class GlobalTau:
             rel = float(np.linalg.norm(b - Av(dx)) / max(np.linalg.norm(b), 1e-300))
             xn = np.where(unk, np.minimum(x + np.where(free, dx, 0.0), 0.0), x)
             q1 = float(GE.lagged_energy(jnp.asarray(xn), P, L))
-            e1 = float(GE.j_energy(jnp.asarray(xn), P, g0))
+            e1 = float(GE.j_scaled_energy(jnp.asarray(xn), P))
+            e1o = float(GE.j_energy(jnp.asarray(xn), P, g0))
             step = float(np.abs(xn - x).max())
             its.append({
-                "iter": it, "q0": float(q0), "q1": q1, "e": e1, "step_mm": step,
+                "iter": it, "q0": float(q0), "q1": q1, "e": e1, "e_orig": e1o, "step_mm": step,
                 "cg_iters": n_it[0], "cg_rel": rel, "jac_s": t_jac, "factor_s": t_fac,
                 "cg_s": t_cg, "s": time.time() - ti,
                 "s0_below_0.1": int(np.sum(free[: pb.S] & (np.asarray(L["s"])[: pb.S] < 0.1))),
@@ -1002,7 +1009,7 @@ class GlobalTau:
             "tag": tag,
             "iters": its,
             "e0": e_first,
-            "e1": float(GE.j_energy(jnp.asarray(x), P, g0)),
+            "e1": float(GE.j_scaled_energy(jnp.asarray(x), P)),
             "n_unk": int(unk.sum()),
             "s": time.time() - t_solve,
         }

@@ -289,28 +289,41 @@ def j_slot_parts(
     return vox, thick, ts
 
 
-# ------------------------------------------------------------ lagged quadratic form
+# ------------------------------------------------------------ scaled terms, lagged form
 #
-# A second estimator of the same roles with a fixed top surface Σ (user,
-# 2026-11-19: "start from the cost function we expect to be able to solve").
-# The nonlinear parts are frozen at the previous iterate x0 (lag_state), so
-# each term is a linear residual in τ and one outer step is one convex
-# least-squares solve. With Σ fixed the domain is inside Σ: f = 1, no stop.
-#   align  κ coh |∇τ × n̂|² / s0²            (= κ coh (1 - (ĝ·n̂)²) at x0)
-#   smooth |P0 (∂∇τ) P0|² / (s0² 2σ_t²)      (∂ĝ = P ∂∇τ / s exactly; here
-#                                             the derivative of ∇τ, not of ĝ)
-#   equi   wq (div(∇τ / s0²))²               (div v with |∇τ|² frozen)
-#   pull   (ĝ0·∇τ - 1)² / (2σ_p²)            (unchanged)
-#   thick  r_lin² / (2 SD²) + t / t0,        r_lin = log t0 + (t - t0)/t0
-#                                             - log median; t/t0 is the
-#                                             tangent of log t (a majoriser)
-#   tsmooth tw0 (r_lin,i - r_lin,j)² / 2      (the IRLS majoriser of the
-#                                             Student-t, weights at x0)
-# s0 = |∇τ(x0)|, ĝ0, P0 = I - ĝ0ĝ0ᵀ, t0 and tw0 come from x0. The thickness
-# r_lin is a linearisation (not a majoriser), so the original energy need
-# not fall at each outer step: the solver reports it.
+# Scaled terms (user, 2026-11-19, option A): align, smooth and equi are
+# multiplied by a power of s = |∇τ| so that nothing is divided by s. Where
+# s = 1 they equal the terms above; where s → 0 (a ridge of τ) they go to 0
+# instead of without bound (the equivolume term of the first site-1 T5 run
+# went from 4,071 to 55,940 when one voxel reached s = 0.04).
+#   align  κ coh |∇τ × n̂|²                  (= s² κ coh (1 - (ĝ·n̂)²))
+#   smooth |P H P|² / (2σ_t²)                (= s² |∂ĝ P|²: ∂ĝ = P H / s)
+#   equi   wq (Δτ - 2 ĝᵀHĝ)²                (= s⁴ wq (div(∇τ/s²))², exact)
+#   pull   |∇τ - ĝ|² / (2σ_p²)              (= (s - 1)² at ĝ = ∇τ/s)
+# H is the derivative of the discrete ∇τ (the derivative of ∇τ on each
+# axis, real neighbours only, as _deriv), so the discrete identities hold
+# only approximately. The thickness terms are those above (log-normal and
+# Student-t). scaled_energy is this energy with ĝ = ∇τ/|∇τ| of τ itself:
+# the energy that T5 (top_solve) evaluates and differentiates.
+#
+# The lagged form (a fixed top surface Σ; user, 2026-11-19: "start from the
+# cost function we expect to be able to solve") freezes ĝ0 and P0 = I -
+# ĝ0ĝ0ᵀ, the thickness t0 and the Student-t weights tw0 at the previous
+# iterate x0 (lag_state): every residual is affine in τ, and one outer step
+# is one convex least-squares solve. With Σ fixed the domain is inside Σ:
+# f = 1, no stop term.
+#   pull   |∇τ - ĝ0|²: a majoriser of (|∇τ| - 1)² (||g| - 1| <= |g - ĝ0|
+#          for a unit ĝ0), equal at x0. (The first form, (ĝ0·∇τ - 1)², left
+#          ∇τ free across ĝ0; where the pull is the only term, the inner
+#          voxels at the start of T5, τ diverged: site 1, 2026-11-19.)
+#   thick  r_lin² / (2 SD²) + t / t0, r_lin = log t0 + (t - t0)/t0 - log
+#          median; t / t0 is the tangent of log t (a majoriser)
+#   tsmooth tw0 (r_lin,i - r_lin,j)² / 2: the IRLS majoriser of the
+#          Student-t
+# r_lin is a linearisation (not a majoriser), so the energy need not fall at
+# each outer step: the solver reports it.
 
-NRES_L = 14  # align 3, smooth 9, equi 1, pull 1
+NRES_L = 16  # align 3, smooth 9, equi 1, pull 3
 
 
 def lag_state(x: Array, P: dict[str, Array]) -> dict[str, Array]:
@@ -328,24 +341,52 @@ def lag_state(x: Array, P: dict[str, Array]) -> dict[str, Array]:
     }
 
 
-def lagged_voxel_residuals(x: Array, P: dict[str, Array], L: dict[str, Array]) -> Array:
-    """(S1, NRES_L), affine in x."""
+def scaled_voxel_residuals(x: Array, P: dict[str, Array], gh: Array, Pm: Array) -> Array:
+    """(S1, NRES_L) residuals of the scaled terms with the column direction
+    gh (S1, 3) and its projector Pm (S1, 3, 3) given: affine in x when gh
+    and Pm are fixed (the lagged form)."""
     nb, nbv, h = P["nb"], P["nbv"], P["h"]
     g = gradient(x, P)
     ev = P["evalw"] * P["valid"]
     tis = ev * (1.0 - P["inner"])
-    s0 = L["s"]
-    r_al = jnp.sqrt(tis * KAPPA * P["coh"])[:, None] * jnp.cross(g, P["nhat"]) / s0[:, None]
-    Jg = jnp.stack([_deriv(g, nb, nbv, h, a) for a in range(3)], -1)  # (S, comp, axis)
-    PJP = jnp.einsum("sij,sja,sab->sib", L["Pm"], Jg, L["Pm"])
-    r_sm = (jnp.sqrt(tis / (2 * SIGMA_T**2)) / s0)[:, None, None] * PJP
-    v = g / (s0 * s0)[:, None]
-    divv = sum(_deriv(v[:, a], nb, nbv, h, a) for a in range(3))
-    r_eq = jnp.sqrt(tis * P["wq"]) * divv
-    r_pi = jnp.sqrt(ev / (2 * SIGMA_P**2)) * (jnp.sum(L["gh"] * g, -1) - 1.0)
-    return jnp.concatenate(
-        [r_al, r_sm.reshape(-1, 9), r_eq[:, None], r_pi[:, None]], axis=1
-    )
+    r_al = jnp.sqrt(tis * KAPPA * P["coh"])[:, None] * jnp.cross(g, P["nhat"])
+    H = jnp.stack([_deriv(g, nb, nbv, h, a) for a in range(3)], -1)  # (S, comp, axis)
+    PHP = jnp.einsum("sij,sja,sab->sib", Pm, H, Pm)
+    r_sm = jnp.sqrt(tis / (2 * SIGMA_T**2))[:, None, None] * PHP
+    lap = H[:, 0, 0] + H[:, 1, 1] + H[:, 2, 2]
+    r_eq = jnp.sqrt(tis * P["wq"]) * (lap - 2.0 * jnp.einsum("si,sij,sj->s", gh, H, gh))
+    r_pi = jnp.sqrt(ev / (2 * SIGMA_P**2))[:, None] * (g - gh)
+    return jnp.concatenate([r_al, r_sm.reshape(-1, 9), r_eq[:, None], r_pi], axis=1)
+
+
+def lagged_voxel_residuals(x: Array, P: dict[str, Array], L: dict[str, Array]) -> Array:
+    """(S1, NRES_L), affine in x."""
+    return scaled_voxel_residuals(x, P, L["gh"], L["Pm"])
+
+
+def _gh_Pm(x: Array, P: dict[str, Array]) -> tuple[Array, Array]:
+    g = gradient(x, P)
+    gh = g / jnp.sqrt(jnp.sum(g * g, -1) + EPS)[:, None]
+    return gh, jnp.eye(3)[None] - gh[:, :, None] * gh[:, None, :]
+
+
+def scaled_parts(x: Array, P: dict[str, Array]) -> dict[str, Array]:
+    """The scaled energy by term, ĝ = ∇τ/|∇τ| of x (not frozen)."""
+    gh, Pm = _gh_Pm(x, P)
+    rv = scaled_voxel_residuals(x, P, gh, Pm)
+    thick, ts = patch_terms(x, P)
+    return {
+        "align": jnp.sum(rv[:, :3] ** 2),
+        "smooth": jnp.sum(rv[:, 3:12] ** 2),
+        "equi": jnp.sum(rv[:, 12] ** 2),
+        "pull": jnp.sum(rv[:, 13:16] ** 2),
+        "thick": jnp.sum(thick),
+        "tsmooth": jnp.sum(ts),
+    }
+
+
+def scaled_energy(x: Array, P: dict[str, Array]) -> Array:
+    return sum(scaled_parts(x, P).values())
 
 
 def lagged_patch_residuals(
@@ -375,7 +416,7 @@ def lagged_parts(x: Array, P: dict[str, Array], L: dict[str, Array]) -> dict[str
         "align": jnp.sum(rv[:, :3] ** 2),
         "smooth": jnp.sum(rv[:, 3:12] ** 2),
         "equi": jnp.sum(rv[:, 12] ** 2),
-        "pull": jnp.sum(rv[:, 13] ** 2),
+        "pull": jnp.sum(rv[:, 13:16] ** 2),
         "thick": jnp.sum(r_th**2) + lin,
         "tsmooth": jnp.sum(r_ts**2),
     }
@@ -408,6 +449,16 @@ def j_lagged_jvp(x: Array, P: dict[str, Array], L: dict[str, Array], t: Array) -
 @jax.jit
 def j_lagged_parts(x: Array, P: dict[str, Array], L: dict[str, Array]) -> dict[str, Array]:
     return lagged_parts(x, P, L)
+
+
+@jax.jit
+def j_scaled_energy(x: Array, P: dict[str, Array]) -> Array:
+    return scaled_energy(x, P)
+
+
+@jax.jit
+def j_scaled_parts(x: Array, P: dict[str, Array]) -> dict[str, Array]:
+    return scaled_parts(x, P)
 
 
 @jax.jit

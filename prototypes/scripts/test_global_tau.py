@@ -573,22 +573,32 @@ def _lagged_problem():  # noqa: ANN202
     return G, P, x, unk
 
 
-def test_lagged_residuals_equal_the_original_at_the_lag_point() -> None:
-    """At x0 the lagged align, equi and pull residuals are the original ones
-    (pull with ĝ0 = ĝ(x0)); smooth uses the derivative of ∇τ, not of ĝ, so
-    it is only close."""
+def test_scaled_terms_against_the_original() -> None:
+    """At x0 with s = |∇τ|: the scaled align residual is s × the original,
+    the pull |∇τ - ĝ| is |s - 1|, the scaled smooth term is s² × the
+    original and the equivolume term s⁴ × the original, up to the discrete
+    product rule (τ smooth here, so within a few percent); the lagged
+    residuals at x0 are the scaled ones."""
     G, P, x, unk = _lagged_problem()
+    c = G.coords - GS.PAD
+    x[: G.S] = -(7 - c[:, 2]) * H * (1.0 + 0.02 * c[:, 0]) - 0.002 * c[:, 1] ** 2  # smooth, s ≠ 1
     xj = jnp.asarray(x)
     g0 = GE.j_g0(xj, P)
     fw, _ = GE.j_weights(xj, P)
     r = np.asarray(GE.voxel_residuals(xj, P, g0, fw))[: G.S]
     L = GE.j_lag_state(xj, P)
     rl = np.asarray(GE.j_lagged_residuals(xj, P, L))[: G.S]
-    np.testing.assert_allclose(rl[:, :3], r[:, :3], atol=1e-9)  # align
-    np.testing.assert_allclose(rl[:, 12], r[:, 12], rtol=1e-7, atol=1e-7)  # equi
-    np.testing.assert_allclose(rl[:, 13], r[:, 13], atol=1e-9)  # pull
-    sm, sml = (r[:, 3:12] ** 2).sum(), (rl[:, 3:12] ** 2).sum()
-    assert abs(sml - sm) < 0.2 * sm
+    gh, Pm = GE._gh_Pm(xj, P)
+    rs = np.asarray(GE.scaled_voxel_residuals(xj, P, gh, Pm))[: G.S]
+    np.testing.assert_allclose(rl, rs, atol=1e-12)
+    s = np.asarray(L["s"])[: G.S]
+    np.testing.assert_allclose(rs[:, :3], s[:, None] * r[:, :3], rtol=1e-6, atol=1e-9)  # align
+    np.testing.assert_allclose(np.linalg.norm(rs[:, 13:16], axis=1), np.abs(r[:, 13]), atol=1e-9)
+    inner = np.all(np.asarray(P["nbv"])[: G.S].all(2), 1)  # central differences on all axes
+    for k in np.flatnonzero(inner)[:20]:
+        assert np.sum(rs[k, 3:12] ** 2) == pytest.approx(s[k] ** 2 * np.sum(r[k, 3:12] ** 2), rel=0.05)
+    eq_o = s[inner] ** 2 * r[inner, 12]
+    assert np.corrcoef(eq_o, rs[inner, 12])[0, 1] > 0.95
 
 
 def test_lagged_residuals_are_affine() -> None:

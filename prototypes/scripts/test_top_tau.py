@@ -45,11 +45,12 @@ def test_axis_crossings_of_a_flat_sheet() -> None:
     n = 6
     v, f = sheet(n, 5.3, True)
     shape = np.array([n, n, 10], np.int64)
-    U, W, T, S = TT._axis_crossings(v, f, 2, shape)
+    U, W, T, S, Fx = TT._axis_crossings(v, f, 2, shape)
     assert len(U) == n * n
     assert len({(u, w) for u, w in zip(U, W)}) == n * n
     np.testing.assert_allclose(T, 5.3)
     assert (S == 1).all()
+    assert ((Fx >= 0) & (Fx < len(f))).all()
     for a in (0, 1):
         assert len(TT._axis_crossings(v, f, a, shape)[0]) == 0
 

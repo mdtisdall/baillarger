@@ -43,17 +43,19 @@ EPS_B, EPS_C = 1.37e-7, 2.91e-7  # voxels: the offset of the grid lines (no exac
 @nb.njit(cache=True)
 def _axis_crossings(
     P: np.ndarray, F: np.ndarray, a: int, shape: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """The crossings of the grid lines along axis a (through the voxel
     centres, integer coordinates on the other two axes) with the faces of
     the mesh (P in voxel coordinates): line coordinates (u, v), the position
-    t on the axis, and the sign of the face normal's component on the axis."""
+    t on the axis, the sign of the face normal's component on the axis, and
+    the face."""
     b, c = (a + 1) % 3, (a + 2) % 3
     cap = 16 * len(F) + 16
     U = np.empty(cap, np.int64)
     W = np.empty(cap, np.int64)
     T = np.empty(cap, np.float64)
     S = np.empty(cap, np.int64)
+    Fx = np.empty(cap, np.int64)
     n = 0
     for f in range(len(F)):
         p0, p1, p2 = P[F[f, 0]], P[F[f, 1]], P[F[f, 2]]
@@ -91,20 +93,22 @@ def _axis_crossings(
                 W[n] = w
                 T[n] = l0 * p0[a] + l1 * p1[a] + l2 * p2[a]
                 S[n] = 1 if na > 0 else -1
+                Fx[n] = f
                 n += 1
-    return U[:n], W[:n], T[:n], S[:n]
+    return U[:n], W[:n], T[:n], S[:n], Fx[:n]
 
 
 @nb.njit(cache=True)
 def _line_votes(
-    U: np.ndarray, W: np.ndarray, T: np.ndarray, S: np.ndarray, a: int,
-    shape: np.ndarray, vote: np.ndarray, voted: np.ndarray,
-    ghost: np.ndarray, gdist: np.ndarray,
+    U: np.ndarray, W: np.ndarray, T: np.ndarray, S: np.ndarray, Fx: np.ndarray,
+    a: int, shape: np.ndarray, vote: np.ndarray, voted: np.ndarray,
+    ghost: np.ndarray, gdist: np.ndarray, gface: np.ndarray,
 ) -> None:
     """Per voxel on each line with crossings: an inside vote (next crossing
     above leaves, or none above and the last below enters), and the ghost
     sides: a crossing between the centre and the neighbour's centre, with
-    θ = its distance from the centre (the nearest crossing on that side)."""
+    θ = its distance from the centre (the nearest crossing on that side)
+    and its face (gface)."""
     b, c = (a + 1) % 3, (a + 2) % 3
     # sort by line, then by t
     key = (U * shape[c] + W).astype(np.float64) * (4.0 * shape[a] + 8.0) + (T + 2.0)
@@ -120,6 +124,7 @@ def _line_votes(
         u, w = U[order[i]], W[order[i]]
         ts = T[order[i:j]]
         ss = S[order[i:j]]
+        fs = Fx[order[i:j]]
         m = j - i
         for k in range(shape[a]):
             # next crossing above k
@@ -140,9 +145,11 @@ def _line_votes(
             if q < m and ts[q] <= k + 1:
                 ghost[idx[0], idx[1], idx[2], a, 1] = True
                 gdist[idx[0], idx[1], idx[2], a, 1] = ts[q] - k
+                gface[idx[0], idx[1], idx[2], a, 1] = fs[q]
             if q > 0 and ts[q - 1] >= k - 1:
                 ghost[idx[0], idx[1], idx[2], a, 0] = True
                 gdist[idx[0], idx[1], idx[2], a, 0] = k - ts[q - 1]
+                gface[idx[0], idx[1], idx[2], a, 0] = fs[q - 1]
         i = j
 
 
@@ -166,10 +173,14 @@ def sigma_top(
     voted = np.zeros(tuple(shape), np.int64)
     ghost = np.zeros((*shape, 3, 2), bool)
     gdist = np.ones((*shape, 3, 2))
+    gface = np.full((*shape, 3, 2), -1, np.int64)
     for a in range(3):
-        U, W, T, S = _axis_crossings(np.ascontiguousarray(P), Fi, a, shape)
-        _line_votes(U, W, T, S, a, shape, vote, voted, ghost, gdist)
+        U, W, T, S, Fx = _axis_crossings(np.ascontiguousarray(P), Fi, a, shape)
+        _line_votes(U, W, T, S, Fx, a, shape, vote, voted, ghost, gdist, gface)
     inside_sigma = (voted > 0) & (vote > 0)
+    # every voxel's crossings within one voxel (before the domain mask): the
+    # stop term's band and the derivatives with respect to Σ (top_solve)
+    geo = {"inside": inside_sigma, "cross": ghost.copy(), "theta": gdist.copy(), "face": gface}
     _, inner = GS.make_domain(site, s)
     tissue = inside_sigma & ~site.inside
     inner &= inside_sigma
@@ -197,7 +208,9 @@ def sigma_top(
         "unanchored_parts": int(n - anchored[1:].sum()),
         "unanchored_voxels": int(free.sum()),
     }
-    return GS.SigmaTop(domain, inner, ghost, gdist, tau0), info
+    sig = GS.SigmaTop(domain, inner, ghost, gdist, tau0)
+    sig.geo = geo
+    return sig, info
 
 
 class TauBehind:
