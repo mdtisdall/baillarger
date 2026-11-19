@@ -7,12 +7,14 @@ mdtisdall/baillarger#222). The voxel data (n̂, the labels, later the
 contrast) stays at full resolution. Only the unknowns of τ become
 fewer.
 
-**Status.** A design proposal and one local prototype
-(`prototypes/scripts/tau_coarse.py`, branch `feature/tau-coarse`, commit
-45fe574, not pushed). Every open choice is a question for the user (see
-*Open questions*). The convergence experiments wait for a Σ in the
-cortex and for the user's choice about the scale bias (see
-*Dependencies*).
+**Status.** The chosen basis is P2 tetrahedra behind Σ, from fTetWild
+(M1, form D). Σ is the faces of the tetrahedral mesh (one surface). The
+mesh moves with Σ, and fTetWild remeshes it when it degrades (M9). The
+prototype is `prototypes/scripts/tau_tet.py` on the local branch
+`feature/tau-coarse` (not pushed). It runs in the T5 evolution of
+`top_solve.py` with `mesh=none`. The meshfree form E1 was tested first
+and set aside (see *Prototype*). Every open choice is a question for the
+user (see *Open questions*).
 
 ## Decisions so far (user, 2026-11-19)
 
@@ -35,6 +37,21 @@ cortex and for the user's choice about the scale bias (see
   user wants the same idea tested here with an irregular mesh for τ:
   nodes where the size map asks for them, not on a regular lattice and
   not on the flow lines of τ.
+- **τ exists only behind Σ.** No quadrature point and no unknown is in
+  front of Σ ("By definition tau doesn't exist out there").
+- **The mesh lives behind Σ.** Its vertices are behind Σ or on Σ. They
+  move with Σ as it advances, and the mesh is refined or made again as
+  needed.
+- **fTetWild with P2 elements.** fTetWild (MPL-2.0) makes the
+  tetrahedra, with Σ's faces in the mesh. The elements are quadratic.
+- **Move the vertices, then remesh.** Between remeshes the tetrahedra
+  keep their connectivity and their vertices move with Σ. When the
+  mesh degrades, fTetWild makes a new mesh.
+- **One surface.** Σ is the set of mesh faces between the τ region and
+  the front. T5 moves the vertices of these faces. There is no second
+  copy of Σ.
+- **Licences.** No GPL or AGPL code. LGPL code only when it is linked
+  dynamically, not modified, and replaceable. MPL is acceptable.
 
 ## What the voxel solver work found (2026-11-19)
 
@@ -187,10 +204,35 @@ a coupling that is correct by construction matters for the descent of
   gradient or an interior penalty, and the equivolume and smooth terms
   are then weakest where τ meets Σ. This is the place that failed in the
   voxel form.
-- **D. Tetrahedra that conform to Σ.** A permissive constrained
-  tetrahedral mesher does not exist (TetGen AGPL, CGAL and gmsh GPL).
-  Out.
-- **E. An irregular mesh, cut by Σ (chosen: E1, user 2026-11-19).** The τ mesh does not have to conform to Σ, because Σ
+- **D. P2 tetrahedra that conform to Σ (chosen, user 2026-11-19).**
+  TetGen (AGPL), CGAL and gmsh (GPL) are out. fTetWild (MPL-2.0,
+  through `pytetwild` 0.4.2, which loads GMP, LGPL-3, as a separate
+  dynamic library) meshes the crop box with Σ inside it. With its
+  filtering off, Σ's faces are in the mesh to within the envelope ε.
+  So no tetrahedron crosses Σ, and the centre of each tetrahedron gives
+  its side. The τ region is the tetrahedra behind Σ whose centre is in
+  the τ domain or in a WM band (1.5 h deep). P2 elements: one value at
+  each vertex and at each edge midpoint. ∇τ is linear and H is
+  constant in each tetrahedron. The quadrature is the 4-point rule of
+  degree 2 in each tetrahedron, with the data (n̂, coh, the labels) of
+  the nearest voxel. τ = 0 is exact on Σ: the dofs on Σ's faces are
+  fixed at 0, so Z1 and the cut weights of M3 are not needed. The two
+  sides of a contact are different tetrahedra that meet only at
+  vertices on Σ, where τ = 0, so M2 needs no copies. M5 has no small
+  cut pieces, but it has flat tetrahedra, which the remesh removes.
+  The crop box is free (no fixed τ0 there). With τ0 fixed on the box,
+  the Hessian terms were too large near the box. Free, at the coarse
+  start: smooth 230 and equivolume 45, against 665 and 28 in the voxel
+  solve.
+  Two settings:
+  - **The edge length** (4 h). The size of the tetrahedra away from Σ.
+  - **The envelope ε** (0.1 h). Σ in the mesh is within ε of the input
+    Σ. A smaller ε keeps Σ closer, and gives smaller tetrahedra near
+    curved parts of Σ.
+
+  A sizing field (fTetWild's background mesh) can later carry a size
+  map, for example the refine marks of T5.
+- **E. An irregular mesh, cut by Σ (tested first, set aside).** The τ mesh does not have to conform to Σ, because Σ
   cuts it (M3) as it cuts the lattice. So no constrained mesher is
   needed. The nodes go where a size field asks for them, and they stay
   fixed in space while Σ moves. Two forms:
@@ -387,7 +429,31 @@ voxel solve and used here as it is.
 
 ### M9. Moving Σ
 
-The lattice does not move. Σ moves through it, and these change:
+**With D (the chosen form).** T5 moves Σ's vertices, which are mesh
+vertices. A mesh vertex off Σ moves with the Σ vertices within 2 edge
+lengths, by a Wendland-weighted average that fades to 0 at that
+distance. On the crop box the motion normal to the box is 0. So
+ΔP = M ΔV, and ∂E/∂V = Mᵀ ∂E/∂P + ∂E_stop/∂V. ∂E/∂P comes from JAX on
+the point energy (the quadrature weights, ∇λ and H move with P). The
+patch roots are fixed points, so their part has no shape derivative.
+A trial with an inverted tetrahedron has E = ∞, so the line search
+halves the step.
+
+fTetWild makes a new mesh of the whole crop box (it has no local
+remeshing) when one of these is true after an accepted step:
+
+- a tetrahedron is inverted, or its smallest dihedral angle is below
+  5°;
+- an edge of Σ is longer than 2 × its length at the last remesh.
+
+τ goes to the new dofs from the last τ grid. This is a projection
+event, logged as `E_before_nodes`. The new Σ is the new mesh's faces,
+within ε of the old Σ. T5 then takes it with its per-vertex fields from
+the nearest old vertex. T5 runs with `mesh=none`: it does not split or
+collapse Σ's edges itself.
+
+**With A and E (the lattice and the meshfree nodes).** The lattice does
+not move. Σ moves through it, and these change:
 
 - the weights f (continuous, M3).
 - the points of the Z1 residuals (continuous, M4).
@@ -444,28 +510,62 @@ the mesh. The angle between the traced columns and n̂ is a diagnostic.
 
 ## Prototype
 
-`prototypes/scripts/tau_coarse.py` (commit 45fe574, local):
+All on the local branch `feature/tau-coarse`. Each form runs in the T5
+evolution through `prototypes/scripts/tau_field_run.py` (`basis=mls` or
+`basis=tet`), from the coarse start Σ of the T5 session
+(`coarse-start-4h.npz`), with `max_steps=80 tau_iters=30`. The energy
+is the shared point residuals of `global_tau_energy.point_residuals`, so
+every form has the same terms.
 
-- **Has:** cubic B-splines on a lattice of L voxels, copies by piece
-  (K1), the fit of τ0, LM on the coefficients with M = Uᵀ(JᵀJ)U and an
-  exact SuperLU step. Exact tests: cubics are held, a V-shape across a
-  cut is held, M equals the dense product.
-- **Does not have:** analytic derivatives (it uses the voxel stencils
-  on τ sampled at the voxel centres), the cut weights f, the Z1
-  residuals, the extension of M5, the bound on τ. It has the two
-  constants `FIT_RIDGE` and `DFLOOR`.
-- **Partial runs** (site 1, T6 start Σ, old stencil, scale bias):
-  voxel LM 5.24 × 10⁶ → 176,192 in 20 iterations. L = 8: 529,259 →
-  325,906 after 86 iterations. These numbers are not valid for a
-  comparison: the stencil decoupled most tissue cells, the energy
-  favoured a flat τ, and Σ was at the white surface.
+**A. The B-spline lattice** (`tau_coarse.py`). Partial runs only, with
+the old stencil, the scale bias and Σ at the white surface. They are
+not valid for a comparison.
 
-The next prototype: replace the voxel stencils by analytic derivatives
-(M7), add f (M3), Z1 (M4) and the extension (M5), and remove the two
-constants. Then add the irregular basis E1 behind the same interface
-(a sparse U and its derivative matrices at the voxel centres), so A and
-E1 run on the same energy, Σ and solver. A test then checks that at L = 1 the energy is close to the
-voxel energy with the three-point stencil.
+**E1. Meshfree MLS** (`tau_mls.py`, `tau_field.py`). Set aside:
+
+- With fixed nodes cut by Σ, 90 % of the nodes in use were in front of
+  Σ, and the fit of the voxel τ had an RMS error of 0.09 mm. The first
+  version also had quadrature points in front of Σ, with a ramp weight.
+  These put the τ = 0 level beyond Σ: on the same Σ, the median |∇τ| was
+  0.12, against 1.02 in the voxel solve. With the points only behind Σ,
+  the run stopped after 3 steps, because the solve after each step gave
+  a higher E than the trial.
+- With nodes behind Σ (Poisson-disk, added and removed after each
+  step), E rose after each step. The MLS space is not nested, so each
+  change of the nodes is a projection event, and these events were
+  larger than the steps.
+
+**D. P2 tetrahedra from fTetWild** (`tau_tet.py`). Exact tests: P2
+holds every quadratic, the τ region behind a plane has the right volume
+and its Σ faces tile the plane with normals to the front, the shape
+derivative matches finite differences, and the motion follows a
+translated Σ. At the fixed coarse start (free box): median |∇τ| 0.96,
+against 1.02 in the voxel solve, and the quantiles of τ are close to
+those of the voxel solve. About 950 patch roots are in front of Σ and
+get τ = 0, so the thickness term is about 135,000. A first run with a
+separate Σ (projected onto T5's faces) lowered E from 141,191 to
+139,424 in its first step, with 28,970 tetrahedra and a median edge of
+0.23 h near Σ. It was slow, and it is replaced by the one-surface form.
+
+The one-surface form, smoke run of 3 steps (`mesh=none`): E went from
+138,398 to 133,101, 107,954 and 73,245, with one remesh after step 1
+(an edge of Σ stretched) and no intersections. At step 2 the LM used
+all 100 iterations. The mesh's Σ has open edges near the crop faces
+(within 4 h of them), where the side test leaves out some faces. No
+open edge is far inside the box.
+
+The envelope at the coarse start (edge 4 h; one fTetWild run each):
+
+| ε | coarsen | Tetrahedra | Σ faces | Median Σ face area | Smallest dihedral | Input Σ to mesh Σ, p99 | fTetWild |
+|---|---|---|---|---|---|---|---|
+| 0.1 h | no | 12,968 | 4,331 | 0.98 h² | 8.3° | 1.2 h | 39 s |
+| 0.25 h | no | 6,434 | 2,693 | 2.9 h² | 10.6° | 1.4 h | 15 s |
+| 0.1 h | yes | 3,327 | 1,864 | 3.6 h² | 9.1° | 1.5 h | 57 s |
+
+The mesh's Σ is within ε of the input Σ in each case. The other
+direction has a long tail (p99 1.2–1.5 h) from the faces that the side
+test leaves out near the crop faces. With coarsen the τ region is 8 %
+smaller (51.7 mm³ against 56.4 mm³). The cause is not known.
 
 ## Dependencies
 
@@ -504,20 +604,20 @@ Diagnostics for a person to read, not pass/fail criteria.
 
 ## Open questions
 
-**Answers for the E1 prototype (user, 2026-11-19).** Accept every
-recommendation below for this prototype (questions 2–8, 10, 11, 13 and
-14). Question 12: compare now, with the bias in both forms, and label
-the results as biased. Question 9: run E1 through the same T5 evolution
-as the T5 session (Σ moves, τ solved on E1 behind it), not only at a
-fixed Σ. So the E1 τ must give T5 its ∂E/∂V (M9).
+**Answers for the prototypes (user, 2026-11-19).** Accept every
+recommendation below (questions 2–8, 10, 11, 13 and 14). Question 12:
+compare now, with the bias in both forms, and label the results as
+biased. Question 9: run the coarse τ through the same T5 evolution as
+the T5 session (Σ moves, τ solved behind it), not only at a fixed Σ. So
+the coarse τ must give T5 its ∂E/∂V (M9). With form D, questions 2, 3,
+4 and 5 do not apply: Σ is in the mesh.
 
 Each question has options and a recommendation (R). No choice is made
 before the user answers.
 
-1. **Basis** (M1). Answered (user, 2026-11-19): E1, meshfree MLS with
-   C² weights, on an irregular set of nodes cut by Σ. A (the B-spline
-   lattice, already prototyped) is the reference on the same energy and
-   the same Σ.
+1. **Basis** (M1). Answered (user, 2026-11-19): D, P2 tetrahedra
+   from fTetWild, with Σ as the mesh's faces. E1 was tested first and
+   set aside (see *Prototype*).
 2. **Copies** (M2). K1 voxel connectivity, K2 from Σ. R: K1.
 3. **τ = 0 on Σ** (M4). Z1 residuals at h/4, Z2 Nitsche, Z3
    WEB-splines. R: Z1.
@@ -571,7 +671,9 @@ past the basis:
 
 ## Rules
 
-- No GPL or LGPL dependencies.
+- No GPL or AGPL dependencies. LGPL only when it is linked dynamically,
+  not modified, and replaceable. MPL is acceptable. State the licence
+  of each library that a change proposes.
 - Always 3D.
 - Outside medium, never CSF.
 - Diagnostics for a person to read, not pass/fail criteria.
