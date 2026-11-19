@@ -2,8 +2,10 @@
 
 usage: top_surface_measures.py SITE_NPZ RUN_DIR [CONTACT_FACES_NPZ|-] [FIG_DIR]
 Prints JSON: the vertices and area by state; the distance moved (travel)
-by state; the minimum distance between parts of Σ and the intersections;
-the time per step; with CONTACT_FACES_NPZ (a global τ result.npz with
+by state; the minimum distance between parts of Σ; all the checks of
+baillarger.mesh_checks (intersections, folds at shared vertices, creases,
+faces turned from the white surface they grew from, the gap); the time per
+step; with CONTACT_FACES_NPZ (a global τ result.npz with
 'faces', rows x, y, z, axis: the face between voxel (x, y, z) and its +axis
 neighbour), the distance from each BLOCKED vertex to the nearest contact
 face, and from each contact face to the nearest BLOCKED vertex (mm). With
@@ -23,7 +25,7 @@ import numpy as np
 import top_surface as TS
 from scipy.spatial import cKDTree
 
-from baillarger import mesh_intersect as MI
+from baillarger import mesh_checks as MC
 
 
 def q(a: np.ndarray) -> dict:
@@ -55,11 +57,10 @@ def main() -> None:
     }
     out["travel_mm"] = {nm: q(tr[st == i]) for i, nm in enumerate(TS.STATE_NAMES)}
     gap = log["settings"]["gap_vox"] * h
-    _, ng, dmin = TS.gap_check(m, V, 4 * gap, want_dmin=True)
-    out["gap_pairs_at_gap"] = int(TS.gap_check(m, V, gap)[1])
+    _, _, dmin = MC.gap_check(m.top, V, 4 * gap, want_dmin=True)
     out["min_distance_other_part_mm"] = float(dmin[np.isfinite(dmin)].min()) if np.isfinite(dmin).any() else None
     out["vertices_within_2gap_of_other_part"] = int((dmin < 2 * gap).sum())
-    out["intersections"] = int(MI.intersecting_faces(V, F)[1])
+    out["checks"] = TS.counts(m, gap, log["settings"].get("fold_cos", MC.FOLD_COS))
     out["step_s"] = q(np.array([s["s"] for s in log["steps"]]))
     out["initial"] = log["initial"]
     iso = TS.isolated_top(m, z["labels"])

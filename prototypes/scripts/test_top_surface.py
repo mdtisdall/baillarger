@@ -1,7 +1,9 @@
 """Tests of the Σ start (top_surface.py) on small synthetic label arrays and
-meshes: the point-triangle distance, the gap test, the remeshing, and the
+meshes: the remeshing, the fold rule ("reference + dihedral"), and the
 start on a slab (stops at label 0), on two facing sheets (stop at the gap,
-no intersection: a first contact), and at a zero-thickness face."""
+no intersection: a first contact), in a narrow valley (no new fold), and at
+a zero-thickness face. The checks themselves are tested in
+tests/test_mesh_checks.py."""
 
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ import global_tau_prep as TP
 import numpy as np
 import top_surface as TS
 
+from baillarger import mesh_checks as MC
 from baillarger import mesh_intersect as MI
 
 H = 0.16
@@ -38,37 +41,6 @@ def site_of(labels: np.ndarray, v: np.ndarray, f: np.ndarray) -> SimpleNamespace
     return SimpleNamespace(labels=labels, vox=np.full(3, H), v=v, f=f)
 
 
-def test_point_triangle_distance_brute_force() -> None:
-    rng = np.random.default_rng(0)
-    for _ in range(200):
-        a, b, c, p = rng.normal(size=(4, 3))
-        u = rng.random((20000, 2))
-        u = u[u.sum(1) <= 1]
-        q = a + u[:, :1] * (b - a) + u[:, 1:] * (c - a)
-        brute = np.linalg.norm(q - p, axis=1).min()
-        d = TS._pt_tri(p, a, b, c)
-        assert d <= brute + 1e-12
-        assert brute - d < 0.02 * np.linalg.norm(b - a)
-
-
-def test_gap_check_two_sheets_and_own_sheet() -> None:
-    """Two parallel sheets 0.1 voxel apart violate a gap of 0.25 voxel; one
-    sheet alone has no violation (its own faces are its local patch)."""
-    v1, f1 = grid_sheet(6, 5.0, True)
-    v2, f2 = grid_sheet(6, 5.1, False, shift=0.3)
-    one = TS.Mesh(v1 * H, f1, v1 * H, np.zeros(len(v1), np.int64), np.zeros(len(v1)))
-    bad, n, dmin = TS.gap_check(one, one.V, 0.25 * H)
-    assert n == 0 and not bad.any()
-    V = np.r_[v1, v2] * H
-    F = np.r_[f1, f2 + len(v1)]
-    two = TS.Mesh(V, F, V, np.zeros(len(V), np.int64), np.zeros(len(V)))
-    bad, n, dmin = TS.gap_check(two, two.V, 0.25 * H, want_dmin=True)
-    assert n > 0 and bad[: len(v1)].any() and bad[len(v1) :].any()
-    xy = V[:, :2] / H
-    over = np.all((xy >= 2.3 - 1e-9) & (xy <= 7.0 + 1e-9), axis=1)  # above the other sheet
-    np.testing.assert_allclose(dmin[over], 0.1 * H, atol=1e-9)
-
-
 def test_split_keeps_the_shape() -> None:
     v, f = grid_sheet(4, 5.0, True, step=3.0)
     m = TS.Mesh(v * H, f, v * H, np.zeros(len(v), np.int64), np.zeros(len(v)))
@@ -79,16 +51,16 @@ def test_split_keeps_the_shape() -> None:
     np.testing.assert_allclose(a1, a0, rtol=1e-12)
     np.testing.assert_allclose(m.V[:, 2], 5.0 * H)
     assert len(m.F) == len(f) + 2 * n
-    assert TS.boundary_vertices(m.F, len(m.V)).sum() >= TS.boundary_vertices(f, len(v)).sum()
+    assert MC.boundary_vertices(m.F, len(m.V)).sum() >= MC.boundary_vertices(f, len(v)).sum()
 
 
 def test_collapse_short_edges_stays_flat_and_manifold() -> None:
     v, f = grid_sheet(8, 5.0, True)
     rng = np.random.default_rng(1)
-    v[:, :2] += rng.uniform(-0.3, 0.3, (len(v), 2)) * (~TS.boundary_vertices(f, len(v)))[:, None]
+    v[:, :2] += rng.uniform(-0.3, 0.3, (len(v), 2)) * (~MC.boundary_vertices(f, len(v)))[:, None]
     m = TS.Mesh(v * H, f, v * H, np.zeros(len(v), np.int64), np.zeros(len(v)))
     nf0 = len(m.F)
-    s, c, _, _ = TS.remesh(m, 0.25 * H, 10 * H, 0.6 * H)
+    s, c = TS.remesh(m, 0.25 * H, 10 * H, 0.6 * H, MC.FOLD_COS)
     assert s == 0 and c > 0
     assert len(m.F) == nf0 - 2 * c
     np.testing.assert_allclose(m.V[:, 2], 5.0 * H)
@@ -129,7 +101,7 @@ def test_start_two_sheets_stop_at_the_gap() -> None:
     run = TS.StartRun(site_of(lab, v, f), TS.StartSettings(collapse_ratio=0.0))
     m = run.run()
     gap = 0.25 * H
-    _, ng, dmin = TS.gap_check(m, m.V, gap, want_dmin=True)
+    _, ng, dmin = MC.gap_check(m.top, m.V, gap, want_dmin=True)
     assert ng == 0
     assert MI.intersecting_faces(m.V, m.F)[1] == 0
     inner = ~m.boundary
@@ -160,19 +132,6 @@ def test_wm_pass_through_and_limit() -> None:
     np.testing.assert_allclose(m.travel, 2.0 * H, atol=1e-12)
 
 
-def test_foldover_at_a_shared_vertex() -> None:
-    """Two faces that share only vertex 0: apart, no fold; when one is
-    turned to cross the other beyond vertex 0, a fold (the triangle test of
-    mesh_intersect skips this pair)."""
-    F = np.array([[0, 1, 2], [0, 3, 4]], np.int64)
-    flat = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [-1, 0, 0], [-1, 1, 0]], float)
-    m = TS.Mesh(flat, F, flat, np.zeros(5, np.int64), np.zeros(5))
-    assert TS.foldovers(m, flat)[1] == 0
-    cross = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0.8, 0.3, -0.5], [0.8, 0.3, 0.5]], float)
-    assert MI.intersecting_faces(cross, F)[1] == 0
-    assert TS.foldovers(m, cross)[1] == 1
-
-
 def test_refused_but_not_facing_retries() -> None:
     """Two sheets side by side with the same normal (not facing): a move
     that breaks the gap is refused, but the vertex is not BLOCKED (no
@@ -184,7 +143,7 @@ def test_refused_but_not_facing_retries() -> None:
     v = np.r_[v1, v2]
     f = np.r_[f1, f2 + len(v1)]
     m = TS.start_mesh(site_of(lab, v, f))
-    chk = TS.Checker(m, m.V, 0.25 * H, slack=0.25 * H)
+    chk = MC.Checker(m.top, m.V, 0.25 * H, slack=0.25 * H)
     disp, info = TS.expand_step(m, site_of(lab, v, f), TS.StartSettings(), H, chk)
     assert info["refused"] > 0 and info["blocked"] == 0
     assert not (m.state == TS.BLOCKED).any()
@@ -202,7 +161,7 @@ def test_checker_matches_mesh_intersect_and_full_check() -> None:
     F = np.r_[f1, f2 + len(v1)]
     m = TS.Mesh(V, F, V, np.zeros(len(V), np.int64), np.zeros(len(V)))
     mask, n = MI.intersecting_faces(V, F)
-    bad, ng, ni, _ = TS.Checker(m, V, 0.25 * H).check(V)
+    bad, ng, ni, _ = MC.Checker(m.top, V, 0.25 * H).check(V)
     assert n > 0 and ni == n  # no folds here: the sheets share no vertex
     # move a few vertices of sheet 2 toward sheet 1 (no crossing yet in the
     # flat part); the local check agrees with the whole check at them
@@ -210,22 +169,27 @@ def test_checker_matches_mesh_intersect_and_full_check() -> None:
     W = np.r_[v1, v2b] * H
     Fw = np.r_[f1, f2[:, ::-1] + len(v1)]
     mw = TS.Mesh(W, Fw, W, np.zeros(len(W), np.int64), np.zeros(len(W)))
-    c = TS.Checker(mw, W, 0.25 * H, slack=0.25 * H)
+    c = MC.Checker(mw.top, W, 0.25 * H, slack=0.25 * H)
     assert c.check(W)[1] == 0
     ch = np.zeros(len(W), bool)
     ch[len(v1) + np.arange(20, 30)] = True
     W2 = W.copy()
     W2[ch, 2] -= 0.9 * H  # 0.1 voxel above sheet 1: inside the gap
     b_loc, ng_loc, ni_loc, _ = c.check(W2, ch)
-    b_all, ng_all, ni_all, _ = TS.Checker(mw, W2, 0.25 * H).check(W2)
+    b_all, ng_all, ni_all, _ = MC.Checker(mw.top, W2, 0.25 * H).check(W2)
     assert ng_loc == ng_all > 0 and ni_loc == ni_all
     np.testing.assert_array_equal(b_loc, b_all)
 
 
 def test_isolated_top_finds_a_single_label0_voxel() -> None:
     """One label-0 voxel inside the cortex of a slab stops the vertex under
-    it early: it heads the review list, with a large lag and a one-voxel
-    label-0 region; the vertices that stop at the real top have no lag."""
+    it early: it heads the review list, with a lag of more than one voxel
+    and a one-voxel label-0 region; the vertices that stop at the real top
+    have no lag. The fold rule keeps the neighbours from closing over it,
+    so they stay as a narrow shaft (lag 1.2 voxels at the vertex, not the
+    needle of more than 4 voxels that the start made without the rule).
+    Whether this shaft occurs in real tissue is not known yet (user,
+    2026-11-18: wait for the site-1 run)."""
     lab = np.zeros((14, 14, 20), np.int16)
     lab[..., :5] = TP.WM
     lab[..., 5:15] = TP.CORTEX
@@ -236,8 +200,121 @@ def test_isolated_top_finds_a_single_label0_voxel() -> None:
     iso = TS.isolated_top(m, lab)
     first = iso["vertex"][0]
     assert np.allclose(m.V[first, :2] / H, (6, 6), atol=0.5)
-    assert iso["lag_mm"][0] > 4 * H
+    assert iso["lag_mm"][0] > H
     assert iso["comp_voxels"][0] == 1 and not iso["comp_at_crop_edge"][0]
     assert iso["label0_3x3x3"][0] == 1
     big = iso["comp_voxels"] > 1
     assert big.any() and iso["comp_at_crop_edge"][big].all()
+
+
+# ------------------------------------------------------------ the fold rule
+
+
+def valley(slope: float = 3.0):
+    """A narrow valley along y: z = 3 + slope × |x - 5| voxels, normals up,
+    in cortex with label 0 from z = 22."""
+    lab = np.full((14, 14, 24), TP.CORTEX, np.int16)
+    lab[..., 22:] = 0
+    v, f = grid_sheet(7, 0.0, True)
+    v[:, 2] = 3.0 + slope * np.abs(v[:, 0] - 5.0)
+    return site_of(lab, v, f)
+
+
+def test_new_folds_dihedral_only() -> None:
+    """Two faces on a common edge, each turned 80 degrees from the
+    reference (+z) to opposite sides: a crease (160 degrees between the
+    normals) but no face turned 90 degrees from its reference."""
+    F = np.array([[0, 1, 2], [1, 0, 3]], np.int64)
+    flat = np.array([[0, 0, 0], [0, 1, 0], [-1, 0.5, 0], [1, 0.5, 0]], float)
+    m = TS.Mesh(flat, F, flat, np.zeros(4, np.int64), np.zeros(4))
+    t = np.radians(80.0)
+    ridge = np.array([[0, 0, 0], [0, 1, 0], [-np.cos(t), 0.5, -np.sin(t)], [np.cos(t), 0.5, -np.sin(t)]], float)
+    ch = np.ones(4, bool)
+    bad, nt, nc = TS.new_folds(m, ridge, flat, ch, MC.FOLD_COS)
+    assert nt == 0 and nc == 1 and bad.all()
+    # the same crease before the move is not a new fold
+    assert TS.new_folds(m, ridge, ridge, ch, MC.FOLD_COS)[2] == 0
+    # 70 degrees each side: 140 degrees between the normals, above the cut-off
+    t = np.radians(70.0)
+    ridge[2:, [0, 2]] = [[-np.cos(t), -np.sin(t)], [np.cos(t), -np.sin(t)]]
+    assert TS.new_folds(m, ridge, flat, ch, MC.FOLD_COS)[2] == 0
+
+
+def test_new_folds_turned_from_the_white_surface() -> None:
+    """An interior vertex pushed in the plane past its 1-ring turns faces
+    over (against the reference at `origin`) and folds them back on their
+    neighbours; only the faces with a changed vertex are tested."""
+    v, f = grid_sheet(5, 5.0, True)
+    V0 = v * H
+    m = TS.Mesh(V0, f, V0, np.zeros(len(v), np.int64), np.zeros(len(v)))
+    V = V0.copy()
+    c = 12  # the centre vertex
+    V[c, 0] += 1.6 * H
+    ch = np.zeros(len(v), bool)
+    ch[c] = True
+    bad, nt, nc = TS.new_folds(m, V, V0, ch, MC.FOLD_COS)
+    assert nt > 0 and nc > 0 and bad[c]
+    # no changed vertex: nothing tested
+    assert TS.new_folds(m, V, V0, np.zeros(len(v), bool), MC.FOLD_COS)[0].sum() == 0
+
+
+def test_start_in_a_narrow_valley_makes_no_fold(monkeypatch) -> None:
+    """In a narrow valley the walls' first rows close in over the floor:
+    the faces at the floor fold back on each other, inside the local patch
+    of the gap test and with no crossing, so only the fold rule sees them.
+    With the rule, no crease, turned face or crossing; without it (the fold
+    test replaced by one that finds nothing), creases."""
+    run = TS.StartRun(valley(), TS.StartSettings(max_steps=16))
+    m = run.run()
+    c = TS.counts(m, 0.25 * H, MC.FOLD_COS)
+    assert run.initial["white"]["creases"] == 0
+    assert c["creases"] == 0 and c["turned_faces"] == 0
+    assert c["intersecting_pairs"] == 0 and c["shared_vertex_fold_pairs"] == 0 and c["gap_pairs"] == 0
+    assert sum(r["fold_limited"] for r in run.log) > 0
+    monkeypatch.setattr(TS, "new_folds", lambda m, V, V0, ch, fc: (np.zeros(len(V), bool), 0, 0))
+    m2 = TS.StartRun(valley(), TS.StartSettings(max_steps=16)).run()
+    c2 = TS.counts(m2, 0.25 * H, MC.FOLD_COS)
+    assert c2["creases"] > 0 and c2["gap_pairs"] == 0 and c2["intersecting_pairs"] == 0
+
+
+def test_remesh_undoes_a_failed_batch_and_excludes_it(monkeypatch) -> None:
+    """When the check of a collapse batch fails at its merged vertices, the
+    batch is undone (every per-vertex field restored) and done again
+    without the collapses near them: those vertices keep their positions."""
+    v, f = grid_sheet(8, 5.0, True)
+    rng = np.random.default_rng(1)
+    v[:, :2] += rng.uniform(-0.3, 0.3, (len(v), 2)) * (~MC.boundary_vertices(f, len(v)))[:, None]
+    m = TS.Mesh(v * H, f, v * H, np.zeros(len(v), np.int64), np.arange(len(v), dtype=float))
+    first: dict = {}
+    real_collapse, real_folds = TS._collapse, TS.new_folds
+
+    def collapse(m_, lmin, exclude):
+        if not first:
+            first["V"] = m_.V.copy()
+            first["ptr"], first["nbr"] = m_.ptr, m_.nbr
+        out = real_collapse(m_, lmin, exclude)
+        if "merged" not in first:
+            first["merged"] = out[2]
+        return out
+
+    calls = []
+
+    def folds(m_, V, V0, ch, fc):
+        calls.append(int(ch.sum()))
+        if len(calls) == 1:  # the first batch fails at every merged vertex
+            return ch.copy(), 0, 0
+        return real_folds(m_, V, V0, ch, fc)
+
+    monkeypatch.setattr(TS, "_collapse", collapse)
+    monkeypatch.setattr(TS, "new_folds", folds)
+    s, c = TS.remesh(m, 0.25 * H, 10 * H, 0.9 * H, MC.FOLD_COS)
+    assert s == 0 and len(calls) == 2 and c > 0
+    for nm in TS.VERTEX_FIELDS:
+        assert len(getattr(m, nm)) == len(m.V)
+    # the vertices near the failed batch were not collapsed: still there
+    near = MC.near_vertices(first["ptr"], first["nbr"], np.isin(np.arange(len(first["V"])), first["merged"]))
+    for p in first["V"][near]:
+        assert np.isclose(m.V, p).all(1).any()
+    # travel was set to the vertex index: kept vertices keep their own
+    kept = np.isclose(m.travel, np.round(m.travel))
+    assert kept.sum() >= near.sum()

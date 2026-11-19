@@ -56,7 +56,17 @@ The user's choices of 2026-11-18 (T1–T8).
   the part of Σ inside the ball of radius h/2 that is connected to the
   point (faces reached from the point's own faces across shared vertices,
   each closer than h/2). The no-crossing rule also tests faces that share
-  one vertex (a fold at the vertex), which the triangle test skips. A
+  one vertex (a fold at the vertex), which the triangle test skips. The
+  fold rule ("reference + dihedral", user, 2026-11-18): no face may turn
+  by 90 degrees or more from the white face it grew from (through
+  `origin`), and no two faces with a common edge may fold back past 154
+  degrees (`mesh_checks.FOLD_COS`). Only new folds count; the white
+  surface's own creases are counted, not removed. All these checks are
+  `baillarger.mesh_checks`, shared with the WM side. Open point: on a
+  synthetic slab with one label-0 voxel in the cortex, the fold rule keeps
+  the neighbours of the stopped vertex as a narrow shaft that never stops
+  (not BLOCKED, not TOP). Whether this occurs in real tissue is not known;
+  the site-1 run decides (user, 2026-11-18). A
   contact is two parts of Σ with no voxel centre between them along their
   normals.
   The gap is a numerical margin, not a statement about tissue: at 0.05 mm
@@ -82,8 +92,8 @@ The user's choices of 2026-11-18 (T1–T8).
   in steps of h/4, driven only by the stop term of T4 (out in the cortex
   label, stop at label 0). The white mesh lies inside the WM voxels, so a
   vertex in WM keeps moving; it stops as "wm" after 3 voxels still in WM.
-  Each step keeps the gap and is checked for intersections. A move that
-  breaks either is halved up to 4 times (h/4 to h/64), then refused for
+  Each step keeps the gap and is checked for intersections and new folds.
+  A move that breaks one is halved up to 4 times (h/4 to h/64), then refused for
   that step. A refused vertex tries again in each step. It is a first
   contact (BLOCKED) only while the near face of the other part points
   against its normal (two sheets that face each other). A vertex whose
@@ -93,7 +103,7 @@ The user's choices of 2026-11-18 (T1–T8).
   vertex moves only in its tangent plane, toward the centroid of its
   neighbours). Edges longer than 2 × the white mesh's median edge are
   split, and edges shorter than 0.5 × are collapsed, where the change keeps
-  the gap and makes no intersection. No normal smoothing: the shape of Σ
+  the gap and makes no intersection and no new fold. No normal smoothing: the shape of Σ
   comes only from the τ energy and the stop term, so the abrasion test
   sees the neighbour-consistency terms on their own.
 - **T8. Abrasion site.** Chosen later, when steps 1–3 work on site 1.
