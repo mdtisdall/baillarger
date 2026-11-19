@@ -287,3 +287,129 @@ def j_slot_parts(
     vox = jnp.stack([P["evalw"] * vt[k] for k in VOXEL_TERMS])
     thick, ts = patch_terms(x, P)
     return vox, thick, ts
+
+
+# ------------------------------------------------------------ lagged quadratic form
+#
+# A second estimator of the same roles with a fixed top surface Σ (user,
+# 2026-11-19: "start from the cost function we expect to be able to solve").
+# The nonlinear parts are frozen at the previous iterate x0 (lag_state), so
+# each term is a linear residual in τ and one outer step is one convex
+# least-squares solve. With Σ fixed the domain is inside Σ: f = 1, no stop.
+#   align  κ coh |∇τ × n̂|² / s0²            (= κ coh (1 - (ĝ·n̂)²) at x0)
+#   smooth |P0 (∂∇τ) P0|² / (s0² 2σ_t²)      (∂ĝ = P ∂∇τ / s exactly; here
+#                                             the derivative of ∇τ, not of ĝ)
+#   equi   wq (div(∇τ / s0²))²               (div v with |∇τ|² frozen)
+#   pull   (ĝ0·∇τ - 1)² / (2σ_p²)            (unchanged)
+#   thick  r_lin² / (2 SD²) + t / t0,        r_lin = log t0 + (t - t0)/t0
+#                                             - log median; t/t0 is the
+#                                             tangent of log t (a majoriser)
+#   tsmooth tw0 (r_lin,i - r_lin,j)² / 2      (the IRLS majoriser of the
+#                                             Student-t, weights at x0)
+# s0 = |∇τ(x0)|, ĝ0, P0 = I - ĝ0ĝ0ᵀ, t0 and tw0 come from x0. The thickness
+# r_lin is a linearisation (not a majoriser), so the original energy need
+# not fall at each outer step: the solver reports it.
+
+NRES_L = 14  # align 3, smooth 9, equi 1, pull 1
+
+
+def lag_state(x: Array, P: dict[str, Array]) -> dict[str, Array]:
+    g = gradient(x, P)
+    s = jnp.sqrt(jnp.sum(g * g, -1) + EPS)
+    gh = g / s[:, None]
+    t = jnp.maximum(thickness(x, P), 0.02)
+    d = jnp.log(t[P["pi"]]) - jnp.log(t[P["pj"]])
+    return {
+        "s": s,
+        "gh": gh,
+        "Pm": jnp.eye(3)[None] - gh[:, :, None] * gh[:, None, :],
+        "t": t,
+        "tw": (NU + 1) / (NU * P["psd"] ** 2 + d**2),
+    }
+
+
+def lagged_voxel_residuals(x: Array, P: dict[str, Array], L: dict[str, Array]) -> Array:
+    """(S1, NRES_L), affine in x."""
+    nb, nbv, h = P["nb"], P["nbv"], P["h"]
+    g = gradient(x, P)
+    ev = P["evalw"] * P["valid"]
+    tis = ev * (1.0 - P["inner"])
+    s0 = L["s"]
+    r_al = jnp.sqrt(tis * KAPPA * P["coh"])[:, None] * jnp.cross(g, P["nhat"]) / s0[:, None]
+    Jg = jnp.stack([_deriv(g, nb, nbv, h, a) for a in range(3)], -1)  # (S, comp, axis)
+    PJP = jnp.einsum("sij,sja,sab->sib", L["Pm"], Jg, L["Pm"])
+    r_sm = (jnp.sqrt(tis / (2 * SIGMA_T**2)) / s0)[:, None, None] * PJP
+    v = g / (s0 * s0)[:, None]
+    divv = sum(_deriv(v[:, a], nb, nbv, h, a) for a in range(3))
+    r_eq = jnp.sqrt(tis * P["wq"]) * divv
+    r_pi = jnp.sqrt(ev / (2 * SIGMA_P**2)) * (jnp.sum(L["gh"] * g, -1) - 1.0)
+    return jnp.concatenate(
+        [r_al, r_sm.reshape(-1, 9), r_eq[:, None], r_pi[:, None]], axis=1
+    )
+
+
+def lagged_patch_residuals(
+    x: Array, P: dict[str, Array], L: dict[str, Array]
+) -> tuple[Array, Array, Array]:
+    """r_th (T,), r_ts (Q,) and the linear term Σ t / t0 (scalar)."""
+    t = thickness(x, P)
+    t0 = L["t"]
+    rl = jnp.log(t0) + (t - t0) / t0 - P["logmed"]
+    r_th = P["hasroot"] * rl / (jnp.sqrt(2.0) * THICK_SD)
+    r_ts = jnp.sqrt(P["pm"] * L["tw"] / 2) * (rl[P["pi"]] - rl[P["pj"]])
+    lin = jnp.sum(P["hasroot"] * t / t0)
+    return r_th, r_ts, lin
+
+
+def lagged_energy(x: Array, P: dict[str, Array], L: dict[str, Array]) -> Array:
+    """The quadratic model Q(x) of one outer step."""
+    rv = lagged_voxel_residuals(x, P, L)
+    r_th, r_ts, lin = lagged_patch_residuals(x, P, L)
+    return jnp.sum(rv * rv) + jnp.sum(r_th * r_th) + jnp.sum(r_ts * r_ts) + lin
+
+
+def lagged_parts(x: Array, P: dict[str, Array], L: dict[str, Array]) -> dict[str, Array]:
+    rv = lagged_voxel_residuals(x, P, L)
+    r_th, r_ts, lin = lagged_patch_residuals(x, P, L)
+    return {
+        "align": jnp.sum(rv[:, :3] ** 2),
+        "smooth": jnp.sum(rv[:, 3:12] ** 2),
+        "equi": jnp.sum(rv[:, 12] ** 2),
+        "pull": jnp.sum(rv[:, 13] ** 2),
+        "thick": jnp.sum(r_th**2) + lin,
+        "tsmooth": jnp.sum(r_ts**2),
+    }
+
+
+@jax.jit
+def j_lag_state(x: Array, P: dict[str, Array]) -> dict[str, Array]:
+    return lag_state(x, P)
+
+
+@jax.jit
+def j_lagged_energy_grad(
+    x: Array, P: dict[str, Array], L: dict[str, Array]
+) -> tuple[Array, Array]:
+    return jax.value_and_grad(lagged_energy)(x, P, L)
+
+
+@jax.jit
+def j_lagged_residuals(x: Array, P: dict[str, Array], L: dict[str, Array]) -> Array:
+    return lagged_voxel_residuals(x, P, L)
+
+
+@jax.jit
+def j_lagged_jvp(x: Array, P: dict[str, Array], L: dict[str, Array], t: Array) -> Array:
+    """J t of the lagged voxel residuals (S1, NRES_L); J does not depend on x."""
+    _, jt = jax.jvp(lambda y: lagged_voxel_residuals(y, P, L), (x,), (t,))
+    return jt
+
+
+@jax.jit
+def j_lagged_parts(x: Array, P: dict[str, Array], L: dict[str, Array]) -> dict[str, Array]:
+    return lagged_parts(x, P, L)
+
+
+@jax.jit
+def j_energy_parts(x: Array, P: dict[str, Array], g0: Array) -> dict[str, Array]:
+    return energy_parts(x, P, g0)

@@ -231,6 +231,29 @@ def test_stencil_jacobian_matches_dense(ridge: bool) -> None:
         assert e == pytest.approx(A[i, j], abs=1e-9)
 
 
+def test_energy_gradient_is_twice_jt_r() -> None:
+    """In tissue (f = 1) with no stop term, the voxel energy is Σ r², so
+    ∇E = 2 Jᵀr and its Hessian ≈ 2 JᵀJ: the Gauss-Newton system of lm_solve
+    is (JᵀJ + λD) dx = -∇E / 2 (an LM step of -∇E is twice the step)."""
+    G, P, x, unk, _ = small_problem()
+    x[: G.S] -= H  # f = 1 everywhere
+    P = dict(P)
+    P["c"] = jnp.zeros_like(P["c"])
+    xj = jnp.asarray(x)
+    g0 = GE.j_g0(xj, P)
+    fw, _ = GE.j_weights(xj, P)
+    assert np.all(np.asarray(fw)[: G.S] == 1.0)
+    r = np.asarray(GE.voxel_residuals(xj, P, g0, fw))
+    e = float(GE.energy(xj, P, g0))
+    assert e == pytest.approx(float((r**2).sum()), rel=1e-8)  # EPS in |∇τ|
+    col = K.stencil_cols(G.slot_flat, G.slot_of, G.strides, K.OFFS)
+    Jst = GS.stencil_jacobian(xj, P, g0, fw, G.colour, G.ncolour, col, unk, G.S)
+    grad = np.asarray(jax.grad(GE.energy)(xj, P, g0))[: G.S]
+    np.testing.assert_allclose(
+        grad, 2 * K.jst_apply_t(Jst, col, r[: G.S], G.S), rtol=1e-7, atol=1e-7
+    )
+
+
 def test_upwind_gradient_sees_the_checkerboard() -> None:
     G, P, x, unk, _ = small_problem(shape=(6, 6, 8))
     c = G.coords - GS.PAD
@@ -537,3 +560,77 @@ def test_snapshots_round_trip(tmp_path) -> None:  # noqa: ANN001
     assert np.allclose(tau[tuple(c.T)], gt.tau, atol=1e-6)
     assert np.isnan(tau[~gt.domain]).all() and len(faces) == 6 * 6
     assert meta["tag"] == "outer0" and meta["lm_iter"] == len(snaps) - 2
+
+
+# ------------------------------------------------------------ lagged quadratic form
+
+
+def _lagged_problem():  # noqa: ANN202
+    G, P, x, unk, _ = small_problem()
+    x[: G.S] -= H  # f = 1 everywhere, as inside a fixed Σ
+    P = dict(P)
+    P["c"] = jnp.zeros_like(P["c"])
+    return G, P, x, unk
+
+
+def test_lagged_residuals_equal_the_original_at_the_lag_point() -> None:
+    """At x0 the lagged align, equi and pull residuals are the original ones
+    (pull with ĝ0 = ĝ(x0)); smooth uses the derivative of ∇τ, not of ĝ, so
+    it is only close."""
+    G, P, x, unk = _lagged_problem()
+    xj = jnp.asarray(x)
+    g0 = GE.j_g0(xj, P)
+    fw, _ = GE.j_weights(xj, P)
+    r = np.asarray(GE.voxel_residuals(xj, P, g0, fw))[: G.S]
+    L = GE.j_lag_state(xj, P)
+    rl = np.asarray(GE.j_lagged_residuals(xj, P, L))[: G.S]
+    np.testing.assert_allclose(rl[:, :3], r[:, :3], atol=1e-9)  # align
+    np.testing.assert_allclose(rl[:, 12], r[:, 12], rtol=1e-7, atol=1e-7)  # equi
+    np.testing.assert_allclose(rl[:, 13], r[:, 13], atol=1e-9)  # pull
+    sm, sml = (r[:, 3:12] ** 2).sum(), (rl[:, 3:12] ** 2).sum()
+    assert abs(sml - sm) < 0.2 * sm
+
+
+def test_lagged_residuals_are_affine() -> None:
+    G, P, x, unk = _lagged_problem()
+    xj = jnp.asarray(x)
+    L = GE.j_lag_state(xj, P)
+    t = np.zeros_like(x)
+    t[: G.S] = np.random.default_rng(3).normal(size=G.S)
+    r = [np.asarray(GE.j_lagged_residuals(jnp.asarray(x + a * t), P, L)) for a in (0, 1, 2)]
+    np.testing.assert_allclose(r[2] - 2 * r[1] + r[0], 0.0, atol=1e-6)
+    jt = np.asarray(GE.j_lagged_jvp(xj, P, L, jnp.asarray(t)))
+    np.testing.assert_allclose(r[1] - r[0], jt, rtol=1e-9, atol=1e-6)
+
+
+def test_lagged_stencil_jacobian_matches_dense() -> None:
+    G, P, x, unk = _lagged_problem()
+    xj = jnp.asarray(x)
+    L = GE.j_lag_state(xj, P)
+    col = K.stencil_cols(G.slot_flat, G.slot_of, G.strides, K.OFFS)
+    Jst = GS.stencil_jacobian(
+        xj, P, None, None, G.colour, G.ncolour, col, unk, G.S,
+        jvp=lambda t: GE.j_lagged_jvp(xj, P, L, t),
+    )
+    assert Jst.shape[2] == GE.NRES_L
+    Jd = np.asarray(jax.jacfwd(lambda y: GE.lagged_voxel_residuals(y, P, L))(xj))[
+        : G.S, :, : G.S
+    ]
+    v = np.random.default_rng(4).normal(size=G.S)
+    np.testing.assert_allclose(
+        K.jst_apply(Jst, col, v), np.einsum("skt,t->sk", Jd, v), atol=1e-9
+    )
+
+
+def test_lagged_patch_terms_majorise_at_the_lag_point() -> None:
+    """t / t0 is the tangent of log t (equal at t0, above elsewhere), and the
+    IRLS weight makes tw0 d² / 2 the tangent quadratic of the Student-t."""
+    t0, t = 2.0, np.array([0.5, 1.0, 2.0, 3.0, 6.0])
+    tang = np.log(t0) + t / t0 - 1.0
+    assert np.all(tang >= np.log(t) - 1e-12)
+    psd, d0 = 0.3, 0.4
+    st = lambda d: (GE.NU + 1) / 2 * np.log1p(d**2 / (GE.NU * psd**2))  # noqa: E731
+    tw = (GE.NU + 1) / (GE.NU * psd**2 + d0**2)
+    d = np.linspace(-2, 2, 41)
+    maj = st(d0) + tw / 2 * (d**2 - d0**2)
+    assert np.all(maj >= st(d) - 1e-12)

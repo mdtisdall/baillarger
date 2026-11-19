@@ -94,6 +94,14 @@ class Settings:
     lm_update: str = "x10"
     lm_lambda0: float = 1e-3  # Marquardt start (relative to diag(JᵀJ))
     lm_retries: int = 10
+    #: "lm" (the original energy, LM) or "lagged" (the lagged quadratic
+    #: form, global_tau_energy; a fixed Σ only): one PCG solve per outer step
+    estimator: str = "lm"
+    lag_iters: int = 30
+    lag_tol: float = 1e-6  # max |Δτ| (mm) of an outer step
+    #: a fixed top surface Σ only: the rim voxels (no neighbour and no ghost
+    #: on some axis: the crop edge) stay at τ0, as in the ridge form
+    rim_fixed: bool = False
     cg_tol: float = 1e-3  # G4
     cg_iters: int = 200  # G4
     line_max: int = 32  # G6: lines longer than this are split
@@ -215,19 +223,27 @@ def stencil_jacobian(
     col: np.ndarray,
     unk: np.ndarray,
     S: int,
+    jvp: Any = None,
 ) -> np.ndarray:
     """The Jacobian of the voxel residuals in stencil storage (S, NOFF, NRES)
     by colouring (G5): one jvp per colour; two unknowns of one colour are more
-    than L1 4 apart, so they never share a residual."""
-    Jst = np.zeros((S, K.NOFF, GE.NRES))
+    than L1 4 apart, so they never share a residual. jvp(t) -> J t (S1, k)
+    replaces the residuals of the original energy (the lagged form)."""
+    if jvp is None:
+        jvp = lambda t: GE.j_residual_jvp(x, P, g0, fw, t)  # noqa: E731
+    Jst: np.ndarray | None = None
     S1 = len(unk)
     for c in range(ncolour):
         t = np.zeros(S1)
         t[:S] = (colour == c) & unk[:S]
         if not t.any():
             continue
-        jv = np.asarray(GE.j_residual_jvp(x, P, g0, fw, jnp.asarray(t)))[:S]
+        jv = np.asarray(jvp(jnp.asarray(t)))[:S]
+        if Jst is None:
+            Jst = np.zeros((S, K.NOFF, jv.shape[1]))
         K.scatter_colour(Jst, jv, col, colour, c, unk[:S])
+    if Jst is None:
+        Jst = np.zeros((S, K.NOFF, GE.NRES))
     return Jst
 
 
@@ -654,14 +670,15 @@ class GlobalTau:
     # ------------------------------------------------------------ LM + PCG
 
     def _patch_jac(
-        self, pb: Problem, x: np.ndarray, tw: np.ndarray
+        self, pb: Problem, x: np.ndarray, tw: np.ndarray, t0: np.ndarray | None = None
     ) -> sparse.csr_matrix:
+        """With t0 (the lagged form): d r / d τ = -rw / t0 for every patch."""
         P = pb.P
         rslot = np.asarray(P["rslot"])
         rw = np.asarray(P["rw"])
         hr = np.asarray(P["hasroot"])
-        t = -np.sum(rw * x[rslot], 1)
-        live = t > 0.02
+        t = -np.sum(rw * x[rslot], 1) if t0 is None else t0
+        live = t > 0.02 if t0 is None else np.ones(len(t), bool)
         dr = np.where(live[:, None], -rw / np.maximum(t, 0.02)[:, None], 0.0)  # (T, 8)
         T = len(t)
         w_th = hr / (np.sqrt(2.0) * GE.THICK_SD)
@@ -773,7 +790,9 @@ class GlobalTau:
                 )
                 t_fac = time.time() - tf
                 tc = time.time()
-                b = -grad
+                # Gauss-Newton: E = Σ r² (+ the log t term), ∇E = 2 Jᵀr and
+                # the Hessian ≈ 2 JᵀJ, so (JᵀJ + λD) dx = -∇E / 2
+                b = -0.5 * grad
                 n_it = [0]
                 A_op = spla.LinearOperator(
                     (pb.S1, pb.S1), matvec=lambda v, lam_=lam: Av(v, lam_), dtype=float
@@ -831,9 +850,10 @@ class GlobalTau:
                     }
                 )
                 # gain ratio: actual / predicted decrease of the model
-                # L(0) - L(dx) = dx·(λ D dx + b) / 2 (b = -grad)
+                # the model L(dx) = E + ∇E·dx + dxᵀJᵀJdx, so with
+                # (JᵀJ + λD) dx = b = -∇E / 2: L(0) - L(dx) = dx·(λ D dx + b)
                 dxf = np.where(free, dx, 0.0)
-                pred = 0.5 * float(dxf @ (lam * D * dxf + b))
+                pred = float(dxf @ (lam * D * dxf + b))
                 rho = (e - e1) / pred if pred > 0 else -1.0
                 tries[-1]["rho"] = rho
                 if e1 < e:
@@ -879,12 +899,121 @@ class GlobalTau:
             "s": time.time() - t_solve,
         }
 
+    def lagged_solve(
+        self, pb: Problem, x: np.ndarray, g0: Any, tag: str
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        """The lagged quadratic form: each outer step freezes ĝ0, s0, P0, t0
+        and tw0 at x (GE.lag_state), and minimises the quadratic model Q by
+        one PCG solve of (JᵀJ) dx = -∇Q / 2 (J is exact: the residuals are
+        affine in x) with the column-line preconditioner; then τ ≤ 0 by
+        projection. Each step logs the original energy (g0 as in lm_solve)
+        and Q before and after."""
+        s = self.s
+        unk = pb.unk
+        P = pb.P
+        x = x.copy()
+        x[~unk] = np.where(np.arange(pb.S1)[~unk] < pb.S, x[~unk], 0.0)
+        x = np.where(unk, np.minimum(x, 0.0), x)
+        olut = -np.ones((5, 5, 5), np.int64)
+        for o, (a, b, c) in enumerate(K.OFFS):
+            olut[a + 2, b + 2, c + 2] = o
+        its: list[dict[str, Any]] = []
+        t_solve = time.time()
+        e_first = float(GE.j_energy(jnp.asarray(x), P, g0))
+        for it in range(s.lag_iters):
+            ti = time.time()
+            xj = jnp.asarray(x)
+            L = GE.j_lag_state(xj, P)
+            q0, gq = GE.j_lagged_energy_grad(xj, P, L)
+            gq = np.where(unk, np.asarray(gq), 0.0)
+            free = unk & ~((x >= 0.0) & (gq < 0.0))
+            Jst = stencil_jacobian(
+                xj, P, g0, None, pb.colour, self.G.ncolour, pb.col, free, pb.S,
+                jvp=lambda t, xj=xj, L=L: GE.j_lagged_jvp(xj, P, L, t),
+            )
+            Jp = self._patch_jac(pb, x, np.asarray(L["tw"]), np.asarray(L["t"]))
+            t_jac = time.time() - ti
+            dvox = np.zeros(pb.S1)
+            dvox[: pb.S] = K.jst_diag(Jst, pb.col, pb.S)
+            dp = np.asarray(Jp.multiply(Jp).sum(0)).ravel()
+            D = np.where(free, dvox + dp, 0.0)
+            reg = 1e-12 * max(D.max(), 1e-12)  # only against an exact null space
+            ghat = np.asarray(L["gh"])[: pb.S]
+            nbr = np.asarray(P["nb"])[: pb.S + 1].copy()
+            nbr[nbr >= pb.S] = pb.S
+            nbv = np.asarray(P["nbv"])[: pb.S + 1].copy()
+            nbv[pb.S] = False
+            nbv[: pb.S] &= free[nbr[: pb.S]]
+            lptr, lsl = K.column_lines(nbr, nbv, ghat, s.line_max)
+            keep = free[lsl]
+            lens = np.diff(lptr)
+            cid = np.repeat(np.arange(len(lens)), lens)
+            lsl2 = lsl[keep]
+            cnt = np.bincount(cid[keep], minlength=len(lens))
+            lptr2 = np.concatenate([[0], np.cumsum(cnt)]).astype(np.int64)
+
+            def Av(v: np.ndarray, Jst: np.ndarray = Jst, Jp: Any = Jp,
+                   free: np.ndarray = free) -> np.ndarray:
+                vv = np.where(free, v, 0.0)
+                out = np.zeros(pb.S1)
+                out[: pb.S] = K.jst_apply_t(Jst, pb.col, K.jst_apply(Jst, pb.col, vv[: pb.S]), pb.S)
+                out += Jp.T @ (Jp @ vv) + reg * vv
+                return np.where(free, out, 0.0)
+
+            tf = time.time()
+            B, bptr = K.line_blocks(
+                lptr2, lsl2, Jst, pb.col, pb.slot_flat, pb.slot_of, self.G.strides,
+                K.OFFS, olut, pb.coords, (dp + reg)[: pb.S],
+            )
+            t_fac = time.time() - tf
+
+            def prec(r: np.ndarray, B: np.ndarray = B, bptr: np.ndarray = bptr,
+                     free: np.ndarray = free) -> np.ndarray:
+                z = np.zeros(pb.S1)
+                z[: pb.S] = K.line_solve(lptr2, lsl2, B, bptr, np.where(free, r, 0.0)[: pb.S])
+                return np.where(free, z, 0.0)
+
+            b = -0.5 * gq
+            n_it = [0]
+            tc = time.time()
+            dx, _ = spla.cg(
+                spla.LinearOperator((pb.S1, pb.S1), matvec=Av, dtype=float),
+                b, rtol=s.cg_tol, atol=0.0, maxiter=s.cg_iters,
+                M=spla.LinearOperator((pb.S1, pb.S1), matvec=prec, dtype=float),
+                callback=lambda xk: n_it.__setitem__(0, n_it[0] + 1),
+            )
+            t_cg = time.time() - tc
+            rel = float(np.linalg.norm(b - Av(dx)) / max(np.linalg.norm(b), 1e-300))
+            xn = np.where(unk, np.minimum(x + np.where(free, dx, 0.0), 0.0), x)
+            q1 = float(GE.lagged_energy(jnp.asarray(xn), P, L))
+            e1 = float(GE.j_energy(jnp.asarray(xn), P, g0))
+            step = float(np.abs(xn - x).max())
+            its.append({
+                "iter": it, "q0": float(q0), "q1": q1, "e": e1, "step_mm": step,
+                "cg_iters": n_it[0], "cg_rel": rel, "jac_s": t_jac, "factor_s": t_fac,
+                "cg_s": t_cg, "s": time.time() - ti,
+                "s0_below_0.1": int(np.sum(free[: pb.S] & (np.asarray(L["s"])[: pb.S] < 0.1))),
+            })
+            self.log.solves.append({"tag": tag, "lag_iter": it, **its[-1]})
+            x = xn
+            if step < s.lag_tol:
+                break
+        return x, {
+            "tag": tag,
+            "iters": its,
+            "e0": e_first,
+            "e1": float(GE.j_energy(jnp.asarray(x), P, g0)),
+            "n_unk": int(unk.sum()),
+            "s": time.time() - t_solve,
+        }
+
     # ------------------------------------------------------------ global step
 
     def global_problem(self, owner: np.ndarray) -> Problem:
         allm = np.ones(self.G.S, bool)
         pb = self.build(np.arange(self.G.S), allm, allm, owner)
-        if self.ridge:  # the rim voxels stay at τ0
+        if self.ridge or (self.sigma is not None and self.s.rim_fixed):
+            # the rim voxels stay at τ0
             pb.unk[: pb.S] &= np.asarray(pb.P["valid"])[: pb.S] > 0
         return pb
 
@@ -896,7 +1025,12 @@ class GlobalTau:
         x[: pb.S] = self.tau
         if g0 is None:
             g0 = GE.j_g0(jnp.asarray(x), pb.P)
-        x, info = self.lm_solve(pb, x, g0, tag)
+        if self.s.estimator == "lagged":
+            if self.sigma is None:
+                raise ValueError("the lagged estimator needs a fixed top surface Σ")
+            x, info = self.lagged_solve(pb, x, g0, tag)
+        else:
+            x, info = self.lm_solve(pb, x, g0, tag)
         self.tau = x[: pb.S].copy()
         if self.ridge:
             self.ridges = self.find_ridges(pb, x)
