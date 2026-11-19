@@ -30,6 +30,11 @@ cortex and for the user's choice about the scale bias (see
 - **The user expects contrast to be smooth over wide patches**, wider
   than 10 voxels (1.6 mm at 0.16 mm) in many places, and more along the
   laminae. So τ can be coarse.
+- **Test an irregular τ mesh.** The T5 session moved to a coarse Σ
+  first, refined once the rough shape of τ is known (finding 9). The
+  user wants the same idea tested here with an irregular mesh for τ:
+  nodes where the size map asks for them, not on a regular lattice and
+  not on the flow lines of τ.
 
 ## What the voxel solver work found (2026-11-19)
 
@@ -136,6 +141,22 @@ next to it. A T5 run with the new stencil is in progress (`t5-sw/`).
    off the crop face, and the inside test then leaks through the gap.
    Holding the border vertices in their box face fixes it. *For the
    mesh:* the same rule applies to every Σ that a test uses.
+9. **T5 descends now, but Σ is rough (T5 run `t5-sw`, in progress).**
+   With the three-point stencil, E fell from about 31,000 to −4,587 in
+   21 steps, with no intersections (the old run stopped at step 4). But
+   neighbouring vertices of Σ move by very different amounts. The run
+   splits edges down to 1 h, so each vertex sees only a few voxel-line
+   crossings (θ) and a few stop-ramp voxels. E has no term on the shape
+   of Σ, so the forces on neighbouring vertices are almost independent.
+   This explanation comes from how E is built and is not measured yet.
+   8,467 vertex moves were refused at step 21. The user chose to start
+   with a coarser Σ mesh and to refine it once the rough shape of τ is
+   known. *For the mesh:* the same coarse-to-fine order applies to τ
+   (M6). Two parts of this plan also make the forces on Σ denser: the
+   cut weights f (M3) give a force from every voxel within h/2 of Σ,
+   not only from the lines that cross it, and the Z1 residuals (M4) tie
+   each point of Σ to a smooth τ, which couples neighbouring vertices
+   through the shared coefficients. Neither is a smoothness term on Σ.
 
 **Conclusion.** The faults found are in two places. Some are at the
 coupling of the continuous Σ and the voxel τ: membership, ghosts, the
@@ -166,11 +187,46 @@ a coupling that is correct by construction matters for the descent of
   gradient or an interior penalty, and the equivolume and smooth terms
   are then weakest where τ meets Σ. This is the place that failed in the
   voxel form.
-- **D. Tetrahedra.** A permissive constrained tetrahedral mesher does
-  not exist (TetGen AGPL, CGAL and gmsh GPL). Own code would be a large
-  piece of work. Out, unless A and B fail.
+- **D. Tetrahedra that conform to Σ.** A permissive constrained
+  tetrahedral mesher does not exist (TetGen AGPL, CGAL and gmsh GPL).
+  Out.
+- **E. An irregular mesh, cut by Σ (the form to test, user
+  2026-11-19).** The τ mesh does not have to conform to Σ, because Σ
+  cuts it (M3) as it cuts the lattice. So no constrained mesher is
+  needed. The nodes go where a size field asks for them, and they stay
+  fixed in space while Σ moves. Two forms:
+  - **E1. Meshfree, moving least squares (MLS) with compact C² weights
+    (Wendland).** Each node has a support (a ball, or an ellipsoid).
+    The MLS shape functions reproduce every polynomial of the chosen
+    degree (2 or 3), and they are C² if the weights are. So ∇τ and H
+    are analytic, as for A. The supports can be ellipsoids, longer
+    along the laminae and shorter across them, oriented by the column
+    direction n̂ of the image (an orientation, not a node path). That
+    gives the anisotropy that an axis-aligned lattice can not give.
+    Quadrature is the usual difficulty of meshfree methods. Here the
+    quadrature points are the voxel centres (M3), so it is not a
+    problem. The shape functions at the voxel centres are a fixed sparse
+    matrix U (as in the prototype), with the matrices of their first and
+    second derivatives. Each voxel needs one small solve (10 × 10 for
+    degree 2) to build them, once for each node layout.
+  - **E2. Tetrahedra of a Delaunay triangulation of the nodes** (Qhull
+    through `scipy.spatial.Delaunay`. The Qhull licence is permissive,
+    not GPL). Linear or quadratic elements, C⁰ only. H needs a recovered
+    gradient or an interior penalty, with the same limit as C. Long thin
+    tets need care to keep the elements valid.
 
-The lattice is fixed in space and does not move with Σ. An axis-aligned
+  Node placement for E: the size field of measurement 2 (finer at
+  crowns, fundi, contacts and excisions), filled by Poisson-disk
+  sampling or by a few Lloyd steps, in the cortex label dilated by the
+  inner layer. Copies by piece (M2) and extension for small pieces (M5)
+  apply to E as to A: aggregation is the meshfree and FEM form of the
+  extension. A refinement adds nodes. With MLS this changes the shape
+  functions near the new nodes, so it is a projection event (M9), not
+  a nested refinement as in THB.
+
+A is already prototyped. It is the reference for E: the same energy,
+cut weights, copies and extension, with a regular basis. The lattice is
+fixed in space and does not move with Σ. An axis-aligned
 lattice can not be coarse along the laminae and fine across them. With
 cubic functions, 2–3 cells across the cortex can hold a τ that bends
 smoothly in depth, so this matters less than for linear elements. The
@@ -364,6 +420,11 @@ Estimates, for the analysis only:
   10⁶. At L = 0.4 mm: about 8 × 10⁶. The axis-aligned lattice costs
   more than a mesh that is coarse only along the laminae. The size map
   decides which L is enough.
+- With E1 and ellipsoid supports, for example 1.6 mm along the laminae
+  and 0.6 mm across them: about (cortex volume) / (1.6² × 0.6 mm³),
+  about 3 × 10⁵ nodes, before refinement. Each MLS shape function at a
+  voxel has more nonzeros than a cubic B-spline (about 20–40 nodes in
+  range, against 64), so the cost of each evaluation pass is similar.
 - Evaluation: every voxel near the cortex is a quadrature point. Each
   point needs 3 × 4 1D weights and their derivatives, and 64
   coefficients. The pass reads n̂ (as the tensor coh n̂n̂ᵀ), the label and
@@ -402,7 +463,9 @@ the mesh. The angle between the traced columns and n̂ is a diagnostic.
 
 The next prototype: replace the voxel stencils by analytic derivatives
 (M7), add f (M3), Z1 (M4) and the extension (M5), and remove the two
-constants. A test then checks that at L = 1 the energy is close to the
+constants. Then add the irregular basis E1 behind the same interface
+(a sparse U and its derivative matrices at the voxel centres), so A and
+E1 run on the same energy, Σ and solver. A test then checks that at L = 1 the energy is close to the
 voxel energy with the three-point stencil.
 
 ## Dependencies
@@ -446,7 +509,12 @@ Each question has options and a recommendation (R). No choice is made
 before the user answers.
 
 1. **Basis** (M1). A cubic B-splines, B THB-splines, C trilinear on an
-   octree, D tetrahedra. R: A, then B for local refinement.
+   octree, D tetrahedra that conform to Σ, E an irregular mesh cut by Σ
+   (E1 MLS with C² weights, E2 Delaunay tetrahedra). The user wants an
+   irregular mesh tested. R: E1, with A (already prototyped) as the
+   reference on the same energy and the same Σ. E1 keeps the analytic H
+   and allows anisotropic supports. E2 brings back the C⁰ limit next to
+   Σ.
 2. **Copies** (M2). K1 voxel connectivity, K2 from Σ. R: K1.
 3. **τ = 0 on Σ** (M4). Z1 residuals at h/4, Z2 Nitsche, Z3
    WEB-splines. R: Z1.
@@ -475,6 +543,15 @@ before the user answers.
     energy, and label the results as biased. The comparison is about the
     representation, and the bias is the same in both forms. Repeat it
     after the fix.
+13. **Supports of E1.** Balls, or ellipsoids oriented by n̂. R: balls
+    for the first test, ellipsoids after the size map shows how much
+    the two directions differ. A ball needs no orientation field, so
+    the first test has one cause less.
+14. **Resolution of Σ and τ.** The T5 session starts Σ coarse (finding
+    9). τ's nodes can follow the same schedule (coarse, then refined
+    where the size map asks), or stay at one size. R: the same
+    coarse-to-fine schedule, with τ's node spacing never finer than Σ's
+    edge in the first stage.
 
 ## Tests
 
