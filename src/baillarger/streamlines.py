@@ -58,7 +58,8 @@ Labels: 0 cortex, 1 fluid, 2 WM, 3 missing tissue, other values other.
 Validated (reports/Crossing paths and contacts from laminar profiles.md,
 *Column traces at folds*) on fold phantoms with known columns (crowns,
 fundi, touching banks) at the measured noise: the fitted field with the
-blended start (column_traces.TRACERS "fitted_blend") is the most accurate at
+blended start (the "fitted_blend" tracer of baillarger.column_traces, now
+removed) is the most accurate at
 tight fundi and at contacts.
 """
 

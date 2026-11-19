@@ -19,9 +19,7 @@ label of its nearest neighbour outside the mask, and each piece of
 the mask below CRUMB_MM3 given the labels of its neighbours outside the mask
 (small_pieces). Every later stage
 reads its labels from the corrected segmentation, never the aseg plus a list
-of changes: the whole-hemisphere surface (baillarger.white_surf) and the box
-stages (baillarger.column_traces.load_tissue, baillarger.pial_labels, whose
-WM is the corrected mask of their box: filled_labels).
+of changes: the whole-hemisphere surface (baillarger.white_surf).
 
 The command writes the corrected segmentation (desc-wmtopo_dseg), the
 changed voxels (desc-wmtopofixes_dseg), the fix table and the fix diff, with

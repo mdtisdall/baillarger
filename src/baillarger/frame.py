@@ -46,7 +46,7 @@ along the mesh over about curv_mm (mesh_curvatures). The flow tube of a
 streamline is taken as that of the surfaces offset from the white surface,
 A(s) = (1 + k1 s)(1 + k2 s), each factor floored at a_min past a focal point;
 path_volume gives A and V(s) = ∫ A ds at the streamline's points, and
-volume_at reads V at any depth (baillarger.columns uses it for
+volume_at reads V at any depth (for the equivolume depth
 r = V(d) / V(T_p)). The first version integrated div u, the divergence of the
 streamlines' direction field (from D): right at the scale of a column, but
 on V1V2 it corrected about twice too much for the curvature (see the plan).
