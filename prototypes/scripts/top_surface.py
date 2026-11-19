@@ -554,13 +554,11 @@ def _split(m: Mesh, lmax: float, size: np.ndarray | None = None) -> int:
 def _collapse(
     m: Mesh, lmin: float, exclude: np.ndarray, size: np.ndarray | None = None
 ) -> tuple[int, np.ndarray, np.ndarray]:
-    """Collapses, to the midpoint, interior edges shorter than lmin with
-    both ends in the same state that pass the link condition (exactly two
-    common neighbours) and turn no face normal by more than 90 degrees, no
-    two in the closed 1-rings of each other's ends (so no two collapses
-    touch the same face). They are chosen in rounds: the locally shortest
-    candidates first; a picked edge that fails a condition leaves the
-    candidates, so it does not block its neighbours. Returns the number of collapses,
+    """Collapses, to the midpoint, the interior edges shorter than lmin with
+    both ends in the same state that are the shortest candidate in the
+    closed 1-rings of both ends (so no two collapses touch the same face),
+    pass the link condition (exactly two common neighbours), and turn no
+    face normal by more than 90 degrees. Returns the number of collapses,
     the new index of each old vertex (-1: removed) and the old indices of
     the merged (kept) vertices."""
     F, V = m.F, m.V
@@ -574,6 +572,13 @@ def _collapse(
     c = (L < thr) & ~m.boundary[a] & ~m.boundary[b] & ~exclude[a] & ~exclude[b] & (m.state[a] == m.state[b])
     if not c.any():
         return 0, ident, none
+    E, Lc = u[c], L[c]
+    rank = np.empty(len(E), np.int64)
+    rank[np.lexsort((np.arange(len(E)), Lc))] = np.arange(len(E))
+    E = E[_local_best(E, rank, n, m.ptr, m.nbr)]
+    E = E[MC.link_condition(m.ptr, m.nbr, E)]
+    if len(E) == 0:
+        return 0, ident, none
 
     def apply(E: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         remap = ident.copy()
@@ -584,51 +589,22 @@ def _collapse(
         gone = (F2[:, 0] == F2[:, 1]) | (F2[:, 1] == F2[:, 2]) | (F2[:, 0] == F2[:, 2])
         return V2, F2, gone
 
-    def turned(E: np.ndarray) -> np.ndarray:
-        """Per edge of an independent set: its collapse turns a face of
-        its fan by 90 degrees or more."""
-        V2, F2, gone = apply(E)
-        owner = np.full(n, -1, np.int64)
-        owner[E[:, 0]] = np.arange(len(E))
-        owner[E[:, 1]] = np.arange(len(E))
-        fo = owner[F].max(1)  # the collapse that changes this face (at most one)
-        ch = (fo >= 0) & ~gone
-        n_old = MC.face_normals(V, F[ch])
-        n_new = MC.face_normals(V2, F2[ch])
-        bad = np.zeros(len(E), bool)
-        bad[fo[ch][(n_old * n_new).sum(1) <= 0]] = True
-        return bad
-
-    # Rounds: the locally shortest candidates (no two in the closed 1-rings
-    # of each other's ends); those that fail the link condition or would
-    # turn a face leave the candidates, and the next round picks again away
-    # from the accepted ones. (A single round let an edge that can never
-    # collapse block its neighbourhood in every pass.)
-    cand = np.flatnonzero(c)
-    blocked = np.zeros(n, bool)
-    keep: list[np.ndarray] = []
-    while len(cand):
-        Ec, Lc = u[cand], L[cand]
-        rank = np.empty(len(Ec), np.int64)
-        rank[np.lexsort((np.arange(len(Ec)), Lc))] = np.arange(len(Ec))
-        pick = _local_best(Ec, rank, n, m.ptr, m.nbr)
-        Ep = Ec[pick]
-        ok = MC.link_condition(m.ptr, m.nbr, Ep)
-        if ok.any():
-            ok[np.flatnonzero(ok)] = ~turned(Ep[ok])
-        keep.append(Ep[ok])
-        if ok.any():
-            ring = np.zeros(n, bool)
-            ring[Ep[ok].ravel()] = True
-            blocked |= MC.near_vertices(m.ptr, m.nbr, ring)
-        drop = np.zeros(len(cand), bool)
-        drop[np.flatnonzero(pick)] = True  # picked: accepted or failed, either way done
-        cand = cand[~drop]
-        cand = cand[~blocked[u[cand, 0]] & ~blocked[u[cand, 1]]]
-    E = np.concatenate(keep) if keep else np.zeros((0, 2), np.int64)
-    if len(E) == 0:
-        return 0, ident, none
     V2, F2, gone = apply(E)
+    # no flipped face: an edge whose fan has a face turned by >= 90 degrees is not collapsed
+    owner = np.full(n, -1, np.int64)
+    owner[E[:, 0]] = np.arange(len(E))
+    owner[E[:, 1]] = np.arange(len(E))
+    fo = owner[F].max(1)  # the collapse that changes this face (at most one)
+    ch = (fo >= 0) & ~gone
+    n_old = MC.face_normals(V, F[ch])
+    n_new = MC.face_normals(V2, F2[ch])
+    flip = np.zeros(len(E), bool)
+    flip[fo[ch][(n_old * n_new).sum(1) <= 0]] = True
+    if flip.any():
+        E = E[~flip]
+        if len(E) == 0:
+            return 0, ident, none
+        V2, F2, gone = apply(E)
     m.V = V2
     for nm in ("origin", "travel", "last"):
         x = getattr(m, nm).copy()
