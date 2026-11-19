@@ -508,6 +508,30 @@ def test_a_paint_against_the_correction_is_an_edit() -> None:
         LE.paint(LE.empty(), a, [(0, 0, 0)], [0], dseg=d[:-1])
 
 
+def test_a_paint_compares_with_the_input_where_the_dseg_was_edited() -> None:
+    """A voxel that the dseg's own edits changed (dseg_edits) and the diff
+    no longer has is at its input label: painted with the dseg's label, it
+    gets an entry. A voxel that the diff still has compares with its entry,
+    and one that the dseg's edits did not change with its dseg label."""
+    a = labels()
+    a[0, 0, 0] = 41  # input WM
+    d = a.copy()
+    d[0, 0, 0] = 42  # the dseg was made with the edit (0, 0, 0): 42
+    made = edits({(0, 0, 0): 42})
+    e, undo = LE.paint(LE.empty(), a, [(0, 0, 0)], [42], dseg=d, dseg_edits=made)
+    assert same(e, edits({(0, 0, 0): 42}))
+    assert same(undo, edits({(0, 0, 0): -1}))
+    # without dseg_edits it compares with the dseg: no edit
+    e2, _ = LE.paint(LE.empty(), a, [(0, 0, 0)], [42], dseg=d)
+    assert len(e2) == 0
+    # the diff's entry counts first; a voxel the dseg's edits did not change
+    # compares with its dseg label
+    e3, undo3 = LE.paint(
+        e, a, [(0, 0, 0), (3, 3, 3)], [42, 41], dseg=d, dseg_edits=made
+    )
+    assert same(e3, e) and len(undo3) == 0
+
+
 def test_a_paint_does_not_depend_on_the_history() -> None:
     """Paint 41 and then 0 gives the same diff as paint 0 alone, on a voxel
     that the correction changed and on one that it did not."""
