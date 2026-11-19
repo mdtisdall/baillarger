@@ -10,8 +10,9 @@ fewer.
 **Status.** A design proposal and one local prototype
 (`prototypes/scripts/tau_coarse.py`, branch `feature/tau-coarse`, commit
 45fe574, not pushed). Every open choice is a question for the user (see
-*Open questions*). The convergence experiments wait for two repairs of
-the energy (see *Dependencies*).
+*Open questions*). The convergence experiments wait for a Σ in the
+cortex and for the user's choice about the scale bias (see
+*Dependencies*).
 
 ## Decisions so far (user, 2026-11-19)
 
@@ -34,7 +35,9 @@ the energy (see *Dependencies*).
 
 The global-τ session repaired and measured the voxel τ of T5 on site 1
 (65³ voxels, 0.16 mm). These results set the design below. Commits are
-on `feature/top-surface`. c5b0066 and c5fb5b1 are local and not pushed.
+on `feature/top-surface` (PR #222). The offset series is in
+`scratch/top-surface/site1-grow/offset-sw-series.log`, with its τ files
+next to it. A T5 run with the new stencil is in progress (`t5-sw/`).
 
 1. **Signed distance (4b27f68).** The stop ramp, the inside test and τ0
    use the signed distance s to Σ. E_stop jumps in 7 of 80 small steps
@@ -57,8 +60,8 @@ on `feature/top-surface`. c5b0066 and c5fb5b1 are local and not pushed.
    free (down to −0.39 mm where it should be about −0.003 mm). The
    three-point (Shortley–Weller) derivative couples them again. Median
    thickness at offset 0 went from 0.388 to 0.216 mm, and E_τ from
-   38,747 to 77,732. The earlier offset and thickening results used the
-   old stencil, and are measured again now. *For the mesh:* the
+   38,747 to 77,732. The old low E_τ came from the free cells, whose τ
+   made the columns look thick. *For the mesh:* the
    prototype samples τ at the voxel centres and then applies the voxel
    stencils, so its partial runs had the same fault. An analytic
    gradient of a basis always contains the local coefficients (M4).
@@ -66,10 +69,16 @@ on `feature/top-surface`. c5b0066 and c5fb5b1 are local and not pushed.
    equivolume are not normalised by |∇τ|. A stretch of τ by k multiplies
    them by k², so they reward a flat τ in tissue. Only the pull and the
    thickness prior push back. The per-term thickening test showed this
-   (old stencil, to be measured again). The lagged 1/|∇τ| weights
-   (c5b0066, off) diverge on site 1: inside one round, a small patch
-   next to Σ goes flat (|∇τ| ≈ 5 × 10⁻⁵), and the weight of the next
-   round explodes. This is open. *For the mesh:* the bias is in the
+   with the old stencil. With the new stencil, the bias is still in the
+   terms, but from offset 0 to 4 h the thickness pressure outweighs it
+   (finding 7). The tissue terms grow from 559 to 14,642 as the domain
+   grows from 14,612 to 54,216 slots. The columns are still thin: the
+   median thickness at 4 h is 0.57 mm, against a prior median of 2.7 mm.
+   Whether the bias holds the thickness down there is not measured. The
+   lagged 1/|∇τ| weights (c5b0066, off) still diverge at 0.25 h: inside
+   one round, a small patch next to Σ goes flat (|∇τ| ≈ 5 × 10⁻⁵), and
+   the weight of the next round explodes. They are not needed to pass
+   the barrier. The bias is open. *For the mesh:* the bias is in the
    energy, not in the representation, so the mesh has it too. The
    prototype's partial runs show it: with no bound on the coefficients,
    8,000–13,000 voxels went to τ > 0 and τ flattened toward 0. A coarse
@@ -92,12 +101,30 @@ on `feature/top-surface`. c5b0066 and c5fb5b1 are local and not pushed.
    the difference between two starts, not the size of the last step.
    My earlier note to the solver session judged the partial runs by the
    step size. That reading was wrong.
-7. **Σ stays at the white surface.** At the T5 result, the domain is a
-   shell of 494 tissue voxels on 14,118 inner voxels. An energy barrier
-   in the first 0.5 h outward holds T5 there (old stencil, measured
-   again now). *For the mesh:* the prototype used the T6 start Σ, which
-   is also at the white surface. A test of a coarse τ needs a Σ in the
-   cortex (question 9).
+7. **The barrier near the white surface was an artefact.** At the old
+   T5 result, Σ is at the white surface: the domain is a shell of 494
+   tissue voxels on 14,118 inner voxels. With the old stencil, E_τ rose
+   from 38.7k to 62.1k over the first 0.5 h outward, and T5's small
+   steps could not cross that. With the three-point stencil, E_τ falls
+   at every offset (border held, unweighted τ):
+
+   | Offset | E_τ | E (with stop) | Median thickness | Roots at the floor |
+   |---|---|---|---|---|
+   | 0 | 77,732 | 73,920 | 0.216 mm | 201 |
+   | 0.25 h | 66,005 | 57,780 | 0.185 mm | 26 |
+   | 0.5 h | 61,247 | 46,880 | 0.185 mm | 15 |
+   | 1 h | 52,363 | 23,694 | 0.235 mm | 4 |
+   | 2 h | 40,742 | −17,070 | 0.363 mm | 1 |
+   | 4 h | 36,764 | −80,743 | 0.573 mm | 1 |
+
+   Mostly the thickness term falls (55.6k to 17.3k). At 1, 2 and 4 h,
+   the last LM call from the warm start took no accepted step, so these
+   solves are not fully converged. The plain normal offset folds Σ
+   locally (319 of 14,053 faces at 4 h). *For the mesh:* the prototype
+   used the T6 start Σ, at the white surface. A test of a coarse τ needs
+   a Σ in the cortex (question 9). The 2 h and 4 h offsets, and their
+   voxel τ, are now a usable reference. A T5 result that has moved out
+   would be better, because it has no offset folds.
 8. **Open crop border.** A normal offset of Σ moves its border vertices
    off the crop face, and the inside test then leaks through the gap.
    Holding the border vertices in their box face fixes it. *For the
@@ -110,7 +137,10 @@ removes most of these by construction. The others are in the energy:
 the scale bias. A basis does not fix these, so they must be fixed for
 the voxel τ and the coarse τ alike. The prototype mixed the two: coarse
 unknowns, but the voxel stencils. The next prototype changes that (see
-*Prototype*).
+*Prototype*). The offset series adds one point: a single coupling fault
+(the decoupled stencil) made a barrier in E large enough to stop T5. So
+a coupling that is correct by construction matters for the descent of
+Σ, not only for accuracy.
 
 ## Design
 
@@ -370,13 +400,16 @@ voxel energy with the three-point stencil.
 
 ## Dependencies
 
-1. **The scale bias (finding 4)** is fixed in the energy, or the user
-   chooses to measure with it. Until then, a convergence comparison
-   measures how fast each form reaches a biased minimum.
-2. **The offset series with the three-point stencil** (running in the
-   global-τ session) gives the voxel baseline, and shows whether the
-   barrier near the white surface remains.
-3. **A Σ in the cortex** for the tests (question 9).
+1. **The scale bias (finding 4).** Fix it in the energy, or measure with
+   it. It no longer blocks T5 near the white surface, so it does not
+   block a first comparison. But a comparison with the bias measures how
+   fast each form reaches a biased minimum, so the report must say so
+   (question 12).
+2. **The voxel baseline.** Done: the offset series with the three-point
+   stencil (finding 7). Its 2 h and 4 h τ files are the voxel reference
+   until a T5 result in the cortex exists.
+3. **A Σ in the cortex** for the tests (question 9). The T5 run with the
+   new stencil (in progress) shows whether T5 now moves Σ out.
 
 ## Measurements
 
@@ -420,14 +453,21 @@ before the user answers.
 7. **Bound τ ≤ 0** (M4). A one-sided residual, or none. R: the residual,
    measured after the scale bias is fixed.
 8. **Solve** (M8). Alternate (T5) or joint. R: alternate first.
-9. **Σ for the tests.** The T5 result (at the white surface), an offset
-   of it with the border held (for example 2 h or 4 h), or a T5 result
-   after the barrier is fixed. R: an offset with the border held now.
-   It puts Σ in the cortex without waiting for T5.
+9. **Σ for the tests.** The old T5 result (at the white surface), an
+   offset of it with the border held (2 h or 4 h, with the voxel τ of
+   the offset series), or the result of the T5 run with the new stencil.
+   R: the new T5 result if it moves Σ into the cortex, because it has
+   no offset folds. Otherwise the 4 h offset.
 10. **Depth adaptivity** (M6). D1 or D2. R: D1, then D2 from the band
     count.
 11. **Branch.** Keep `feature/tau-coarse` local until the next prototype
     works, or push it as a draft PR. R: local, as the user said.
+12. **Scale bias in the first comparison** (Dependencies, item 1).
+    Wait for a fix of the energy, or compare the voxel and the coarse
+    forms now, with the bias in both. R: compare now, on the same
+    energy, and label the results as biased. The comparison is about the
+    representation, and the bias is the same in both forms. Repeat it
+    after the fix.
 
 ## Tests
 
