@@ -100,6 +100,10 @@ class Settings:
     #: only): one PCG solve per outer step
     estimator: str = "lm"
     lag_iters: int = 30
+    #: "lm_scaled" only: 0 = the scaled terms as they are; n > 0 = n solves,
+    #: each with the lagged 1/|∇τ| weights renewed at its start
+    #: (global_tau_energy, "Lagged scale weights")
+    scale_lag_iters: int = 0
     lag_tol: float = 1e-6  # max |Δτ| (mm) of an outer step
     #: a fixed top surface Σ only: the rim voxels (no neighbour and no ghost
     #: on some axis: the crop edge) stay at τ0, as in the ridge form
@@ -349,6 +353,10 @@ class SigmaTop:
     ghost: np.ndarray
     gdist: np.ndarray
     tau0: np.ndarray
+    #: the signed distance (mm, negative inside) of each voxel to Σ, for
+    #: the fade-in of the voxels next to Σ (global_tau_energy._fade); None:
+    #: no fade
+    sdist: np.ndarray | None = None
     #: top_tau.sigma_top: inside Σ, the axis crossings of every voxel within
     #: one voxel (theta, face: the ghosts' ∂E/∂Σ) and the signed-distance
     #: band (band: the stop term and its ∂E/∂Σ)
@@ -395,8 +403,9 @@ class GlobalTau:
             c[:] = 0.0  # Σ is fixed: the stop term does not depend on τ
             self.sigma_ghost: np.ndarray | None = sigma.ghost[X0]
             self.sigma_gdist: np.ndarray | None = sigma.gdist[X0]
+            self.sigma_sdist: np.ndarray | None = None if sigma.sdist is None else sigma.sdist[X0]
         else:
-            self.sigma_ghost = self.sigma_gdist = None
+            self.sigma_ghost = self.sigma_gdist = self.sigma_sdist = None
         self.c = c
         self.coh = site.coh[X].astype(np.float64)
         self.nhat = site.nhat[X].astype(np.float64)
@@ -439,6 +448,9 @@ class GlobalTau:
         self.owner_march = self.owner.copy()
         self.timing["march_s"] = time.time() - t1
         self.ridge = s.contacts == "ridge"
+        #: diagnostics: called after each accepted LM step with (iteration,
+        #: x before, x after, ∇E, free mask, the try's record, problem)
+        self.iter_hook: Any = None
         self.ridges: dict[str, np.ndarray] = {
             k: np.zeros((0, 3), np.int64) for k in RIDGE_CLASSES
         }
@@ -642,6 +654,8 @@ class GlobalTau:
             "psd": psd,
             "pm": pm,
         }
+        if self.sigma_sdist is not None:  # the fade-in next to Σ (T5)
+            P["sdist"] = padn(self.sigma_sdist[sub], -self.htau)
         P = {k: jnp.asarray(v) for k, v in P.items()}
         unk = np.zeros(S1, bool)
         unk[:S] = unk_g[sub]
@@ -874,6 +888,8 @@ class GlobalTau:
                 if e1 < e:
                     accepted = True
                     step_mm = float(np.abs(xn - x).max())
+                    if self.iter_hook is not None:  # diagnostics only
+                        self.iter_hook(it, x, xn, grad, free, tries[-1], pb)
                     x = xn
                     if s.lm_update == "nielsen":
                         lam = max(lam * max(1.0 / 3.0, 1.0 - (2.0 * rho - 1.0) ** 3), 1e-12)
@@ -1051,6 +1067,8 @@ class GlobalTau:
             if self.sigma is None:
                 raise ValueError("the lagged estimator needs a fixed top surface Σ")
             x, info = self.lagged_solve(pb, x, g0, tag)
+        elif self.s.estimator == "lm_scaled" and self.s.scale_lag_iters > 0:
+            x, info = self.reweighted_solve(pb, x, g0, tag)
         else:
             x, info = self.lm_solve(pb, x, g0, tag)
         self.tau = x[: pb.S].copy()
@@ -1061,6 +1079,42 @@ class GlobalTau:
             self.faces = pb.faces
         self._pb, self._g0 = pb, g0
         return info, g0
+
+    def reweighted_solve(
+        self, pb: Problem, x: np.ndarray, g0: Any, tag: str
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        """lm_scaled with the lagged 1/|∇τ| weights: scale_lag_iters LM
+        solves, the weights renewed at the start of each. pb.P keeps the
+        last weights, so the energy after the solve is the weighted one.
+        Each round records how much the weights changed and how many slots
+        have a small |∇τ| (the weight grows as 1/|∇τ| there)."""
+        rounds: list[dict[str, Any]] = []
+        info: dict[str, Any] = {}
+        e0 = None
+        for k in range(self.s.scale_lag_iters):
+            w = np.asarray(GE.j_lag_weights(jnp.asarray(x), pb.P))
+            unk = pb.unk[: pb.S]
+            rw = None
+            if "wlag" in pb.P:
+                wp = np.asarray(pb.P["wlag"])[: pb.S][unk]
+                rw = np.abs(w[: pb.S][unk] / wp - 1.0)
+            s0 = 1.0 / w[: pb.S][unk]
+            pb.P["wlag"] = jnp.asarray(w)
+            x, info = self.lm_solve(pb, x, g0, f"{tag}/w{k}")
+            if e0 is None:
+                e0 = info["e0"]
+            rounds.append({
+                "e0": info["e0"], "e1": info["e1"], "lm_iters": len(info["iters"]), "s": info["s"],
+                "s0_median": float(np.median(s0)), "s0_below_0.1": int((s0 < 0.1).sum()),
+                "s0_min": float(s0.min()),
+                "w_change_median": None if rw is None else float(np.median(rw)),
+                "w_change_p99": None if rw is None else float(np.percentile(rw, 99)),
+            })
+        info = dict(info)
+        info["e0"] = e0
+        info["s"] = float(sum(r["s"] for r in rounds))
+        info["reweight"] = rounds
+        return x, info
 
     def slot_energies(
         self, pb: Problem, x: np.ndarray, g0: Any

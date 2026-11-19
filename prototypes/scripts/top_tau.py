@@ -430,7 +430,11 @@ def sigma_top(
         **finfo,
         "vote_disagree": int(((voted > 0) & (vote_inside != inside_sigma)).sum()),
     }
-    sig = GS.SigmaTop(domain, inner, ghost, gdist, tau0)
+    h = float(vox.mean())
+    # s for the fade-in (global_tau_energy._fade): band values, and -h (ω =
+    # 1) for the voxels inside Σ off the band
+    sdist = np.where(np.isfinite(sgrid), sgrid, -h)
+    sig = GS.SigmaTop(domain, inner, ghost, gdist, tau0, sdist=sdist)
     sig.geo = geo
     return sig, info
 

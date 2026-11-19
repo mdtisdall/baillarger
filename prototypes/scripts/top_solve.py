@@ -83,6 +83,10 @@ class SolveSettings:
     refine_var: float = 1.0  # force variation: max |g_i - g_j| / max |g_i| over a face
     refine_held: int = 2  # a vertex refused in this many steps in a row
     refine_min_vox: float = 1.0  # no split makes an edge shorter than this × h
+    #: the fade-in of the voxels next to Σ (global_tau_energy._fade; user,
+    #: 2026-11-19): E_τ continuous as Σ passes over voxel centres
+    fade: bool = False  # not yet tested: off until it is
+    scale_lag: int = 0  # GS.Settings.scale_lag_iters: the lagged 1/|∇τ| weights (0: off)
 
 
 def stop_weights(labels: np.ndarray) -> np.ndarray:
@@ -184,6 +188,18 @@ def _energy_and_dgdist(x: Any, P: dict[str, Any]) -> tuple[Any, Any]:
 
 
 @jax.jit
+def _energy_and_dsigma(x: Any, P: dict[str, Any]) -> tuple[Any, Any, Any]:
+    """The scaled E_τ, ∂E_τ/∂gdist (S1, 3, 2) and ∂E_τ/∂sdist (S1,) (the
+    fade-in, global_tau_energy._fade)."""
+
+    def e(gd: Any, sd: Any) -> Any:
+        return GE.scaled_energy(x, {**P, "gdist": gd, "sdist": sd})
+
+    val, (dg, ds) = jax.value_and_grad(e, argnums=(0, 1))(P["gdist"], P["sdist"])
+    return val, dg, ds
+
+
+@jax.jit
 def _energy_parts(x: Any, P: dict[str, Any]) -> dict[str, Any]:
     return GE.scaled_parts(x, P)
 
@@ -207,6 +223,7 @@ class Evaluator:
         self.gs = GS.Settings(
             face_test=False, estimator=s.tau_estimator, rim_fixed=s.rim_fixed,
             lag_iters=s.tau_iters, lag_tol=s.tau_tol_mm, lm_iters=s.tau_iters,
+            scale_lag_iters=s.scale_lag,
         )
         self.pt = TP.make_patches(site, self.gs.patch_mm)
         self.centre_vox = np.array(site.labels.shape) / 2.0
@@ -218,6 +235,8 @@ class Evaluator:
         vox = site.vox.astype(float)
         P = V / vox
         sig, ginfo = TT.sigma_top(site, V, F, tau_prev, self.gs)
+        if not self.s.fade:
+            sig.sdist = None
         geo = sig.geo
         assert geo is not None
         e_stop, grad, sd = stop_energy(self.c, geo, F, len(V), float(vox.mean()))
@@ -237,12 +256,30 @@ class Evaluator:
             x = np.zeros(pb.S1)
             x[: pb.S] = gt.tau
             xj = jnp.asarray(x)
-            e, dgd = _energy_and_dgdist(xj, pb.P)
+            dsd = None
+            if "sdist" in pb.P:
+                e, dgd, dsd = _energy_and_dsigma(xj, pb.P)
+            else:
+                e, dgd = _energy_and_dgdist(xj, pb.P)
             e_tau = float(e)
             parts = {k: float(v) for k, v in _energy_parts(xj, pb.P).items()}
             dgd = np.asarray(dgd)[: pb.S]
             ijk = gt.G.coords[: pb.S] - GS.PAD
             X = tuple(ijk.T)
+            if dsd is not None:
+                # through s of each faded slot: ∂s/∂V_i = -w_i u (band)
+                ds = np.zeros(shape)
+                ds[X] = np.asarray(dsd)[: pb.S]
+                band = geo["band"]
+                dsb = ds[tuple(band["ijk"].T)]
+                k = dsb != 0.0
+                if k.any():
+                    coef = -dsb[k][:, None] * band["u"][k]
+                    fr_ = F[band["face"][k]]
+                    wb = band["w"][k]
+                    for j in range(3):
+                        np.add.at(grad, fr_[:, j], wb[:, j : j + 1] * coef)
+                info["faded_slots"] = int(k.sum())
             sg = sig.ghost[X]  # (S, 3, 2) the ghost sides of Σ
             th = geo["theta"][X]
             use = sg & (th > TT.THETA_MIN) & (th <= 1.0)
@@ -257,6 +294,7 @@ class Evaluator:
             its = sinfo["iters"]
             info.update({
                 "tau_s": sinfo["s"],
+                "reweight": sinfo.get("reweight"),
                 "lag_iters": len(its),
                 "cg_iters": [r["cg_iters"] for r in its],
                 "last_step_mm": its[-1]["step_mm"] if its else 0.0,

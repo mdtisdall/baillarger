@@ -601,6 +601,45 @@ def test_scaled_terms_against_the_original() -> None:
     assert np.corrcoef(eq_o, rs[inner, 12])[0, 1] > 0.95
 
 
+def test_lag_weights_restore_the_original_terms() -> None:
+    """With P["wlag"] = 1/s0 at x0 = x: the align residuals equal the
+    original ones, the smooth term equals it up to the discrete product rule,
+    and the equivolume residual follows the original (as in the test above,
+    now without the factors of s)."""
+    G, P, x, unk = _lagged_problem()
+    c = G.coords - GS.PAD
+    x[: G.S] = -(7 - c[:, 2]) * H * (1.0 + 0.02 * c[:, 0]) - 0.002 * c[:, 1] ** 2  # smooth, s ≠ 1
+    xj = jnp.asarray(x)
+    g0 = GE.j_g0(xj, P)
+    fw, _ = GE.j_weights(xj, P)
+    r = np.asarray(GE.voxel_residuals(xj, P, g0, fw))[: G.S]
+    Pw = {**P, "wlag": GE.j_lag_weights(xj, P)}
+    rs = np.asarray(GE.j_scaled_residuals(xj, Pw))[: G.S]
+    np.testing.assert_allclose(rs[:, :3], r[:, :3], rtol=1e-6, atol=1e-9)  # align
+    np.testing.assert_allclose(np.linalg.norm(rs[:, 13:16], axis=1), np.abs(r[:, 13]), atol=1e-9)  # pull: no weight
+    inner = np.all(np.asarray(P["nbv"])[: G.S].all(2), 1)
+    for k in np.flatnonzero(inner)[:20]:
+        assert np.sum(rs[k, 3:12] ** 2) == pytest.approx(np.sum(r[k, 3:12] ** 2), rel=0.05)
+    assert np.corrcoef(r[inner, 12], rs[inner, 12])[0, 1] > 0.95
+
+
+@pytest.mark.parametrize("k", [0.5, 2.0])
+def test_lag_weights_remove_the_scale_bias(k: float) -> None:
+    """τ → k τ with the weights renewed at k τ: the weighted align and smooth
+    terms do not change, and the equivolume term changes as 1/k², as the
+    original div(∇τ/|∇τ|²)². Without the weights all three grow with k."""
+    G, P, x, unk = _lagged_problem()
+    xj, xk = jnp.asarray(x), jnp.asarray(k * x)
+    p1 = GE.j_scaled_parts(xj, {**P, "wlag": GE.j_lag_weights(xj, P)})
+    pk = GE.j_scaled_parts(xk, {**P, "wlag": GE.j_lag_weights(xk, P)})
+    for t in ("align", "smooth"):
+        assert float(pk[t]) == pytest.approx(float(p1[t]), rel=1e-6)
+    assert float(pk["equi"]) * k**2 == pytest.approx(float(p1["equi"]), rel=1e-6)
+    q1, qk = GE.j_scaled_parts(xj, P), GE.j_scaled_parts(xk, P)
+    for t in ("align", "smooth"):
+        assert float(qk[t]) == pytest.approx(k**2 * float(q1[t]), rel=1e-6)
+
+
 def test_lagged_residuals_are_affine() -> None:
     G, P, x, unk = _lagged_problem()
     xj = jnp.asarray(x)
@@ -632,12 +671,16 @@ def test_lagged_stencil_jacobian_matches_dense() -> None:
     )
 
 
-def test_scaled_stencil_jacobian_matches_dense() -> None:
+@pytest.mark.parametrize("weighted", [False, True])
+def test_scaled_stencil_jacobian_matches_dense(weighted: bool) -> None:
     """The Jacobian of the scaled residuals with ĝ = ĝ(τ) (estimator
-    "lm_scaled"): the colouring stays exact (each residual depends on τ
-    within L1 distance 2), and Σ r² is the voxel part of the scaled energy."""
+    "lm_scaled"), with and without the lagged 1/|∇τ| weights: the colouring
+    stays exact (each residual depends on τ within L1 distance 2), and Σ r²
+    is the voxel part of the scaled energy."""
     G, P, x, unk = _lagged_problem()
     xj = jnp.asarray(x)
+    if weighted:
+        P = {**P, "wlag": GE.j_lag_weights(xj, P) * (1.0 + 0.1 * jnp.sin(jnp.arange(len(x))))}
     col = K.stencil_cols(G.slot_flat, G.slot_of, G.strides, K.OFFS)
     Jst = GS.stencil_jacobian(
         xj, P, None, None, G.colour, G.ncolour, col, unk, G.S,

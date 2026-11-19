@@ -73,17 +73,61 @@ NRES = 15  # voxel residuals per slot: align 3, smooth 9, equi 1, pull 2
 Array = Any
 
 
-def _deriv(F: Array, nb: Array, nbv: Array, h: Array, a: int) -> Array:
-    """Derivative along axis a of F (S,) or (S, k), real neighbours only."""
+def _fade(P: dict[str, Array]) -> tuple[Array, Array] | None:
+    """The fade-in of the voxels next to a fixed top surface Σ (T5,
+    top-surface plan; user, 2026-11-19: "Do the fade-in first"), from the
+    signed distance sdist (S1,) of each slot to Σ (mm, negative inside):
+      ω = clip(-2 s / h, 0, 1): 0 at Σ, 1 from h/2 inside. A slot's own
+          voxel residuals have the weight ω, and a neighbour of weight ω
+          counts with the weight ω in its neighbours' stencils (below).
+      θ' = 1 + clip(-s, 0, h/2) / h: where a neighbour fades, the other
+          stencil on that side is the ghost τ = 0 at θ' h, which is the
+          ghost the slot had (θ = 1) when the neighbour entered the domain
+          at s = 0. (θ' is the distance for a Σ normal to the axis; for an
+          oblique Σ the crossing is farther. It only needs to be continuous
+          and equal to 1 at s = 0.)
+    So nothing switches on at once when Σ passes over a voxel centre, and E
+    is continuous in Σ. None when P has no sdist (no fade)."""
+    sd = P.get("sdist")
+    if sd is None:
+        return None
+    ht = P["htau"]
+    return jnp.clip(-2.0 * sd / ht, 0.0, 1.0), 1.0 + jnp.clip(-sd, 0.0, 0.5 * ht) / ht
+
+
+def _one_sided(vm: Array, Fm: Array, dm: Array, vp: Array, Fp: Array, dp: Array, F: Array) -> Array:
+    both = (Fp - Fm) / (dm + dp)
+    plus = (Fp - F) / dp
+    minus = (F - Fm) / dm
+    return jnp.where(vp & vm, both, jnp.where(vp, plus, jnp.where(vm, minus, 0.0)))
+
+
+def _deriv(F: Array, nb: Array, nbv: Array, h: Array, a: int, om: Array | None = None) -> Array:
+    """Derivative along axis a of F (S,) or (S, k), real neighbours only.
+    With om (the fade weights ω): a neighbour of weight ω counts with the
+    weight ω, the stencil without it with 1 - ω (bilinear over the two
+    sides)."""
     m, p = nb[:, a, 0], nb[:, a, 1]
     vm, vp = nbv[:, a, 0], nbv[:, a, 1]
+    wm = wp = None
+    if om is not None:
+        wm, wp = jnp.where(vm, om[m], 1.0), jnp.where(vp, om[p], 1.0)
     if F.ndim == 2:
         vm, vp = vm[:, None], vp[:, None]
+        if om is not None:
+            wm, wp = wm[:, None], wp[:, None]
     Fm, Fp = F[m], F[p]
-    both = (Fp - Fm) / (2 * h[a])
-    plus = (Fp - F) / h[a]
-    minus = (F - Fm) / h[a]
-    return jnp.where(vp & vm, both, jnp.where(vp, plus, jnp.where(vm, minus, 0.0)))
+    hh = h[a]
+    d = _one_sided(vm, Fm, hh, vp, Fp, hh, F)
+    if om is None:
+        return d
+    no = jnp.zeros_like(vm)
+    return (
+        wm * wp * d
+        + wm * (1 - wp) * _one_sided(vm, Fm, hh, no, Fp, hh, F)
+        + (1 - wm) * wp * _one_sided(no, Fm, hh, vp, Fp, hh, F)
+        + (1 - wm) * (1 - wp) * _one_sided(no, Fm, hh, no, Fp, hh, F)
+    )
 
 
 def _grad_axis(x: Array, P: dict[str, Array], a: int) -> Array:
@@ -109,6 +153,23 @@ def _grad_axis(x: Array, P: dict[str, Array], a: int) -> Array:
     minus = (x - Fm) / dm
     one = jnp.where(vp, plus, jnp.where(vm, minus, 0.0))
     base = jnp.where(vp & vm, both, one)
+    fd = _fade(P)
+    if fd is not None:
+        # a real neighbour of weight ω: the stencil with it (ω) and the
+        # stencil with the ghost τ = 0 at θ' h in its place (1 - ω)
+        om, th = fd
+        rm, rp = nbv[:, a, 0] & ~gm, nbv[:, a, 1] & ~gp
+        wm, wp = jnp.where(rm, om[m], 1.0), jnp.where(rp, om[p], 1.0)
+        dm2 = jnp.where(rm, th[m] * h[a], dm)
+        dp2 = jnp.where(rp, th[p] * h[a], dp)
+        Fm2 = jnp.where(rm, 0.0, Fm)
+        Fp2 = jnp.where(rp, 0.0, Fp)
+        base = (
+            wm * wp * base
+            + wm * (1 - wp) * _one_sided(vm, Fm, dm, vp, Fp2, dp2, x)
+            + (1 - wm) * wp * _one_sided(vm, Fm2, dm2, vp, Fp, dp, x)
+            + (1 - wm) * (1 - wp) * _one_sided(vm, Fm2, dm2, vp, Fp2, dp2, x)
+        )
     split = jnp.where(
         vp & vm, jnp.maximum(minus, 0.0) + jnp.minimum(plus, 0.0), one
     )
@@ -323,7 +384,23 @@ def j_slot_parts(
 # r_lin is a linearisation (not a majoriser), so the energy need not fall at
 # each outer step: the solver reports it.
 
+# Lagged scale weights (user, 2026-11-19). The scaled align and smooth
+# terms are s² × the original and the equivolume term s⁴ × the original, so
+# at a fixed Σ they favour a flatter τ (smaller s): on site 1 they made the
+# solved columns thinner as Σ moved out of the WM. With P["wlag"] = 1/s0,
+# s0 = |∇τ| at a lag point x0 (lag_weights), the align and smooth residuals
+# are multiplied by 1/s0 and the equivolume residual by 1/s0²: each residual
+# stays affine in the scaled form's sense (the weight is a constant), and at
+# x = x0 the three terms equal the original ones. The solver repeats the
+# solve with the weights renewed (Settings.scale_lag_iters).
+
 NRES_L = 16  # align 3, smooth 9, equi 1, pull 3
+
+
+def lag_weights(x: Array, P: dict[str, Array]) -> Array:
+    """1/s0 per slot, s0 = |∇τ| at x (the EPS of ĝ as the floor of s0²)."""
+    g = gradient(x, P)
+    return 1.0 / jnp.sqrt(jnp.sum(g * g, -1) + EPS)
 
 
 def lag_state(x: Array, P: dict[str, Array]) -> dict[str, Array]:
@@ -341,6 +418,13 @@ def lag_state(x: Array, P: dict[str, Array]) -> dict[str, Array]:
     }
 
 
+def _ssqrt(w: Array) -> Array:
+    """sqrt(w) for weights w ≥ 0 with a finite derivative at w = 0 (the
+    residual weights fade to 0 with ω, and E is differentiated in ω)."""
+    pos = w > 0
+    return jnp.where(pos, jnp.sqrt(jnp.where(pos, w, 1.0)), 0.0)
+
+
 def scaled_voxel_residuals(x: Array, P: dict[str, Array], gh: Array, Pm: Array) -> Array:
     """(S1, NRES_L) residuals of the scaled terms with the column direction
     gh (S1, 3) and its projector Pm (S1, 3, 3) given: affine in x when gh
@@ -348,14 +432,24 @@ def scaled_voxel_residuals(x: Array, P: dict[str, Array], gh: Array, Pm: Array) 
     nb, nbv, h = P["nb"], P["nbv"], P["h"]
     g = gradient(x, P)
     ev = P["evalw"] * P["valid"]
+    fd = _fade(P)
+    om = None
+    if fd is not None:
+        om = fd[0]
+        ev = ev * om  # the slot's own residuals fade in with ω
     tis = ev * (1.0 - P["inner"])
-    r_al = jnp.sqrt(tis * KAPPA * P["coh"])[:, None] * jnp.cross(g, P["nhat"])
-    H = jnp.stack([_deriv(g, nb, nbv, h, a) for a in range(3)], -1)  # (S, comp, axis)
+    r_al = _ssqrt(tis * KAPPA * P["coh"])[:, None] * jnp.cross(g, P["nhat"])
+    H = jnp.stack([_deriv(g, nb, nbv, h, a, om) for a in range(3)], -1)  # (S, comp, axis)
     PHP = jnp.einsum("sij,sja,sab->sib", Pm, H, Pm)
-    r_sm = jnp.sqrt(tis / (2 * SIGMA_T**2))[:, None, None] * PHP
+    r_sm = _ssqrt(tis / (2 * SIGMA_T**2))[:, None, None] * PHP
     lap = H[:, 0, 0] + H[:, 1, 1] + H[:, 2, 2]
-    r_eq = jnp.sqrt(tis * P["wq"]) * (lap - 2.0 * jnp.einsum("si,sij,sj->s", gh, H, gh))
-    r_pi = jnp.sqrt(ev / (2 * SIGMA_P**2))[:, None] * (g - gh)
+    r_eq = _ssqrt(tis * P["wq"]) * (lap - 2.0 * jnp.einsum("si,sij,sj->s", gh, H, gh))
+    r_pi = _ssqrt(ev / (2 * SIGMA_P**2))[:, None] * (g - gh)
+    if "wlag" in P:  # the lagged 1/s0 weights (see "Lagged scale weights" above)
+        w = P["wlag"]
+        r_al = r_al * w[:, None]
+        r_sm = r_sm * w[:, None, None]
+        r_eq = r_eq * w**2
     return jnp.concatenate([r_al, r_sm.reshape(-1, 9), r_eq[:, None], r_pi], axis=1)
 
 
@@ -464,6 +558,11 @@ def j_lagged_parts(x: Array, P: dict[str, Array], L: dict[str, Array]) -> dict[s
 @jax.jit
 def j_scaled_energy(x: Array, P: dict[str, Array]) -> Array:
     return scaled_energy(x, P)
+
+
+@jax.jit
+def j_lag_weights(x: Array, P: dict[str, Array]) -> Array:
+    return lag_weights(x, P)
 
 
 @jax.jit

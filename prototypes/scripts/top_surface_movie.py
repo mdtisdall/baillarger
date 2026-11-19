@@ -2,7 +2,7 @@
 through them: three slices and a 3D view (docs/plans/top-surface.md,
 "Watching the optimization").
 
-usage: top_surface_movie.py SITE_NPZ RUN_DIR OUT_DIR [--watch SECONDS]
+usage: top_surface_movie.py SITE_NPZ RUN_DIR OUT_DIR [--watch SECONDS] [--at I,J,K]
 Reads RUN_DIR/snapshots/*.npz (top_surface_run.py snapshots=true). For each
 snapshot without a frame, writes
   OUT_DIR/frames/<name>.png: three slices through the site centre with echo
@@ -15,7 +15,9 @@ snapshot without a frame, writes
 Writes OUT_DIR/frames.json and OUT_DIR/index.html (slider, play, follow the
 newest; the 3D view keeps its angle between frames). With --watch, repeats
 every SECONDS until RUN_DIR/log.json exists (the run has ended), then once
-more. three.js 0.160.0 (MIT) from jsDelivr.
+more. With --at, the slices go through voxel I,J,K. A snapshot with dtau
+(the change of τ since the previous snapshot) gets a second row of slices
+with it; meta "title" replaces the start-step title. three.js 0.160.0 (MIT) from jsDelivr.
 """
 
 import json
@@ -33,6 +35,7 @@ from matplotlib.collections import LineCollection  # noqa: E402
 
 CONTACT_CODE = 4  # the state code the 3D view shows in cyan (not a top_surface state)
 TAU_RANGE_MM = (-2.0, 0.0)  # the fixed colour scale of τ in the slices
+DTAU_LIN_MM, DTAU_MAX_MM = 1e-4, 0.05  # the Δτ row (symmetric log scale): linear below, clipped above
 
 PAGE = """<!doctype html><meta charset="utf-8"><title>Top surface evolution</title>
 <style>body{font:14px system-ui;margin:16px;background:#111;color:#ddd}
@@ -117,7 +120,25 @@ def render(z: dict, wv: np.ndarray, wf: np.ndarray, snap: Path, out: Path, cv: n
     contact = sn["contact"] if "contact" in sn else st == CONTACT_CODE
     meta = json.loads(str(sn["meta"]))
     e2 = z["echoes"][1].astype(float)
-    fig, axs = plt.subplots(1, 3, figsize=(15, 5.3), layout="constrained")
+    has_d = "dtau" in sn
+    fig, axg = plt.subplots(2 if has_d else 1, 3, figsize=(15, 10.6 if has_d else 5.3), layout="constrained", squeeze=False)
+    axs = axg[0]
+    if has_d:
+        # Δτ since the previous snapshot: where τ still moves
+        from matplotlib.colors import SymLogNorm
+
+        nrm = SymLogNorm(DTAU_LIN_MM, vmin=-DTAU_MAX_MM, vmax=DTAU_MAX_MM)
+        for ax in range(3):
+            a = axg[1, ax]
+            k = int(cv[ax])
+            a.imshow(np.take(e2, k, axis=ax), cmap="gray", origin="lower", interpolation="nearest")
+            di = a.imshow(np.take(sn["dtau"], k, axis=ax), cmap="RdBu_r", norm=nrm, origin="lower", interpolation="nearest")
+            V0 = sn["V"].astype(float) / vox
+            a.add_collection(LineCollection(cut_segments(V0, sn["F"].astype(np.int64), ax, k), colors="black", linewidths=0.8))
+            a.set_title(f"Δτ since the previous frame, {'xyz'[ax]} = {k}")
+            a.set_xticks([])
+            a.set_yticks([])
+        fig.colorbar(di, ax=axg[1], shrink=0.8, label="Δτ (mm, symmetric log)")
     for ax in range(3):
         a = axs[ax]
         k = int(cv[ax])
@@ -143,10 +164,13 @@ def render(z: dict, wv: np.ndarray, wf: np.ndarray, snap: Path, out: Path, cv: n
     if "tau" in sn:
         fig.colorbar(ti, ax=axs, shrink=0.8, label="τ (mm); red = τ > 0, white = below −2 mm")
     states = meta.get("states", {})
-    fig.suptitle(
-        f"{snap.stem}   moving {states.get('moving', '-')}   top {states.get('top', '-')}   "
-        f"wm {states.get('wm', '-')}   edge {states.get('edge', '-')}   contact {int(contact.sum())}"
-    )
+    if "title" in meta:
+        fig.suptitle(f"{snap.stem}   {meta['title']}")
+    else:
+        fig.suptitle(
+            f"{snap.stem}   moving {states.get('moving', '-')}   top {states.get('top', '-')}   "
+            f"wm {states.get('wm', '-')}   edge {states.get('edge', '-')}   contact {int(contact.sum())}"
+        )
     fig.savefig(out, dpi=90, bbox_inches="tight")
     plt.close(fig)
     shown = np.where(contact, CONTACT_CODE, st)
@@ -183,13 +207,15 @@ def once(z: dict, wv: np.ndarray, wf: np.ndarray, run: Path, out: Path, cv: np.n
 
 def main() -> None:
     site_p, run, out = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
-    watch = float(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[4] == "--watch" else None
+    watch = float(sys.argv[sys.argv.index("--watch") + 1]) if "--watch" in sys.argv else None
     z = dict(np.load(site_p))
     A = z["affine"].astype(float)
     vox = np.abs(np.diag(A)[:3])
     wv = TP.mm_to_vox(A, z["white_v"].astype(float))
     wf = z["white_f"].astype(np.int64)
     cv = np.round((np.linalg.inv(A) @ np.r_[z["site_mm"], 1])[:3]).astype(int)
+    if "--at" in sys.argv:  # the slices through this voxel, not the site centre
+        cv = np.array([int(c) for c in sys.argv[sys.argv.index("--at") + 1].split(",")])
     while True:
         done = (run / "log.json").exists()
         n = once(z, wv, wf, run, out, cv, vox)
