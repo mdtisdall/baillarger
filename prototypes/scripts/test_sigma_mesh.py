@@ -162,3 +162,20 @@ def test_refine_keeps_the_minimum_length() -> None:
     m = _mesh(V, F)
     assert TSV.refine(m, np.ones(len(F), bool), 1.0 * H) == 0
     assert TSV.refine(m, np.ones(len(F), bool), 0.5 * H) > 0
+
+
+def test_sizing_with_a_larger_minimum_edge() -> None:
+    """The same sphere with lmin_vox = 4: the curvature bound (4.74 h) is
+    below the target floor 4 / (4/5) = 5 h, so the target is 5 h
+    everywhere, and the collapse limit 4/5 × 5 h is the minimum 4 h. The
+    default keeps the old clip range."""
+    n, R = 48, 20.0
+    g = np.indices((n, n, n)).astype(float) - (n - 1) / 2
+    d = np.sqrt((g**2).sum(0)) - R
+    v, f, _, _ = marching_cubes(-d, 0.0)
+    v = v.astype(np.float64) - (n - 1) / 2
+    nrm = v / np.linalg.norm(v, axis=1, keepdims=True)
+    site = SimpleNamespace(v=v, f=f.astype(np.int64), vox=np.full(3, H), normal=nrm)
+    np.testing.assert_allclose(SM.sizing(site, 4.0), 5.0 * H, rtol=1e-12)
+    assert SM.target_range(4.0) == (5.0, 5.0)
+    assert SM.target_range(SM.LMIN_VOX) == (SM.LMIN_VOX, SM.LMAX_VOX)

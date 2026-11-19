@@ -57,9 +57,22 @@ LMIN_VOX = 1.0  # the energy reaches Σ through grid lines one voxel apart
 LMAX_VOX = 5.0
 
 
-def sizing(site: TP.Site) -> np.ndarray:
+def target_range(lmin_vox: float) -> tuple[float, float]:
+    """The clip range of the target (× h) for a minimum edge lmin_vox × h.
+    The remeshing collapses edges below 4/5 × target, so a target of at
+    least lmin_vox / (4/5) keeps the edges at or above lmin_vox (where the
+    checks allow the collapses). With the default LMIN_VOX it is the old
+    range [LMIN_VOX, LMAX_VOX]."""
+    if lmin_vox <= LMIN_VOX:
+        return LMIN_VOX, LMAX_VOX
+    lo = lmin_vox / 0.8
+    return lo, max(LMAX_VOX, lo)
+
+
+def sizing(site: TP.Site, lmin_vox: float = LMIN_VOX) -> np.ndarray:
     """The target edge length (mm) at each white vertex."""
     h = float(site.vox.mean())
+    tlo, thi = target_range(lmin_vox)
     V = site.v * site.vox
     F = site.f
     k1, k2 = mesh_curvatures(V, F, site.normal, CURV_VOX * h)
@@ -69,7 +82,7 @@ def sizing(site: TP.Site) -> np.ndarray:
     FN = MC.face_normals(V, F)
     cen = V[F].mean(1)
     rad = float(np.linalg.norm(V[F] - cen[:, None], axis=2).max())
-    lmax = LMAX_VOX * h
+    lmax = thi * h
     act = np.arange(len(V))
     lists = cKDTree(cen).query_ball_point(
         V + 0.5 * lmax * site.normal, 0.5 * lmax + rad
@@ -79,7 +92,7 @@ def sizing(site: TP.Site) -> np.ndarray:
     idx = np.fromiter((j for x in lists for j in x), np.int64, int(ptr[-1]))
     face_d, _ = TS._facing_hits(V, site.normal, F, FN, act, ptr, idx, lmax)
     L = np.minimum(L, face_d)
-    return np.clip(L, LMIN_VOX * h, LMAX_VOX * h)
+    return np.clip(L, tlo * h, thi * h)
 
 
 def closest_on(
@@ -112,12 +125,16 @@ class Reference:
     """The white mesh: the target at each vertex, closest points on it, and
     the deviation check."""
 
-    def __init__(self, site: TP.Site, eps: float | None = None):
+    def __init__(self, site: TP.Site, eps: float | None = None, lmin_vox: float = LMIN_VOX):
         h = float(site.vox.mean())
         self.eps = EPS_VOX * h if eps is None else eps
         self.V = site.v * site.vox
         self.F = site.f
-        self.size = sizing(site)
+        self.size = sizing(site, lmin_vox)
+        #: the deviation is a check only at the default minimum edge; with a
+        #: larger minimum (user, 2026-11-19: "Minimum wins") it is measured
+        #: and logged, so that it does not keep the short edges
+        self.check = lmin_vox <= LMIN_VOX
         self.vtree = cKDTree(self.V)
         self.ftree = cKDTree(self.V[self.F].mean(1))
 
@@ -136,6 +153,8 @@ class Reference:
         white vertex more than eps away, for the white vertices near the
         changed vertices of Σ (within the longest edge of their faces)."""
         bad = np.zeros(len(V), bool)
+        if not getattr(self, "check", True):  # a Reference built without __init__ (tests) checks
+            return bad
         fc = changed[F].any(1)
         if not fc.any():
             return bad
@@ -289,15 +308,34 @@ def relax_project(
     return int((np.abs(Vn - V0).sum(1) > 0).sum()), float(d.max())
 
 
+def deviation_all(ref: Reference, V: np.ndarray, F: np.ndarray, k: int = 24) -> np.ndarray:
+    """The distance (mm) from each white vertex to Σ (V, F)."""
+    _, d, _ = closest_on(V, F, cKDTree(V[F].mean(1)), ref.V, k)
+    return d
+
+
+def _deviation_log(ref: Reference, m: TS.Mesh, h: float) -> dict[str, Any]:
+    d = deviation_all(ref, m.V, m.F)
+    e = np.linalg.norm(m.V[m.F[:, [0, 1, 2]]] - m.V[m.F[:, [1, 2, 0]]], axis=2).ravel() / h
+    return {"deviation_max_vox": float(d.max()) / h, "deviation_over_eps": int((d > ref.eps).sum()),
+            "edge_vox_p1_50_99": [float(q) for q in np.percentile(e, [1, 50, 99])]}
+
+
 def coarse_start(
     site: TP.Site,
     max_passes: int = 30,
     fold_cos: float = MC.FOLD_COS,
     progress: Any = None,
+    lmin_vox: float = LMIN_VOX,
 ) -> tuple[TS.Mesh, Reference, list[dict[str, Any]]]:
+    """The coarse start. lmin_vox: the minimum edge (× h; user, 2026-11-19:
+    4 h for the coarse stage, refine once τ has its rough shape). Above the
+    default, the deviation from the white surface is not a check
+    ("Minimum wins"): each pass logs its largest value and the white
+    vertices more than eps from Σ."""
     h = float(site.vox.mean())
     gap = 0.25 * h
-    ref = Reference(site)
+    ref = Reference(site, lmin_vox=lmin_vox)
     m = TS.start_mesh(site)
     log = []
     for k in range(max_passes):
@@ -320,6 +358,7 @@ def coarse_start(
             "flips": fl,
             "relaxed": nr,
             "projection_max_vox": dmax / h,
+            **_deviation_log(ref, m, h),
             "vertices": len(m.V),
             "faces": len(m.F),
             "s": time.time() - t0,
@@ -336,15 +375,16 @@ def coarse_start(
 
 
 def main() -> None:
-    """usage: sigma_mesh.py SITE_NPZ OUT_NPZ [max_passes]
+    """usage: sigma_mesh.py SITE_NPZ OUT_NPZ [max_passes] [lmin_vox]
     Writes OUT_NPZ (V mm, F, and the pass log as JSON) for top_solve_run.py start=."""
     import json
     import sys
 
     site = TP.load_site(sys.argv[1])
     mp = int(sys.argv[3]) if len(sys.argv) > 3 else 300
+    lv = float(sys.argv[4]) if len(sys.argv) > 4 else LMIN_VOX
     m, _, log = coarse_start(
-        site, max_passes=mp, progress=lambda r: print(r, flush=True)
+        site, max_passes=mp, progress=lambda r: print(r, flush=True), lmin_vox=lv
     )
     np.savez(sys.argv[2], V=m.V, F=m.F, log=json.dumps(log))
 
