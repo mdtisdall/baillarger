@@ -452,3 +452,35 @@ def test_the_cost_of_a_local_check_does_not_grow_with_the_mesh() -> None:
         chk.rollback()
     assert out[0][0] == out[1][0]
     np.testing.assert_allclose(out[0][1], out[1][1])
+
+
+def test_closest_points_on_the_live_mesh_match_brute_force() -> None:
+    """Checker.closest after some edits: the closest point, distance and
+    face among the faces within r, as a search over every live face."""
+    rng = np.random.default_rng(4)
+    V, F = sphere()
+    chk = C.Checker(C.Topology.of(F, len(V)), V, 0.3)
+    done = 0
+    while done < 30:
+        e = random_edit(chk, rng, 0.4)
+        if e is None:
+            continue
+        r = chk.propose(**e)
+        if r.ok:
+            chk.commit()
+            done += 1
+        else:
+            chk.rollback()
+    P = rng.uniform(V.min(0) - 2, V.max(0) + 2, (300, 3))
+    Q, d, face = chk.closest(P, 1.5)
+    live = np.flatnonzero(chk.F[:, 0] >= 0)
+    T = chk.V[chk.F[live]]
+    for i in range(len(P)):
+        dd = np.array([C._ptd_xyz.py_func(*P[i], *t[0], *t[1], *t[2]) for t in T])  # type: ignore[attr-defined]
+        k = int(np.argmin(dd))
+        if dd[k] >= 1.5:
+            assert face[i] == -1 and np.isinf(d[i])
+        else:
+            assert np.isclose(d[i], dd[k]) and np.isclose(
+                np.linalg.norm(Q[i] - P[i]), d[i]
+            )
