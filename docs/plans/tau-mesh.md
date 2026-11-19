@@ -504,6 +504,13 @@ Diagnostics for a person to read, not pass/fail criteria.
 
 ## Open questions
 
+**Answers for the E1 prototype (user, 2026-11-19).** Accept every
+recommendation below for this prototype (questions 2–8, 10, 11, 13 and
+14). Question 12: compare now, with the bias in both forms, and label
+the results as biased. Question 9: run E1 through the same T5 evolution
+as the T5 session (Σ moves, τ solved on E1 behind it), not only at a
+fixed Σ. So the E1 τ must give T5 its ∂E/∂V (M9).
+
 Each question has options and a recommendation (R). No choice is made
 before the user answers.
 
