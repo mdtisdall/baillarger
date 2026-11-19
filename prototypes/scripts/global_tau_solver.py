@@ -349,9 +349,10 @@ class SigmaTop:
     ghost: np.ndarray
     gdist: np.ndarray
     tau0: np.ndarray
-    #: top_tau.sigma_top: the crossings of every voxel within one voxel
-    #: (inside, cross, theta, face), for the stop term and ∂E/∂Σ
-    geo: dict[str, np.ndarray] | None = None
+    #: top_tau.sigma_top: inside Σ, the axis crossings of every voxel within
+    #: one voxel (theta, face: the ghosts' ∂E/∂Σ) and the signed-distance
+    #: band (band: the stop term and its ∂E/∂Σ)
+    geo: dict[str, Any] | None = None
 
 
 class GlobalTau:

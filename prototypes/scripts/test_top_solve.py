@@ -49,15 +49,45 @@ def test_stop_energy_on_a_flat_sheet() -> None:
     st = SimpleNamespace(labels=np.full((n, n, 10), 42, np.int16), vox=np.full(3, H),
                          inside=np.zeros((n, n, 10), bool), dist=np.ones((n, n, 10)))
     sig, _ = TT.sigma_top(st, v * H, f, None, TSV.GS.Settings())
-    e, sd = TSV.stop_energy(c, sig.geo, v, f, np.full(3, H))
-    assert e == np.float64(-GE.LOG_ODDS * n * n * 5.8) or abs(e + GE.LOG_ODDS * n * n * 5.8) < 1e-9
+    e, g, sd = TSV.stop_energy(c, sig.geo, f, len(v), H)
+    np.testing.assert_allclose(e, -GE.LOG_ODDS * n * n * 5.8, rtol=1e-12)
     assert sd["ramp_voxels"] == n * n
-    _, jac = TSV.crossing_derivs(v, f, np.full(3, H), sd["a"], sd["face"], TSV._line_uw(sd["ijk"], sd["a"]))
-    g = np.zeros_like(v)
-    gv = sd["dE_dt"][:, None, None] * jac[:, 0] + sd["dE_dn"][:, None, None] * jac[:, 1]
-    np.add.at(g, f[sd["face"]].ravel(), gv.reshape(-1, 3))
     np.testing.assert_allclose(g[:, 2].sum(), -GE.LOG_ODDS * n * n / H, rtol=1e-9)
     np.testing.assert_allclose(g[:, :2].sum(0), 0.0, atol=1e-9)
+
+
+def test_stop_energy_derivative_matches_finite_differences() -> None:
+    """A bent Σ (a tent over x with a random tilt): ∂E_stop/∂V against
+    central differences of E_stop for every coordinate of the vertices that
+    the ramp sees. E_stop is continuous in V, so the differences converge."""
+    from types import SimpleNamespace
+
+    n = 8
+    rng = np.random.default_rng(3)
+    v, f = sheet(n, 4.4, True)
+    v = v + np.c_[np.zeros((len(v), 2)), 0.6 * np.abs(v[:, 0] - 3.3) / 4 + rng.uniform(-0.2, 0.2, len(v))]
+    shape = (n, n, 10)
+    c = np.where(np.indices(shape)[2] < 4, -GE.LOG_ODDS, GE.LOG_ODDS)
+    st = SimpleNamespace(labels=np.full(shape, 42, np.int16), vox=np.full(3, H),
+                         inside=np.zeros(shape, bool), dist=np.ones(shape))
+
+    def stop(vv: np.ndarray) -> tuple[float, np.ndarray]:
+        sig, _ = TT.sigma_top(st, vv * H, f, None, TSV.GS.Settings())
+        e, g, _ = TSV.stop_energy(c, sig.geo, f, len(vv), H)
+        return e, g
+
+    _, g = stop(v)
+    eps = 1e-6
+    checked = 0
+    for i in np.flatnonzero(np.abs(g).sum(1) > 0):
+        for k in range(3):
+            vp, vm = v.copy(), v.copy()
+            vp[i, k] += eps / H
+            vm[i, k] -= eps / H
+            fd = (stop(vp)[0] - stop(vm)[0]) / (2 * eps)
+            np.testing.assert_allclose(fd, g[i, k], rtol=1e-4, atol=1e-6)
+            checked += 1
+    assert checked >= 12
 
 
 def test_energy_derivative_in_gdist() -> None:

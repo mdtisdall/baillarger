@@ -11,17 +11,17 @@ The energy is E(τ, Σ) = E_τ(τ; Σ) + E_stop(Σ):
     quadratic form, which can cycle).
   - E_stop (T4): Σ c f over the voxels, c = -log(19) in the cortex label,
     +log(19) in label 0, 0 elsewhere; f = clip(0.5 - s/h, 0, 1) with s the
-    signed distance from the voxel centre to Σ (positive outside). s comes
-    from an axis crossing within one voxel (user, 2026-11-19: "Axis
-    crossings"): on the axis whose crossing face has the largest |n_a|,
-    s = (k - t) n_a (n the unit outward face normal, t the crossing, k the
-    voxel centre on that axis). A voxel with no crossing within one voxel
-    has f = 1 inside Σ and 0 outside.
+    signed distance from the voxel centre to Σ (positive outside; user,
+    2026-11-19: "Signed distance", which replaced the axis crossings
+    because E jumped as Σ moved): s = ± |x - q|, q the closest point on
+    Σ, within top_tau.BAND_VOX voxels of Σ. Off that band f = 1 inside Σ
+    and 0 outside. E_stop is a continuous function of the vertices.
 
 One step (T5, user, 2026-11-19):
   1. ∂E/∂V at the current (τ, Σ), with τ fixed: through θ of each ghost
-     side (∂E_τ/∂θ by JAX) and through t and n_a of each stop crossing.
-     Both are functions of the crossing face's three vertices.
+     side (∂E_τ/∂θ by JAX; θ is an axis crossing, a function of the
+     crossing face's three vertices) and through s of each voxel on the
+     stop ramp (∂s/∂V_i = -w_i u, top_tau.signed_distance_band).
   2. A trial Σ' = Σ - α ∂E/∂V, each vertex at most h/2, halved up to
      HALVINGS times per vertex (then refused) until it keeps the gap and
      makes no intersection and no new fold (T2).
@@ -145,47 +145,29 @@ def _line_uw(ijk: np.ndarray, a: np.ndarray) -> np.ndarray:
 
 
 def stop_energy(
-    c: np.ndarray, geo: dict[str, np.ndarray], P: np.ndarray, F: np.ndarray, vox: np.ndarray
-) -> tuple[float, dict[str, Any]]:
-    """E_stop and, for the voxels on the ramp (0 < f < 1), the crossing used
-    and ∂E_stop/∂(t, n_a). Only voxels with c ≠ 0 count."""
-    inside = geo["inside"]
-    cross, theta, face = geo["cross"], geo["theta"], geo["face"]
+    c: np.ndarray, geo: dict[str, Any], F: np.ndarray, nv: int, h: float
+) -> tuple[float, np.ndarray, dict[str, Any]]:
+    """E_stop = Σ c f, f = clip(0.5 - s/h, 0, 1) in the signed-distance band
+    and 1 inside Σ, 0 outside, off it; and ∂E_stop/∂V (nv, 3). On the ramp
+    (0 < f < 1), ∂f/∂s = -1/h and ∂s/∂V_i = -w_i u (top_tau.
+    signed_distance_band), so ∂E/∂V_i = c w_i u / h. Only voxels with
+    c ≠ 0 count."""
+    band = geo["band"]
     live = c != 0
-    has = cross.any((3, 4)) & live
-    f = np.where(inside & live, 1.0, 0.0)
-    ijk = np.argwhere(has)
-    cr = cross[has]  # (k, 3, 2)
-    th = theta[has]
-    fc = face[has]
-    # n_a of every candidate crossing (numpy, unit normals of the faces)
-    Fn = np.cross(P[F[:, 1]] - P[F[:, 0]], P[F[:, 2]] - P[F[:, 0]])
-    Fn /= np.maximum(np.linalg.norm(Fn, axis=1, keepdims=True), 1e-300)
-    nabs = np.zeros(cr.shape)
-    for ax in range(3):
-        for sd in range(2):
-            nabs[:, ax, sd] = np.where(cr[:, ax, sd], np.abs(Fn[np.maximum(fc[:, ax, sd], 0), ax]), -1.0)
-    best = nabs.reshape(len(ijk), 6).argmax(1)
-    ba, bs = best // 2, best % 2
-    r = np.arange(len(ijk))
-    side = np.where(bs == 1, 1.0, -1.0)
-    tk = side * th[r, ba, bs]  # t - k
-    bf = fc[r, ba, bs]
-    nb = Fn[bf, ba]
-    fr = 0.5 + tk * nb
-    fv = np.clip(fr, 0.0, 1.0)
-    f[tuple(ijk.T)] = fv
-    cv = c[tuple(ijk.T)]
-    ramp = (fr > 0.0) & (fr < 1.0)
+    f = np.where(geo["inside"] & live, 1.0, 0.0)
+    X = tuple(band["ijk"].T)
+    cv = c[X]
+    fr = 0.5 - band["s"] / h
+    f[X] = np.where(cv != 0, np.clip(fr, 0.0, 1.0), 0.0)
+    ramp = (fr > 0.0) & (fr < 1.0) & (cv != 0)
     e = float((c * f).sum())
-    return e, {
-        "ijk": ijk[ramp],
-        "a": ba[ramp],
-        "face": bf[ramp],
-        "dE_dt": (cv * nb)[ramp],  # f = 0.5 + (t - k) n_a
-        "dE_dn": (cv * tk)[ramp],
-        "ramp_voxels": int(ramp.sum()),
-    }
+    grad = np.zeros((nv, 3))
+    coef = (cv[ramp] / h)[:, None] * band["u"][ramp]  # (k, 3)
+    fr_ = F[band["face"][ramp]]
+    w = band["w"][ramp]
+    for k in range(3):
+        np.add.at(grad, fr_[:, k], w[:, k : k + 1] * coef)
+    return e, grad, {"ramp_voxels": int(ramp.sum())}
 
 
 # ------------------------------------------------------------ τ behind Σ and the energy
@@ -238,13 +220,16 @@ class Evaluator:
         sig, ginfo = TT.sigma_top(site, V, F, tau_prev, self.gs)
         geo = sig.geo
         assert geo is not None
-        e_stop, sd = stop_energy(self.c, geo, P, F, vox)
+        e_stop, grad, sd = stop_energy(self.c, geo, F, len(V), float(vox.mean()))
         shape = site.labels.shape
-        grad = np.zeros_like(V)
         tau = np.full(shape, np.nan)
         info: dict[str, Any] = {"sigma": ginfo, "ramp_voxels": sd["ramp_voxels"]}
         e_tau = 0.0
-        rec_a, rec_f, rec_uw, rec_dt, rec_dn = [sd["a"]], [sd["face"]], [_line_uw(sd["ijk"], sd["a"])], [sd["dE_dt"]], [sd["dE_dn"]]
+        rec_a: list[np.ndarray] = []
+        rec_f: list[np.ndarray] = []
+        rec_uw: list[np.ndarray] = []
+        rec_dt: list[np.ndarray] = []
+        rec_dn: list[np.ndarray] = []
         if sig.domain.any():
             gt = GS.GlobalTau(site, self.pt, self.gs, self.centre_vox, sigma=sig)
             sinfo, _ = gt.solve_global("sigma")
@@ -283,12 +268,12 @@ class Evaluator:
                 "ghost_derivs": int(len(s_i)),
                 "parts": parts,
             })
-        a = np.concatenate(rec_a).astype(np.int64)
-        fcs = np.concatenate(rec_f).astype(np.int64)
-        uw = np.concatenate(rec_uw).astype(np.int64)
-        dt = np.concatenate(rec_dt)
-        dn = np.concatenate(rec_dn)
-        if len(fcs):
+        if rec_f and len(rec_f[0]):  # the ghosts' θ (axis crossings) as functions of Σ
+            a = np.concatenate(rec_a).astype(np.int64)
+            fcs = np.concatenate(rec_f).astype(np.int64)
+            uw = np.concatenate(rec_uw).astype(np.int64)
+            dt = np.concatenate(rec_dt)
+            dn = np.concatenate(rec_dn)
             _, jac = crossing_derivs(P, F, vox, a, fcs, uw)
             gv = dt[:, None, None] * jac[:, 0] + dn[:, None, None] * jac[:, 1]  # (k, 3, 3)
             bad = ~np.isfinite(gv).all((1, 2))

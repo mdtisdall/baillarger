@@ -59,7 +59,7 @@ def test_sigma_top_inside_ghosts_and_theta() -> None:
     """White surface at z = 1.5, Σ at z = 5.3 (normal +z): the tissue is
     z = 2..5, the inner voxels z = 0..1 (within 1.5 voxels inside the white
     surface); the +z side of z = 5 is a ghost with θ = 0.3, and no other
-    side is; τ0 = 0.5 h at z = 5 falling by h per voxel."""
+    side is; τ0 = s = -0.3 h at z = 5, falling by h per voxel."""
     n = 6
     v, f = sheet(n, 5.3, True)
     st = site((n, n, 10), 1.5)
@@ -70,8 +70,39 @@ def test_sigma_top_inside_ghosts_and_theta() -> None:
     g = sig.ghost
     assert g[:, :, 5, 2, 1].all() and g.sum() == n * n
     np.testing.assert_allclose(sig.gdist[:, :, 5, 2, 1], 0.3)
-    np.testing.assert_allclose(sig.tau0[2, 2, 2:6], [-3.5 * H, -2.5 * H, -1.5 * H, -0.5 * H])
+    np.testing.assert_allclose(sig.tau0[2, 2, 2:6], [-3.3 * H, -2.3 * H, -1.3 * H, -0.3 * H])
     assert info["unanchored_voxels"] == 0
+
+
+def test_signed_distance_and_inside_of_a_sphere() -> None:
+    """A closed sphere (marching cubes, R = 5.5 voxels, outward faces): in
+    the band, s is the distance to the mesh, within the mesh's own error of
+    |x| - R; inside from the band and the fill is |x| < R away from Σ, with
+    no mixed part; ∂s/∂x (u) is the outward radial direction."""
+    from skimage.measure import marching_cubes
+
+    from baillarger import mesh_checks as MC
+
+    n, R = 16, 5.5
+    g = np.indices((n, n, n)).astype(float) - 7.3
+    v, f, _, _ = marching_cubes(-(np.sqrt((g**2).sum(0)) - R), 0.0)
+    v = v.astype(np.float64)
+    f = f.astype(np.int64)
+    if (MC.face_normals(v, f) * (v[f].mean(1) - 7.3)).sum() < 0:
+        f = f[:, ::-1].copy()
+    shape = (n, n, n)
+    band = TT.signed_distance_band(v * H, f, np.full(3, H), shape)
+    r = np.linalg.norm(band["ijk"] - 7.3, axis=1)
+    np.testing.assert_allclose(band["s"] / H, r - R, atol=0.08)
+    assert (np.abs(band["s"]) < TT.BAND_VOX * H).all()
+    radial = (band["ijk"] - 7.3) / r[:, None]
+    far = np.abs(band["s"]) > 0.5 * H
+    assert ((band["u"][far] * radial[far]).sum(1) > 0.95).all()
+    inside, info = TT.inside_from_band(band, shape)
+    rr = np.sqrt((g**2).sum(0))
+    clear = np.abs(rr - R) > 0.2
+    np.testing.assert_array_equal(inside[clear], (rr < R)[clear])
+    assert info["mixed_parts"] == 0 and info["parts_no_band"] == 0
 
 
 def test_sigma_top_inside_the_wm_voxels() -> None:

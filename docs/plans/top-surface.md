@@ -83,7 +83,15 @@ The user's choices of 2026-11-18 (T1–T8).
   signed distance from the voxel centre to Σ (positive outside). This is
   the ramp of the global solve, taken from Σ, not from τ. It is continuous
   in the vertex positions. Where c < 0 (cortex label) it pushes Σ out;
-  where c > 0 (label 0) it pulls Σ in.
+  where c > 0 (label 0) it pulls Σ in. s = ±|x − q| with q the closest
+  point on Σ, exact within 1.5 voxels of Σ (`top_tau.signed_distance_band`);
+  the sign is from the pseudonormal of the face, edge or vertex that q lies
+  on. ∂s/∂V_i = −w_i u (w the barycentric weights of q, u = (x − q)/s).
+  "Inside Σ" is s < 0 in the band; each connected part off the band takes
+  the side of the band voxels next to it (user, 2026-11-19: "Signed
+  distance"; it replaced the axis crossings and the line votes, which made
+  E jump as Σ moved). The ghosts of T3 still use the axis crossings; a
+  comment in `sigma_top` says to test them.
 - **T5. Solve** (`top_solve.py`). The energy is the scaled τ energy (the
   equivolume, align and smooth terms have no division by |∇τ|) plus the
   stop term. Alternate: (a) τ with Σ fixed (LM on the scaled energy with
@@ -91,8 +99,8 @@ The user's choices of 2026-11-18 (T1–T8).
   2026-11-19); (b) a step of Σ along −∂E/∂V, at most h/2 for each vertex,
   halved until it keeps the gap and makes no intersection and no new fold
   (FreeSurfer's rule), accepted if E falls. Repeat until Σ and τ do not
-  change. Open: E is not continuous in Σ (below), so the test "E falls"
-  fails for small steps.
+  change. Open: E_τ is not continuous in Σ (below): a voxel that enters
+  the domain adds to E_τ at once.
 - **T6. Start.** Expand Σ from the white surface along the vertex normals
   in steps of h/4, driven only by the stop term of T4 (out in the cortex
   label, stop at label 0). The white mesh lies inside the WM voxels, so a
@@ -205,6 +213,26 @@ the optimization (2026-11-18). Every run can write snapshots
        voxels.
      - Along −∂E/∂V, E rises (+26 to +54); along +∂E/∂V it falls (−42 to
        −460): the jumps, not the slope, decide each step.
+   - With the signed distance (T4), on the T5 result Σ, the same 80 moves
+     of 0.0005 h along the normals:
+     - E_stop jumps in 7 steps (sum 36, largest 14.9; before: 22, 969,
+       218). Analytic slope −7.18 per step, measured median −7.19. 6 of the
+       7 are sign flips (|s| 1.0–1.4 h, f 1 → 0) at vertices of a cluster
+       of very small faces (edges 0.06–0.3 h, altitudes 0.02–0.05 h) in
+       the T5 result; 1 is at the open crop edge. 21 faces of 14,053 have
+       an altitude below 0.01 h.
+     - The band has 29,463 voxels; no connected part off the band has
+       neighbours on both sides. The old line votes disagree with the new
+       inside test at 320 voxels.
+     - E_τ at a frozen τ: each new domain voxel (τ = s ≈ 0) adds 600–5,000,
+       all in the equivolume term. It has 3 ghost sides with θ clipped at
+       0.05. From α = 0 to +0.02 h, E_τ rises from 34,737 to 335,441.
+     - E_τ with τ solved again (2 × 30 LM iterations, warm) at steps of
+       0.0005 h from −0.002 h to +0.006 h: equivolume stays at 124–162,
+       but E_τ rises by +8 to +418 per step (mostly the thickness term),
+       larger in steps where more voxels enter (11–16 voxels: +177 to
+       +418). The analytic ∂E_τ/∂V (through θ) predicts −11.8 per step.
+       The LM last steps are 0.007–0.097 mm, so part of this is the solve.
 4. The abrasion site (T8, chosen later): how far Σ goes into the medium,
    against the distance its neighbours give.
 5. Report: what worked, what failed with exact numbers, open questions.
