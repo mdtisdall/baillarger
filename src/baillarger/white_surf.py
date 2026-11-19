@@ -208,6 +208,101 @@ def block_bounds(v: Float, f: Int, blocks: MeshBlocks) -> Float:
     return out
 
 
+def write_surface_arrays(
+    paths: dict[str, Path],
+    v_mm: npt.NDArray[np.floating[Any]],
+    f: Int,
+    normals: npt.NDArray[np.floating[Any]],
+    normlen: npt.NDArray[np.floating[Any]],
+    keys: Int,
+    hemi: str,
+) -> tuple[Path, Path, Path, Path]:
+    """The GIfTI files of a white surface (surface_paths: surf, normals,
+    normlen, keys) with their external data: vertices (scanner mm), faces,
+    smoothed normals, normal length and edge keys (docs/formats/white-surf.md).
+    Returns the .dat files: surface, normals, normal length, keys."""
+    surf_meta = dict(
+        AnatomicalStructurePrimary=STRUCTURE[hemi],
+        AnatomicalStructureSecondary="GrayWhite",
+        GeometricType="Anatomical",
+    )
+    top = dict(AnatomicalStructurePrimary=STRUCTURE[hemi])
+    dat = write_external(
+        paths["surf"],
+        [
+            DataArray(
+                np.asarray(v_mm, "<f4"), "NIFTI_INTENT_POINTSET", surf_meta, np.eye(4)
+            ),
+            DataArray(np.asarray(f, "<i4"), "NIFTI_INTENT_TRIANGLE"),
+        ],
+        top,
+    )
+    ndat = write_external(
+        paths["normals"],
+        [
+            DataArray(
+                np.asarray(normals, "<f4"),
+                "NIFTI_INTENT_VECTOR",
+                dict(Name="normals, smoothed along the mesh"),
+            )
+        ],
+        top,
+    )
+    ldat = write_external(
+        paths["normlen"],
+        [
+            DataArray(
+                np.asarray(normlen, "<f4"),
+                "NIFTI_INTENT_NONE",
+                dict(Name="normal length |n|, smoothed with no normalisation"),
+            )
+        ],
+        top,
+    )
+    # int64 keys as (low, high) int32 words: GIfTI has no 64-bit integers
+    kdat = write_external(
+        paths["keys"],
+        [
+            DataArray(
+                np.ascontiguousarray(keys, "<i8").view("<i4").reshape(-1, 2),
+                "NIFTI_INTENT_NONE",
+                dict(Name="edge keys, int64 as (low, high) int32 words"),
+            )
+        ],
+        top,
+    )
+    return dat, ndat, ldat, kdat
+
+
+def write_block_index(
+    path: Path,
+    v_mm: npt.NDArray[np.floating[Any]],
+    f: Int,
+    blocks: MeshBlocks,
+    affine: npt.ArrayLike,
+) -> Int:
+    """The block index of a white surface (docs/formats/white-surf.md, Order
+    and the block index): one row per block, the bounding boxes of the
+    vertices as a reader gets them back from the file (v_mm: float32 scanner
+    mm, as written). Returns the integer columns, one row per block."""
+    bb = block_bounds(mm_to_voxel(v_mm, affine), f, blocks)
+    bb[:, :3] = np.floor(bb[:, :3].astype(np.float64) * 1000) / 1000
+    bb[:, 3:] = np.ceil(bb[:, 3:].astype(np.float64) * 1000) / 1000
+    rows: Int = np.c_[
+        blocks.origin // blocks.cells,
+        blocks.vertex_start,
+        blocks.vertex_stop,
+        blocks.face_start,
+        blocks.face_stop,
+    ].astype(np.int64)
+    with path.open("w") as fh:
+        fh.write("\t".join(BLOCK_COLUMNS) + "\n")
+        for r, q in zip(rows, bb, strict=True):
+            ints = "\t".join(str(int(x)) for x in r)
+            fh.write(ints + "\t" + "\t".join(f"{x:.3f}" for x in q) + "\n")
+    return rows
+
+
 def write_white_surface(
     dseg: Path,
     out: Path,
@@ -308,72 +403,11 @@ def write_white_surface(
     nlen = np.minimum(nlen, 1)
     lap("normals")
     v_mm = as_written(v).astype("<f4")
-    surf_meta = dict(
-        AnatomicalStructurePrimary=STRUCTURE[hemi],
-        AnatomicalStructureSecondary="GrayWhite",
-        GeometricType="Anatomical",
-    )
-    dat = write_external(
-        paths["surf"],
-        [
-            DataArray(v_mm, "NIFTI_INTENT_POINTSET", surf_meta, np.eye(4)),
-            DataArray(f.astype("<i4"), "NIFTI_INTENT_TRIANGLE"),
-        ],
-        dict(AnatomicalStructurePrimary=STRUCTURE[hemi]),
-    )
-    ndat = write_external(
-        paths["normals"],
-        [
-            DataArray(
-                n.astype("<f4"),
-                "NIFTI_INTENT_VECTOR",
-                dict(Name="normals, smoothed along the mesh"),
-            )
-        ],
-        dict(AnatomicalStructurePrimary=STRUCTURE[hemi]),
-    )
-    ldat = write_external(
-        paths["normlen"],
-        [
-            DataArray(
-                nlen.astype("<f4"),
-                "NIFTI_INTENT_NONE",
-                dict(Name="normal length |n|, smoothed with no normalisation"),
-            )
-        ],
-        dict(AnatomicalStructurePrimary=STRUCTURE[hemi]),
-    )
-    # int64 keys as (low, high) int32 words: GIfTI has no 64-bit integers
-    kdat = write_external(
-        paths["keys"],
-        [
-            DataArray(
-                np.ascontiguousarray(blocks.vertex_key, "<i8")
-                .view("<i4")
-                .reshape(-1, 2),
-                "NIFTI_INTENT_NONE",
-                dict(Name="edge keys, int64 as (low, high) int32 words"),
-            )
-        ],
-        dict(AnatomicalStructurePrimary=STRUCTURE[hemi]),
+    dat, ndat, ldat, kdat = write_surface_arrays(
+        paths, v_mm, f, n, nlen, blocks.vertex_key, hemi
     )
     lap("write GIfTI")
-    # the boxes hold the vertices as a reader gets them back from the file
-    bb = block_bounds(mm_to_voxel(v_mm, aff), f, blocks)
-    bb[:, :3] = np.floor(bb[:, :3].astype(np.float64) * 1000) / 1000
-    bb[:, 3:] = np.ceil(bb[:, 3:].astype(np.float64) * 1000) / 1000
-    rows = np.c_[
-        blocks.origin // block,
-        blocks.vertex_start,
-        blocks.vertex_stop,
-        blocks.face_start,
-        blocks.face_stop,
-    ]
-    with paths["blocks"].open("w") as fh:
-        fh.write("\t".join(BLOCK_COLUMNS) + "\n")
-        for r, q in zip(rows, bb, strict=True):
-            ints = "\t".join(str(int(x)) for x in r)
-            fh.write(ints + "\t" + "\t".join(f"{x:.3f}" for x in q) + "\n")
+    rows = write_block_index(paths["blocks"], v_mm, f, blocks, aff)
     lap("block index")
     pieces = mesh_pieces(v, f, (vox[0], vox[1], vox[2]))
     lap("pieces")
