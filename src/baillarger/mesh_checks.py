@@ -176,14 +176,14 @@ def vertex_normals(V: Float, F: Int) -> Float:
 
 
 @njit(cache=True, inline="always")
-def _ptd_xyz(
+def _closest_xyz(
     px: float, py: float, pz: float,
     ax: float, ay: float, az: float,
     bx: float, by: float, bz: float,
     cx: float, cy: float, cz: float,
-) -> float:  # fmt: skip
-    """Distance from the point p to the triangle a, b, c (Ericson, closest
-    point), in scalars: no temporary arrays."""
+) -> tuple[float, float, float, float]:  # fmt: skip
+    """The closest point q on the triangle a, b, c to the point p
+    (Ericson), and the distance |p - q|, in scalars: no temporary arrays."""
     abx, aby, abz = bx - ax, by - ay, bz - az
     acx, acy, acz = cx - ax, cy - ay, cz - az
     apx, apy, apz = px - ax, py - ay, pz - az
@@ -228,7 +228,18 @@ def _ptd_xyz(
                             qz = az + abz * v_ + acz * w_
     dx, dy, dz = px - qx, py - qy, pz - qz
     d: float = np.sqrt(dx * dx + dy * dy + dz * dz)
-    return d
+    return qx, qy, qz, d
+
+
+@njit(cache=True, inline="always")
+def _ptd_xyz(
+    px: float, py: float, pz: float,
+    ax: float, ay: float, az: float,
+    bx: float, by: float, bz: float,
+    cx: float, cy: float, cz: float,
+) -> float:  # fmt: skip
+    """Distance from the point p to the triangle a, b, c."""
+    return _closest_xyz(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz)[3]
 
 
 @njit(cache=True, inline="always")
@@ -1175,6 +1186,58 @@ def _check_kernel(
     return out_bad, out_fac, ng, out_xf, ni, nf, out_cr, ncr, out_av, dmin
 
 
+@njit(cache=True)
+def _closest_kernel(
+    M: _Live, P: Float, r: float, Q: Float, d: Float, face: Int
+) -> None:
+    """For each point P[i]: the closest point Q[i] on the live mesh, its
+    distance d[i] and face[i], among the faces closer than r (d = inf and
+    face = -1 if none)."""
+    (
+        V,
+        F,
+        vhead,
+        cnext,
+        cprev,
+        fcell,
+        gnext,
+        gprev,
+        hkey,
+        hhead,
+        vfree,
+        ffree,
+        cnt,
+        prm,
+        lo,
+    ) = M
+    cell, Rmax = prm[_CELL], prm[_RMAX]
+    rad = int(np.ceil((r + Rmax) / cell))
+    for i in range(len(P)):
+        px, py, pz = P[i, 0], P[i, 1], P[i, 2]
+        d[i] = np.inf
+        face[i] = -1
+        i0, j0, k0 = _q(px, lo[0], cell), _q(py, lo[1], cell), _q(pz, lo[2], cell)
+        for a in range(max(i0 - rad, 0), min(i0 + rad, _KMAX) + 1):
+            for b in range(max(j0 - rad, 0), min(j0 + rad, _KMAX) + 1):
+                for c in range(max(k0 - rad, 0), min(k0 + rad, _KMAX) + 1):
+                    key = _pack(a, b, c)
+                    s = _hslot(hkey, key)
+                    if hkey[s] != key:
+                        continue
+                    g = hhead[s]
+                    while g >= 0:
+                        u, v, w = F[g, 0], F[g, 1], F[g, 2]
+                        qx, qy, qz, dd = _closest_xyz(
+                            px, py, pz, V[u, 0], V[u, 1], V[u, 2],
+                            V[v, 0], V[v, 1], V[v, 2], V[w, 0], V[w, 1], V[w, 2],
+                        )  # fmt: skip
+                        if dd < r and dd < d[i]:
+                            d[i] = dd
+                            face[i] = g
+                            Q[i, 0], Q[i, 1], Q[i, 2] = qx, qy, qz
+                        g = gnext[g]
+
+
 @dataclass
 class EditCheck:
     """The checks near one edit (Checker.propose). Vertex and face ids are
@@ -1488,6 +1551,17 @@ class Checker:
         dmin = np.full(n, np.inf)
         dmin[r.affected] = r.dmin
         return bad, r.gap_pairs, r.intersecting_pairs + r.vertex_fold_pairs, dmin
+
+    def closest(self, P: npt.ArrayLike, r: float) -> tuple[Float, Float, Int]:
+        """For each point: the closest point on the live mesh, its distance
+        and its face, among the faces closer than r (inf and -1 if none).
+        Costs O(the faces within r + the largest face radius) per point."""
+        Pf = np.ascontiguousarray(np.asarray(P, np.float64).reshape(-1, 3))
+        Q = np.full(Pf.shape, np.nan)
+        d = np.empty(len(Pf))
+        face = np.empty(len(Pf), np.int64)
+        _closest_kernel(self._M(), Pf, float(r), Q, d, face)
+        return Q, d, face
 
     def export(self) -> tuple[Float, Int, Int]:
         """The live mesh compacted: positions, faces, and for each old
