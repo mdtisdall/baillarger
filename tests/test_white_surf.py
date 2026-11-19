@@ -17,6 +17,7 @@ from baillarger import backend, bids, white_dseg, white_surf
 from baillarger import mesh_smoothing as S
 from baillarger.blocks import ArraySource, PatchedSource
 from baillarger.mesh import marching_tetrahedra_blocks, topology
+from baillarger.mesh_checks import check_mesh
 
 VOX = (0.2, 0.16, 0.2)
 AFF = np.array([[0.2, 0, 0, -3.0], [0, 0.16, 0, 2.0], [0, 0, 0.2, 5.0], [0, 0, 0, 1.0]])
@@ -402,3 +403,35 @@ def test_paints_in_sequence_update_one_working_field(
     assert all(
         a.start < b.stop and b.start < a.stop for a, b in zip(*boxes[:2], strict=True)
     )
+
+
+def test_a_marched_surface_has_no_crossings_and_no_shared_vertex_folds(
+    tmp_path: Path,
+) -> None:
+    """The construction guarantee (each vertex on its own grid edge), checked
+    with baillarger.mesh_checks on the written surface, in mm, on a mask with
+    narrow features: sheets one voxel thick, gaps of one voxel between them, a
+    fold back on itself and a diagonal staircase. Creases are not asserted."""
+    a = np.zeros((40, 36, 32), np.int16)
+    a[2:38, 2:34, 2:30] = 42
+    a[4:36, 4:8, 4:28] = 41  # the base
+    for i in range(6, 32, 2):  # sheets one voxel thick, gaps of one voxel
+        a[i, 8:20, 4:28] = 41
+    a[6:31, 20, 4:28] = 41  # a fold: a sheet back over the sheets' ends
+    a[6:31, 21:24, 4:6] = 41
+    a[6:31, 24, 4:28] = 41
+    for k in range(8):  # a staircase of voxels that touch at an edge
+        a[4:36, 25 + k, 6 + 2 * k : 8 + 2 * k] = 41
+    src = tmp_path / "in" / "sub-T01_ses-S1_aseg.nii.gz"
+    src.parent.mkdir(parents=True)
+    nib.save(nib.nifti1.Nifti1Image(a, AFF), src)
+    white_dseg.main([str(src), "--out", str(tmp_path / "deriv")])
+    dseg = tmp_path / "deriv/sub-T01/ses-S1/anat/sub-T01_ses-S1_desc-wmtopo_dseg.nii.gz"
+    w = white_surf.write_white_surface(dseg, tmp_path / "deriv", 8)
+    pts, tri = GiftiImage.from_filename(str(w.paths["surf"])).agg_data(
+        ("pointset", "triangle")
+    )
+    c = check_mesh(pts, tri).counts()
+    assert len(tri) > 1000
+    assert c["intersecting_pairs"] == 0
+    assert c["shared_vertex_fold_pairs"] == 0

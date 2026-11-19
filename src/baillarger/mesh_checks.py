@@ -1,5 +1,6 @@
-"""Validity checks of a triangle mesh, shared by the WM side (decimate,
-white_surf) and the τ = 0 top surface Σ.
+"""Validity checks of a triangle mesh, shared by the WM side (decimate; the
+white_surf tests, which check its guarantee by construction) and the τ = 0 top
+surface Σ.
 
 The checks, each per face (or per vertex for the gap) with a count of pairs:
 
