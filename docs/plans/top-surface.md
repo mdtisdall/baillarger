@@ -86,13 +86,13 @@ The user's choices of 2026-11-18 (T1–T8).
   where c > 0 (label 0) it pulls Σ in.
 - **T5. Solve** (`top_solve.py`). The energy is the scaled τ energy (the
   equivolume, align and smooth terms have no division by |∇τ|) plus the
-  stop term. Alternate: (a) τ with Σ fixed (the lagged quadratic solve,
-  warm start, the rim fixed); (b) a step of Σ along −∂E/∂V, at most h/2
-  for each vertex, halved until it keeps the gap and makes no intersection
-  and no new fold (FreeSurfer's rule), accepted if E falls. Repeat until Σ
-  and τ do not change. Open: the lagged τ solve does not converge on the
-  coarse start of site 1 (below), so E has noise larger than a step's
-  decrease.
+  stop term. Alternate: (a) τ with Σ fixed (LM on the scaled energy with
+  ĝ = ĝ(τ), estimator "lm_scaled", warm start, the rim fixed; user,
+  2026-11-19); (b) a step of Σ along −∂E/∂V, at most h/2 for each vertex,
+  halved until it keeps the gap and makes no intersection and no new fold
+  (FreeSurfer's rule), accepted if E falls. Repeat until Σ and τ do not
+  change. Open: E is not continuous in Σ (below), so the test "E falls"
+  fails for small steps.
 - **T6. Start.** Expand Σ from the white surface along the vertex normals
   in steps of h/4, driven only by the stop term of T4 (out in the cortex
   label, stop at label 0). The white mesh lies inside the WM voxels, so a
@@ -179,16 +179,32 @@ the optimization (2026-11-18). Every run can write snapshots
    - E at the coarse start is 40,620; at the white mesh it is 25,783. 399
      voxel centres within h/4 of the white surface change side and
      switch on the align, equivolume and smooth terms.
-   - T5 from the coarse start: 3 accepted steps (E 40,620 → 38,185), then
-     no decrease in 8 tries. The force indicator marks about 3,600 faces,
-     but few have an edge of 2 h or more (14, 10, 4 splits).
-   - The lagged τ solve does not converge on the coarse start: the
-     largest |Δτ| stays at 0.295 mm from 10 to 300 lags. At 86% of the
-     3,307 voxels that move by more than 0.01 mm, the next lag moves them
-     back. E changes by thousands from lag to lag (42,510 → 45,456 →
-     41,070). The voxels are spread over the crop, mostly WM just behind
-     Σ, with normal |∇τ| (median 0.94). The lagged step freezes ĝ and is
-     not a descent step on the scaled E.
+   - The lagged τ solve does not converge on the coarse start: a
+     two-cycle (at 86% of the voxels that move, the next lag moves them
+     back; the largest |Δτ| stays at 0.295 mm from 10 to 300 lags; E
+     changes by thousands from lag to lag). The lagged step freezes ĝ and
+     is not a descent step on the scaled E.
+   - LM on the scaled E (lm_scaled) descends: E_τ on the coarse start is
+     36,456 after 10 iterations, 34,955 after 30 and 34,908 after 100
+     (lagged: 44,600–46,500). The equivolume term falls from 8,105 to 106.
+   - T5 from the coarse start with lm_scaled (30 iterations per solve):
+     3 accepted steps (E 30,953 → 30,381), then no decrease in 8 tries,
+     down to steps of 0.002 h. The force indicator marks about 2,250
+     faces; few edges are 2 h or longer (0, 0, 2 splits).
+   - ∂E_stop/∂V is right: along a uniform move of 0.0005 h on the normals,
+     the analytic slope is −7.12 per step and the measured median is
+     −7.24. But E is not continuous in Σ:
+     - E_stop jumps in 22 of 80 such steps (the jumps sum to 969, the
+       largest 218). Causes: crossings that enter or leave the one-voxel
+       window (|Δf| ≈ 0.33 each), changes of the best axis, and the inside
+       vote. A move of 0.0005 h flips "inside" at 12–601 voxels, mostly
+       far from Σ (of 601, 4 have a crossing within one voxel): the vote
+       is taken along whole grid lines. No vertex lies on a grid line.
+     - E_τ falls for steps in both directions (−16 to −77 at 0.00125–0.02
+       h), so it is not smooth in Σ either; its domain is the inside
+       voxels.
+     - Along −∂E/∂V, E rises (+26 to +54); along +∂E/∂V it falls (−42 to
+       −460): the jumps, not the slope, decide each step.
 4. The abrasion site (T8, chosen later): how far Σ goes into the medium,
    against the distance its neighbours give.
 5. Report: what worked, what failed with exact numbers, open questions.

@@ -632,6 +632,29 @@ def test_lagged_stencil_jacobian_matches_dense() -> None:
     )
 
 
+def test_scaled_stencil_jacobian_matches_dense() -> None:
+    """The Jacobian of the scaled residuals with ĝ = ĝ(τ) (estimator
+    "lm_scaled"): the colouring stays exact (each residual depends on τ
+    within L1 distance 2), and Σ r² is the voxel part of the scaled energy."""
+    G, P, x, unk = _lagged_problem()
+    xj = jnp.asarray(x)
+    col = K.stencil_cols(G.slot_flat, G.slot_of, G.strides, K.OFFS)
+    Jst = GS.stencil_jacobian(
+        xj, P, None, None, G.colour, G.ncolour, col, unk, G.S,
+        jvp=lambda t: GE.j_scaled_jvp(xj, P, t),
+    )
+    assert Jst.shape[2] == GE.NRES_L
+    Jd = np.asarray(jax.jacfwd(lambda y: GE.scaled_residuals(y, P))(xj))[: G.S, :, : G.S]
+    v = np.random.default_rng(6).normal(size=G.S)
+    np.testing.assert_allclose(
+        K.jst_apply(Jst, col, v), np.einsum("skt,t->sk", Jd, v), rtol=1e-9, atol=1e-9
+    )
+    parts = GE.j_scaled_parts(xj, P)
+    r = np.asarray(GE.j_scaled_residuals(xj, P))
+    vox = sum(float(parts[k]) for k in ("align", "smooth", "equi", "pull"))
+    np.testing.assert_allclose(float(np.sum(r * r)), vox, rtol=1e-12)
+
+
 def test_lagged_patch_terms_majorise_at_the_lag_point() -> None:
     """t / t0 is the tangent of log t (equal at t0, above elsewhere), and the
     IRLS weight makes tw0 d² / 2 the tangent quadratic of the Student-t."""

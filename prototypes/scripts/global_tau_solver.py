@@ -94,8 +94,10 @@ class Settings:
     lm_update: str = "x10"
     lm_lambda0: float = 1e-3  # Marquardt start (relative to diag(JᵀJ))
     lm_retries: int = 10
-    #: "lm" (the original energy, LM) or "lagged" (the lagged quadratic
-    #: form, global_tau_energy; a fixed Σ only): one PCG solve per outer step
+    #: "lm" (the original energy, LM), "lm_scaled" (LM on the scaled energy,
+    #: ĝ = ĝ(τ) not frozen: a descent method on the energy T5 uses) or
+    #: "lagged" (the lagged quadratic form, global_tau_energy; a fixed Σ
+    #: only): one PCG solve per outer step
     estimator: str = "lm"
     lag_iters: int = 30
     lag_tol: float = 1e-6  # max |Δτ| (mm) of an outer step
@@ -723,10 +725,17 @@ class GlobalTau:
         e_first = None
         t_solve = time.time()
         snap = self.snap_dir is not None and "/" not in tag and pb.S == self.G.S
+        # the objective: the original energy (g0 frozen for the pull) or the
+        # scaled energy with ĝ(τ) (estimator "lm_scaled"); the same LM
+        scaled = s.estimator == "lm_scaled"
+
+        def efun(xx: Any) -> float:
+            return float(GE.j_scaled_energy(xx, P) if scaled else GE.j_energy(xx, P, g0))
+
         for it in range(s.lm_iters):
             ti = time.time()
             xj = jnp.asarray(x)
-            e, grad = GE.j_energy_grad(xj, P, g0)
+            e, grad = GE.j_scaled_energy_grad(xj, P) if scaled else GE.j_energy_grad(xj, P, g0)
             e = float(e)
             if e_first is None:
                 e_first = e
@@ -737,7 +746,8 @@ class GlobalTau:
             free = unk & ~((x >= 0.0) & (grad < 0.0)) if bounded else unk
             fw, tw = GE.j_weights(xj, P)
             Jst = stencil_jacobian(
-                xj, P, g0, fw, pb.colour, self.G.ncolour, pb.col, free, pb.S
+                xj, P, g0, fw, pb.colour, self.G.ncolour, pb.col, free, pb.S,
+                jvp=(lambda t, xj=xj: GE.j_scaled_jvp(xj, P, t)) if scaled else None,
             )
             Jp = self._patch_jac(pb, x, np.asarray(tw))
             t_jac = time.time() - ti
@@ -829,7 +839,7 @@ class GlobalTau:
                 xn = x + np.where(free, dx, 0.0)
                 if bounded:  # projected step: τ ≤ 0 inside a fixed Σ
                     xn = np.where(unk, np.minimum(xn, 0.0), xn)
-                e1 = float(GE.j_energy(jnp.asarray(xn), P, g0))
+                e1 = efun(jnp.asarray(xn))
                 tries.append(
                     {
                         "lambda": lam,
@@ -862,6 +872,7 @@ class GlobalTau:
                 tries[-1]["rho"] = rho
                 if e1 < e:
                     accepted = True
+                    step_mm = float(np.abs(xn - x).max())
                     x = xn
                     if s.lm_update == "nielsen":
                         lam = max(lam * max(1.0 / 3.0, 1.0 - (2.0 * rho - 1.0) ** 3), 1e-12)
@@ -879,6 +890,9 @@ class GlobalTau:
                     "iter": it,
                     "e": e,
                     "e_new": tries[-1]["e_trial"] if accepted else e,
+                    "step_mm": step_mm if accepted else 0.0,
+                    "cg_iters": tries[-1]["cg_iters"],
+                    "lambda": tries[-1]["lambda"],
                     "jac_s": t_jac,
                     "lines": int(len(lptr2) - 1),
                     "tries": tries,
@@ -893,7 +907,7 @@ class GlobalTau:
                               {"tag": tag, "lm_iter": it + 1, "energy": tries[-1]["e_trial"], "lambda": lam})
             if e - tries[-1]["e_trial"] < s.lm_tol * nunk:
                 break
-        e_end = float(GE.j_energy(jnp.asarray(x), P, g0))
+        e_end = efun(jnp.asarray(x))
         return x, {
             "tag": tag,
             "iters": its,

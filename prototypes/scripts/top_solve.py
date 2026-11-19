@@ -5,8 +5,10 @@ costs").
 The energy is E(τ, Σ) = E_τ(τ; Σ) + E_stop(Σ):
   - E_τ: the scaled τ energy (global_tau_energy.scaled_energy; user,
     2026-11-19, option A: no term divides by |∇τ|), τ = 0 at the crossings
-    of Σ (the ghost at θh), at the τ that the lagged quadratic estimator
-    finds behind Σ (Settings.estimator = "lagged", the rim at τ0).
+    of Σ (the ghost at θh), at the τ that the estimator tau_estimator
+    finds behind Σ (the rim at τ0): "lm_scaled" (LM on the scaled energy
+    itself, a descent method; user, 2026-11-19) or "lagged" (the lagged
+    quadratic form, which can cycle).
   - E_stop (T4): Σ c f over the voxels, c = -log(19) in the cortex label,
     +log(19) in label 0, 0 elsewhere; f = clip(0.5 - s/h, 0, 1) with s the
     signed distance from the voxel centre to Σ (positive outside). s comes
@@ -65,8 +67,9 @@ class SolveSettings:
     max_steps: int = 200
     max_tries: int = 8
     stop_vox: float = 1e-3  # converged: every accepted vertex step below this × h
-    tau_iters: int = 10  # lagged outer steps per τ solve (warm start)
-    tau_tol_mm: float = 1e-3  # the lagged solve stops when max |Δτ| is below this
+    tau_estimator: str = "lm_scaled"  # or "lagged"
+    tau_iters: int = 10  # LM iterations or lagged outer steps per τ solve (warm start)
+    tau_tol_mm: float = 1e-3  # lagged only: stops when max |Δτ| is below this
     rim_fixed: bool = True  # the crop-edge voxels at τ0 (global_tau_solver)
     #: the tangential relaxation after an accepted step (T7): "all" vertices,
     #: "none", or only the "flagged" ones (a face of theirs has its smallest
@@ -215,13 +218,13 @@ class State:
 
 
 class Evaluator:
-    """τ behind Σ (lagged, warm start) and E with its derivative in V."""
+    """τ behind Σ (tau_estimator, warm start) and E with its derivative in V."""
 
     def __init__(self, site: TP.Site, s: SolveSettings):
         self.site, self.s = site, s
         self.gs = GS.Settings(
-            face_test=False, estimator="lagged", rim_fixed=s.rim_fixed,
-            lag_iters=s.tau_iters, lag_tol=s.tau_tol_mm,
+            face_test=False, estimator=s.tau_estimator, rim_fixed=s.rim_fixed,
+            lag_iters=s.tau_iters, lag_tol=s.tau_tol_mm, lm_iters=s.tau_iters,
         )
         self.pt = TP.make_patches(site, self.gs.patch_mm)
         self.centre_vox = np.array(site.labels.shape) / 2.0
@@ -272,7 +275,8 @@ class Evaluator:
                 "lag_iters": len(its),
                 "cg_iters": [r["cg_iters"] for r in its],
                 "last_step_mm": its[-1]["step_mm"] if its else 0.0,
-                "s0_below_0.1": its[-1]["s0_below_0.1"] if its else 0,
+                "s0_below_0.1": its[-1].get("s0_below_0.1", -1) if its else 0,
+                "e_start": sinfo["e0"],
                 "unknowns": sinfo["n_unk"],
                 "at_bound": int((gt.tau == 0.0).sum()),
                 "tau_min": float(gt.tau.min()),

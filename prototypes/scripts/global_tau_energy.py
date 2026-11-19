@@ -389,6 +389,16 @@ def scaled_energy(x: Array, P: dict[str, Array]) -> Array:
     return sum(scaled_parts(x, P).values())
 
 
+def scaled_residuals(x: Array, P: dict[str, Array]) -> Array:
+    """(S1, NRES_L) the voxel residuals of the scaled energy with ĝ = ĝ(x)
+    (not frozen): Σ r² is the voxel part of scaled_energy. The estimator
+    "lm_scaled" (Gauss-Newton / LM on the scaled energy itself) uses their
+    Jacobian. ĝ at a slot depends on τ within L1 distance 1, H within 2, so
+    each residual depends on τ within L1 distance 2, as the original."""
+    gh, Pm = _gh_Pm(x, P)
+    return scaled_voxel_residuals(x, P, gh, Pm)
+
+
 def lagged_patch_residuals(
     x: Array, P: dict[str, Array], L: dict[str, Array]
 ) -> tuple[Array, Array, Array]:
@@ -459,6 +469,23 @@ def j_scaled_energy(x: Array, P: dict[str, Array]) -> Array:
 @jax.jit
 def j_scaled_parts(x: Array, P: dict[str, Array]) -> dict[str, Array]:
     return scaled_parts(x, P)
+
+
+@jax.jit
+def j_scaled_energy_grad(x: Array, P: dict[str, Array]) -> tuple[Array, Array]:
+    return jax.value_and_grad(scaled_energy)(x, P)
+
+
+@jax.jit
+def j_scaled_residuals(x: Array, P: dict[str, Array]) -> Array:
+    return scaled_residuals(x, P)
+
+
+@jax.jit
+def j_scaled_jvp(x: Array, P: dict[str, Array], t: Array) -> Array:
+    """J t of the scaled voxel residuals (S1, NRES_L) at x."""
+    _, jt = jax.jvp(lambda y: scaled_residuals(y, P), (x,), (t,))
+    return jt
 
 
 @jax.jit
