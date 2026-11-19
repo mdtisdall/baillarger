@@ -439,7 +439,9 @@ def relax(
     return np.linalg.norm(dlt, axis=1), int((np.abs(dlt).sum(1) > 0).sum())
 
 
-def remesh(m: Mesh, gap: float, lmax: float, lmin: float, fold_cos: float) -> tuple[int, int]:
+def remesh(
+    m: Mesh, gap: float, lmax: float, lmin: float, fold_cos: float, size: Any = None, extra: Any = None
+) -> tuple[int, int]:
     """One batch of edge splits (longer than lmax, at the midpoint: the
     shape does not change), then one batch of collapses (shorter than lmin,
     to the midpoint). Each batch takes edges that are the longest (splits)
@@ -451,12 +453,16 @@ def remesh(m: Mesh, gap: float, lmax: float, lmin: float, fold_cos: float) -> tu
     reference, or folded back on a neighbour). If a check fails there, the
     batch is undone and done again without the collapses near the failing
     vertices (at most 3 times; then no collapse in this pass). Returns the
-    numbers of splits and collapses."""
-    splits = _split(m, lmax)
+    numbers of splits and collapses. With size (a function of the mesh
+    giving a target edge length per vertex), lmax and lmin are factors of
+    the smaller target of an edge's two ends. With extra (a function of the
+    mesh and the merged vertices giving failing vertices), its failures
+    count as check failures of the collapses."""
+    splits = _split(m, lmax, None if size is None else size(m))
     exclude = np.zeros(len(m.V), bool)
     for _ in range(3):
         saved = m.save()
-        col, newid, merged = _collapse(m, lmin, exclude)
+        col, newid, merged = _collapse(m, lmin, exclude, None if size is None else size(m))
         if col == 0:
             return splits, 0
         moved = np.zeros(len(m.V), bool)
@@ -467,6 +473,8 @@ def remesh(m: Mesh, gap: float, lmax: float, lmin: float, fold_cos: float) -> tu
         bad &= MC.near_vertices(m.ptr, m.nbr, moved)
         fb, _, _ = new_folds(m, m.V, None, moved, fold_cos)
         bad |= fb
+        if extra is not None:
+            bad |= extra(m, moved)
         if not bad.any():
             return splits, col
         old = np.flatnonzero(newid >= 0)
@@ -494,14 +502,17 @@ def _local_best(E: np.ndarray, rank: np.ndarray, n: int, ptr: np.ndarray | None,
     return (best[E[:, 0]] == rank) & (best[E[:, 1]] == rank)
 
 
-def _split(m: Mesh, lmax: float) -> int:
-    """Splits the edges longer than lmax that are the longest candidate at
-    both ends (so each face has at most one split edge)."""
+def _split(m: Mesh, lmax: float, size: np.ndarray | None = None) -> int:
+    """Splits the edges longer than lmax (with size, a target length per
+    vertex: longer than lmax × the smaller target of the two ends) that are
+    the longest candidate at both ends (so each face has at most one split
+    edge)."""
     F, V = m.F, m.V
     n0 = len(V)
     u = _edges(F)
     L = np.linalg.norm(V[u[:, 0]] - V[u[:, 1]], axis=1)
-    c = L > lmax
+    thr = lmax if size is None else lmax * np.minimum(size[u[:, 0]], size[u[:, 1]])
+    c = L > thr
     if not c.any():
         return 0
     E = u[c]
@@ -540,7 +551,9 @@ def _split(m: Mesh, lmax: float) -> int:
     return k
 
 
-def _collapse(m: Mesh, lmin: float, exclude: np.ndarray) -> tuple[int, np.ndarray, np.ndarray]:
+def _collapse(
+    m: Mesh, lmin: float, exclude: np.ndarray, size: np.ndarray | None = None
+) -> tuple[int, np.ndarray, np.ndarray]:
     """Collapses, to the midpoint, the interior edges shorter than lmin with
     both ends in the same state that are the shortest candidate in the
     closed 1-rings of both ends (so no two collapses touch the same face),
@@ -555,7 +568,8 @@ def _collapse(m: Mesh, lmin: float, exclude: np.ndarray) -> tuple[int, np.ndarra
     u = _edges(F)
     L = np.linalg.norm(V[u[:, 0]] - V[u[:, 1]], axis=1)
     a, b = u[:, 0], u[:, 1]
-    c = (L < lmin) & ~m.boundary[a] & ~m.boundary[b] & ~exclude[a] & ~exclude[b] & (m.state[a] == m.state[b])
+    thr = lmin if size is None else lmin * np.minimum(size[a], size[b])
+    c = (L < thr) & ~m.boundary[a] & ~m.boundary[b] & ~exclude[a] & ~exclude[b] & (m.state[a] == m.state[b])
     if not c.any():
         return 0, ident, none
     E, Lc = u[c], L[c]

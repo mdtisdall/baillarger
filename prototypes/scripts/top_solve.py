@@ -73,6 +73,13 @@ class SolveSettings:
     #: altitude below the step cap step_max_vox × h: one step could flip it)
     relax: str = "all"
     measure_relax: bool = False  # also E right after the relaxation (one more τ solve)
+    #: the mesh after an accepted step: "remesh" (relax, then uniform splits
+    #: and collapses, T7) or "refine" (no relaxation, no collapse: longest-edge
+    #: splits of the faces that an indicator marks, see refine_marks)
+    mesh: str = "remesh"
+    refine_var: float = 1.0  # force variation: max |g_i - g_j| / max |g_i| over a face
+    refine_held: int = 2  # a vertex refused in this many steps in a row
+    refine_min_vox: float = 1.0  # no split makes an edge shorter than this × h
 
 
 def stop_weights(labels: np.ndarray) -> np.ndarray:
@@ -359,12 +366,56 @@ def constrained_move(
     }
 
 
+def refine_marks(
+    m: TS.Mesh, grad: np.ndarray, halved: np.ndarray, vox: np.ndarray, s: SolveSettings
+) -> tuple[np.ndarray, dict[str, int]]:
+    """The faces to split, by three indicators (plan, coarse to fine):
+      - force: the force -∂E/∂V varies strongly within the face, max over
+        its vertex pairs of |g_i - g_j| >= refine_var × max |g_i|;
+      - facing: a vertex of the face has a facing part of Σ
+        (top_surface.contacts) nearer than the face's longest edge;
+      - held: a vertex of the face was refused in refine_held steps in a
+        row, or halved in this step.
+    Returns the marked faces and the count for each indicator."""
+    F = m.F
+    G = grad[F]  # (m, 3, 3)
+    gmax = np.linalg.norm(G, axis=2).max(1)
+    dif = np.stack([np.linalg.norm(G[:, i] - G[:, (i + 1) % 3], axis=1) for i in range(3)], 1).max(1)
+    force = (gmax > 0) & (dif >= s.refine_var * gmax)
+    longest = np.linalg.norm(m.V[F] - m.V[F][:, [1, 2, 0]], axis=2).max(1)
+    fac = TS.contacts(m, vox)["facing_mm"]
+    facing = (fac[F] < longest[:, None]).any(1)
+    hv = (m.held >= s.refine_held) | halved
+    held = hv[F].any(1)
+    return force | facing | held, {
+        "force": int(force.sum()), "facing": int(facing.sum()), "held": int(held.sum()),
+    }
+
+
+def refine(m: TS.Mesh, marked: np.ndarray, min_len: float) -> int:
+    """Splits, at the midpoint (Σ's shape does not change), the longest edge
+    of each marked face if it is at least 2 × min_len (top_surface._split
+    with a per-vertex target: the shortest longest-edge of the marked faces
+    at the vertex; unmarked vertices: no split). Returns the splits."""
+    if not marked.any():
+        return 0
+    F = m.F
+    longest = np.linalg.norm(m.V[F] - m.V[F][:, [1, 2, 0]], axis=2).max(1)
+    size = np.full(len(m.V), np.inf)
+    fm = np.flatnonzero(marked & (longest >= 2.0 * min_len))
+    if not len(fm):
+        return 0
+    np.minimum.at(size, F[fm].ravel(), np.repeat(longest[fm] * (1.0 - 1e-9), 3))
+    return TS._split(m, 1.0, size)
+
+
 @dataclass
 class SolveRun:
     site: TP.Site
     s: SolveSettings
     progress: Any = None
     snapshot: Any = None  # callable(name, mesh, disp, meta, tau)
+    start: TS.Mesh | None = None  # the initial Σ (default: the white mesh, remeshed)
     log: list[dict[str, Any]] = field(default_factory=list)
     ended: str = ""
     contacts: dict[str, np.ndarray] = field(default_factory=dict)
@@ -373,7 +424,7 @@ class SolveRun:
         site, s = self.site, self.s
         h = float(site.vox.mean())
         gap = s.gap_vox * h
-        m = TS.start_mesh(site)
+        m = TS.start_mesh(site) if self.start is None else self.start
         u = TS._edges(m.F)
         med = float(np.median(np.linalg.norm(m.V[u[:, 0]] - m.V[u[:, 1]], axis=1)))
         self.median_edge = med
@@ -383,7 +434,7 @@ class SolveRun:
         ev = Evaluator(site, s)
         t0 = time.time()
         white = TS.counts(m, gap, s.fold_cos)
-        sp, co = TS.remesh(m, gap, lmax, lmin, s.fold_cos)
+        sp, co = (0, 0) if s.mesh == "refine" else TS.remesh(m, gap, lmax, lmin, s.fold_cos)
         cur = ev(m.V, m.F, None)
         self.initial = {"quality": quality(m.V, m.F, h, s.step_max_vox * h), "vertices": len(m.V), "faces": len(m.F), "white": white, "splits": sp,
                         "collapses": co, "E": cur.E, "E_tau": cur.E_tau, "E_stop": cur.E_stop,
@@ -415,7 +466,8 @@ class SolveRun:
                 dd, cinfo = constrained_move(m, d, chk, s.fold_cos)
                 cinfo["halved_flagged"] = int((cinfo["_halved"] & fl).sum())
                 cinfo["refused_flagged"] = int((cinfo["_refused"] & fl).sum())
-                del cinfo["_halved"], cinfo["_refused"]
+                halved = cinfo.pop("_halved")
+                del cinfo["_refused"]
                 trial = ev(m.V + dd, m.F, cur.tau)
                 tries.append({"alpha": alpha, "E": trial.E, "E_tau": trial.E_tau, "E_stop": trial.E_stop,
                               "max_step_vox": float(np.linalg.norm(dd, axis=1).max() / h), **cinfo,
@@ -437,7 +489,8 @@ class SolveRun:
                 break
             e_trial = trial.E
             q_before = quality(m.V, m.F, h, s.step_max_vox * h)
-            if s.relax == "none":
+            marks: dict[str, int] = {}
+            if s.mesh == "refine" or s.relax == "none":
                 r, nrel = np.zeros(len(m.V)), 0
             else:
                 only = flagged_vertices(m.V, m.F, s.step_max_vox * h)[0] if s.relax == "flagged" else None
@@ -446,13 +499,18 @@ class SolveRun:
             e_relax = None
             if nrel and s.measure_relax:
                 e_relax = ev(m.V, m.F, trial.tau).E  # E after the relaxation alone (diagnostic)
-            sp, co = TS.remesh(m, gap, lmax, lmin, s.fold_cos)
-            cur = ev(m.V, m.F, trial.tau)
+            if s.mesh == "refine":
+                mk, marks = refine_marks(m, trial.grad, halved, site.vox, s)
+                sp, co = refine(m, mk, s.refine_min_vox * h), 0
+            else:
+                sp, co = TS.remesh(m, gap, lmax, lmin, s.fold_cos)
+            cur = trial if sp == 0 and co == 0 and nrel == 0 else ev(m.V, m.F, trial.tau)
             c = TS.counts(m, gap, s.fold_cos)
             rec = {"step": k, "tries": tries, "accepted": True, "E_trial": e_trial, "E_relaxed": e_relax,
                    "E": cur.E, "quality_before_relax": q_before,
                    "quality": quality(m.V, m.F, h, s.step_max_vox * h),
                    "E_tau": cur.E_tau, "E_stop": cur.E_stop, "relaxed": nrel, "splits": sp, "collapses": co,
+                   "marks": marks,
                    **c, "vertices": len(m.V), "faces": len(m.F), "eval": cur.info,
                    "max_step_vox": float(disp.max() / h), "s": time.time() - t1}
             self.log.append(rec)
@@ -465,7 +523,7 @@ class SolveRun:
                     f"τ: {ti.get('unknowns', 0)} unknowns, lag {ti.get('lag_iters', 0)} (last Δτ {ti.get('last_step_mm', 0):.1e} mm), "
                     f"bound {ti.get('at_bound', 0)}, ramp {ti['ramp_voxels']}, "
                     f"halved/refused at flagged {tries[-1]['halved_flagged']}/{tries[-1]['refused_flagged']}, "
-                    f"relaxed {nrel} (E after relax {e_relax}), splits {sp} collapses {co}, "
+                    f"relaxed {nrel} (E after relax {e_relax}), marks {marks}, splits {sp} collapses {co}, "
                     f"quality before relax {q_before}, after remesh {rec['quality']}, "
                     f"intersections {c['intersecting_faces']} gap {c['gap_vertices']}, {rec['s']:.1f} s"
                 )

@@ -313,11 +313,11 @@ def test_remesh_undoes_a_failed_batch_and_excludes_it(monkeypatch) -> None:
     first: dict = {}
     real_collapse, real_folds = TS._collapse, TS.new_folds
 
-    def collapse(m_, lmin, exclude):
+    def collapse(m_, lmin, exclude, size=None):
         if not first:
             first["V"] = m_.V.copy()
             first["ptr"], first["nbr"] = m_.ptr, m_.nbr
-        out = real_collapse(m_, lmin, exclude)
+        out = real_collapse(m_, lmin, exclude, size)
         if "merged" not in first:
             first["merged"] = out[2]
         return out

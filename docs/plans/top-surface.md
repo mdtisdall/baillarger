@@ -84,10 +84,15 @@ The user's choices of 2026-11-18 (T1–T8).
   the ramp of the global solve, taken from Σ, not from τ. It is continuous
   in the vertex positions. Where c < 0 (cortex label) it pushes Σ out;
   where c > 0 (label 0) it pulls Σ in.
-- **T5. Solve.** Alternate: (a) the τ LM solve with Σ fixed; (b) a step of
-  Σ along the gradient of the energy with respect to the vertex positions,
-  at most h/2 for each vertex, halved until it keeps the gap and makes no
-  intersection (FreeSurfer's rule). Repeat until Σ and τ do not change.
+- **T5. Solve** (`top_solve.py`). The energy is the scaled τ energy (the
+  equivolume, align and smooth terms have no division by |∇τ|) plus the
+  stop term. Alternate: (a) τ with Σ fixed (the lagged quadratic solve,
+  warm start, the rim fixed); (b) a step of Σ along −∂E/∂V, at most h/2
+  for each vertex, halved until it keeps the gap and makes no intersection
+  and no new fold (FreeSurfer's rule), accepted if E falls. Repeat until Σ
+  and τ do not change. Open: the lagged τ solve does not converge on the
+  coarse start of site 1 (below), so E has noise larger than a step's
+  decrease.
 - **T6. Start.** Expand Σ from the white surface along the vertex normals
   in steps of h/4, driven only by the stop term of T4 (out in the cortex
   label, stop at label 0). The white mesh lies inside the WM voxels, so a
@@ -108,13 +113,28 @@ The user's choices of 2026-11-18 (T1–T8).
   equilibrium of the whole energy. A vertex whose
   white face faces label 0 directly does not move (zero thickness at an
   excision).
-- **T7. Mesh quality.** After each Σ step, a tangential relaxation (each
-  vertex moves only in its tangent plane, toward the centroid of its
-  neighbours). Edges longer than 2 × the white mesh's median edge are
-  split, and edges shorter than 0.5 × are collapsed, where the change keeps
-  the gap and makes no intersection and no new fold. No normal smoothing: the shape of Σ
-  comes only from the τ energy and the stop term, so the abrasion test
-  sees the neighbour-consistency terms on their own.
+- **T7. Mesh quality.** Coarse to fine (user, 2026-11-19):
+  - **Coarse start** (`sigma_mesh.py`). An adaptive remeshing of the white
+    mesh. The target edge is 3/4 × sqrt(8 ε R), ε = h/4, R the curvature
+    radius (smoothed over 2.5 h), at most the distance to a facing sheet,
+    clipped to [h, 5 h]. Each pass: splits and collapses toward the
+    target, edge flips where the two diagonals pass within ε of each
+    other, a tangential relaxation, then projection onto the white mesh.
+    A deviation check keeps every white vertex within ε of Σ. Every change
+    keeps the gap and makes no intersection and no new fold. The crop's
+    boundary does not change.
+  - **Refinement in T5** (`mesh=refine`). No relaxation and no collapse.
+    After each accepted step, the longest edge of a marked face is split
+    at its midpoint (Σ's shape does not change), down to edges of h. A
+    face is marked if the force varies strongly across it (max |g_i − g_j|
+    ≥ max |g_i|), if a facing part of Σ is nearer than its longest edge,
+    or if a vertex was refused 2 steps in a row or halved in this step.
+  - The earlier mode (`mesh=remesh`): a tangential relaxation after each
+    step, then splits of edges longer than 2 × the white median edge and
+    collapses below 0.5 ×.
+  No normal smoothing: the shape of Σ comes only from the τ energy and
+  the stop term, so the abrasion test sees the neighbour-consistency terms
+  on their own.
 - **T8. Abrasion site.** Chosen later, when steps 1–3 work on site 1.
 
 ## Watching the optimization
@@ -149,6 +169,26 @@ the optimization (2026-11-18). Every run can write snapshots
    the cost.
 3. Alternation (T5, T7) on site 1: how far Σ moves, the contacts after
    each outer iteration, intersections (always 0), energy by term.
+   Current state, site 1 (`site1-grow/c10mm`):
+   - The coarse start has 7,781 vertices (white mesh: 37,286). The median
+     edge is 1.27 h: the deviation check stops most collapses before the
+     target (up to 5 h). Every white vertex is within h/4 of it. No
+     interior face has an altitude/longest-edge ratio below 0.46 (p1).
+     All checks are 0. ∂E/∂V = 0 at 10% of the vertices, 83% of them on
+     the crop boundary (white mesh: 32%).
+   - E at the coarse start is 40,620; at the white mesh it is 25,783. 399
+     voxel centres within h/4 of the white surface change side and
+     switch on the align, equivolume and smooth terms.
+   - T5 from the coarse start: 3 accepted steps (E 40,620 → 38,185), then
+     no decrease in 8 tries. The force indicator marks about 3,600 faces,
+     but few have an edge of 2 h or more (14, 10, 4 splits).
+   - The lagged τ solve does not converge on the coarse start: the
+     largest |Δτ| stays at 0.295 mm from 10 to 300 lags. At 86% of the
+     3,307 voxels that move by more than 0.01 mm, the next lag moves them
+     back. E changes by thousands from lag to lag (42,510 → 45,456 →
+     41,070). The voxels are spread over the crop, mostly WM just behind
+     Σ, with normal |∇τ| (median 0.94). The lagged step freezes ĝ and is
+     not a descent step on the scaled E.
 4. The abrasion site (T8, chosen later): how far Σ goes into the medium,
    against the distance its neighbours give.
 5. Report: what worked, what failed with exact numbers, open questions.
