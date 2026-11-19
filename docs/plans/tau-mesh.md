@@ -190,8 +190,7 @@ a coupling that is correct by construction matters for the descent of
 - **D. Tetrahedra that conform to Σ.** A permissive constrained
   tetrahedral mesher does not exist (TetGen AGPL, CGAL and gmsh GPL).
   Out.
-- **E. An irregular mesh, cut by Σ (the form to test, user
-  2026-11-19).** The τ mesh does not have to conform to Σ, because Σ
+- **E. An irregular mesh, cut by Σ (chosen: E1, user 2026-11-19).** The τ mesh does not have to conform to Σ, because Σ
   cuts it (M3) as it cuts the lattice. So no constrained mesher is
   needed. The nodes go where a size field asks for them, and they stay
   fixed in space while Σ moves. Two forms:
@@ -508,13 +507,10 @@ Diagnostics for a person to read, not pass/fail criteria.
 Each question has options and a recommendation (R). No choice is made
 before the user answers.
 
-1. **Basis** (M1). A cubic B-splines, B THB-splines, C trilinear on an
-   octree, D tetrahedra that conform to Σ, E an irregular mesh cut by Σ
-   (E1 MLS with C² weights, E2 Delaunay tetrahedra). The user wants an
-   irregular mesh tested. R: E1, with A (already prototyped) as the
-   reference on the same energy and the same Σ. E1 keeps the analytic H
-   and allows anisotropic supports. E2 brings back the C⁰ limit next to
-   Σ.
+1. **Basis** (M1). Answered (user, 2026-11-19): E1, meshfree MLS with
+   C² weights, on an irregular set of nodes cut by Σ. A (the B-spline
+   lattice, already prototyped) is the reference on the same energy and
+   the same Σ.
 2. **Copies** (M2). K1 voxel connectivity, K2 from Σ. R: K1.
 3. **τ = 0 on Σ** (M4). Z1 residuals at h/4, Z2 Nitsche, Z3
    WEB-splines. R: Z1.
