@@ -10,7 +10,7 @@ patches) and prints one progress line for each outer iteration.
 import json
 import sys
 import time
-from dataclasses import asdict, fields
+from dataclasses import asdict
 from pathlib import Path
 
 import global_tau_prep as TP
@@ -22,11 +22,8 @@ def main() -> None:
     site_p, out = Path(sys.argv[1]), Path(sys.argv[2])
     out.mkdir(parents=True, exist_ok=True)
     s = GS.Settings()
-    types = {f.name: type(getattr(s, f.name)) for f in fields(s)}
     for kv in sys.argv[3:]:
-        k, v = kv.split("=")
-        t = types[k]
-        setattr(s, k, (v.lower() in ("1", "true")) if t is bool else t(v))
+        TP.set_setting(s, kv)
     t0 = time.time()
     site = TP.load_site(site_p)
     z = np.load(site_p)

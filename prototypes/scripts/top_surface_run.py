@@ -29,11 +29,11 @@ def main() -> None:
     s = TS.StartSettings()
     snaps = False
     for kv in sys.argv[3:]:
-        k, v = kv.split("=", 1)
+        k, _, v = kv.partition("=")
         if k == "snapshots":
-            snaps = v.lower() == "true"
+            snaps = TP.parse_bool(k, v)
         else:
-            setattr(s, k, type(getattr(s, k))(v))
+            TP.set_setting(s, kv)
     t0 = time.time()
     site = TP.load_site(site_p)
     print(f"site {len(site.v)} vertices, {len(site.f)} faces, {time.time() - t0:.0f} s", flush=True)

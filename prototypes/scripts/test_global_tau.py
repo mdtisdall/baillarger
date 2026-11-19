@@ -754,3 +754,18 @@ def test_lagged_patch_terms_majorise_at_the_lag_point() -> None:
     d = np.linspace(-2, 2, 41)
     maj = st(d0) + tw / 2 * (d**2 - d0**2)
     assert np.all(maj >= st(d) - 1e-12)
+
+
+def test_set_setting_parses_booleans_and_rejects_bad_input() -> None:
+    """Command-line settings: "False", "false" and "0" give False, "True"
+    and "1" give True (bool("False") would be True); a misspelt boolean, an
+    unknown key and a value without "=" stop the run."""
+    s = GS.Settings()
+    for v, want in (("False", False), ("false", False), ("0", False), ("True", True), ("1", True)):
+        TP.set_setting(s, f"face_test={v}")
+        assert s.face_test is want
+    TP.set_setting(s, "lm_iters=7")
+    assert s.lm_iters == 7
+    for bad in ("face_test=ture", "no_such_setting=1", "face_test"):
+        with pytest.raises(SystemExit):
+            TP.set_setting(s, bad)

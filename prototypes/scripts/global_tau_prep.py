@@ -77,6 +77,28 @@ class Patches:
     same_dist: npt.NDArray[np.float32]
 
 
+def parse_bool(key: str, v: str) -> bool:
+    """A boolean command-line value: true/false/1/0 in any case. Any other
+    value stops the run with an error (bool("False") would be True)."""
+    b = {"true": True, "1": True, "false": False, "0": False}.get(v.lower())
+    if b is None:
+        raise SystemExit(f"{key}: expected true/false/1/0, got {v!r}")
+    return b
+
+
+def set_setting(s: object, kv: str) -> None:
+    """Set one field of a settings dataclass from "key=value", with the type
+    of its default; booleans by parse_bool. An unknown key or a "kv" without
+    "=" stops the run with an error."""
+    k, sep, v = kv.partition("=")
+    if not sep:
+        raise SystemExit(f"expected key=value, got {kv!r}")
+    if not hasattr(s, k):
+        raise SystemExit(f"unknown setting {k!r}")
+    t = type(getattr(s, k))
+    setattr(s, k, parse_bool(k, v) if t is bool else t(v))
+
+
 def vertex_normals_areas(v_mm: F64, f: I64) -> tuple[F64, F64]:
     """Area-weighted unit vertex normals (face orientation) and vertex areas."""
     cr = np.cross(v_mm[f[:, 1]] - v_mm[f[:, 0]], v_mm[f[:, 2]] - v_mm[f[:, 0]])

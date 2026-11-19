@@ -29,13 +29,13 @@ def main() -> None:
     snaps = False
     start = None
     for kv in sys.argv[3:]:
-        k, v = kv.split("=", 1)
+        k, _, v = kv.partition("=")
         if k == "snapshots":
-            snaps = v.lower() == "true"
+            snaps = TP.parse_bool(k, v)
         elif k == "start":
             start = Path(v)
         else:
-            setattr(s, k, type(getattr(s, k))(v))
+            TP.set_setting(s, kv)
     site = TP.load_site(site_p)
     sd = out / "snapshots"
     if snaps:
