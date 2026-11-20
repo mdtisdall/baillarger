@@ -23,6 +23,12 @@
 // outline. It asks for them at the start and after each write into the edits (a paint, an undo, a site answer); no brick
 // volume changes. The input labels are the volume "input" of the brick pane, to compare with the labels.
 //
+// Grow (key g, a sub-mode of paint; docs/plans/label-editing.md, Part 6): the strokes are seeds. Submit (x) sends them to
+// /review/grow (a job, polled). The server grows them from echoes 2 and 3 and smooths the WM near the change, and answers
+// with a proposal, drawn like the pending edits with a yellow outline; the surface preview takes the proposal as its strokes.
+// Accept (key a) sends the proposal to /review/paint with its grow job (for the grow log): one write, one undo. Escape discards the proposal and the strokes; a
+// new stroke discards the proposal. The eraser is not in grow mode. Without echoes 2 and 3, grow is off (/review/queue).
+//
 // A plug-in of the brick pane (window.BVP, as static/overlays.js): it draws the previews and the strokes on #bvo, takes the
 // pointer in brush mode, and puts its own pane in place of the surface pane when the server has a review (/review/queue).
 //
@@ -52,7 +58,7 @@ const CHOICES = [   // [name, key, label]
 ];
 const SITE_PX = 10;   // px per voxel (at least) when a site opens
 const COL = { answer: "rgba(64, 224, 255, 0.85)", correction: "rgba(255, 140, 0, 0.85)", site: "rgba(255, 255, 255, 0.9)",
-  pending: "rgba(255, 0, 255, 0.95)" };
+  pending: "rgba(255, 0, 255, 0.95)", proposal: "rgba(255, 210, 63, 0.95)" };
 const STROKE_RGB = { wm: [245, 245, 245], cortex: [255, 70, 90], outside: [70, 140, 255], input: [255, 0, 255] };
 const PREVIEW_POLL_MS = 400;
 const SURF_COL = { cut: "rgba(64, 255, 128, 0.95)", working: [0.45, 0.7, 1.0], preview: [0.3, 1.0, 0.5] };
@@ -63,7 +69,7 @@ const MAX_DRAWN = 50000;
 const R = window.REVIEW = {
   api: null, on: false, meta: null, sites: [], session: null, cur: null, t0: 0, choice: null, params: {}, preview: null,
   previewSeq: 0, sp: { on: true, off: "", seq: 0, rev: -1, job: null, cells: 0, working: new Map(), preview: new Map(), cuts: new Map(), gl: null, show3d: false },
-  regen: null, pending: null, pendingSeq: 0, labelRGBA: new Map(), brush: false, mode: "paint", cls: null, radius: 1, undoDepth: 0, strokes: [], stroke: null, s0: 0, inv: null, A: null, revealed: new Map(),
+  regen: null, pending: null, pendingSeq: 0, grow: false, proposal: null, growSeq: 0, labelRGBA: new Map(), brush: false, mode: "paint", cls: null, radius: 1, undoDepth: 0, strokes: [], stroke: null, s0: 0, inv: null, A: null, revealed: new Map(),
 };
 
 // ------------------------------------------------------------------ helpers
@@ -98,7 +104,8 @@ function pane() {
       <option value="paint">paint</option><option value="scribble">scribble</option></select></label>
     <label>label <select id="rvcls"></select></label>
     <label title="keys [ and ]">radius <select id="rvrad"><option>0</option><option selected>1</option><option>2</option><option>3</option><option>4</option></select> voxels</label>
-    <button id="rvssub" title="key x">submit (x)</button><button id="rvsclr" title="Escape">clear</button>
+    <label title="key g: the strokes are seeds; submit shows a proposal grown from the echoes and smoothed; a accepts it as one paint"><input type="checkbox" id="rvgrow"> grow (g)</label>
+    <button id="rvssub" title="key x">submit (x)</button><button id="rvaccept" title="key a: write the proposal as one paint" disabled>accept (a)</button><button id="rvsclr" title="Escape">clear</button>
     <button id="rvundo" title="key u: undo the last write into the label edits (a paint or a site answer) of this viewer run">undo (u)</button><span id="rvsn"></span>
   </div>
   <div class="pbar" id="rvsurf"><label title="the white surface after the edits and the strokes: a local solve of the antialiased field, approximate">
@@ -111,10 +118,11 @@ function pane() {
   <div class="pbar"><span id="rvmsg" style="color:var(--mute)"></span></div>
   <div id="rvtable" style="overflow-y:auto;flex:1;min-height:0;font-size:12px"></div>
   <div class="help" style="position:static;padding:2px 8px">keys: 1–7 choices · t thicken radius · Enter submit · s skip · n next ·
-    b brush on/off · p paint/scribble · w WM · c cortex · o outside · e eraser (input label) · [ ] brush radius · x submit strokes ·
+    b brush on/off · p paint/scribble · g grow · a accept the proposal · w WM · c cortex · o outside · e eraser (input label) · [ ] brush radius · x submit strokes ·
     u undo the last write into the edits · Esc clear strokes · v 3D view. Row: open that site.
     Preview: <span style="color:${COL.answer}">■ the answer</span> <span style="color:${COL.correction}">■ the correction</span> ·
     <span style="color:${COL.pending}">□</span> pending edits (not yet in the dseg), filled in their label's colour ·
+    <span style="color:${COL.proposal}">□</span> the grow proposal, filled in its label's colour ·
     <span style="color:${SURF_COL.cut}">—</span> the surface preview's cut</div>`;
   const surf = $("p-surface"); surf.style.display = "none"; surf.parentElement.insertBefore(p, surf.nextSibling);
   if (window.VIEWER) window.VIEWER.layout();   // the review pane in the surface pane's place: shown or hidden with it
@@ -129,11 +137,53 @@ function pane() {
   $("rvcls").onchange = () => { R.cls = $("rvcls").value; };
   $("rvrad").onchange = () => { R.radius = Number($("rvrad").value); };
   $("rvssub").onclick = submitStrokes; $("rvsclr").onclick = clearStrokes; $("rvundo").onclick = undo;
+  $("rvaccept").onclick = accept;
+  $("rvgrow").onchange = () => setGrow($("rvgrow").checked);
   $("rvrgo").onclick = regenerate;
   $("rvspon").onchange = () => { R.sp.on = $("rvspon").checked; if (R.sp.on) surfacePreview(); else { R.sp.seq++; showSurface(); } };
   $("rv3d").onclick = () => show3d(!R.sp.show3d);
 }
-function clearStrokes() { R.strokes = []; R.stroke = null; strokesInfo(); R.api.draw(); strokesPreview(); surfacePreview(); }
+function clearStrokes() { R.strokes = []; R.stroke = null; dropProposal(); strokesInfo(); R.api.draw(); strokesPreview(); surfacePreview(); }
+// the grow sub-mode of paint (the module comment): on only in paint mode, away from a site's manual paint, with echoes 2 and 3
+function setGrow(on) {
+  if (on && !R.meta.grow) { say(R.meta.grow_off || "the grow brush is off", true); on = false; }
+  if (on && R.mode !== "paint") { say("grow is a sub-mode of paint (p)", true); on = false; }
+  R.grow = on; $("rvgrow").checked = on; dropProposal();
+  if (on && R.cls === "input") pick("wm");
+  strokesInfo(); R.api.draw(); surfacePreview();
+}
+function dropProposal() { R.growSeq++; if (R.proposal) { R.proposal = null; R.api.draw(); } $("rvaccept").disabled = true; }
+// the proposal as paint strokes, one per label
+function proposalStrokes() {
+  const by = new Map();
+  R.proposal.voxels.forEach((v, i) => { const l = R.proposal.labels[i]; if (!by.has(l)) by.set(l, []); by.get(l).push(v); });
+  return [...by].map(([label, voxels]) => ({ label, voxels }));
+}
+async function growStrokes() {
+  if (!R.strokes.length) { say("no strokes", true); return; }
+  const strokes = paintStrokes(), seq = ++R.growSeq;
+  say(`grow: computing the proposal of ${strokes.length} strokes…`);
+  let r; try { r = await post("/review/grow", { strokes }); } catch (e) { if (seq === R.growSeq) say(e.message, true); return; }
+  while (r.status === "running") {
+    await new Promise(ok => setTimeout(ok, PREVIEW_POLL_MS)); if (seq !== R.growSeq) return;
+    try { r = await getj(`/review/grow?job=${encodeURIComponent(r.job)}`); } catch (e) { if (seq === R.growSeq) say(e.message, true); return; }
+  }
+  if (seq !== R.growSeq) return;
+  if (r.status !== "done") { say(`grow: ${r.error || r.status}`, true); return; }
+  R.proposal = { job: r.job, voxels: r.voxels, labels: r.labels, by: bySlice(r.voxels.map((v, i) => [r.labels[i], v])) };
+  $("rvaccept").disabled = !r.voxels.length;
+  say(r.voxels.length ? `grow: the proposal changes ${r.voxels.length} voxels (${(r.seconds ?? 0).toFixed(1)} s). a: accept as one paint · Esc: discard · a new stroke: discard and grow again`
+    : "grow: the proposal changes no voxel");
+  R.api.draw(); surfacePreview();
+}
+async function accept() {
+  if (!R.proposal || !R.proposal.voxels.length) { say("no proposal to accept", true); return; }
+  const n = R.proposal.voxels.length;
+  let r; try { r = await post("/review/paint", { strokes: proposalStrokes(), grow_job: R.proposal.job }); } catch (e) { say(e.message, true); return; }
+  R.undoDepth = r.undo_depth; R.strokes = []; dropProposal();
+  say(`grow: the proposal written: ${r.voxels} of ${n} voxels changed their label in the label edits (one paint: u undoes it)`);
+  strokesInfo(); R.api.draw(); pending(); surfacePreview();
+}
 // the brush mode: paint (the menu of the paint mode) or scribble (the classes); strokes of the other mode must go first
 function setMode(m, quiet) {
   if (m === "scribble" && R.meta.paint_only) m = "paint";
@@ -141,6 +191,7 @@ function setMode(m, quiet) {
     $("rvmode").value = R.mode; if (!quiet) say("submit or clear the strokes first (Esc)", true); return false;
   }
   R.mode = m; $("rvmode").value = m;
+  if (m !== "paint" && R.grow) { R.grow = false; $("rvgrow").checked = false; dropProposal(); }
   const list = m === "paint" ? R.meta.menu : R.meta.classes;
   $("rvcls").innerHTML = list.map(c => `<option value="${esc(c.value)}" data-key="${esc(c.key || "")}">${esc(c.name)}${typeof c.value === "number" ? ` (${c.value})` : ""}</option>`).join("");
   pick("wm"); R.cls = $("rvcls").value; strokesInfo(); R.api.draw(); return true;
@@ -380,6 +431,7 @@ function paint(t, x, y) {   // dabs from the last point to (x, y), at most half 
 async function submitStrokes() {
   if (R.mode === "scribble") return scribble();
   if (R.cur && R.choice === "manual-paint") return submit();
+  if (R.grow) return growStrokes();
   if (!R.strokes.length) { say("no strokes", true); return; }
   const strokes = paintStrokes();
   let r; try { r = await post("/review/paint", { strokes }); } catch (e) { say(e.message, true); return; }
@@ -413,7 +465,7 @@ function decode(buf) {
 const sps = (m, bad) => { const el = $("rvsps"); el.textContent = m ? " " + m : ""; el.style.color = bad ? "#ff6b6b" : "var(--mute)"; if (bad) R.api.log("surface preview: " + m); };
 async function surfacePreview() {
   const S = R.sp; if (!R.on || !S.on || S.off || closed()) return;
-  const seq = ++S.seq, strokes = R.mode === "paint" ? paintStrokes() : [], t0 = performance.now();
+  const seq = ++S.seq, strokes = R.mode !== "paint" ? [] : R.grow ? (R.proposal ? proposalStrokes() : []) : paintStrokes(), t0 = performance.now();
   sps(`computing the surface after the edits${strokes.length ? ` and ${strokes.length} strokes` : ""}…`);
   let r; try { r = await post("/review/surface-preview", { strokes, since: S.rev }); } catch (e) { if (seq === S.seq) sps(e.message, true); return; }
   while (r.status === "running") {
@@ -553,7 +605,7 @@ function squares(g, t, list, colour, cap = MAX_DRAWN, outline = null) {
 function draw2d(g, t) {
   if (!R.on || !R.A) return;
   const n = vaxis(t.n), k = mm2vox(R.api.cross)[n];
-  t.rvpcap = 0;
+  t.rvpcap = 0; t.rvgcap = 0;
   if (R.pending) {   // under the preview and the strokes
     const list = R.pending.by[n].get(k) || [];
     const d = squares(g, t, list, labelFill, MAX_DRAWN, COL.pending); t.rvpcap = list.length > d && d >= MAX_DRAWN ? list.length : 0;
@@ -561,6 +613,10 @@ function draw2d(g, t) {
   if (R.preview) {
     const list = R.preview.by[n].get(k) || [];
     const d = squares(g, t, list); t.rvcap = list.length > d && d >= MAX_DRAWN ? list.length : 0;
+  }
+  if (R.proposal) {
+    const list = R.proposal.by[n].get(k) || [];
+    const d = squares(g, t, list, labelFill, MAX_DRAWN, COL.proposal); if (list.length > d && d >= MAX_DRAWN) t.rvgcap = list.length;
   }
   for (const s of [...R.strokes, ...(R.stroke ? [R.stroke] : [])]) {
     const rgb = STROKE_RGB[s.key] || [255, 210, 63], vs = [...s.voxels.values()].filter(v => v[n] === k);
@@ -573,9 +629,10 @@ function draw2d(g, t) {
 }
 function text(t) {
   let s = "";
-  if (R.brush) s += ` · ${R.mode}: ${$("rvcls").selectedOptions[0]?.textContent ?? R.cls} r ${R.radius}`;
+  if (R.brush) s += ` · ${R.mode}${R.grow ? " (grow)" : ""}: ${$("rvcls").selectedOptions[0]?.textContent ?? R.cls} r ${R.radius}`;
   if (t.rvcap) s += ` · preview: ${MAX_DRAWN} of ${t.rvcap} voxels drawn`;
   if (t.rvpcap) s += ` · pending: ${MAX_DRAWN} of ${t.rvpcap} voxels drawn`;
+  if (t.rvgcap) s += ` · proposal: ${MAX_DRAWN} of ${t.rvgcap} voxels drawn`;
   return s;
 }
 function pointer(type, e, h) {   // brush mode: a left drag paints one stroke of the current label
@@ -584,6 +641,8 @@ function pointer(type, e, h) {   // brush mode: a left drag paints one stroke of
     if (!R.strokes.length && !R.stroke) R.s0 = performance.now();
     const c = $("rvcls"), opt = c.options[c.selectedIndex];
     const value = c.value === "input" ? "input" : Number(c.value);
+    if (R.grow && value === "input") { say("the eraser is not in grow mode: turn grow off (g) to erase", true); return true; }
+    if (R.grow) dropProposal();
     R.stroke = { value, key: opt.dataset.key, voxels: new Map(), tile: h.t }; paint(h.t, h.x, h.y); R.api.draw(); return true;
   }
   if (!R.stroke) return false;
@@ -603,6 +662,7 @@ function keys(e) {
   const act = c ? () => choose(c[0]) : {
     Enter: () => (R.cur ? submit() : submitStrokes()), s: skip, n: next, x: submitStrokes, u: undo,
     p: () => setMode(R.mode === "paint" ? "scribble" : "paint"),
+    g: () => setGrow(!R.grow), a: accept,
     o: () => pick("outside"), e: () => pick("input"),
     t: () => { $("rvthick").value = $("rvthick").value === "1" ? "2" : "1"; if (R.choice === "thicken") choose("thicken"); },
     b: () => { $("rvbon").checked = !$("rvbon").checked; $("rvbon").onchange(); },

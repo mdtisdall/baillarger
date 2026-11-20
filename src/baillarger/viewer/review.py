@@ -59,8 +59,8 @@ Routes (Review.get, Review.post), JSON:
   in the request.
 - POST /review/answer {site, choice, params, reviewer_seconds}: the choice's
   voxels and labels at the site, written into the label edits
-  (label_edits.paint: only the voxels whose label changes from the dseg's
-  label with the edits applied), then appended to the log. If the log refuses
+  (label_edits.paint: only the voxels whose label changes from the label
+  that the user sees, as for a paint), then appended to the log. If the log refuses
   the answer, the edits are written back as they were. {answer, kind, how, rank, voxels,
   edited}: edited is the number of voxels written into the edits.
 - POST /review/scribble {strokes: [{class, voxels}], reviewer_seconds}:
@@ -170,9 +170,10 @@ label_edits.INPUT) and its voxels. The strokes become voxels with the same
 function as a scribble's (stroke_voxels: a voxel in two strokes keeps the
 later one). A label that is not in the menu, or a voxel off the grid, refuses
 the whole paint, and nothing is written. Only the voxels whose label changes
-are written (label_edits.paint: from the dseg's labels, the labels that the
-user sees, with the edits applied). A paint back to a voxel's input label,
-against the automatic correction, is an edit.
+are written (label_edits.paint: from the labels that the user sees, the
+dseg's labels with the pending edits; a voxel that the dseg's own edits
+changed and the edits no longer have is at its input label). A paint back to
+a voxel's input label, against the automatic correction, is an edit.
 
 Undo. Every write into the edits of this viewer run (a paint, and a site
 answer of any choice: accept-fix and manual-paint too) pushes the earlier
@@ -254,6 +255,28 @@ a request for another key stops the running job at its next group
 (surface_preview.Stopped). Each group is atomic, so the state that a
 stopped job leaves is valid, and the next job continues from it.
 
+Grow. The grow brush (docs/plans/label-editing.md, Part 6). POST /review/grow
+{strokes} (as /review/paint; no eraser) runs label_grow.grow as a job
+(Review.gjobs) on echoes 2 and 3 (memory-mapped, read for the box only) and
+the labels that the user sees (the dseg's labels with the pending edits, as
+the slice tiles draw them). Its answer, polled with GET /review/grow?job=, is
+the proposal: {voxels, labels, box, settings}. It writes nothing. The page
+shows the proposal; an accepted proposal is a POST /review/paint of its
+voxels, so it is one write and one undo. Without echoes 2 and 3 the route
+refuses, and /review/queue says why (grow_off).
+
+Grow log. With the grow brush on, the review appends one JSON object per line
+to the grow log (grow_log_path: next to the edits, suffix growlog, .jsonl,
+with a sidecar of GROW_LOG_SPEC). It is a record for diagnosis and replay,
+not an input of any step. Each line has time (ISO 8601) and event:
+- grow: job, strokes [{label, voxels}], settings; then proposal {voxels,
+  labels}, box and seconds, or error.
+- paint: strokes, grow_job (the accepted proposal's job, or null), voxels
+  (the voxels that changed) and undo_depth.
+- undo: voxels and undo_depth.
+- surface: job, stroke_voxels, revision, kept and solves (their summaries),
+  preview_blocks and seconds; or stopped, or error.
+
 Paint only. With no queue and no log (sites and log None; the viewer's
 --edits alone), the review has the paint routes only; the hemisphere comes
 from the dseg's sidecar (wm-dseg/1).
@@ -278,8 +301,17 @@ from typing import Any, Protocol
 import numpy as np
 import numpy.typing as npt
 
-from baillarger import blocks, label_edits, white_dseg
-from baillarger.bids import derivative_path, entities, file_sha256
+from baillarger import blocks, label_edits, label_grow, white_dseg
+from baillarger.bids import (
+    Key,
+    SidecarSpec,
+    derivative_path,
+    entities,
+    file_sha256,
+    provenance,
+    sidecar_path,
+    write_sidecar,
+)
 from baillarger.labels import CORTEX_LABEL, LUT_NAMES, WM_LABEL
 from baillarger.viewer import surface_preview as SP
 from baillarger.viewer.jobs import LOG_LINES, Jobs
@@ -315,6 +347,76 @@ def identity(path: Path) -> Identity:
 
 def site_id(s: Sequence[int]) -> str:
     return f"{int(s[0])},{int(s[1])},{int(s[2])}"
+
+
+#: the sidecar of the grow log (module docstring, Grow log)
+GROW_LOG_SPEC = SidecarSpec(
+    "grow-log/1",
+    (
+        Key("SpecVersion", "string", True, "format and version of the spec"),
+        Key("Description", "string", True, "what the file is"),
+        Key("Edits", "string", True, "the label edits of the review (path)"),
+        Key("Hemisphere", "string", True, "R or L"),
+        Key("Shape", "array of integers", True, "the grid's shape"),
+        Key("Provenance", "object", True, "Created, Function, Version, Commit, Dirty"),
+    ),
+)
+
+
+def grow_log_path(edits: Path) -> Path:
+    """The grow log of the edits at edits (a .npy): its name with the suffix
+    growlog and the extension .jsonl (module docstring, Grow log)."""
+    stem = edits.name.removesuffix(".npy")
+    stem = stem.removesuffix("_edits") if stem.endswith("_edits") else stem
+    return edits.with_name(stem + "_growlog.jsonl")
+
+
+class GrowLog:
+    """The grow log (module docstring, Grow log): append writes one line.
+    The sidecar is written before the first line."""
+
+    def __init__(self, path: Path, edits: Path, hemi: str, shape: Sequence[int]):
+        self.path = path
+        self._side = dict(
+            SpecVersion=GROW_LOG_SPEC.version,
+            Description="The grow brush's requests and the writes into the "
+            "label edits of one review, one JSON object per line.",
+            Edits=str(edits),
+            Hemisphere=hemi,
+            Shape=[int(n) for n in shape],
+        )
+        self._lock = threading.Lock()
+
+    def append(self, event: str, **fields: Any) -> None:
+        line = dict(time=time.strftime("%Y-%m-%dT%H:%M:%S%z"), event=event, **fields)
+        text = json.dumps(line, default=_json_default) + "\n"
+        with self._lock:
+            side = sidecar_path(self.path)
+            if not side.exists():
+                write_sidecar(
+                    side,
+                    GROW_LOG_SPEC,
+                    dict(self._side, Provenance=provenance("review.GrowLog")),
+                )
+            with self.path.open("a") as fh:
+                fh.write(text)
+
+
+def _json_default(x: Any) -> Any:
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+    if isinstance(x, np.integer):
+        return int(x)
+    if isinstance(x, np.floating):
+        return float(x)
+    raise TypeError(f"{type(x).__name__} is not JSON")
+
+
+def _strokes_json(strokes: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        dict(label=st.get("label"), voxels=[[int(c) for c in v] for v in st["voxels"]])
+        for st in strokes
+    ]
 
 
 def parse_site(x: Any) -> Site:
@@ -795,6 +897,7 @@ class Review:
         regenerate: Sequence[str] = REGENERATE,
         surface: Path | None = None,
         device: str | None = None,
+        echoes: Sequence[Path] | None = None,
     ) -> None:
         import nibabel as nib
 
@@ -889,6 +992,20 @@ class Review:
         self._sp: SP.SurfacePreview | None = None
         self._sstops = 0
         self._splock = threading.Lock()  # a surface preview request's stop and start
+        #: the grow brush (module docstring, Grow): echoes 2 and 3, opened at
+        #: the first grow, and its jobs
+        self.echo_paths = None if echoes is None else [Path(e) for e in echoes]
+        self._echo_maps: list[Arr] | None = None
+        self._echo_srcs: list[Any] = []
+        self.gjobs: Jobs[dict[str, Any]] = Jobs(
+            log=lambda m: None, keep_in_memory=PREVIEWS_KEPT
+        )
+        #: the grow log (module docstring, Grow log), with the grow brush on
+        self.grow_log: GrowLog | None = None
+        if self.grow_off() is None:
+            self.grow_log = GrowLog(
+                grow_log_path(self.edits), self.edits, self.hemi, self.shape
+            )
         #: the regenerate run (module docstring, Regenerate)
         self.regenerate_command = list(regenerate)
         self.regen = Regeneration()
@@ -1023,6 +1140,8 @@ class Review:
             hemisphere=self.hemi,
             paint_only=self.paint_only,
             undo_depth=len(self.undo),
+            grow=self.grow_off() is None,
+            grow_off=self.grow_off(),
         )
 
     def _find(self, site: Site) -> dict[str, Any]:
@@ -1158,11 +1277,12 @@ class Review:
         self, edits: label_edits.Edits, voxels: Arr, labels: Arr
     ) -> tuple[label_edits.Edits, label_edits.Edits, Arr]:
         """The edits with the voxels painted with the labels (label_edits.paint,
-        against the dseg's labels from labels(); label_edits.INPUT for the
-        eraser), the undo: the earlier entries of the voxels whose label
-        changes, and the input labels of the voxels (int64). Only the voxels
-        are read, not their box. Raises ValueError for a voxel off the grid
-        or a label not in label-set/1."""
+        against the dseg's labels from labels() and the dseg's copy of the
+        edits that it used; label_edits.INPUT for the eraser), the undo: the
+        earlier entries of the voxels whose label changes, and the input
+        labels of the voxels (int64). Only the voxels are read, not their
+        box. Raises ValueError for a voxel off the grid or a label not in
+        label-set/1."""
         v = np.asarray(voxels, np.int64).reshape(-1, 3)
         if not len(v):
             return edits, label_edits.empty(), np.zeros(0, np.int64)
@@ -1177,8 +1297,17 @@ class Review:
             np.asarray(labels, np.int64),
             dseg=self.labels(),
             shape=self.shape,
+            dseg_edits=self._dseg_edits_or_none(),
         )
         return new, undo, grid[tuple(v.T)].astype(np.int64)
+
+    def _dseg_edits_or_none(self) -> label_edits.Edits | None:
+        """The dseg's copy of the edits that it used (_dseg_edits), or None
+        if the dseg has none."""
+        try:
+            return self._dseg_edits()
+        except ValueError:
+            return None
 
     def _on_grid(self, v: Arr) -> None:
         if len(v) and not np.all((v >= 0) & (v < self.shape)):
@@ -1264,12 +1393,149 @@ class Review:
             np.int64
         )
 
-    def paint(self, strokes: Sequence[dict[str, Any]]) -> dict[str, Any]:
-        """A paint (module docstring): {voxels, undo_depth}."""
+    def paint(
+        self, strokes: Sequence[dict[str, Any]], grow_job: str | None = None
+    ) -> dict[str, Any]:
+        """A paint (module docstring): {voxels, undo_depth}. grow_job: the
+        job of the grow proposal that the strokes accept (the grow log)."""
         v, lab = self.paint_voxels(strokes)
         with self.lock:
             undo, _ = self._commit(v, lab)
-            return dict(voxels=len(undo), undo_depth=len(self.undo))
+            out = dict(voxels=len(undo), undo_depth=len(self.undo))
+        if self.grow_log is not None:
+            self.grow_log.append(
+                "paint", strokes=_strokes_json(strokes), grow_job=grow_job, **out
+            )
+        return out
+
+    # -------------------------------------------------------------- grow
+    def grow_off(self) -> str | None:
+        """Why the grow brush is off (no echoes 2 and 3), or None."""
+        if self.echo_paths is None or len(self.echo_paths) != 2:
+            return "the grow brush needs echoes 2 and 3 (--echo-dir)"
+        missing = [p.name for p in self.echo_paths if not p.is_file()]
+        if missing:
+            return f"the grow brush needs echoes 2 and 3: {', '.join(missing)} missing"
+        return None
+
+    def _echoes(self) -> list[Arr]:
+        """Echoes 2 and 3 of the whole grid, memory-mapped, opened once
+        (blocks.open_volume, as _input_labels). Raises ValueError if they are
+        not on the review's grid."""
+        if self._echo_maps is None:
+            assert self.echo_paths is not None
+            maps, srcs = [], []
+            for p in self.echo_paths:
+                src = blocks.open_volume(p)
+                if tuple(src.shape[:3]) != self.shape:
+                    raise ValueError(
+                        f"{p.name}: the echo is not on the grid {self.shape}"
+                    )
+                m = np.asarray(src.img.dataobj)
+                maps.append(m.reshape(m.shape[:3]))
+                srcs.append(src)
+            self._echo_maps, self._echo_srcs = maps, srcs
+        return self._echo_maps
+
+    def _current_box(self, pending: tuple[Arr, Arr], box: label_grow.Box) -> Arr:
+        """The labels that the user sees in a box: the dseg's labels with the
+        pending edits (_pending: the voxels and their labels) written in."""
+        (a0, b0, c0), (a1, b1, c1) = box
+        crop = np.array(self.labels()[a0:a1, b0:b1, c0:c1])
+        v, lab = pending
+        q = v - np.asarray(box[0], np.int64)
+        ok = np.all((q >= 0) & (q < np.asarray(crop.shape)), axis=1)
+        crop[tuple(q[ok].T)] = lab[ok]
+        return crop
+
+    def grow(self, strokes: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        """The grow brush's proposal of the strokes (module docstring, Grow),
+        or a job that computes it: {status, job}, and when done {voxels,
+        labels, box, settings}. It writes nothing. Raises ValueError as a
+        paint does for the strokes, for the eraser, if the grow brush is off,
+        and if the outputs were replaced."""
+        off = self.grow_off()
+        if off is not None:
+            raise ValueError(off)
+        if any(st.get("label") == ERASER for st in strokes):
+            raise ValueError("the eraser is not in grow mode")
+        self.paint_voxels(strokes)  # the labels and the grid, checked
+        seeds = [(int(lab), v) for lab, v in stroke_voxels(strokes, "label")]
+        with self.lock:
+            self._check_outputs()
+            edits = self._read_edits()
+            pending = self._pending(edits)
+        h = hashlib.sha256()
+        for lab, v in seeds:
+            h.update(str(lab).encode())
+            h.update(np.ascontiguousarray(v).tobytes())
+            h.update(b"|")
+        for a in (edits.index, edits.label):
+            h.update(np.ascontiguousarray(a).tobytes())
+        key = h.hexdigest()[:24]
+        wm = WM_LABEL[self.hemi]
+
+        def work(log: Any) -> dict[str, Any]:
+            t0 = time.perf_counter()
+            e2, e3 = self._echoes()
+
+            def echoes(b: label_grow.Box) -> tuple[Arr, Arr]:
+                sl = tuple(slice(x, y) for x, y in zip(b[0], b[1], strict=True))
+                return np.asarray(e2[sl]), np.asarray(e3[sl])
+
+            try:
+                p = label_grow.grow(
+                    seeds,
+                    lambda b: self._current_box(pending, b),
+                    echoes,
+                    shape=self.shape,
+                    wm=wm,
+                )
+            except Exception as e:
+                if self.grow_log is not None:
+                    self.grow_log.append(
+                        "grow", job=key, strokes=_strokes_json(strokes), error=str(e)
+                    )
+                raise
+            if self.grow_log is not None:
+                self.grow_log.append(
+                    "grow",
+                    job=key,
+                    strokes=_strokes_json(strokes),
+                    settings=p.settings.as_dict(),
+                    proposal=dict(voxels=p.voxels(self.shape), labels=p.label),
+                    box=[list(p.box[0]), list(p.box[1])],
+                    seconds=time.perf_counter() - t0,
+                )
+            return dict(
+                voxels=p.voxels(self.shape).tolist(),
+                labels=p.label.tolist(),
+                box=[list(p.box[0]), list(p.box[1])],
+                settings=p.settings.as_dict(),
+                seconds=time.perf_counter() - t0,
+            )
+
+        out = self.gjobs.run(key, "grow", work)
+        if out["status"] == "error":
+            return dict(status="failed", job=key, error=out["error"])
+        return self._goutcome(key, self.gjobs.wait(key, WAIT_S))
+
+    def _goutcome(self, key: str, out: dict[str, Any]) -> dict[str, Any]:
+        if out["status"] == "error":
+            return dict(status="failed", job=key, error=out["error"])
+        if out["status"] == "running":
+            return dict(status="running", job=key)
+        if out["status"] != "done":
+            raise ValueError(f"no grow job {key}")
+        try:
+            r = self.gjobs.get(key)
+        except KeyError:
+            raise ValueError(f"no grow job {key}") from None
+        return dict(status="done", job=key, **r)
+
+    def grow_job(self, key: str) -> dict[str, Any]:
+        """The state of the grow job key (_goutcome)."""
+        return self._goutcome(key, self.gjobs.wait(key, 0))
 
     def undo_last(self) -> dict[str, Any]:
         """The last write into the edits undone (module docstring, Undo): its
@@ -1280,7 +1546,10 @@ class Review:
             if not self.undo:
                 raise ValueError("nothing to undo in this viewer run")
             n = self._pop_undo()
-            return dict(voxels=n, undo_depth=len(self.undo))
+            out = dict(voxels=n, undo_depth=len(self.undo))
+        if self.grow_log is not None:
+            self.grow_log.append("undo", **out)
+        return out
 
     def _fix(self, site: Site) -> tuple[int, Arr, Arr]:
         """The fix of the override site: its id, its voxels (N, 3, sorted by
@@ -1804,28 +2073,66 @@ class Review:
             out = self.sjobs.run(
                 key,
                 "surface preview",
-                lambda log: self._surface_work(edits, after, stops),
+                lambda log: self._surface_work(
+                    edits, after, stops, key, 0 if v is None else len(v)
+                ),
             )
             if out["status"] == "error":
                 return dict(status="failed", job=key, error=out["error"])
         return self._soutcome(key, self.sjobs.wait(key, WAIT_S), since)
 
     def _surface_work(
-        self, edits: label_edits.Edits, after: label_edits.Edits, stops: int
+        self,
+        edits: label_edits.Edits,
+        after: label_edits.Edits,
+        stops: int,
+        key: str = "",
+        stroke_voxels: int = 0,
     ) -> dict[str, Any]:
         """The job of a surface preview: the working state taken to edits (kept),
         then a copy of it taken to after (the preview, dropped). Raises
-        Stopped when a newer request stops it."""
+        Stopped when a newer request stops it. The grow log gets one line."""
         t0 = time.perf_counter()
-        sp = self._surface()
+        glog = self.grow_log
 
         def stop() -> bool:
             return self._sstops != stops
 
-        st = sp.state
-        kept = sp.change(st, edits, self._surface_pending, self._surface_region, stop)
-        pv = st.copy()
-        solves = sp.change(pv, after, self._surface_pending, self._surface_region, stop)
+        try:
+            sp = self._surface()
+            st = sp.state
+            kept = sp.change(
+                st, edits, self._surface_pending, self._surface_region, stop
+            )
+            pv = st.copy()
+            solves = sp.change(
+                pv, after, self._surface_pending, self._surface_region, stop
+            )
+        except SP.Stopped:
+            if glog is not None:
+                glog.append(
+                    "surface", job=key, stroke_voxels=stroke_voxels, stopped=True
+                )
+            raise
+        except Exception as e:
+            if glog is not None:
+                glog.append(
+                    "surface", job=key, stroke_voxels=stroke_voxels, error=str(e)
+                )
+            raise
+        if glog is not None:
+            glog.append(
+                "surface",
+                job=key,
+                stroke_voxels=stroke_voxels,
+                revision=st.revision,
+                kept=[s.summary() for s in kept],
+                solves=[s.summary() for s in solves],
+                preview_blocks=sum(
+                    1 for m in pv.blocks.values() if m.revision > st.revision
+                ),
+                seconds=time.perf_counter() - t0,
+            )
         return dict(
             revision=st.revision,
             cells=sp.cells,
@@ -1930,6 +2237,8 @@ class Review:
             return self.regen.status()
         if path == "/review/surface-preview":
             return self.surface_job(q["job"], int(q.get("since", -1)))
+        if path == "/review/grow":
+            return self.grow_job(q["job"])
         raise KeyError(path)
 
     def get_bytes(self, path: str, q: dict[str, str]) -> bytes | None:
@@ -1975,7 +2284,10 @@ class Review:
         if path == "/review/scribble":
             return self.scribble(list(req["strokes"]), float(req["reviewer_seconds"]))
         if path == "/review/paint":
-            return self.paint(list(req["strokes"]))
+            gj = req.get("grow_job")
+            return self.paint(list(req["strokes"]), None if gj is None else str(gj))
+        if path == "/review/grow":
+            return self.grow(list(req["strokes"]))
         if path == "/review/undo":
             return self.undo_last()
         if path == "/review/regenerate":
@@ -2053,15 +2365,19 @@ def for_white(
     dseg: Path,
     labels: Callable[[], Arr],
     affine: Arr,
+    echoes: Sequence[Path] | None = None,
 ) -> Review | None:
     """The review of --white mode: with --sites (--log and --edits are then
-    needed), or paint only with --edits alone; None with neither."""
+    needed), or paint only with --edits alone; None with neither. echoes:
+    echoes 2 and 3, for the grow brush (None: the grow brush is off)."""
     if a.sites is None:
         if a.log is not None:
             raise ValueError("--log needs --sites")
         if a.edits is None:
             return None
-        return Review(None, None, a.edits, dseg, labels, affine, None, surface=surf)
+        return Review(
+            None, None, a.edits, dseg, labels, affine, None, surface=surf, echoes=echoes
+        )
     if a.log is None:
         raise ValueError("--sites needs --log: the log's path (there is no default)")
     if a.edits is None:
@@ -2077,6 +2393,7 @@ def for_white(
         affine,
         lambda n, seed: read_random_sites(surf, n, seed),
         surface=surf,
+        echoes=echoes,
     )
 
 

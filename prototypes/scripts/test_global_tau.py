@@ -231,6 +231,29 @@ def test_stencil_jacobian_matches_dense(ridge: bool) -> None:
         assert e == pytest.approx(A[i, j], abs=1e-9)
 
 
+def test_energy_gradient_is_twice_jt_r() -> None:
+    """In tissue (f = 1) with no stop term, the voxel energy is Σ r², so
+    ∇E = 2 Jᵀr and its Hessian ≈ 2 JᵀJ: the Gauss-Newton system of lm_solve
+    is (JᵀJ + λD) dx = -∇E / 2 (an LM step of -∇E is twice the step)."""
+    G, P, x, unk, _ = small_problem()
+    x[: G.S] -= H  # f = 1 everywhere
+    P = dict(P)
+    P["c"] = jnp.zeros_like(P["c"])
+    xj = jnp.asarray(x)
+    g0 = GE.j_g0(xj, P)
+    fw, _ = GE.j_weights(xj, P)
+    assert np.all(np.asarray(fw)[: G.S] == 1.0)
+    r = np.asarray(GE.voxel_residuals(xj, P, g0, fw))
+    e = float(GE.energy(xj, P, g0))
+    assert e == pytest.approx(float((r**2).sum()), rel=1e-8)  # EPS in |∇τ|
+    col = K.stencil_cols(G.slot_flat, G.slot_of, G.strides, K.OFFS)
+    Jst = GS.stencil_jacobian(xj, P, g0, fw, G.colour, G.ncolour, col, unk, G.S)
+    grad = np.asarray(jax.grad(GE.energy)(xj, P, g0))[: G.S]
+    np.testing.assert_allclose(
+        grad, 2 * K.jst_apply_t(Jst, col, r[: G.S], G.S), rtol=1e-7, atol=1e-7
+    )
+
+
 def test_upwind_gradient_sees_the_checkerboard() -> None:
     G, P, x, unk, _ = small_problem(shape=(6, 6, 8))
     c = G.coords - GS.PAD
@@ -537,3 +560,212 @@ def test_snapshots_round_trip(tmp_path) -> None:  # noqa: ANN001
     assert np.allclose(tau[tuple(c.T)], gt.tau, atol=1e-6)
     assert np.isnan(tau[~gt.domain]).all() and len(faces) == 6 * 6
     assert meta["tag"] == "outer0" and meta["lm_iter"] == len(snaps) - 2
+
+
+# ------------------------------------------------------------ lagged quadratic form
+
+
+def _lagged_problem(ghosts: bool = False):  # noqa: ANN202
+    G, P, x, unk, _ = small_problem(faces_z=3 if ghosts else None)
+    x[: G.S] -= H  # f = 1 everywhere, as inside a fixed Σ
+    P = dict(P)
+    P["c"] = jnp.zeros_like(P["c"])
+    if ghosts:  # a fixed Σ: ghosts at θh, θ in [THETA_MIN, 1]
+        th = np.random.default_rng(9).uniform(0.05, 1.0, size=(len(x), 3, 2))
+        P["gdist"] = jnp.asarray(th)
+    return G, P, x, unk
+
+
+def test_three_point_gradient_at_a_sigma_ghost_is_exact() -> None:
+    """A fixed Σ (gdist given): a slot with its real minus neighbour at -h
+    and the ghost τ = 0 at +θh. For τ on each z line a quadratic
+    q(t) = (t - θh)(u + v t) (zero at the ghost), dτ/dz at the slot is
+    q'(0) = u - θ h v exactly, and the slot's own τ is in it. Without gdist
+    (a contact face) the wide difference stays: (0 - τ_m)/(1.5 h)."""
+    G, P, x, unk, _ = small_problem(faces_z=3)
+    P = dict(P)
+    c = G.coords - GS.PAD
+    rng = np.random.default_rng(3)
+    th = np.ones((len(x), 3, 2))
+    top = np.flatnonzero(c[:, 2] == 3)
+    th[top, 2, 1] = rng.uniform(0.05, 1.0, len(top))
+    P["gdist"] = jnp.asarray(th)
+    want = {}
+    for s in top:
+        u, v = rng.normal(size=2)
+        t0 = th[s, 2, 1] * H
+        line = np.flatnonzero((c[:, 0] == c[s, 0]) & (c[:, 1] == c[s, 1]) & (c[:, 2] <= 3))
+        t = (c[line, 2] - 3) * H
+        x[line] = (t - t0) * (u + v * t)
+        want[s] = u - t0 * v
+    g = np.asarray(GE.gradient(jnp.asarray(x), P))
+    for s, w in want.items():
+        assert g[s, 2] == pytest.approx(w, rel=1e-10, abs=1e-12)
+    # the slot's own τ has the weight -(1 - θ)/(θh) (the ghost on the plus side)
+    s = top[0]
+    J = np.asarray(jax.jacfwd(lambda y: GE.gradient(y, P)[s, 2])(jnp.asarray(x)))
+    assert J[s] == pytest.approx(-(1 - th[s, 2, 1]) / (th[s, 2, 1] * H))
+    # no ghost on the axis: the central difference, the own τ not in it
+    s2 = np.flatnonzero(c[:, 2] == 1)[0]
+    J2 = np.asarray(jax.jacfwd(lambda y: GE.gradient(y, P)[s2, 2])(jnp.asarray(x)))
+    assert J2[s2] == 0.0
+    # a contact face (no gdist): the wide difference, as before
+    del P["gdist"]
+    g = np.asarray(GE.gradient(jnp.asarray(x), P))
+    m = G.slot_of[G.slot_flat[s] - G.strides[2]]
+    assert g[s, 2] == pytest.approx((0.0 - x[m]) / (1.5 * H))
+
+
+def test_scaled_terms_against_the_original() -> None:
+    """At x0 with s = |∇τ|: the scaled align residual is s × the original,
+    the pull |∇τ - ĝ| is |s - 1|, the scaled smooth term is s² × the
+    original and the equivolume term s⁴ × the original, up to the discrete
+    product rule (τ smooth here, so within a few percent); the lagged
+    residuals at x0 are the scaled ones."""
+    G, P, x, unk = _lagged_problem()
+    c = G.coords - GS.PAD
+    x[: G.S] = -(7 - c[:, 2]) * H * (1.0 + 0.02 * c[:, 0]) - 0.002 * c[:, 1] ** 2  # smooth, s ≠ 1
+    xj = jnp.asarray(x)
+    g0 = GE.j_g0(xj, P)
+    fw, _ = GE.j_weights(xj, P)
+    r = np.asarray(GE.voxel_residuals(xj, P, g0, fw))[: G.S]
+    L = GE.j_lag_state(xj, P)
+    rl = np.asarray(GE.j_lagged_residuals(xj, P, L))[: G.S]
+    gh, Pm = GE._gh_Pm(xj, P)
+    rs = np.asarray(GE.scaled_voxel_residuals(xj, P, gh, Pm))[: G.S]
+    np.testing.assert_allclose(rl, rs, atol=1e-12)
+    s = np.asarray(L["s"])[: G.S]
+    np.testing.assert_allclose(rs[:, :3], s[:, None] * r[:, :3], rtol=1e-6, atol=1e-9)  # align
+    np.testing.assert_allclose(np.linalg.norm(rs[:, 13:16], axis=1), np.abs(r[:, 13]), atol=1e-9)
+    inner = np.all(np.asarray(P["nbv"])[: G.S].all(2), 1)  # central differences on all axes
+    for k in np.flatnonzero(inner)[:20]:
+        assert np.sum(rs[k, 3:12] ** 2) == pytest.approx(s[k] ** 2 * np.sum(r[k, 3:12] ** 2), rel=0.05)
+    eq_o = s[inner] ** 2 * r[inner, 12]
+    assert np.corrcoef(eq_o, rs[inner, 12])[0, 1] > 0.95
+
+
+def test_lag_weights_restore_the_original_terms() -> None:
+    """With P["wlag"] = 1/s0 at x0 = x: the align residuals equal the
+    original ones, the smooth term equals it up to the discrete product rule,
+    and the equivolume residual follows the original (as in the test above,
+    now without the factors of s)."""
+    G, P, x, unk = _lagged_problem()
+    c = G.coords - GS.PAD
+    x[: G.S] = -(7 - c[:, 2]) * H * (1.0 + 0.02 * c[:, 0]) - 0.002 * c[:, 1] ** 2  # smooth, s ≠ 1
+    xj = jnp.asarray(x)
+    g0 = GE.j_g0(xj, P)
+    fw, _ = GE.j_weights(xj, P)
+    r = np.asarray(GE.voxel_residuals(xj, P, g0, fw))[: G.S]
+    Pw = {**P, "wlag": GE.j_lag_weights(xj, P)}
+    rs = np.asarray(GE.j_scaled_residuals(xj, Pw))[: G.S]
+    np.testing.assert_allclose(rs[:, :3], r[:, :3], rtol=1e-6, atol=1e-9)  # align
+    np.testing.assert_allclose(np.linalg.norm(rs[:, 13:16], axis=1), np.abs(r[:, 13]), atol=1e-9)  # pull: no weight
+    inner = np.all(np.asarray(P["nbv"])[: G.S].all(2), 1)
+    for k in np.flatnonzero(inner)[:20]:
+        assert np.sum(rs[k, 3:12] ** 2) == pytest.approx(np.sum(r[k, 3:12] ** 2), rel=0.05)
+    assert np.corrcoef(r[inner, 12], rs[inner, 12])[0, 1] > 0.95
+
+
+@pytest.mark.parametrize("k", [0.5, 2.0])
+def test_lag_weights_remove_the_scale_bias(k: float) -> None:
+    """τ → k τ with the weights renewed at k τ: the weighted align and smooth
+    terms do not change, and the equivolume term changes as 1/k², as the
+    original div(∇τ/|∇τ|²)². Without the weights all three grow with k."""
+    G, P, x, unk = _lagged_problem()
+    xj, xk = jnp.asarray(x), jnp.asarray(k * x)
+    p1 = GE.j_scaled_parts(xj, {**P, "wlag": GE.j_lag_weights(xj, P)})
+    pk = GE.j_scaled_parts(xk, {**P, "wlag": GE.j_lag_weights(xk, P)})
+    for t in ("align", "smooth"):
+        assert float(pk[t]) == pytest.approx(float(p1[t]), rel=1e-6)
+    assert float(pk["equi"]) * k**2 == pytest.approx(float(p1["equi"]), rel=1e-6)
+    q1, qk = GE.j_scaled_parts(xj, P), GE.j_scaled_parts(xk, P)
+    for t in ("align", "smooth"):
+        assert float(qk[t]) == pytest.approx(k**2 * float(q1[t]), rel=1e-6)
+
+
+def test_lagged_residuals_are_affine() -> None:
+    G, P, x, unk = _lagged_problem()
+    xj = jnp.asarray(x)
+    L = GE.j_lag_state(xj, P)
+    t = np.zeros_like(x)
+    t[: G.S] = np.random.default_rng(3).normal(size=G.S)
+    r = [np.asarray(GE.j_lagged_residuals(jnp.asarray(x + a * t), P, L)) for a in (0, 1, 2)]
+    np.testing.assert_allclose(r[2] - 2 * r[1] + r[0], 0.0, atol=1e-6)
+    jt = np.asarray(GE.j_lagged_jvp(xj, P, L, jnp.asarray(t)))
+    np.testing.assert_allclose(r[1] - r[0], jt, rtol=1e-9, atol=1e-6)
+
+
+def test_lagged_stencil_jacobian_matches_dense() -> None:
+    G, P, x, unk = _lagged_problem()
+    xj = jnp.asarray(x)
+    L = GE.j_lag_state(xj, P)
+    col = K.stencil_cols(G.slot_flat, G.slot_of, G.strides, K.OFFS)
+    Jst = GS.stencil_jacobian(
+        xj, P, None, None, G.colour, G.ncolour, col, unk, G.S,
+        jvp=lambda t: GE.j_lagged_jvp(xj, P, L, t),
+    )
+    assert Jst.shape[2] == GE.NRES_L
+    Jd = np.asarray(jax.jacfwd(lambda y: GE.lagged_voxel_residuals(y, P, L))(xj))[
+        : G.S, :, : G.S
+    ]
+    v = np.random.default_rng(4).normal(size=G.S)
+    np.testing.assert_allclose(
+        K.jst_apply(Jst, col, v), np.einsum("skt,t->sk", Jd, v), atol=1e-9
+    )
+
+
+@pytest.mark.parametrize("ghosts", [False, True])
+@pytest.mark.parametrize("weighted", [False, True])
+def test_scaled_stencil_jacobian_matches_dense(weighted: bool, ghosts: bool) -> None:
+    """The Jacobian of the scaled residuals with ĝ = ĝ(τ) (estimator
+    "lm_scaled"), with and without the lagged 1/|∇τ| weights: the colouring
+    stays exact (each residual depends on τ within L1 distance 2), and Σ r²
+    is the voxel part of the scaled energy."""
+    G, P, x, unk = _lagged_problem(ghosts)
+    xj = jnp.asarray(x)
+    if weighted:
+        P = {**P, "wlag": GE.j_lag_weights(xj, P) * (1.0 + 0.1 * jnp.sin(jnp.arange(len(x))))}
+    col = K.stencil_cols(G.slot_flat, G.slot_of, G.strides, K.OFFS)
+    Jst = GS.stencil_jacobian(
+        xj, P, None, None, G.colour, G.ncolour, col, unk, G.S,
+        jvp=lambda t: GE.j_scaled_jvp(xj, P, t),
+    )
+    assert Jst.shape[2] == GE.NRES_L
+    Jd = np.asarray(jax.jacfwd(lambda y: GE.scaled_residuals(y, P))(xj))[: G.S, :, : G.S]
+    v = np.random.default_rng(6).normal(size=G.S)
+    np.testing.assert_allclose(
+        K.jst_apply(Jst, col, v), np.einsum("skt,t->sk", Jd, v), rtol=1e-9, atol=1e-9
+    )
+    parts = GE.j_scaled_parts(xj, P)
+    r = np.asarray(GE.j_scaled_residuals(xj, P))
+    vox = sum(float(parts[k]) for k in ("align", "smooth", "equi", "pull"))
+    np.testing.assert_allclose(float(np.sum(r * r)), vox, rtol=1e-12)
+
+
+def test_lagged_patch_terms_majorise_at_the_lag_point() -> None:
+    """t / t0 is the tangent of log t (equal at t0, above elsewhere), and the
+    IRLS weight makes tw0 d² / 2 the tangent quadratic of the Student-t."""
+    t0, t = 2.0, np.array([0.5, 1.0, 2.0, 3.0, 6.0])
+    tang = np.log(t0) + t / t0 - 1.0
+    assert np.all(tang >= np.log(t) - 1e-12)
+    psd, d0 = 0.3, 0.4
+    st = lambda d: (GE.NU + 1) / 2 * np.log1p(d**2 / (GE.NU * psd**2))  # noqa: E731
+    tw = (GE.NU + 1) / (GE.NU * psd**2 + d0**2)
+    d = np.linspace(-2, 2, 41)
+    maj = st(d0) + tw / 2 * (d**2 - d0**2)
+    assert np.all(maj >= st(d) - 1e-12)
+
+
+def test_set_setting_parses_booleans_and_rejects_bad_input() -> None:
+    """Command-line settings: "False", "false" and "0" give False, "True"
+    and "1" give True (bool("False") would be True); a misspelt boolean, an
+    unknown key and a value without "=" stop the run."""
+    s = GS.Settings()
+    for v, want in (("False", False), ("false", False), ("0", False), ("True", True), ("1", True)):
+        TP.set_setting(s, f"face_test={v}")
+        assert s.face_test is want
+    TP.set_setting(s, "lm_iters=7")
+    assert s.lm_iters == 7
+    for bad in ("face_test=ture", "no_such_setting=1", "face_test"):
+        with pytest.raises(SystemExit):
+            TP.set_setting(s, bad)

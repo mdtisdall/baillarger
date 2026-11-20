@@ -408,6 +408,7 @@ def main(argv: list[str] | None = None) -> None:
             VV.white_paths(white.surf, white.W.sidecar["Sources"], a.dseg, a.fixes)[0],
             lambda: lab.volume.source().arrays[0],  # type: ignore[attr-defined]
             white.W.affine,
+            [VC.echo_file(k, edir) for k in (2, 3)],
         )
     except ValueError as exc:
         ap.error(str(exc))

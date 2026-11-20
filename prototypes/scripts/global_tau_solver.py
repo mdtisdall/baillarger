@@ -89,8 +89,25 @@ class Settings:
     alpha: float = 8.0  # G2
     lm_iters: int = 30  # G4
     lm_tol: float = 1e-6  # G4: nats per unknown
+    # the damping update: "x10" (÷10 on accept, ×10 on reject, G4) or
+    # "nielsen" (by the gain ratio; Madsen, Nielsen and Tingleff 2004)
+    lm_update: str = "x10"
     lm_lambda0: float = 1e-3  # Marquardt start (relative to diag(JᵀJ))
     lm_retries: int = 10
+    #: "lm" (the original energy, LM), "lm_scaled" (LM on the scaled energy,
+    #: ĝ = ĝ(τ) not frozen: a descent method on the energy T5 uses) or
+    #: "lagged" (the lagged quadratic form, global_tau_energy; a fixed Σ
+    #: only): one PCG solve per outer step
+    estimator: str = "lm"
+    lag_iters: int = 30
+    #: "lm_scaled" only: 0 = the scaled terms as they are; n > 0 = n solves,
+    #: each with the lagged 1/|∇τ| weights renewed at its start
+    #: (global_tau_energy, "Lagged scale weights")
+    scale_lag_iters: int = 0
+    lag_tol: float = 1e-6  # max |Δτ| (mm) of an outer step
+    #: a fixed top surface Σ only: the rim voxels (no neighbour and no ghost
+    #: on some axis: the crop edge) stay at τ0, as in the ridge form
+    rim_fixed: bool = False
     cg_tol: float = 1e-3  # G4
     cg_iters: int = 200  # G4
     line_max: int = 32  # G6: lines longer than this are split
@@ -212,19 +229,27 @@ def stencil_jacobian(
     col: np.ndarray,
     unk: np.ndarray,
     S: int,
+    jvp: Any = None,
 ) -> np.ndarray:
     """The Jacobian of the voxel residuals in stencil storage (S, NOFF, NRES)
     by colouring (G5): one jvp per colour; two unknowns of one colour are more
-    than L1 4 apart, so they never share a residual."""
-    Jst = np.zeros((S, K.NOFF, GE.NRES))
+    than L1 4 apart, so they never share a residual. jvp(t) -> J t (S1, k)
+    replaces the residuals of the original energy (the lagged form)."""
+    if jvp is None:
+        jvp = lambda t: GE.j_residual_jvp(x, P, g0, fw, t)  # noqa: E731
+    Jst: np.ndarray | None = None
     S1 = len(unk)
     for c in range(ncolour):
         t = np.zeros(S1)
         t[:S] = (colour == c) & unk[:S]
         if not t.any():
             continue
-        jv = np.asarray(GE.j_residual_jvp(x, P, g0, fw, jnp.asarray(t)))[:S]
+        jv = np.asarray(jvp(jnp.asarray(t)))[:S]
+        if Jst is None:
+            Jst = np.zeros((S, K.NOFF, jv.shape[1]))
         K.scatter_colour(Jst, jv, col, colour, c, unk[:S])
+    if Jst is None:
+        Jst = np.zeros((S, K.NOFF, GE.NRES))
     return Jst
 
 
@@ -315,11 +340,43 @@ class Problem:
     nbv: np.ndarray | None = None
 
 
+@dataclass
+class SigmaTop:
+    """A fixed top surface Σ for the τ solve (T3, docs/plans/top-surface.md),
+    on the site's grid: the domain (voxel centres between the white surface
+    and Σ, plus the inner voxels), the inner voxels, the axis sides that
+    cross Σ before the neighbour's centre (ghost, (X, Y, Z, 3, 2)) with the
+    crossing's distance as a fraction of h (gdist, 0 < θ ≤ 1), and τ0."""
+
+    domain: np.ndarray
+    inner: np.ndarray
+    ghost: np.ndarray
+    gdist: np.ndarray
+    tau0: np.ndarray
+    #: the signed distance (mm, negative inside) of each voxel to Σ, for
+    #: the fade-in of the voxels next to Σ (global_tau_energy._fade); None:
+    #: no fade
+    sdist: np.ndarray | None = None
+    #: top_tau.sigma_top: inside Σ, the axis crossings of every voxel within
+    #: one voxel (theta, face: the ghosts' ∂E/∂Σ) and the signed-distance
+    #: band (band: the stop term and its ∂E/∂Σ)
+    geo: dict[str, Any] | None = None
+
+
 class GlobalTau:
     def __init__(
-        self, site: TP.Site, pt: TP.Patches, s: Settings, centre_vox: np.ndarray
+        self,
+        site: TP.Site,
+        pt: TP.Patches,
+        s: Settings,
+        centre_vox: np.ndarray,
+        sigma: SigmaTop | None = None,
     ):
+        """With sigma (T3): the domain, τ = 0 at the crossings of Σ (ghost
+        values at θh), no stop term (Σ is fixed), no contact faces from the
+        owners, and τ0 from sigma."""
         self.site, self.pt, self.s = site, pt, s
+        self.sigma = sigma
         self.log = Log()
         self.progress: Any = lambda m: None
         #: when set, a snapshot after each LM iteration of the global solves
@@ -327,7 +384,10 @@ class GlobalTau:
         self.snap_dir: Path | None = None
         self._snap_n = 0
         t0 = time.time()
-        self.domain, inner = make_domain(site, s)
+        if sigma is None:
+            self.domain, inner = make_domain(site, s)
+        else:
+            self.domain, inner = sigma.domain, sigma.inner
         self.G = G = Grid(self.domain)
         self.h = site.vox.astype(np.float64)
         self.htau = float(self.h.mean())
@@ -338,6 +398,14 @@ class GlobalTau:
         c[self.labels == TP.OUTSIDE] = GE.LOG_ODDS
         c[self.labels == TP.CORTEX] = -GE.LOG_ODDS
         c[self.inner] = 0.0
+        X0 = tuple(G.coords.T - PAD)
+        if sigma is not None:
+            c[:] = 0.0  # Σ is fixed: the stop term does not depend on τ
+            self.sigma_ghost: np.ndarray | None = sigma.ghost[X0]
+            self.sigma_gdist: np.ndarray | None = sigma.gdist[X0]
+            self.sigma_sdist: np.ndarray | None = None if sigma.sdist is None else sigma.sdist[X0]
+        else:
+            self.sigma_ghost = self.sigma_gdist = self.sigma_sdist = None
         self.c = c
         self.coh = site.coh[X].astype(np.float64)
         self.nhat = site.nhat[X].astype(np.float64)
@@ -380,10 +448,16 @@ class GlobalTau:
         self.owner_march = self.owner.copy()
         self.timing["march_s"] = time.time() - t1
         self.ridge = s.contacts == "ridge"
+        #: diagnostics: called after each accepted LM step with (iteration,
+        #: x before, x after, ∇E, free mask, the try's record, problem)
+        self.iter_hook: Any = None
         self.ridges: dict[str, np.ndarray] = {
             k: np.zeros((0, 3), np.int64) for k in RIDGE_CLASSES
         }
-        if self.ridge:
+        if sigma is not None:
+            self.faces = np.zeros((0, 3), np.int64)
+            self.tau = sigma.tau0[X0].astype(np.float64)
+        elif self.ridge:
             self.faces = np.zeros((0, 3), np.int64)
             seeds = self.seed_faces(s.tau0_faces) if s.tau0_faces else self.faces
             self.tau = self.tau_init(seeds)
@@ -499,7 +573,7 @@ class GlobalTau:
         so = G.sub_index(sub) if len(sub) < G.S else G.slot_of
         sf = G.slot_flat[sub]
         own = owner[sub]
-        if self.ridge:
+        if self.ridge or self.sigma is not None:
             faces = np.zeros((0, 3), np.int64)
         else:
             faces = K.contact_faces(
@@ -518,6 +592,12 @@ class GlobalTau:
         nbr_p[S:] = S
         nbv_p = padn(nbv[:S], False)
         gh_p = padn(gh[:S], False)
+        gd_p = np.full((S1, 3, 2), 0.5)
+        if self.sigma_ghost is not None:  # fixed top surface Σ (T3)
+            sg, sd = self.sigma_ghost[sub], self.sigma_gdist[sub]
+            gh_p[:S] |= sg
+            nbv_p[:S] &= ~sg  # a neighbour across Σ is not a neighbour
+            gd_p[:S] = np.where(sg, sd, gd_p[:S])
         valid = np.all((nbv_p | gh_p).any(2), 1)
         area_o = np.where(own >= 0, self.area[np.maximum(own, 0)], np.inf)
         wq = GE.W_EQ / (2 * area_o)
@@ -555,6 +635,7 @@ class GlobalTau:
             "nbv": nbv_p,
             "ridge": np.float64(1.0 if self.ridge else 0.0),
             "ghost": gh_p,
+            "gdist": gd_p,
             "h": self.h,
             "htau": self.htau,
             "valid": valid.astype(np.float64),
@@ -573,6 +654,8 @@ class GlobalTau:
             "psd": psd,
             "pm": pm,
         }
+        if self.sigma_sdist is not None:  # the fade-in next to Σ (T5)
+            P["sdist"] = padn(self.sigma_sdist[sub], -self.htau)
         P = {k: jnp.asarray(v) for k, v in P.items()}
         unk = np.zeros(S1, bool)
         unk[:S] = unk_g[sub]
@@ -607,14 +690,15 @@ class GlobalTau:
     # ------------------------------------------------------------ LM + PCG
 
     def _patch_jac(
-        self, pb: Problem, x: np.ndarray, tw: np.ndarray
+        self, pb: Problem, x: np.ndarray, tw: np.ndarray, t0: np.ndarray | None = None
     ) -> sparse.csr_matrix:
+        """With t0 (the lagged form): d r / d τ = -rw / t0 for every patch."""
         P = pb.P
         rslot = np.asarray(P["rslot"])
         rw = np.asarray(P["rw"])
         hr = np.asarray(P["hasroot"])
-        t = -np.sum(rw * x[rslot], 1)
-        live = t > 0.02
+        t = -np.sum(rw * x[rslot], 1) if t0 is None else t0
+        live = t > 0.02 if t0 is None else np.ones(len(t), bool)
         dr = np.where(live[:, None], -rw / np.maximum(t, 0.02)[:, None], 0.0)  # (T, 8)
         T = len(t)
         w_th = hr / (np.sqrt(2.0) * GE.THICK_SD)
@@ -640,8 +724,15 @@ class GlobalTau:
         nunk = max(int(unk.sum()), 1)
         P = pb.P
         lam = s.lm_lambda0
+        nu = 2.0  # Nielsen's damping update (Madsen, Nielsen and Tingleff 2004, eq. 3.16)
         x = x.copy()
         x[~unk] = np.where(np.arange(pb.S1)[~unk] < pb.S, x[~unk], 0.0)
+        # with a fixed Σ (T3) every domain voxel is inside Σ, so τ ≤ 0 is a
+        # bound: a projected LM (the voxels at the bound whose gradient points
+        # beyond it are held for that iteration; each step is clipped to it)
+        bounded = self.sigma is not None
+        if bounded:
+            x = np.where(unk, np.minimum(x, 0.0), x)
         olut = -np.ones((5, 5, 5), np.int64)
         for o, (a, b, c) in enumerate(K.OFFS):
             olut[a + 2, b + 2, c + 2] = o
@@ -649,10 +740,17 @@ class GlobalTau:
         e_first = None
         t_solve = time.time()
         snap = self.snap_dir is not None and "/" not in tag and pb.S == self.G.S
+        # the objective: the original energy (g0 frozen for the pull) or the
+        # scaled energy with ĝ(τ) (estimator "lm_scaled"); the same LM
+        scaled = s.estimator == "lm_scaled"
+
+        def efun(xx: Any) -> float:
+            return float(GE.j_scaled_energy(xx, P) if scaled else GE.j_energy(xx, P, g0))
+
         for it in range(s.lm_iters):
             ti = time.time()
             xj = jnp.asarray(x)
-            e, grad = GE.j_energy_grad(xj, P, g0)
+            e, grad = GE.j_scaled_energy_grad(xj, P) if scaled else GE.j_energy_grad(xj, P, g0)
             e = float(e)
             if e_first is None:
                 e_first = e
@@ -660,26 +758,28 @@ class GlobalTau:
                     self.snapshot(f"{tag}-lm00", x, self.owner, self._snap_faces(pb, x),
                                   {"tag": tag, "lm_iter": 0, "energy": e})
             grad = np.where(unk, np.asarray(grad), 0.0)
+            free = unk & ~((x >= 0.0) & (grad < 0.0)) if bounded else unk
             fw, tw = GE.j_weights(xj, P)
             Jst = stencil_jacobian(
-                xj, P, g0, fw, pb.colour, self.G.ncolour, pb.col, unk, pb.S
+                xj, P, g0, fw, pb.colour, self.G.ncolour, pb.col, free, pb.S,
+                jvp=(lambda t, xj=xj: GE.j_scaled_jvp(xj, P, t)) if scaled else None,
             )
             Jp = self._patch_jac(pb, x, np.asarray(tw))
             t_jac = time.time() - ti
             dvox = np.zeros(pb.S1)
             dvox[: pb.S] = K.jst_diag(Jst, pb.col, pb.S)
             dp = np.asarray(Jp.multiply(Jp).sum(0)).ravel()
-            D = np.where(unk, dvox + dp, 0.0)
+            D = np.where(free, dvox + dp, 0.0)
             D = np.maximum(D, 1e-12 * max(D.max(), 1e-12))
             ghat = np.asarray(GE.j_g0(xj, P))[: pb.S]
             nbr = np.asarray(P["nb"])[: pb.S + 1].copy()
             nbr[nbr >= pb.S] = pb.S
             nbv = np.asarray(P["nbv"])[: pb.S + 1].copy()
             nbv[pb.S] = False
-            nbv[: pb.S] &= unk[nbr[: pb.S]]
+            nbv[: pb.S] &= free[nbr[: pb.S]]
             lptr, lsl = K.column_lines(nbr, nbv, ghat, s.line_max)
-            keep = unk[lsl]
-            # keep only unknown slots in the lines (fixed slots: own singleton lines dropped)
+            keep = free[lsl]
+            # keep only freenown slots in the lines (fixed slots: own singleton lines dropped)
             lens = np.diff(lptr)
             cid = np.repeat(np.arange(len(lens)), lens)
             lsl2 = lsl[keep]
@@ -689,13 +789,13 @@ class GlobalTau:
             Jst_s = Jst
 
             def Av(v: np.ndarray, lam_: float) -> np.ndarray:
-                vv = np.where(unk, v, 0.0)
+                vv = np.where(free, v, 0.0)
                 r = K.jst_apply(Jst_s, pb.col, vv[: pb.S])
                 out = np.zeros(pb.S1)
                 out[: pb.S] = K.jst_apply_t(Jst_s, pb.col, r, pb.S)
                 out += Jp.T @ (Jp @ vv)
                 out += lam_ * D * vv
-                return np.where(unk, out, 0.0)
+                return np.where(free, out, 0.0)
 
             accepted = False
             tries = []
@@ -718,7 +818,10 @@ class GlobalTau:
                 )
                 t_fac = time.time() - tf
                 tc = time.time()
-                b = -grad
+                # Gauss-Newton: E = Σ r² (+ the log t term), ∇E = 2 Jᵀr and
+                # the Hessian ≈ 2 JᵀJ, so (JᵀJ + λD) dx = -∇E / 2
+                # the held voxels (at the bound) are not unknowns of this step
+                b = np.where(free, -0.5 * grad, 0.0)
                 n_it = [0]
                 A_op = spla.LinearOperator(
                     (pb.S1, pb.S1), matvec=lambda v, lam_=lam: Av(v, lam_), dtype=float
@@ -729,9 +832,9 @@ class GlobalTau:
                 ) -> np.ndarray:
                     z = np.zeros(pb.S1)
                     z[: pb.S] = K.line_solve(
-                        lptr2, lsl2, B_, bp_, np.where(unk, r, 0.0)[: pb.S]
+                        lptr2, lsl2, B_, bp_, np.where(free, r, 0.0)[: pb.S]
                     )
-                    return np.where(unk, z, 0.0)
+                    return np.where(free, z, 0.0)
 
                 M_op = spla.LinearOperator((pb.S1, pb.S1), matvec=prec, dtype=float)
                 dx, _ = spla.cg(
@@ -748,8 +851,10 @@ class GlobalTau:
                 bn = float(np.linalg.norm(b))
                 t_cg = time.time() - tc
                 rel = float(np.linalg.norm(r) / max(bn, 1e-300))
-                xn = x + np.where(unk, dx, 0.0)
-                e1 = float(GE.j_energy(jnp.asarray(xn), P, g0))
+                xn = x + np.where(free, dx, 0.0)
+                if bounded:  # projected step: τ ≤ 0 inside a fixed Σ
+                    xn = np.where(unk, np.minimum(xn, 0.0), xn)
+                e1 = efun(jnp.asarray(xn))
                 tries.append(
                     {
                         "lambda": lam,
@@ -773,17 +878,38 @@ class GlobalTau:
                         "accepted": e1 < e,
                     }
                 )
+                # gain ratio: actual / predicted decrease of the model
+                # the model L(dx) = E + ∇E·dx + dxᵀJᵀJdx, so with
+                # (JᵀJ + λD) dx = b = -∇E / 2: L(0) - L(dx) = dx·(λ D dx + b)
+                dxf = np.where(free, dx, 0.0)
+                pred = float(dxf @ (lam * D * dxf + b))
+                rho = (e - e1) / pred if pred > 0 else -1.0
+                tries[-1]["rho"] = rho
                 if e1 < e:
                     accepted = True
+                    step_mm = float(np.abs(xn - x).max())
+                    if self.iter_hook is not None:  # diagnostics only
+                        self.iter_hook(it, x, xn, grad, free, tries[-1], pb)
                     x = xn
-                    lam = max(lam / 10, 1e-12)
+                    if s.lm_update == "nielsen":
+                        lam = max(lam * max(1.0 / 3.0, 1.0 - (2.0 * rho - 1.0) ** 3), 1e-12)
+                        nu = 2.0
+                    else:
+                        lam = max(lam / 10, 1e-12)
                     break
-                lam *= 10
+                if s.lm_update == "nielsen":
+                    lam *= nu
+                    nu *= 2.0
+                else:
+                    lam *= 10
             its.append(
                 {
                     "iter": it,
                     "e": e,
                     "e_new": tries[-1]["e_trial"] if accepted else e,
+                    "step_mm": step_mm if accepted else 0.0,
+                    "cg_iters": tries[-1]["cg_iters"],
+                    "lambda": tries[-1]["lambda"],
                     "jac_s": t_jac,
                     "lines": int(len(lptr2) - 1),
                     "tries": tries,
@@ -798,7 +924,7 @@ class GlobalTau:
                               {"tag": tag, "lm_iter": it + 1, "energy": tries[-1]["e_trial"], "lambda": lam})
             if e - tries[-1]["e_trial"] < s.lm_tol * nunk:
                 break
-        e_end = float(GE.j_energy(jnp.asarray(x), P, g0))
+        e_end = efun(jnp.asarray(x))
         return x, {
             "tag": tag,
             "iters": its,
@@ -808,12 +934,124 @@ class GlobalTau:
             "s": time.time() - t_solve,
         }
 
+    def lagged_solve(
+        self, pb: Problem, x: np.ndarray, g0: Any, tag: str
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        """The lagged quadratic form: each outer step freezes ĝ0, s0, P0, t0
+        and tw0 at x (GE.lag_state), and minimises the quadratic model Q by
+        one PCG solve of (JᵀJ) dx = -∇Q / 2 (J is exact: the residuals are
+        affine in x) with the column-line preconditioner; then τ ≤ 0 by
+        projection. Each step logs the scaled energy (GE.scaled_energy: the
+        energy this estimator is for), the original energy (g0 as in
+        lm_solve) and Q before and after."""
+        s = self.s
+        unk = pb.unk
+        P = pb.P
+        x = x.copy()
+        x[~unk] = np.where(np.arange(pb.S1)[~unk] < pb.S, x[~unk], 0.0)
+        x = np.where(unk, np.minimum(x, 0.0), x)
+        olut = -np.ones((5, 5, 5), np.int64)
+        for o, (a, b, c) in enumerate(K.OFFS):
+            olut[a + 2, b + 2, c + 2] = o
+        its: list[dict[str, Any]] = []
+        t_solve = time.time()
+        e_first = float(GE.j_scaled_energy(jnp.asarray(x), P))
+        for it in range(s.lag_iters):
+            ti = time.time()
+            xj = jnp.asarray(x)
+            L = GE.j_lag_state(xj, P)
+            q0, gq = GE.j_lagged_energy_grad(xj, P, L)
+            gq = np.where(unk, np.asarray(gq), 0.0)
+            free = unk & ~((x >= 0.0) & (gq < 0.0))
+            Jst = stencil_jacobian(
+                xj, P, g0, None, pb.colour, self.G.ncolour, pb.col, free, pb.S,
+                jvp=lambda t, xj=xj, L=L: GE.j_lagged_jvp(xj, P, L, t),
+            )
+            Jp = self._patch_jac(pb, x, np.asarray(L["tw"]), np.asarray(L["t"]))
+            t_jac = time.time() - ti
+            dvox = np.zeros(pb.S1)
+            dvox[: pb.S] = K.jst_diag(Jst, pb.col, pb.S)
+            dp = np.asarray(Jp.multiply(Jp).sum(0)).ravel()
+            D = np.where(free, dvox + dp, 0.0)
+            reg = 1e-12 * max(D.max(), 1e-12)  # only against an exact null space
+            ghat = np.asarray(L["gh"])[: pb.S]
+            nbr = np.asarray(P["nb"])[: pb.S + 1].copy()
+            nbr[nbr >= pb.S] = pb.S
+            nbv = np.asarray(P["nbv"])[: pb.S + 1].copy()
+            nbv[pb.S] = False
+            nbv[: pb.S] &= free[nbr[: pb.S]]
+            lptr, lsl = K.column_lines(nbr, nbv, ghat, s.line_max)
+            keep = free[lsl]
+            lens = np.diff(lptr)
+            cid = np.repeat(np.arange(len(lens)), lens)
+            lsl2 = lsl[keep]
+            cnt = np.bincount(cid[keep], minlength=len(lens))
+            lptr2 = np.concatenate([[0], np.cumsum(cnt)]).astype(np.int64)
+
+            def Av(v: np.ndarray, Jst: np.ndarray = Jst, Jp: Any = Jp,
+                   free: np.ndarray = free) -> np.ndarray:
+                vv = np.where(free, v, 0.0)
+                out = np.zeros(pb.S1)
+                out[: pb.S] = K.jst_apply_t(Jst, pb.col, K.jst_apply(Jst, pb.col, vv[: pb.S]), pb.S)
+                out += Jp.T @ (Jp @ vv) + reg * vv
+                return np.where(free, out, 0.0)
+
+            tf = time.time()
+            B, bptr = K.line_blocks(
+                lptr2, lsl2, Jst, pb.col, pb.slot_flat, pb.slot_of, self.G.strides,
+                K.OFFS, olut, pb.coords, (dp + reg)[: pb.S],
+            )
+            t_fac = time.time() - tf
+
+            def prec(r: np.ndarray, B: np.ndarray = B, bptr: np.ndarray = bptr,
+                     free: np.ndarray = free) -> np.ndarray:
+                z = np.zeros(pb.S1)
+                z[: pb.S] = K.line_solve(lptr2, lsl2, B, bptr, np.where(free, r, 0.0)[: pb.S])
+                return np.where(free, z, 0.0)
+
+            # the held voxels (at the bound) are not unknowns of this step
+            b = np.where(free, -0.5 * gq, 0.0)
+            n_it = [0]
+            tc = time.time()
+            dx, _ = spla.cg(
+                spla.LinearOperator((pb.S1, pb.S1), matvec=Av, dtype=float),
+                b, rtol=s.cg_tol, atol=0.0, maxiter=s.cg_iters,
+                M=spla.LinearOperator((pb.S1, pb.S1), matvec=prec, dtype=float),
+                callback=lambda xk: n_it.__setitem__(0, n_it[0] + 1),
+            )
+            t_cg = time.time() - tc
+            rel = float(np.linalg.norm(b - Av(dx)) / max(np.linalg.norm(b), 1e-300))
+            xn = np.where(unk, np.minimum(x + np.where(free, dx, 0.0), 0.0), x)
+            q1 = float(GE.lagged_energy(jnp.asarray(xn), P, L))
+            e1 = float(GE.j_scaled_energy(jnp.asarray(xn), P))
+            e1o = float(GE.j_energy(jnp.asarray(xn), P, g0))
+            step = float(np.abs(xn - x).max())
+            its.append({
+                "iter": it, "q0": float(q0), "q1": q1, "e": e1, "e_orig": e1o, "step_mm": step,
+                "cg_iters": n_it[0], "cg_rel": rel, "jac_s": t_jac, "factor_s": t_fac,
+                "cg_s": t_cg, "s": time.time() - ti,
+                "s0_below_0.1": int(np.sum(free[: pb.S] & (np.asarray(L["s"])[: pb.S] < 0.1))),
+            })
+            self.log.solves.append({"tag": tag, "lag_iter": it, **its[-1]})
+            x = xn
+            if step < s.lag_tol:
+                break
+        return x, {
+            "tag": tag,
+            "iters": its,
+            "e0": e_first,
+            "e1": float(GE.j_scaled_energy(jnp.asarray(x), P)),
+            "n_unk": int(unk.sum()),
+            "s": time.time() - t_solve,
+        }
+
     # ------------------------------------------------------------ global step
 
     def global_problem(self, owner: np.ndarray) -> Problem:
         allm = np.ones(self.G.S, bool)
         pb = self.build(np.arange(self.G.S), allm, allm, owner)
-        if self.ridge:  # the rim voxels stay at τ0
+        if self.ridge or (self.sigma is not None and self.s.rim_fixed):
+            # the rim voxels stay at τ0
             pb.unk[: pb.S] &= np.asarray(pb.P["valid"])[: pb.S] > 0
         return pb
 
@@ -825,7 +1063,14 @@ class GlobalTau:
         x[: pb.S] = self.tau
         if g0 is None:
             g0 = GE.j_g0(jnp.asarray(x), pb.P)
-        x, info = self.lm_solve(pb, x, g0, tag)
+        if self.s.estimator == "lagged":
+            if self.sigma is None:
+                raise ValueError("the lagged estimator needs a fixed top surface Σ")
+            x, info = self.lagged_solve(pb, x, g0, tag)
+        elif self.s.estimator == "lm_scaled" and self.s.scale_lag_iters > 0:
+            x, info = self.reweighted_solve(pb, x, g0, tag)
+        else:
+            x, info = self.lm_solve(pb, x, g0, tag)
         self.tau = x[: pb.S].copy()
         if self.ridge:
             self.ridges = self.find_ridges(pb, x)
@@ -834,6 +1079,42 @@ class GlobalTau:
             self.faces = pb.faces
         self._pb, self._g0 = pb, g0
         return info, g0
+
+    def reweighted_solve(
+        self, pb: Problem, x: np.ndarray, g0: Any, tag: str
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        """lm_scaled with the lagged 1/|∇τ| weights: scale_lag_iters LM
+        solves, the weights renewed at the start of each. pb.P keeps the
+        last weights, so the energy after the solve is the weighted one.
+        Each round records how much the weights changed and how many slots
+        have a small |∇τ| (the weight grows as 1/|∇τ| there)."""
+        rounds: list[dict[str, Any]] = []
+        info: dict[str, Any] = {}
+        e0 = None
+        for k in range(self.s.scale_lag_iters):
+            w = np.asarray(GE.j_lag_weights(jnp.asarray(x), pb.P))
+            unk = pb.unk[: pb.S]
+            rw = None
+            if "wlag" in pb.P:
+                wp = np.asarray(pb.P["wlag"])[: pb.S][unk]
+                rw = np.abs(w[: pb.S][unk] / wp - 1.0)
+            s0 = 1.0 / w[: pb.S][unk]
+            pb.P["wlag"] = jnp.asarray(w)
+            x, info = self.lm_solve(pb, x, g0, f"{tag}/w{k}")
+            if e0 is None:
+                e0 = info["e0"]
+            rounds.append({
+                "e0": info["e0"], "e1": info["e1"], "lm_iters": len(info["iters"]), "s": info["s"],
+                "s0_median": float(np.median(s0)), "s0_below_0.1": int((s0 < 0.1).sum()),
+                "s0_min": float(s0.min()),
+                "w_change_median": None if rw is None else float(np.median(rw)),
+                "w_change_p99": None if rw is None else float(np.percentile(rw, 99)),
+            })
+        info = dict(info)
+        info["e0"] = e0
+        info["s"] = float(sum(r["s"] for r in rounds))
+        info["reweight"] = rounds
+        return x, info
 
     def slot_energies(
         self, pb: Problem, x: np.ndarray, g0: Any

@@ -403,10 +403,12 @@ def wm_topo(
     with its cavities filled and its handles removed
     (baillarger.handles.remove_handles). Cavity and handle fills become the
     WM label; each handle cut takes the label of the nearest voxel that is
-    outside the corrected mask and not a cut. Then the pieces of the mask
-    below CRUMB_MM3 (small_pieces) are removed: each of their voxels takes
-    the most common label of its 26-neighbours outside the mask, layer by
-    layer from the outside in (relabel_small_pieces). The corrected
+    outside the corrected mask and not a cut. The pieces of the mask below
+    CRUMB_MM3 (small_pieces) are removed after the cavity fill and before
+    the handles (so that a handle fill of one piece cannot touch them), and
+    again after the handles (pieces that the cuts made): each of their
+    voxels takes the most common label of its 26-neighbours outside the
+    mask, layer by layer from the outside in (relabel_small_pieces). The corrected
     segmentation's voxels with a filled label are exactly the corrected
     mask. Raises RuntimeError if that mask
     still has a handle or a cavity (b1 or b2 not 0), which a fill of one
@@ -451,22 +453,30 @@ def wm_topo(
     vq = np.stack(np.unravel_index(ver_idx, shape), 1) - lo
     vq = vq[np.all((vq >= 0) & (vq < np.asarray(x.shape)), axis=1)]
     verified[tuple(vq.T)] = True
+    a = a0[box]
+    labels = a.copy()
+    labels[cav] = wm_label
+    # the small pieces before the handles, from the labels above, layer by
+    # layer: a handle fill of another piece can then not touch them
+    small0, piece0 = small_pieces(x, voxel_mm)
+    n_small0 = int(piece0.max()) if len(piece0) else 0
+    relabel_small_pieces(labels, small0, filled, lo)
+    x[small0] = False
+    lap("small pieces before")
     r = remove_handles(x, verified)
     del verified, vq
     obj = r.obj
     lap("handles")
     cut, fill = x & ~obj, obj & ~x
-    a = a0[box]
-    labels = a.copy()
-    labels[cav | fill] = wm_label
+    labels[fill] = wm_label
     relabel_cuts(labels, cut, ~obj & ~cut, voxel_mm)
     lap("relabel cuts")
-    # the small pieces, from the labels above, layer by layer
-    small, piece = small_pieces(obj, voxel_mm)
-    n_small = int(piece.max()) if len(piece) else 0
-    relabel_small_pieces(labels, small, filled, lo)
-    obj[small] = False
-    lap("small pieces")
+    # the small pieces that the cuts made, from the labels above
+    small1, piece1 = small_pieces(obj, voxel_mm)
+    n_small1 = int(piece1.max()) if len(piece1) else 0
+    relabel_small_pieces(labels, small1, filled, lo)
+    obj[small1] = False
+    lap("small pieces after")
     if not np.array_equal(np.isin(labels, filled), obj):
         raise AssertionError("the corrected labels do not give the corrected mask")
     after = kuhn_betti(obj)
@@ -504,18 +514,24 @@ def wm_topo(
     cav_id = cav_lab[cav_lab > 0]
     for g in groups(cav_id, n_cav):
         steps.append(("cavity_fill", flat_of(cav_vox[g]), None))
-    sp_vox = np.stack(small, axis=1)
-    sp_groups = groups(piece, n_small)
-    for g in sp_groups:
-        steps.append(("small_piece", flat_of(sp_vox[g]), None))
+    sp_pieces: list[Int] = []  # the voxels (N, 3, in the box) of each small piece
+    for small, piece, n in ((small0, piece0, n_small0), (small1, piece1, n_small1)):
+        sp_vox = np.stack(small, axis=1)
+        sp_pieces += [sp_vox[g] for g in groups(piece, n)]
+    for v in sp_pieces:
+        steps.append(("small_piece", flat_of(v), None))
+    n_small = len(sp_pieces)
     # the fix that changed each voxel last, in the order that the steps run:
-    # the answers, the cavity fill, the handle moves, the small pieces
+    # the answers, the cavity fill, the small pieces before the handles, the
+    # handle moves, the small pieces after them
     n_move = len(r.moves)
+    s0 = n_manual + n_move + n_cav
     run = (
         list(range(n_manual))
-        + list(range(n_manual + n_move, n_manual + n_move + n_cav))
+        + list(range(n_manual + n_move, s0))
+        + list(range(s0, s0 + n_small0))
         + list(range(n_manual, n_manual + n_move))
-        + list(range(n_manual + n_move + n_cav, len(steps)))
+        + list(range(s0 + n_small0, len(steps)))
     )
     own_idx = [steps[s][1] for s in run] or [np.zeros(0, np.int64)]
     own_fix = [np.full(len(steps[s][1]), s + 1, np.int64) for s in run]
@@ -591,13 +607,12 @@ def wm_topo(
         )
         for mv in r.moves
     ]
-    sp = sp_vox + lo
-    for g in sp_groups:
+    for v in sp_pieces:
         moves.append(
             dict(
                 Kind="small_piece",
-                Voxels=len(g),
-                Centre=np.round(sp[g].mean(0)).astype(int).tolist(),
+                Voxels=len(v),
+                Centre=np.round(v.mean(0) + lo).astype(int).tolist(),
             )
         )
     return WMTopo(

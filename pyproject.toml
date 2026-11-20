@@ -85,7 +85,12 @@ testpaths = [
   "prototypes/scripts/test_pia_lib.py",
   "prototypes/scripts/test_pial_height.py",
   "prototypes/scripts/test_pial_solver.py",
+  "prototypes/scripts/test_remesh_seq.py",
+  "prototypes/scripts/test_sigma_mesh.py",
+  "prototypes/scripts/test_top_solve.py",
   "prototypes/scripts/test_top_stage_lib.py",
+  "prototypes/scripts/test_top_surface.py",
+  "prototypes/scripts/test_top_tau.py",
   "prototypes/scripts/test_warp_cut.py",
   "prototypes/scripts/test_warp_qpbo.py",
 ]
