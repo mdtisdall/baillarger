@@ -1692,3 +1692,39 @@ def check_mesh(
         out.gap, out.gap_pairs, _ = gap_check(t, Vf, gap, fac)
         out.gap_facing = fac
     return out
+
+
+# ------------------------------------------------------------ quality measures
+#
+# Measures, not checks: they say how good a valid mesh is (slivers, roughness).
+# The Σ start, T5 and the τ shell each had their own copy of these.
+
+
+def face_angles(V: npt.ArrayLike, F: npt.ArrayLike) -> Float:
+    """The angles (radians) of each face at its three corners, (k, 3);
+    corner j is at vertex F[:, j]. 0 at a corner with an edge of zero
+    length."""
+    Vf = np.asarray(V, np.float64)
+    Fi = np.asarray(F, np.int64)
+    out: Float = np.zeros(Fi.shape)
+    for j in range(3):
+        a, b, c = Vf[Fi[:, j]], Vf[Fi[:, (j + 1) % 3]], Vf[Fi[:, (j + 2) % 3]]
+        u, w = b - a, c - a
+        den = np.linalg.norm(u, axis=1) * np.linalg.norm(w, axis=1)
+        cs = np.einsum("ij,ij->i", u, w) / np.maximum(den, 1e-300)
+        out[:, j] = np.where(den > 0, np.arccos(np.clip(cs, -1.0, 1.0)), 0.0)
+    return out
+
+
+def edge_dihedrals(V: npt.ArrayLike, F: npt.ArrayLike) -> tuple[Float, Float]:
+    """For each edge with exactly two faces (edge_face_pairs' order): the
+    angle (degrees) between the two faces' normals (0: flat, 180: folded
+    back; NaN where a face has zero area), and the edge's midpoint. A crease
+    (shared_edge_folds) is an angle of at least arccos(FOLD_COS)."""
+    Vf = np.asarray(V, np.float64)
+    Fi = np.asarray(F, np.int64)
+    E, P = edge_face_pairs(Fi, len(Vf))
+    c = pair_cosines(Vf, Fi, P)
+    ang: Float = np.degrees(np.arccos(np.clip(c, -1.0, 1.0)))
+    mid: Float = 0.5 * (Vf[E[:, 0]] + Vf[E[:, 1]])
+    return ang, mid

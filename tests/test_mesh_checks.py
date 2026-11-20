@@ -500,3 +500,20 @@ def test_edge_folds_and_pair_cosines_agree_with_shared_edge_folds() -> None:
     V[3] = V[0]  # zero area: NaN cosine, no fold
     assert np.isnan(C.pair_cosines(V, F, P)).all()
     assert not C.edge_folds(V, F, P, fold_cos=1.0).any()
+
+
+def test_face_angles_and_edge_dihedrals() -> None:
+    # a right isosceles triangle, and a second face hinged on edge 0-1 whose
+    # normal is 30 degrees from the first one's
+    t = np.radians(30.0)
+    V = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0.5, -np.cos(t), np.sin(t)]])
+    F = np.array([[0, 1, 2], [1, 0, 3]], np.int64)
+    A = np.degrees(C.face_angles(V, F))
+    np.testing.assert_allclose(A[0], [90.0, 45.0, 45.0])
+    np.testing.assert_allclose(A.sum(1), 180.0)
+    ang, mid = C.edge_dihedrals(V, F)
+    np.testing.assert_allclose(ang, [30.0])
+    np.testing.assert_allclose(mid, [[0.5, 0.0, 0.0]])
+    V[3] = V[0]  # zero area: NaN dihedral; the zero-length corner gives 0
+    assert np.isnan(C.edge_dihedrals(V, F)[0]).all()
+    assert C.face_angles(V, F)[1].min() == 0.0
