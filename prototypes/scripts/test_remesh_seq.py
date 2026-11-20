@@ -1,6 +1,7 @@
 """Tests for remesh_seq: a sphere, a U-shaped plate whose inner faces are
-closer than the target edge (the remesher must keep them apart), and an
-open sheet with a box rim (corners stay, the rim stays on the box)."""
+closer than the target edge (the remesher must keep them apart), an open
+sheet with a box rim (corners stay, the rim stays on the box), and a slab
+with a thin fin (the normal check and the outward bound)."""
 
 from __future__ import annotations
 
@@ -74,9 +75,11 @@ def test_closed_meshes_reach_the_target_and_stay_valid(mesh: str, target: float)
     last = log[-1]
     assert last["edge_in_range"] > 0.85, last
     assert len(F) < len(F0) / 4  # coarser
-    # every vertex is on the white surface
+    # the smoothing is not projected: the vertices stay near the white
+    # surface, within half the target (it rounds the U plate's 90-degree
+    # box edges by about a third of the target; no check bounds it here)
     _, d, _ = rm.white.project(V)
-    assert d.max() < 1e-6
+    assert d.max() < target / 2, d.max()
     if mesh == "u_plate":
         # the inner faces are closer than the target: some operations there
         # were refused, and the two plates stay apart
@@ -102,28 +105,34 @@ def test_an_open_sheet_keeps_its_corners_and_its_rim_on_the_box() -> None:
 
 
 def finger() -> tuple[np.ndarray, np.ndarray]:
-    """A slab with a thin fin on top (3 voxels thick, 9 tall): the fin is
+    """A slab with a thin fin on top (3 voxels thick, 6 tall): the fin is
     narrower than the target edge."""
-    a = np.zeros((34, 30, 30))
-    a[4:30, 4:26, 4:10] = 1
-    a[10:24, 13:16, 10:19] = 1
+    a = np.zeros((24, 20, 22))
+    a[3:21, 3:17, 3:8] = 1
+    a[7:17, 9:12, 8:14] = 1
     v, f = marching_tetrahedra(a, 0.5)
     return v.astype(np.float64), f.astype(np.int64)
 
 
-@pytest.mark.parametrize("eps", [None, 0.5])
-def test_the_no_cut_check_keeps_a_thin_fin(eps: float | None) -> None:
-    """Target 5 on a slab with a fin 3 voxels thick: without the check, Σ
-    cuts into the fin by more than a voxel; with it, no white vertex is
-    more than eps inside Σ, and Σ stays valid."""
+@pytest.mark.parametrize("check", [False, True])
+def test_the_normal_check_keeps_orientation_and_bounds_outward(check: bool) -> None:
+    """Target 4 on a slab with a fin 3 voxels thick. Without the checks,
+    the 3D smoothing moves Σ more than a voxel outward. With theta 30
+    degrees and d_out 0.5: no white vertex is more than 0.5 inside Σ's
+    outer side, no face is farther from its white normals than the worst
+    face of the start, and some operations are refused by the check."""
     V0, F0 = finger()
-    white = RS.White(V0, F0, np.full(len(V0), 5.0))
-    rm = RS.Remesher(white, V0.copy(), F0.copy(), GAP, eps=eps)
-    log = RS.remesh(rm, 1.0, max_passes=10)
+    white = RS.White(V0, F0, np.full(len(V0), 4.0))
+    kw = {"theta_deg": 30.0, "d_out": 0.5} if check else {}
+    rm = RS.Remesher(white, V0.copy(), F0.copy(), GAP, **kw)
+    start = rm.measures(1.0)
+    log = RS.remesh(rm, 1.0, max_passes=4)
     assert_valid(rm)
-    inside = log[-1]["inside_max_vox"]
-    if eps is None:
-        assert inside > 1.0, log[-1]
+    last = log[-1]
+    assert last["faces"] < len(F0) / 3, last  # coarser
+    if not check:
+        assert last["outward_max_vox"] > 1.0, last
     else:
-        assert inside <= eps + 1e-9, log[-1]
-        assert any("nocut" in k for r in log for k in r["refused"])
+        assert last["outward_max_vox"] <= 0.5 + 1e-9, last
+        assert last["face_angle_p50_90_99_max"][3] <= start["face_angle_p50_90_99_max"][3] + 1e-6, (start, last)
+        assert any(k.endswith("_normal") for r in log for k in r["refused"])

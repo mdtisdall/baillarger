@@ -5,8 +5,8 @@ top_surface.remesh).
 
 The mesh lives in a mesh_checks.Checker. Each operation is one
 Checker.propose(); the operation is kept (commit) only if it makes no gap
-violation, crossing, shared-vertex fold or crease, and no face turned
-against the white surface. Else it is undone (rollback) and counted as
+violation, crossing, shared-vertex fold or crease, no face turned
+against the white surface, and passes the normal check (below). Else it is undone (rollback) and counted as
 refused, with its reason. So no batch undo, no retries, no deadlock.
 
 One pass, in the order of Botsch & Kobbelt:
@@ -17,8 +17,7 @@ One pass, in the order of Botsch & Kobbelt:
      not when an edge of the result would be longer than 4/3 × target;
   3. flip the interior edges whose flip brings the valences nearer to 6
      (4 on the rim);
-  4. a tangential relaxation of each interior vertex toward the mean of its
-     neighbours, then projected onto the white surface.
+  4. a 3D smoothing of each interior vertex (see below), not projected.
 target = the mean of the two ends' targets; a vertex's target is the
 sizing field at its nearest white vertex (sigma_mesh.sizing).
 
@@ -26,16 +25,31 @@ The fold reference (user, 2026-11-19: "White normal"): a face is turned
 when its normal is at 90 degrees or more to the normal of the white face
 at the closest point to its centroid.
 
-The no-cut check (user, 2026-11-19: "No-cut check only", after the review
-of the thin WM fingers that the coarsening cut off): with eps given, an
-operation is also refused when it leaves a white vertex more than eps from
-Σ with Σ on its WM side (Σ cuts into the white surface). Σ may lie farther
-than eps on the outer side (across a sulcus). Each white vertex keeps its
-signed distance to Σ (+ outside, - inside; 0 at the start, where Σ is the
-white mesh); after an edit, the white vertices near the old and the new
-faces get theirs again (Checker.closest, within a search radius of twice
-the largest edge). A white vertex with no Σ within that radius keeps its
-old distance if it was more than eps outside, else it is cut.
+The normal check (user, 2026-11-19: "inward is actually fine ... Pushing
+outward (into GM) is worse ... having the faces correctly oriented is more
+important than precise location"; theta 30 degrees, outward 0.5 voxels).
+It replaces the no-cut check. Each white vertex is assigned to its closest
+Σ face and keeps its signed distance to Σ (+: Σ is outward of it, toward
+GM). A Σ face stands for the white vertices assigned to it: S, the sum of
+their area-weighted white normals. An operation is refused ("normal") when
+a face it changes, or a face whose assigned white vertices it changes, is
+more than theta from its S, and the worst such face is worse than before
+the operation (so a start that already exceeds theta somewhere does not
+block every operation there). It is refused ("outward") when it leaves a
+white vertex more than d_out inside Σ's outer side (Σ outward of it), and
+farther than before. Inward offsets are free. After an edit, the white
+vertices near the old and the new faces (within the faces' radius + 2 h +
+d_out) and the white vertices assigned to the removed or moved faces get
+their closest face again (Checker.closest). A farther white vertex keeps
+its face: the assignment is exact only near the edit. A face with no white
+vertex assigned keeps only the turned test.
+
+The relaxation is a 3D smoothing (Taubin 1995: a Jacobi sweep toward the
+mean of the neighbours with lambda = 0.5, then one with mu = -0.53, which
+does not shrink the surface), with no projection onto the white surface.
+(A Gauss-Seidel sweep, each vertex toward neighbours already moved, shrank
+a sphere of radius 10 by about 0.1 per pass.) Splits and
+collapses still project their new points onto the white surface.
 
 The rim (the crop's boundary) does not relax. Corners stay where they are.
 A collapse of a rim edge or of a spoke (one end on the rim) moves the
@@ -149,12 +163,18 @@ class Remesher:
 
     def __init__(self, white: White, V: np.ndarray, F: np.ndarray, gap: float,
                  fold_cos: float = MC.FOLD_COS, corner: np.ndarray | None = None,
-                 eps: float | None = None):
-        self.white, self.gap, self.eps = white, gap, eps
-        #: the white vertices' signed distances to Σ (the no-cut check)
-        self.wd = np.zeros(len(white.V))
-        self.wn = MC.vertex_normals(white.V, white.F)
+                 theta_deg: float | None = None, d_out: float | None = None,
+                 h: float = 1.0):
+        self.white, self.gap = white, gap
+        self.cos_t = None if theta_deg is None else float(np.cos(np.radians(theta_deg)))
+        self.d_out = d_out
+        self.rn = 2.0 * h + (d_out or 0.0)
         self.rs = 2.0 * HI * float(white.size.max())
+        self.wn = MC.vertex_normals(white.V, white.F)
+        cr = MC.face_normals(white.V, white.F)
+        self.Wn = np.zeros((len(white.V), 3))  # area-weighted white normals
+        for k in range(3):
+            np.add.at(self.Wn, white.F[:, k], cr)
         top = MC.Topology.of(F, len(V))
         self.chk = MC.Checker(top, np.asarray(V, np.float64), gap, fold_cos=fold_cos)
         rim, E = rim_of(top.F, len(V))
@@ -162,6 +182,23 @@ class Remesher:
         self.corner = angle_corners(V, rim, E) if corner is None else corner & rim
         self.t = white.target(V)
         self.refused: Counter[str] = Counter()
+        self.places: np.ndarray = np.zeros((0, 3))
+        # the assignment of white vertices to Σ faces
+        nw = len(white.V)
+        self.wf = np.full(nw, -1, np.int64)
+        self.wd = np.zeros(nw)
+        self.Sf = np.zeros((len(self.chk.F), 3))
+        self.fw: dict[int, set[int]] = {}
+        if self.cos_t is not None or self.d_out is not None:
+            _, _, f = self.chk.closest(white.V, self.rs)
+            self.wf[:] = f
+            for w in np.flatnonzero(f >= 0):
+                self.Sf[f[w]] += self.Wn[w]
+                self.fw.setdefault(int(f[w]), set()).add(int(w))
+
+    @property
+    def checking(self) -> bool:
+        return self.cos_t is not None or self.d_out is not None
 
     # ------------------------------------------------------------ helpers
 
@@ -172,6 +209,8 @@ class Remesher:
             self.rim = np.r_[self.rim, np.zeros(k, bool)]
             self.corner = np.r_[self.corner, np.zeros(k, bool)]
             self.t = np.r_[self.t, np.zeros(k)]
+        if len(self.Sf) < len(self.chk.F):
+            self.Sf = np.r_[self.Sf, np.zeros((len(self.chk.F) - len(self.Sf), 3))]
 
     def nbrs(self, v: int) -> set[int]:
         F = self.chk.F
@@ -195,39 +234,116 @@ class Remesher:
         return self.chk.V[self.chk.F[faces]]
 
     def _near_white(self, T: np.ndarray) -> np.ndarray:
-        """The white vertices within eps of the triangles T (a superset:
-        within eps + the triangle's radius of its centroid)."""
+        """The white vertices within rn of the triangles T (a superset:
+        within rn + the triangle's radius of its centroid)."""
         if not len(T):
             return np.zeros(0, np.int64)
         C = T.mean(1)
-        R = np.linalg.norm(T - C[:, None], axis=2).max(1) + self.eps
+        R = np.linalg.norm(T - C[:, None], axis=2).max(1) + self.rn
         lists = self.white.vtree.query_ball_point(C, R)
         return np.unique(np.fromiter((j for x in lists for j in x), np.int64))
 
-    def _cut(self, old: np.ndarray, new: np.ndarray) -> tuple[bool, np.ndarray, np.ndarray]:
-        """The no-cut check after an edit: (cut, the white vertices
-        checked, their new signed distances)."""
-        w = np.union1d(self._near_white(old), self._near_white(new))
+    def _cos(self, faces: np.ndarray, S: np.ndarray) -> np.ndarray:
+        """cos(face normal, S) per face; 1 where S is zero (nothing assigned)."""
+        if not len(faces):
+            return np.ones(0)
+        n = MC.face_normals(self.chk.V, self.chk.F[faces])
+        ns = np.linalg.norm(n, axis=1) * np.linalg.norm(S, axis=1)
+        return np.where(np.linalg.norm(S, axis=1) > 0, (n * S).sum(1) / np.maximum(ns, 1e-300), 1.0)
+
+    def _normal_check(self, ofaces: np.ndarray, cos_old: dict[int, float], old: np.ndarray,
+                      r: MC.EditCheck, faces: np.ndarray, removed: set[int]) -> tuple[str, Any]:
+        """After a proposed edit: the new assignment of the affected white
+        vertices and the reason to refuse ("" if none)."""
+        chk = self.chk
+        self._grow()
+        w = np.union1d(self._near_white(old), self._near_white(self._tris(faces)))
+        extra = [x for f in ofaces for x in self.fw.get(int(f), ())]
+        w = np.union1d(w, np.asarray(extra, np.int64))
         if not len(w):
-            return False, w, np.zeros(0)
+            return "", None
         W = self.white.V[w]
-        Q, d, _ = self.chk.closest(W, self.rs)
+        # the closest face within r is the closest face: search a small
+        # radius first, then larger ones for the misses only
+        T = self._tris(faces)
+        r1 = self.rn + 2.0 * float(np.linalg.norm(T - T.mean(1)[:, None], axis=2).max()) if len(T) else self.rn
+        Q, d, f = chk.closest(W, r1)
+        for rr in (self.rs, None):
+            miss = ~np.isfinite(d)
+            if not miss.any():
+                break
+            if rr is None:
+                rr = float(np.abs(self.wd[w[miss]]).max()) + self.rs
+            Q2, d2, f2 = chk.closest(W[miss], rr)
+            Q[miss], d[miss], f[miss] = Q2, d2, f2
         found = np.isfinite(d)
         side = np.where(found, ((Q - W) * self.wn[w]).sum(1), 0.0)
         sd = np.where(found, np.where(side >= 0, d, -d), self.wd[w])
-        cut = (found & (d > self.eps) & (side < 0)) | (~found & (self.wd[w] <= self.eps))
-        return bool(cut.any()), w, sd
+        f = np.where(found, f, -1)
+        if self.d_out is not None:
+            lim = np.maximum(self.d_out, np.maximum(self.wd[w], 0.0))
+            if (found & (sd > lim + 1e-12)).any():
+                return "outward", None
+        # tentative sums
+        new_ids = {int(x) for x in r.new_faces}
+        S: dict[int, np.ndarray] = {x: np.zeros(3) for x in removed | new_ids}
+        for j, x in enumerate(w):
+            fo, fn = int(self.wf[x]), int(f[j])
+            if fo == fn and fo not in removed and fo not in new_ids:
+                continue
+            if fo >= 0 and fo not in removed:
+                S.setdefault(fo, self.Sf[fo].copy())
+                S[fo] = S[fo] - self.Wn[x]
+            if fn >= 0:
+                S.setdefault(fn, self.Sf[fn].copy())
+                S[fn] = S[fn] + self.Wn[x]
+        for x in faces:
+            S.setdefault(int(x), self.Sf[int(x)].copy())
+        live = [x for x in S if chk.F[x, 0] >= 0]
+        if self.cos_t is not None and live:
+            la = np.asarray(live, np.int64)
+            after = self._cos(la, np.array([S[x] for x in live]))
+            before = [cos_old[x] if x in cos_old else None for x in live]
+            other = [x for x, b in zip(live, before, strict=True) if b is None and x not in new_ids]
+            if other:
+                cb = self._cos(np.asarray(other, np.int64), self.Sf[other])
+                for x, c in zip(other, cb, strict=True):
+                    cos_old[x] = float(c)
+            worst_before = min([*cos_old.values(), 1.0])
+            if after.min() < min(self.cos_t, worst_before) - 1e-12:
+                return "normal", None
+        return "", (w, f, sd, S, removed)
+
+    def _apply(self, state: Any) -> None:
+        w, f, sd, S, removed = state
+        for x in removed:
+            self.fw.pop(x, None)
+        for j, x in enumerate(w):
+            fo, fn = int(self.wf[x]), int(f[j])
+            if fo >= 0 and fo not in removed:
+                s = self.fw.get(fo)
+                if s is not None:
+                    s.discard(int(x))
+            if fn >= 0:
+                self.fw.setdefault(fn, set()).add(int(x))
+        self.wf[w] = f
+        self.wd[w] = sd
+        for x, v in S.items():
+            self.Sf[x] = v
 
     def _try(self, kind: str, **edit: Any) -> MC.EditCheck | None:
         """Propose an edit; keep it if every check passes (returns its
         check), else undo it (None)."""
         mv0 = [int(v) for v in edit.get("move", [])]
-        if self.eps is not None:
-            ofaces = np.unique(np.r_[np.asarray(edit.get("remove_faces", []), np.int64),
+        if self.checking:
+            rem = [int(x) for x in edit.get("remove_faces", [])]
+            ofaces = np.unique(np.r_[np.asarray(rem, np.int64),
                                      *[self.chk.faces_of(v) for v in mv0]]).astype(np.int64)
             old = self._tris(ofaces)
+            cos_old = dict(zip((int(x) for x in ofaces),
+                               (float(c) for c in self._cos(ofaces, self.Sf[ofaces])), strict=True))
         r = self.chk.propose(**edit)
-        reason = ""
+        reason, state = "", None
         if r.gap_pairs:
             reason = "gap"
         elif r.intersecting_pairs or r.vertex_fold_pairs:
@@ -236,21 +352,19 @@ class Remesher:
             reason = "crease"
         else:
             mv = np.asarray(edit.get("move", []), np.int64)
-            faces = np.r_[r.new_faces, *[self.chk.faces_of(int(v)) for v in mv]].astype(np.int64)
-            if self.turned(np.unique(faces)):
+            faces = np.unique(np.r_[r.new_faces, *[self.chk.faces_of(int(v)) for v in mv]].astype(np.int64))
+            if self.turned(faces):
                 reason = "turned"
-            elif self.eps is not None:
-                cut, w, sd = self._cut(old, self._tris(np.unique(faces)))
-                if cut:
-                    reason = "nocut"
+            elif self.checking:
+                reason, state = self._normal_check(ofaces, cos_old, old, r, faces, set(rem))
         if reason:
             self.chk.rollback()
             self.refused[f"{kind}_{reason}"] += 1
             return None
         self.chk.commit()
-        if self.eps is not None:
-            self.wd[w] = sd
         self._grow()
+        if state is not None:
+            self._apply(state)
         return r
 
     def _edges(self) -> tuple[np.ndarray, np.ndarray]:
@@ -364,25 +478,16 @@ class Remesher:
             return None
         return self._try("flip", remove_faces=[f, g], add_faces=[[c, a, d], [c, d, b]]) is not None
 
-    def relax(self, v: int) -> bool:
+    def relax(self, v: int, target: np.ndarray) -> bool:
+        """Move v to target (3D, no projection)."""
         if self.rim[v]:
             return False
-        nb = list(self.nbrs(v))
-        if not nb:
+        p = self.chk.V[v]
+        if np.linalg.norm(target - p) < 1e-9 * self.t[v]:
             return False
-        V = self.chk.V
-        p = V[v]
-        q = V[nb].mean(0)
-        _, _, wf = self.white.project(p[None])
-        n = self.white.N[wf[0]]
-        d = q - p
-        d -= (d @ n) * n
-        new = self.white.project((p + d)[None])[0][0]
-        if np.linalg.norm(new - p) < 1e-9 * self.t[v]:
+        if self._try("relax", move=[v], to=[target]) is None:
             return False
-        if self._try("relax", move=[v], to=[new]) is None:
-            return False
-        self.t[v] = float(self.white.target(new[None])[0])
+        self.t[v] = float(self.white.target(target[None])[0])
         return True
 
     # ------------------------------------------------------------ passes
@@ -428,11 +533,23 @@ class Remesher:
             n += bool(self.flip(a, b))
         return n
 
-    def relax_all(self) -> int:
-        live = self.chk.F[self.chk.F[:, 0] >= 0]
+    def relax_all(self, lam: float = 0.5, mu: float = -0.53) -> int:
+        """One Taubin step: a sweep with lam, then one with mu. Each sweep
+        is a Jacobi step: every vertex moves toward the mean of its
+        neighbours' positions at the start of the sweep (the form that does
+        not shrink); the moves are then tried one at a time."""
         n = 0
-        for v in np.unique(live):
-            n += self.relax(int(v))
+        for step in (lam, mu):
+            live = self.chk.F[self.chk.F[:, 0] >= 0]
+            vs = [int(v) for v in np.unique(live) if not self.rim[v]]
+            V = self.chk.V
+            tg = {}
+            for v in vs:
+                nb = list(self.nbrs(v))
+                if nb:
+                    tg[v] = V[v] + step * (V[nb].mean(0) - V[v])
+            for v, q in tg.items():
+                n += self.relax(v, q)
         return n
 
     def measures(self, h: float) -> dict[str, Any]:
@@ -442,9 +559,6 @@ class Remesher:
         nb = MC.vertex_neighbours(F, len(V))[0]
         deg = np.diff(nb)
         ang = np.degrees(SM._angles(V, F).min(1))
-        q, dev, _ = SM.closest_on(V, F, cKDTree(V[F].mean(1)), self.white.V, 24)
-        inside = ((q - self.white.V) * self.wn).sum(1) < 0
-        din = np.where(inside, dev, 0.0) / h
         return {
             "vertices": len(V),
             "faces": len(F),
@@ -452,11 +566,64 @@ class Remesher:
             "edge_in_range": round(float(((r >= LO) & (r <= HI)).mean()), 4),
             "valence_interior": {int(k): int(c) for k, c in zip(*np.unique(deg[~rim], return_counts=True), strict=True)},
             "min_angle_deg_p1_5_50": [round(float(x), 1) for x in np.percentile(ang, [1, 5, 50])],
-            "deviation_max_vox": round(float(dev.max()) / h, 3),
-            "deviation_p99_vox": round(float(np.percentile(dev, 99)) / h, 3),
-            "inside_max_vox": round(float(din.max()), 3),
-            "inside_over_0.5_1_2_4_vox": [int((din > t).sum()) for t in (0.5, 1, 2, 4)],
+            **surface_measures(V, F, self.white, self.Wn, self.wn, h, self.places),
         }
+
+
+def dihedral(V: np.ndarray, F: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per interior edge: the angle (degrees) between its two faces' normals,
+    and the edge's midpoint."""
+    n = len(V)
+    E = np.r_[F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]
+    fid = np.tile(np.arange(len(F)), 3)
+    key = np.minimum(E[:, 0], E[:, 1]) * n + np.maximum(E[:, 0], E[:, 1])
+    o = np.argsort(key, kind="stable")
+    key, fid, E = key[o], fid[o], E[o]
+    same = key[1:] == key[:-1]
+    f1, f2 = fid[:-1][same], fid[1:][same]
+    N = MC.face_normals(V, F)
+    N /= np.maximum(np.linalg.norm(N, axis=1, keepdims=True), 1e-300)
+    c = np.clip((N[f1] * N[f2]).sum(1), -1, 1)
+    mid = 0.5 * (V[E[:-1][same, 0]] + V[E[:-1][same, 1]])
+    return np.degrees(np.arccos(c)), mid
+
+
+def surface_measures(V: np.ndarray, F: np.ndarray, white: White, Wn: np.ndarray, wn: np.ndarray,
+                     h: float, places: np.ndarray, radius: float = 1.5) -> dict[str, Any]:
+    """Measures of Σ (V, F) against the white surface, from scratch: each
+    white vertex's closest Σ face, its signed offset (+: Σ outward of it),
+    each Σ face's angle to S (its assigned white vertices' summed
+    area-weighted normals), and the dihedral angles (roughness), over all
+    and within radius (mm) of each of the places (mm)."""
+    q, dev, fc = SM.closest_on(V, F, cKDTree(V[F].mean(1)), white.V, 24)
+    side = ((q - white.V) * wn).sum(1)
+    out = np.where(side > 0, dev, 0.0) / h
+    din = np.where(side < 0, dev, 0.0) / h
+    S = np.zeros((len(F), 3))
+    np.add.at(S, fc, Wn)
+    has = np.linalg.norm(S, axis=1) > 0
+    n = MC.face_normals(V, F)
+    fa = np.degrees(np.arccos(np.clip((n * S).sum(1) / np.maximum(
+        np.linalg.norm(n, axis=1) * np.linalg.norm(S, axis=1), 1e-300), -1, 1)))[has]
+    di, mid = dihedral(V, F)
+    res: dict[str, Any] = {
+        "deviation_max_vox": round(float(dev.max()) / h, 3),
+        "outward_max_vox": round(float(out.max()), 3),
+        "outward_over_0.5_1_vox": [int((out > t).sum()) for t in (0.5, 1)],
+        "inside_max_vox": round(float(din.max()), 3),
+        "inside_over_0.5_1_2_4_vox": [int((din > t).sum()) for t in (0.5, 1, 2, 4)],
+        "face_angle_p50_90_99_max": [round(float(x), 1) for x in np.percentile(fa, [50, 90, 99, 100])],
+        "faces_over_30_45_60": [int((fa > t).sum()) for t in (30, 45, 60)],
+        "faces_unassigned": int((~has).sum()),
+        "dihedral_p50_90_99_max": [round(float(x), 1) for x in np.percentile(di, [50, 90, 99, 100])],
+    }
+    if len(places):
+        res["dihedral_at_places_p50_90_max"] = []
+        for p in places:
+            m = np.linalg.norm(mid - p, axis=1) < radius
+            res["dihedral_at_places_p50_90_max"].append(
+                [round(float(x), 1) for x in np.percentile(di[m], [50, 90, 100])] if m.any() else [])
+    return res
 
 
 def remesh(rm: Remesher, h: float, max_passes: int = 20, progress: Any = None) -> list[dict[str, Any]]:
@@ -480,7 +647,9 @@ def remesh(rm: Remesher, h: float, max_passes: int = 20, progress: Any = None) -
 
 
 def coarse_start(site: TP.Site, lmin_vox: float, max_passes: int = 20,
-                 progress: Any = None, eps_vox: float | None = None) -> tuple[TS.Mesh, list[dict[str, Any]], dict[str, Any]]:
+                 progress: Any = None, theta_deg: float | None = None,
+                 d_out_vox: float | None = None,
+                 places_vox: np.ndarray | None = None) -> tuple[TS.Mesh, list[dict[str, Any]], dict[str, Any]]:
     """The coarse Σ start of a site, sequentially remeshed; returns the
     mesh, the pass log and the checks of the start (the white mesh)."""
     h = float(site.vox.mean())
@@ -490,11 +659,14 @@ def coarse_start(site: TP.Site, lmin_vox: float, max_passes: int = 20,
     rim, E = rim_of(F, len(V))
     hi = (np.array(site.labels.shape) - 1) * site.vox
     corner = box_corners(V, rim, E, np.zeros(3), hi, 1e-6 * h)
-    rm = Remesher(white, V, F, gap, corner=corner, eps=None if eps_vox is None else eps_vox * h)
+    rm = Remesher(white, V, F, gap, corner=corner, theta_deg=theta_deg,
+                  d_out=None if d_out_vox is None else d_out_vox * h, h=h)
+    if places_vox is not None:
+        rm.places = np.asarray(places_vox, float) * site.vox
     start = rm.chk.check_all()
     start_info = {"gap_pairs": start.gap_pairs, "intersecting_pairs": start.intersecting_pairs,
                   "vertex_fold_pairs": start.vertex_fold_pairs, "creases": start.creases,
-                  "rim": int(rim.sum()), "corners": int(corner.sum())}
+                  "rim": int(rim.sum()), "corners": int(corner.sum()), **rm.measures(h)}
     if progress:
         progress({"start": start_info})
     log = remesh(rm, h, max_passes, progress)
@@ -504,17 +676,26 @@ def coarse_start(site: TP.Site, lmin_vox: float, max_passes: int = 20,
 
 
 def main() -> None:
-    """usage: remesh_seq.py SITE_NPZ OUT_NPZ [max_passes] [lmin_vox] [eps_vox]
-    (eps_vox: the no-cut check's eps in voxels; none: no check)"""
+    """usage: remesh_seq.py SITE_NPZ OUT_NPZ [max_passes] [lmin_vox]
+    [theta_deg] [d_out_vox] [places.json]
+    (theta_deg, d_out_vox: the normal check; "none" turns one off;
+    places.json: a list of {"at_vox": [i, j, k]} for the roughness there)"""
     import json
     import sys
+
+    def opt(i: int, default: float | None) -> float | None:
+        if len(sys.argv) <= i:
+            return default
+        return None if sys.argv[i] == "none" else float(sys.argv[i])
 
     site = TP.load_site(sys.argv[1])
     mp = int(sys.argv[3]) if len(sys.argv) > 3 else 20
     lv = float(sys.argv[4]) if len(sys.argv) > 4 else 4.0
-    ev = float(sys.argv[5]) if len(sys.argv) > 5 else None
+    places = None
+    if len(sys.argv) > 7:
+        places = np.array([p["at_vox"] for p in json.load(open(sys.argv[7]))], float)
     m, log, start = coarse_start(site, lv, mp, progress=lambda r: print(json.dumps(r), flush=True),
-                                 eps_vox=ev)
+                                 theta_deg=opt(5, None), d_out_vox=opt(6, None), places_vox=places)
     np.savez(sys.argv[2], V=m.V, F=m.F, log=json.dumps(log), start=json.dumps(start))
 
 
