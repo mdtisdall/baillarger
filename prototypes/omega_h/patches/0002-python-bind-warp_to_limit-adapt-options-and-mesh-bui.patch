@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dylan Tisdall <mtisdall@pennmedicine.upenn.edu>
+Date: Fri, 20 Nov 2026 11:14:38 -0500
+Subject: [PATCH 2/2] python: bind warp_to_limit, adapt options and mesh
+ building
+
+- AdaptOpts: the length and quality goals, the should_* switches,
+  nsliver_layers, lock_tag, and set_transfer()/transfer() for
+  xfer_opts.type_map (a bound std::map would be a copy).
+- warp_to_limit(mesh, opts, exit_on_stall=False, max_niters=40).
+- adapt() gets argument names.
+- build_from_elems_and_coords() from NumPy arrays.
+- finalize_classification().
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/PyOmega_h_adapt.cpp | 41 +++++++++++++++++++++++++++++++++++++++--
+ src/PyOmega_h_build.cpp | 14 ++++++++++++++
+ src/PyOmega_h_class.cpp |  3 +++
+ 3 files changed, 56 insertions(+), 2 deletions(-)
+
+diff --git a/src/PyOmega_h_adapt.cpp b/src/PyOmega_h_adapt.cpp
+index a5b7809f..438e120b 100644
+--- a/src/PyOmega_h_adapt.cpp
++++ b/src/PyOmega_h_adapt.cpp
+@@ -16,7 +16,39 @@ void pybind11_adapt(py::module& m) {
+       m, "AdaptOpts", "Options controlling adaptation behavior")
+       .def(py::init<Mesh*>())
+       .def_readwrite("verbosity", &AdaptOpts::verbosity)
+-      .def_readwrite("min_quality_allowed", &AdaptOpts::min_quality_allowed);
++      .def_readwrite("min_length_desired", &AdaptOpts::min_length_desired)
++      .def_readwrite("max_length_desired", &AdaptOpts::max_length_desired)
++      .def_readwrite("max_length_allowed", &AdaptOpts::max_length_allowed)
++      .def_readwrite("min_quality_allowed", &AdaptOpts::min_quality_allowed)
++      .def_readwrite("min_quality_desired", &AdaptOpts::min_quality_desired)
++      .def_readwrite("nsliver_layers", &AdaptOpts::nsliver_layers)
++      .def_readwrite("should_refine", &AdaptOpts::should_refine)
++      .def_readwrite("should_coarsen", &AdaptOpts::should_coarsen)
++      .def_readwrite("should_swap", &AdaptOpts::should_swap)
++      .def_readwrite(
++          "should_coarsen_slivers", &AdaptOpts::should_coarsen_slivers)
++      .def_readwrite("should_prevent_coarsen_flip",
++          &AdaptOpts::should_prevent_coarsen_flip)
++      .def_readwrite("lock_tag", &AdaptOpts::lock_tag,
++          "Name of an I8 tag on every dimension (transfer INHERIT). "
++          "No collapse removes a vertex with a nonzero value. Empty: off.")
++      .def(
++          "set_transfer",
++          [](AdaptOpts& opts, std::string const& name, Omega_h_Transfer type) {
++            opts.xfer_opts.type_map[name] = type;
++          },
++          py::arg("name"), py::arg("type"),
++          "Set how a tag is transferred during adaptation")
++      .def(
++          "transfer",
++          [](AdaptOpts const& opts, std::string const& name) {
++            auto it = opts.xfer_opts.type_map.find(name);
++            if (it == opts.xfer_opts.type_map.end()) {
++              throw py::key_error(name);
++            }
++            return it->second;
++          },
++          py::arg("name"), "Get how a tag is transferred during adaptation");
+   py::class_<MetricSource>(
+       m, "MetricSource", "Describes a single source metric field")
+       .def(py::init<Omega_h_Source, Real, std::string const&, Omega_h_Isotropy,
+@@ -52,7 +84,12 @@ void pybind11_adapt(py::module& m) {
+   m.def("generate_target_metric_tag", &generate_target_metric_tag);
+   m.def("approach_metric", &approach_metric, py::arg("mesh"),
+       py::arg("opts"), py::arg("min_step") = 1e-4);
+-  m.def("adapt", &adapt);
++  m.def("adapt", &adapt, py::arg("mesh"), py::arg("opts"));
++  m.def("warp_to_limit", &warp_to_limit,
++      "Move vertices by the VERT tag \"warp\" as far as quality allows; "
++      "returns false if there is no warp tag",
++      py::arg("mesh"), py::arg("opts"), py::arg("exit_on_stall") = false,
++      py::arg("max_niters") = 40);
+ }
+ 
+ }  // namespace Omega_h
+diff --git a/src/PyOmega_h_build.cpp b/src/PyOmega_h_build.cpp
+index d8151875..bdf88344 100644
+--- a/src/PyOmega_h_build.cpp
++++ b/src/PyOmega_h_build.cpp
+@@ -1,5 +1,7 @@
+ #include <Omega_h_build.hpp>
++#include <Omega_h_mesh.hpp>
+ #include <PyOmega_h.hpp>
++#include <PyOmega_h_numpy_transform.hpp>
+ 
+ namespace Omega_h {
+ 
+@@ -10,6 +12,18 @@ void pybind11_build(py::module& m) {
+       py::arg("y") = 1.0, py::arg("z") = 1.0, py::arg("nx") = 0,
+       py::arg("ny") = 0, py::arg("nz") = 0, py::arg("symmetric") = false,
+       py::keep_alive<0, 1>());
++  m.def(
++      "build_from_elems_and_coords",
++      [](Mesh* mesh, Omega_h_Family family, Int dim, py::array_t<LO> ev2v,
++          py::array_t<Real> coords) {
++        build_from_elems_and_coords(mesh, family, dim,
++            numpy_to_omega_h_read<LO>(ev2v),
++            numpy_to_omega_h_read<Real>(coords));
++      },
++      "Build a mesh from flat element-to-vertex and coordinate arrays "
++      "(the mesh has no classification yet)",
++      py::arg("mesh"), py::arg("family"), py::arg("dim"), py::arg("ev2v"),
++      py::arg("coords"));
+ }
+ 
+ }  // namespace Omega_h
+diff --git a/src/PyOmega_h_class.cpp b/src/PyOmega_h_class.cpp
+index 4ee32b32..bdcbaa15 100644
+--- a/src/PyOmega_h_class.cpp
++++ b/src/PyOmega_h_class.cpp
+@@ -8,6 +8,9 @@ void pybind11_class(py::module& m) {
+   m.def("classify_by_angles", &Omega_h::classify_by_angles,
+       "Classify a mesh, sharp-angle creases become corners/curves",
+       py::arg("mesh"), py::arg("sharp_angle"));
++  m.def("finalize_classification", &Omega_h::finalize_classification,
++      "Derive the classification of the remaining entities",
++      py::arg("mesh"));
+ }
+ 
+ }  // namespace Omega_h
+-- 
+2.54.0 (Apple Git-157)
+
