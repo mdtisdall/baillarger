@@ -136,3 +136,12 @@ def test_the_normal_check_keeps_orientation_and_bounds_outward(check: bool) -> N
         assert last["outward_max_vox"] <= 0.5 + 1e-9, last
         assert last["face_angle_p50_90_99_max"][3] <= start["face_angle_p50_90_99_max"][3] + 1e-6, (start, last)
         assert any(k.endswith("_normal") for r in log for k in r["refused"])
+        # the running sums and counts are those of the assignment
+        live = np.flatnonzero(rm.chk.F[:, 0] >= 0)
+        has = rm.wf >= 0
+        C = np.bincount(rm.wf[has], minlength=len(rm.Cf))
+        S = np.zeros_like(rm.Sf)
+        np.add.at(S, rm.wf[has], rm.Wn[has])
+        assert (C[live] == rm.Cf[live]).all()
+        assert np.allclose(S[live], rm.Sf[live], atol=1e-9)
+        assert all(rm.wf[w] == f for f, ws in rm.fw.items() for w in ws)

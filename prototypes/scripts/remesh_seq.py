@@ -188,12 +188,16 @@ class Remesher:
         self.wf = np.full(nw, -1, np.int64)
         self.wd = np.zeros(nw)
         self.Sf = np.zeros((len(self.chk.F), 3))
+        #: the number of white vertices assigned to each face (a face with
+        #: none is unassigned; its S may keep a round-off residue)
+        self.Cf = np.zeros(len(self.chk.F), np.int64)
         self.fw: dict[int, set[int]] = {}
         if self.cos_t is not None or self.d_out is not None:
             _, _, f = self.chk.closest(white.V, self.rs)
             self.wf[:] = f
             for w in np.flatnonzero(f >= 0):
                 self.Sf[f[w]] += self.Wn[w]
+                self.Cf[f[w]] += 1
                 self.fw.setdefault(int(f[w]), set()).add(int(w))
 
     @property
@@ -210,7 +214,9 @@ class Remesher:
             self.corner = np.r_[self.corner, np.zeros(k, bool)]
             self.t = np.r_[self.t, np.zeros(k)]
         if len(self.Sf) < len(self.chk.F):
-            self.Sf = np.r_[self.Sf, np.zeros((len(self.chk.F) - len(self.Sf), 3))]
+            k = len(self.chk.F) - len(self.Sf)
+            self.Sf = np.r_[self.Sf, np.zeros((k, 3))]
+            self.Cf = np.r_[self.Cf, np.zeros(k, np.int64)]
 
     def nbrs(self, v: int) -> set[int]:
         F = self.chk.F
@@ -243,13 +249,14 @@ class Remesher:
         lists = self.white.vtree.query_ball_point(C, R)
         return np.unique(np.fromiter((j for x in lists for j in x), np.int64))
 
-    def _cos(self, faces: np.ndarray, S: np.ndarray) -> np.ndarray:
-        """cos(face normal, S) per face; 1 where S is zero (nothing assigned)."""
+    def _cos(self, faces: np.ndarray, S: np.ndarray, C: np.ndarray) -> np.ndarray:
+        """cos(face normal, S) per face; 1 where no white vertex is assigned
+        (C = 0)."""
         if not len(faces):
             return np.ones(0)
         n = MC.face_normals(self.chk.V, self.chk.F[faces])
         ns = np.linalg.norm(n, axis=1) * np.linalg.norm(S, axis=1)
-        return np.where(np.linalg.norm(S, axis=1) > 0, (n * S).sum(1) / np.maximum(ns, 1e-300), 1.0)
+        return np.where(np.asarray(C) > 0, (n * S).sum(1) / np.maximum(ns, 1e-300), 1.0)
 
     def _normal_check(self, ofaces: np.ndarray, cos_old: dict[int, float], old: np.ndarray,
                       r: MC.EditCheck, faces: np.ndarray, removed: set[int]) -> tuple[str, Any]:
@@ -287,35 +294,43 @@ class Remesher:
         # tentative sums
         new_ids = {int(x) for x in r.new_faces}
         S: dict[int, np.ndarray] = {x: np.zeros(3) for x in removed | new_ids}
+        C: dict[int, int] = {x: 0 for x in removed | new_ids}
+
+        def touch(x: int) -> None:
+            if x not in S:
+                S[x], C[x] = self.Sf[x].copy(), int(self.Cf[x])
+
         for j, x in enumerate(w):
             fo, fn = int(self.wf[x]), int(f[j])
             if fo == fn and fo not in removed and fo not in new_ids:
                 continue
             if fo >= 0 and fo not in removed:
-                S.setdefault(fo, self.Sf[fo].copy())
+                touch(fo)
                 S[fo] = S[fo] - self.Wn[x]
+                C[fo] -= 1
             if fn >= 0:
-                S.setdefault(fn, self.Sf[fn].copy())
+                touch(fn)
                 S[fn] = S[fn] + self.Wn[x]
+                C[fn] += 1
         for x in faces:
-            S.setdefault(int(x), self.Sf[int(x)].copy())
+            touch(int(x))
         live = [x for x in S if chk.F[x, 0] >= 0]
         if self.cos_t is not None and live:
             la = np.asarray(live, np.int64)
-            after = self._cos(la, np.array([S[x] for x in live]))
+            after = self._cos(la, np.array([S[x] for x in live]), np.array([C[x] for x in live]))
             before = [cos_old[x] if x in cos_old else None for x in live]
             other = [x for x, b in zip(live, before, strict=True) if b is None and x not in new_ids]
             if other:
-                cb = self._cos(np.asarray(other, np.int64), self.Sf[other])
+                cb = self._cos(np.asarray(other, np.int64), self.Sf[other], self.Cf[other])
                 for x, c in zip(other, cb, strict=True):
                     cos_old[x] = float(c)
             worst_before = min([*cos_old.values(), 1.0])
             if after.min() < min(self.cos_t, worst_before) - 1e-12:
                 return "normal", None
-        return "", (w, f, sd, S, removed)
+        return "", (w, f, sd, S, C, removed)
 
     def _apply(self, state: Any) -> None:
-        w, f, sd, S, removed = state
+        w, f, sd, S, C, removed = state
         for x in removed:
             self.fw.pop(x, None)
         for j, x in enumerate(w):
@@ -330,6 +345,7 @@ class Remesher:
         self.wd[w] = sd
         for x, v in S.items():
             self.Sf[x] = v
+            self.Cf[x] = C[x]
 
     def _try(self, kind: str, **edit: Any) -> MC.EditCheck | None:
         """Propose an edit; keep it if every check passes (returns its
@@ -341,7 +357,8 @@ class Remesher:
                                      *[self.chk.faces_of(v) for v in mv0]]).astype(np.int64)
             old = self._tris(ofaces)
             cos_old = dict(zip((int(x) for x in ofaces),
-                               (float(c) for c in self._cos(ofaces, self.Sf[ofaces])), strict=True))
+                               (float(c) for c in self._cos(ofaces, self.Sf[ofaces], self.Cf[ofaces])),
+                               strict=True))
         r = self.chk.propose(**edit)
         reason, state = "", None
         if r.gap_pairs:
