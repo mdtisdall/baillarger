@@ -484,3 +484,19 @@ def test_closest_points_on_the_live_mesh_match_brute_force() -> None:
             assert np.isclose(d[i], dd[k]) and np.isclose(
                 np.linalg.norm(Q[i] - P[i]), d[i]
             )
+
+
+def test_edge_folds_and_pair_cosines_agree_with_shared_edge_folds() -> None:
+    # two faces folded 10 degrees apart (normals 170 degrees apart), then
+    # one of zero area
+    t = np.radians(10.0)
+    V = np.array([[0, 0, 0], [0, 1, 0], [1, 0, 0], [np.cos(t), 0, np.sin(t)]], float)
+    F = np.array([[0, 1, 2], [1, 0, 3]], np.int64)
+    _, P = C.edge_face_pairs(F, len(V))
+    assert np.allclose(np.degrees(np.arccos(C.pair_cosines(V, F, P))), 170.0)
+    assert C.edge_folds(V, F, P).tolist() == [True]
+    assert C.shared_edge_folds(V, F)[1] == 1
+    assert not C.edge_folds(V, F, P, fold_cos=np.cos(np.radians(171))).any()
+    V[3] = V[0]  # zero area: NaN cosine, no fold
+    assert np.isnan(C.pair_cosines(V, F, P)).all()
+    assert not C.edge_folds(V, F, P, fold_cos=1.0).any()

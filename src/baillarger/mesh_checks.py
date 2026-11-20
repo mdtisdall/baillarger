@@ -359,6 +359,37 @@ def shared_vertex_folds(
 # ------------------------------------------------------------ shared-edge folds
 
 
+def _pair_dots(V: Float, F: Int, pairs: Int) -> tuple[Float, Float]:
+    N = face_normals(V, F)
+    L = np.linalg.norm(N, axis=1)
+    a, b = pairs[:, 0], pairs[:, 1]
+    num: Float = np.einsum("ij,ij->i", N[a], N[b])
+    return num, L[a] * L[b]
+
+
+def pair_cosines(V: npt.ArrayLike, F: npt.ArrayLike, pairs: Int) -> Float:
+    """Per pair of faces (rows of pairs, as edge_face_pairs' second array):
+    the cosine of the angle between their normals; NaN where a face has
+    zero area."""
+    num, den = _pair_dots(np.asarray(V, np.float64), np.asarray(F, np.int64), pairs)
+    out: Float = np.full(len(pairs), np.nan)
+    ok = den > 0
+    out[ok] = num[ok] / den[ok]
+    return out
+
+
+def edge_folds(
+    V: npt.ArrayLike, F: npt.ArrayLike, pairs: Int, fold_cos: float = FOLD_COS
+) -> Bool:
+    """The dihedral test per pair of faces (rows of pairs): the cosine of
+    the angle between their normals is at most fold_cos. A pair with a face
+    of zero area is not a fold. shared_edge_folds is this test over the
+    faces."""
+    num, den = _pair_dots(np.asarray(V, np.float64), np.asarray(F, np.int64), pairs)
+    out: Bool = (den > 0) & (num <= fold_cos * den)
+    return out
+
+
 def shared_edge_folds(
     V: npt.ArrayLike,
     F: npt.ArrayLike,
@@ -374,12 +405,8 @@ def shared_edge_folds(
     Vf = np.asarray(V, np.float64)
     Fi = np.ascontiguousarray(F, np.int64)
     P = edge_face_pairs(Fi, len(Vf))[1] if pairs is None else pairs
-    N = face_normals(Vf, Fi)
-    L = np.linalg.norm(N, axis=1)
+    fold = edge_folds(Vf, Fi, P, fold_cos)
     a, b = P[:, 0], P[:, 1]
-    num = np.einsum("ij,ij->i", N[a], N[b])
-    den = L[a] * L[b]
-    fold = (den > 0) & (num <= fold_cos * den)
     out = np.zeros(len(Fi), bool)
     out[a[fold]] = True
     out[b[fold]] = True
