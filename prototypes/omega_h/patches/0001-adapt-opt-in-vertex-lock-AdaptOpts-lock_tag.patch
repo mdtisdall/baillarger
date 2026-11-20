@@ -1,0 +1,410 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dylan Tisdall <mtisdall@pennmedicine.upenn.edu>
+Date: Fri, 20 Nov 2026 11:11:08 -0500
+Subject: [PATCH 1/2] adapt: opt-in vertex lock (AdaptOpts::lock_tag)
+
+AdaptOpts::lock_tag names an I8 tag with one component on every
+dimension. When it is set, no edge collapse removes a vertex whose tag
+value is nonzero. The check is applied with check_collapse_class in
+coarsen_element_based1, so it covers coarsen_by_size, coarsen_slivers
+and coarsen_verts. The option is off by default (empty name).
+
+Refinement, swaps and collapses do not move existing vertices, so a
+locked vertex keeps its exact coordinates. The tag must be transferred
+with OMEGA_H_INHERIT (checked in validate()). A split point inherits the
+value of the split edge, and an edge cut across a face inherits the
+value of the face, so the EDGE and FACE values choose whether new
+boundary vertices are locked too.
+
+unit_lock adapts a box with a locked boundary and checks that every
+locked vertex stays at identical coordinates, that the boundary is only
+subdivided, and that a control run without the lock does remove
+boundary vertices.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/CMakeLists.txt      |   3 +
+ src/Omega_h_adapt.cpp   |  22 ++++
+ src/Omega_h_adapt.hpp   |  10 ++
+ src/Omega_h_coarsen.cpp |  31 +++++-
+ src/unit_lock.cpp       | 238 ++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 302 insertions(+), 2 deletions(-)
+ create mode 100644 src/unit_lock.cpp
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 0d07e2c1..d905e1c0 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -542,6 +542,9 @@ if(BUILD_TESTING)
+   osh_add_exe(unit_mesh)
+   list(APPEND TEST_EXES unit_mesh)
+   test_func(run_unit_mesh 1 ./unit_mesh)
++  osh_add_exe(unit_lock)
++  list(APPEND TEST_EXES unit_lock)
++  test_func(run_unit_lock 1 ./unit_lock)
+   osh_add_exe(unit_io)
+   list(APPEND TEST_EXES unit_io)
+   test_basefunc(run_unit_io 1 ./unit_io)
+diff --git a/src/Omega_h_adapt.cpp b/src/Omega_h_adapt.cpp
+index 6b722c13..e41b99b8 100644
+--- a/src/Omega_h_adapt.cpp
++++ b/src/Omega_h_adapt.cpp
+@@ -87,6 +87,7 @@ AdaptOpts::AdaptOpts(Int dim) {
+   should_swap = true;
+   should_coarsen_slivers = true;
+   should_prevent_coarsen_flip = false;
++  lock_tag = "";
+ }
+ 
+ static Reals get_fixable_qualities(Mesh* mesh, AdaptOpts const&) {
+@@ -148,6 +149,27 @@ static void validate(Mesh* mesh, AdaptOpts const& opts) {
+   OMEGA_H_CHECK(opts.min_quality_desired <= 1.0);
+   OMEGA_H_CHECK(opts.nsliver_layers >= 0);
+   OMEGA_H_CHECK(opts.nsliver_layers < 100);
++  if (!opts.lock_tag.empty()) {
++    auto const& name = opts.lock_tag;
++    for (Int d = 0; d <= mesh->dim(); ++d) {
++      if (!mesh->has_tag(d, name)) {
++        Omega_h_fail("lock tag \"%s\" is not on dimension %d\n",
++            name.c_str(), int(d));
++      }
++      auto tag = mesh->get_tagbase(d, name);
++      if (tag->type() != OMEGA_H_I8 || tag->ncomps() != 1) {
++        Omega_h_fail("lock tag \"%s\" must be I8 with one component\n",
++            name.c_str());
++      }
++    }
++    auto it = opts.xfer_opts.type_map.find(name);
++    if (it == opts.xfer_opts.type_map.end() ||
++        it->second != OMEGA_H_INHERIT) {
++      Omega_h_fail("lock tag \"%s\" needs OMEGA_H_INHERIT in "
++                   "xfer_opts.type_map\n",
++          name.c_str());
++    }
++  }
+   auto mq = min_fixable_quality(mesh, opts);
+   if (mq < opts.min_quality_allowed && !mesh->comm()->rank()) {
+     std::cout << "WARNING: worst input element has quality " << mq
+diff --git a/src/Omega_h_adapt.hpp b/src/Omega_h_adapt.hpp
+index 4eb9c348..32b92743 100644
+--- a/src/Omega_h_adapt.hpp
++++ b/src/Omega_h_adapt.hpp
+@@ -179,6 +179,16 @@ struct AdaptOpts {
+   bool should_swap;
+   bool should_coarsen_slivers;
+   bool should_prevent_coarsen_flip;
++  /* Opt-in vertex lock (off when empty).
++     Names an I8 tag with one component that must exist on every dimension
++     and must be transferred with OMEGA_H_INHERIT (xfer_opts.type_map).
++     No edge collapse removes a vertex whose tag value is nonzero.
++     Refinement, swaps and collapses do not move existing vertices,
++     so a locked vertex keeps its exact coordinates
++     (warp_to_limit still applies the caller's "warp" field to all vertices).
++     A vertex made by splitting an edge inherits the edge's value,
++     so the EDGE values choose whether split points are locked. */
++  std::string lock_tag;
+   TransferOpts xfer_opts;
+ };
+ 
+diff --git a/src/Omega_h_coarsen.cpp b/src/Omega_h_coarsen.cpp
+index c4f67c9d..ee10ec82 100644
+--- a/src/Omega_h_coarsen.cpp
++++ b/src/Omega_h_coarsen.cpp
+@@ -26,13 +26,40 @@ static void put_edge_codes(Mesh* mesh, LOs cands2edges, Read<I8> cand_codes) {
+   mesh->add_tag(EDGE, "collapse_code", 1, edge_codes);
+ }
+ 
+-static bool coarsen_element_based1(Mesh* mesh) {
++/* with AdaptOpts::lock_tag set, no collapse removes a locked vertex */
++static Read<I8> check_collapse_lock(Mesh* mesh, AdaptOpts const& opts,
++    LOs cands2edges, Read<I8> cand_codes) {
++  if (opts.lock_tag.empty()) return cand_codes;
++  if (!mesh->has_tag(VERT, opts.lock_tag)) {
++    Omega_h_fail(
++        "lock tag \"%s\" is not on the vertices\n", opts.lock_tag.c_str());
++  }
++  auto verts_are_locked = mesh->get_array<I8>(VERT, opts.lock_tag);
++  auto edge_verts2verts = mesh->ask_verts_of(EDGE);
++  auto ncands = cands2edges.size();
++  auto cand_codes_w = Write<I8>(ncands);
++  auto f = OMEGA_H_LAMBDA(LO cand) {
++    auto code = cand_codes[cand];
++    auto edge = cands2edges[cand];
++    for (Int eev = 0; eev < 2; ++eev) {
++      if (verts_are_locked[edge_verts2verts[edge * 2 + eev]]) {
++        code = dont_collapse(code, eev);
++      }
++    }
++    cand_codes_w[cand] = code;
++  };
++  parallel_for(ncands, f, "check_collapse_lock");
++  return cand_codes_w;
++}
++
++static bool coarsen_element_based1(Mesh* mesh, AdaptOpts const& opts) {
+   auto comm = mesh->comm();
+   auto edge_cand_codes = get_edge_codes(mesh);
+   auto edges_are_cands = each_neq_to(edge_cand_codes, I8(DONT_COLLAPSE));
+   auto cands2edges = collect_marked(edges_are_cands);
+   auto cand_codes = read(unmap(cands2edges, edge_cand_codes, 1));
+   cand_codes = check_collapse_class(mesh, cands2edges, cand_codes);
++  cand_codes = check_collapse_lock(mesh, opts, cands2edges, cand_codes);
+   /* edge and endpoints classification check */
+   if (get_max(comm, cand_codes) <= DONT_COLLAPSE) return false;
+   put_edge_codes(mesh, cands2edges, cand_codes);
+@@ -158,7 +185,7 @@ static void coarsen_element_based2(Mesh* mesh, AdaptOpts const& opts) {
+ static bool coarsen(Mesh* mesh, AdaptOpts const& opts, OvershootLimit overshoot,
+     Improve improve) {
+   begin_code("coarsen");
+-  auto ret = coarsen_element_based1(mesh);
++  auto ret = coarsen_element_based1(mesh, opts);
+   if (ret) {
+ 
+ 
+diff --git a/src/unit_lock.cpp b/src/unit_lock.cpp
+new file mode 100644
+index 00000000..50b41ffe
+--- /dev/null
++++ b/src/unit_lock.cpp
+@@ -0,0 +1,238 @@
++#include "Omega_h_adapt.hpp"
++#include "Omega_h_array_ops.hpp"
++#include "Omega_h_build.hpp"
++#include "Omega_h_library.hpp"
++#include "Omega_h_mesh.hpp"
++
++#include <array>
++#include <cmath>
++#include <iostream>
++#include <map>
++#include <vector>
++
++using namespace Omega_h;
++
++/* Tests for AdaptOpts::lock_tag: no edge collapse removes a locked vertex. */
++
++using Point = std::array<Real, 3>;
++using Triangle = std::array<Point, 3>;
++
++static Mesh make_box(Library* lib) {
++  return build_box(lib->world(), OMEGA_H_SIMPLEX, 1., 1., 1., 4, 4, 4);
++}
++
++/* lock = 1 on boundary vertices. If lock_split_points, also on boundary
++   edges and faces: a split point inherits the value of the split edge,
++   and an edge cut across a boundary face inherits the face's value. */
++static void add_lock(Mesh* mesh, AdaptOpts* opts, bool lock_split_points) {
++  auto dim = mesh->dim();
++  for (Int d = 0; d <= dim; ++d) {
++    auto class_dim = HostRead<I8>(mesh->get_array<I8>(d, "class_dim"));
++    auto lock = HostWrite<I8>(mesh->nents(d));
++    for (LO i = 0; i < mesh->nents(d); ++i) {
++      bool on_boundary = class_dim[i] < dim;
++      bool locked = (d == VERT) || lock_split_points;
++      lock[i] = I8(on_boundary && locked);
++    }
++    mesh->add_tag(d, "lock", 1, Read<I8>(lock.write()));
++  }
++  opts->lock_tag = "lock";
++  opts->xfer_opts.type_map["lock"] = OMEGA_H_INHERIT;
++}
++
++static void set_size(Mesh* mesh, Real h) {
++  if (mesh->has_tag(VERT, "metric")) mesh->remove_tag(VERT, "metric");
++  mesh->add_tag(VERT, "metric", 1, Reals(mesh->nverts(), 1.0 / (h * h)));
++}
++
++static Point point_of(HostRead<Real> const& coords, LO v) {
++  return {coords[v * 3 + 0], coords[v * 3 + 1], coords[v * 3 + 2]};
++}
++
++static std::vector<Point> boundary_points(Mesh* mesh) {
++  auto coords = HostRead<Real>(mesh->coords());
++  auto class_dim = HostRead<I8>(mesh->get_array<I8>(VERT, "class_dim"));
++  std::vector<Point> out;
++  for (LO v = 0; v < mesh->nverts(); ++v) {
++    if (class_dim[v] < mesh->dim()) out.push_back(point_of(coords, v));
++  }
++  return out;
++}
++
++/* exact coordinates -> lock value of the vertex there (0 if no lock tag) */
++static std::map<Point, I8> points_to_lock(Mesh* mesh) {
++  auto coords = HostRead<Real>(mesh->coords());
++  bool has_lock = mesh->has_tag(VERT, "lock");
++  auto lock = has_lock ? HostRead<I8>(mesh->get_array<I8>(VERT, "lock"))
++                       : HostRead<I8>();
++  std::map<Point, I8> out;
++  for (LO v = 0; v < mesh->nverts(); ++v) {
++    out[point_of(coords, v)] = has_lock ? lock[v] : I8(0);
++  }
++  return out;
++}
++
++static std::vector<Triangle> boundary_triangles(Mesh* mesh) {
++  auto coords = HostRead<Real>(mesh->coords());
++  auto class_dim = HostRead<I8>(mesh->get_array<I8>(FACE, "class_dim"));
++  auto fv2v = HostRead<LO>(mesh->ask_verts_of(FACE));
++  std::vector<Triangle> out;
++  for (LO f = 0; f < mesh->nfaces(); ++f) {
++    if (class_dim[f] >= mesh->dim()) continue;
++    Triangle tri;
++    for (Int k = 0; k < 3; ++k) tri[k] = point_of(coords, fv2v[f * 3 + k]);
++    out.push_back(tri);
++  }
++  return out;
++}
++
++static Point sub(Point a, Point b) {
++  return {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
++}
++static Real dot3(Point a, Point b) {
++  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
++}
++static Point cross3(Point a, Point b) {
++  return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
++      a[0] * b[1] - a[1] * b[0]};
++}
++static Real area(Triangle const& t) {
++  auto n = cross3(sub(t[1], t[0]), sub(t[2], t[0]));
++  return 0.5 * std::sqrt(dot3(n, n));
++}
++
++/* true if p is in the plane of t and its barycentric weights are >= 0 */
++static bool in_triangle(Point p, Triangle const& t, Real tol) {
++  auto e1 = sub(t[1], t[0]);
++  auto e2 = sub(t[2], t[0]);
++  auto n = cross3(e1, e2);
++  auto nn = dot3(n, n);
++  auto d = sub(p, t[0]);
++  if (std::abs(dot3(d, n)) / std::sqrt(nn) > tol) return false;
++  auto a = dot3(cross3(d, e2), n) / nn;
++  auto b = dot3(cross3(e1, d), n) / nn;
++  return a >= -tol && b >= -tol && a + b <= 1 + tol;
++}
++
++/* every new boundary triangle is inside one old boundary triangle,
++   and the total area is the same */
++static bool is_subdivided(
++    std::vector<Triangle> const& before, std::vector<Triangle> const& after) {
++  Real tol = 1e-12;
++  Real area_before = 0, area_after = 0;
++  for (auto& t : before) area_before += area(t);
++  for (auto& t : after) {
++    area_after += area(t);
++    bool found = false;
++    for (auto& T : before) {
++      if (in_triangle(t[0], T, tol) && in_triangle(t[1], T, tol) &&
++          in_triangle(t[2], T, tol)) {
++        found = true;
++        break;
++      }
++    }
++    if (!found) return false;
++  }
++  return std::abs(area_before - area_after) < 1e-12;
++}
++
++static void check_valid(Mesh* mesh) {
++  OMEGA_H_CHECK(get_min(mesh->ask_sizes()) > 0.0);
++  OMEGA_H_CHECK(mesh->min_quality() > 0.0);
++}
++
++/* the number of points that are still mesh vertices (exact coordinates) */
++static LO count_kept(std::vector<Point> const& points, Mesh* mesh) {
++  auto now = points_to_lock(mesh);
++  LO kept = 0;
++  for (auto& p : points) kept += LO(now.count(p));
++  return kept;
++}
++
++static void adapt_to(Mesh* mesh, AdaptOpts const& opts, Real h) {
++  set_size(mesh, h);
++  adapt(mesh, opts);
++}
++
++/* coarsening with the boundary locked keeps every boundary vertex */
++static void test_lock_coarsen(Library* lib) {
++  auto mesh = make_box(lib);
++  AdaptOpts opts(&mesh);
++  opts.verbosity = SILENT;
++  add_lock(&mesh, &opts, false);
++  auto points = boundary_points(&mesh);
++  auto tris = boundary_triangles(&mesh);
++  auto nverts0 = mesh.nverts();
++  adapt_to(&mesh, opts, 0.6);
++  auto kept = count_kept(points, &mesh);
++  std::cout << "lock coarsen: verts " << nverts0 << " -> " << mesh.nverts()
++            << ", boundary kept " << kept << " of " << points.size() << '\n';
++  OMEGA_H_CHECK(mesh.nverts() < nverts0); /* the interior did coarsen */
++  OMEGA_H_CHECK(kept == LO(points.size()));
++  auto now = points_to_lock(&mesh);
++  for (auto& p : points) OMEGA_H_CHECK(now[p] == 1);
++  OMEGA_H_CHECK(is_subdivided(tris, boundary_triangles(&mesh)));
++  check_valid(&mesh);
++}
++
++/* control: the same run without the lock removes boundary vertices */
++static void test_control_coarsen(Library* lib) {
++  auto mesh = make_box(lib);
++  AdaptOpts opts(&mesh);
++  opts.verbosity = SILENT;
++  auto points = boundary_points(&mesh);
++  adapt_to(&mesh, opts, 0.6);
++  auto kept = count_kept(points, &mesh);
++  std::cout << "control coarsen: boundary kept " << kept << " of "
++            << points.size() << '\n';
++  OMEGA_H_CHECK(kept < LO(points.size()));
++  check_valid(&mesh);
++}
++
++/* refine, then coarsen. A split point of a boundary edge is locked only
++   if the edge is locked. The original locked vertices always stay. */
++static void test_lock_split_points(Library* lib, bool lock_split_points) {
++  auto mesh = make_box(lib);
++  AdaptOpts opts(&mesh);
++  opts.verbosity = SILENT;
++  add_lock(&mesh, &opts, lock_split_points);
++  auto points0 = boundary_points(&mesh);
++  auto tris0 = boundary_triangles(&mesh);
++  adapt_to(&mesh, opts, 0.1);
++  auto points1 = boundary_points(&mesh);
++  auto tris1 = boundary_triangles(&mesh);
++  OMEGA_H_CHECK(points1.size() > points0.size()); /* the boundary was split */
++  OMEGA_H_CHECK(is_subdivided(tris0, tris1));
++  adapt_to(&mesh, opts, 0.6);
++  auto kept0 = count_kept(points0, &mesh);
++  auto kept1 = count_kept(points1, &mesh);
++  std::cout << "split points (locked " << lock_split_points
++            << "): original kept " << kept0 << " of " << points0.size()
++            << ", after refine kept " << kept1 << " of " << points1.size()
++            << '\n';
++  auto sub0 = is_subdivided(tris0, boundary_triangles(&mesh));
++  std::cout << "  final boundary inside the original triangles: " << sub0
++            << '\n';
++  OMEGA_H_CHECK(kept0 == LO(points0.size()));
++  if (lock_split_points) {
++    /* the boundary only gains vertices: it stays a subdivision */
++    OMEGA_H_CHECK(kept1 == LO(points1.size()));
++    OMEGA_H_CHECK(is_subdivided(tris1, boundary_triangles(&mesh)));
++    OMEGA_H_CHECK(sub0);
++  } else {
++    /* unlocked split points can be collapsed again */
++    OMEGA_H_CHECK(kept1 < LO(points1.size()));
++  }
++  check_valid(&mesh);
++}
++
++int main(int argc, char** argv) {
++  auto lib = Library(&argc, &argv);
++  if (lib.world()->size() == 1) {
++    test_lock_coarsen(&lib);
++    test_control_coarsen(&lib);
++    test_lock_split_points(&lib, true);
++    test_lock_split_points(&lib, false);
++  }
++  return 0;
++}
+-- 
+2.54.0 (Apple Git-157)
+
