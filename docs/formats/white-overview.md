@@ -58,8 +58,10 @@ passes on grids shifted by half a block). Its guarantees:
   mm); `MaxDistanceMM` is the largest distance measured, from each removed
   vertex to the overview face that stands for it;
 - no two faces intersect: faces that would cross where two sheets of the white
-  surface come within about 2 `EpsMM` of each other are found and kept at
-  the white surface's resolution there (`Repairs`);
+  surface come within about 2 `EpsMM` of each other, and faces that share a
+  vertex and cross beyond it, are found and kept at the white surface's
+  resolution there (`Repairs`). Creases (two faces with a common edge folded
+  back on each other) are counted in `Repairs`, not repaired;
 - every face faces the way of the surface it stands for: its normal is at
   less than 90 degrees to the sum of the white surface's normals (each
   vertex's faces' cross products, summed) at its corners and at the true
@@ -129,7 +131,7 @@ surface's `desc-edgekeys` at `ids`.
 | `TrueFaces` | integer | yes | Faces of the white surface |
 | `Pieces` | array of objects | yes | Per connected piece, largest first: `V`, `F`, `boundary_loops`, `chi`, `genus`, `area_mm2` |
 | `IdsFile` | string | yes | The name of the `desc-overviewids` file |
-| `Repairs` | array of objects | yes | Per repair round: `round`, `intersecting_faces`, `pairs`, `pinned` (true vertices kept so far); the last has no intersecting faces |
+| `Repairs` | array of objects | yes | Per repair round (`baillarger.mesh_checks`): `round`; `intersecting_faces` and `pairs`: faces with no common vertex that cross, and their pairs; `shared_vertex_fold_faces` and `shared_vertex_fold_pairs`: faces that share one vertex and cross beyond it, and their pairs; `creases`: edges whose two faces are folded back past 154° (`mesh_checks.FOLD_COS`), counted and not repaired; `pinned` (true vertices kept so far). The last round has no intersecting faces and no shared-vertex folds |
 | `CarryFile` | string | yes | The name of the `desc-overviewcarry` file |
 | `Carried` | integer | yes | True vertices carried by faces (`TrueVertices` − `Vertices`) |
 | `DataSHA256` | object | yes | SHA-256 of the carry file's `.dat`, by name |
