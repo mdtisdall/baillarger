@@ -33,6 +33,20 @@ Per site, from the corrected segmentation (desc-wmtopo_dseg) and its fixes
 The queue order: grey matter, mixed, fluid, other; within each, more faces
 first, then more fixes, then by the centre voxel.
 
+A crease is an edge of the surface whose two faces are folded back on each
+other: the cosine of the angle between their normals is at most
+baillarger.mesh_checks.FOLD_COS (-0.9, 154 degrees; the shared test,
+mesh_checks.edge_folds). The surface stays embedded there, but its normals
+are not well defined. On the first hemisphere every crease sat on a strand
+or a gap one voxel thick: the two vertices opposite the crease edge lie
+close to one voxel centre or to two neighbouring ones, the tip. Creases
+within GROUP voxels of each other are one group. A group within GROUP
+voxels of a misfacing face joins that face's site; any other group is a
+crease site, centred on its tip. A site with creases proposes a choice
+(baillarger.wm_choices) for the reviewer to accept: remove-strand if the
+tip is in the WM mask, fill-gap if not; the tip is that of the crease with
+the largest angle.
+
 Random sites are a second kind of site (random_sites, read_random_sites):
 vertices of the surface that are drawn with equal weight, not ranked. They are
 not written to a file: n and the seed give the same sites again.
@@ -65,6 +79,8 @@ from baillarger.blocks import open_volume
 from baillarger.decimate import CHUNK, normals
 from baillarger.fix_diff import read_table
 from baillarger.labels import OUTSIDE, TO_OUTSIDE
+from baillarger.mesh import edge_points
+from baillarger.mesh_checks import FOLD_COS, edge_face_pairs, edge_folds, pair_cosines
 from baillarger.timing import log_to_stderr
 from baillarger.white_dseg import output_paths, surface_dseg
 from baillarger.white_surf import SURF_SPEC, WhiteSurface
@@ -106,16 +122,28 @@ COLUMNS = (
     "gap_width",
     "fix",
     "wall",
+    "creases",
+    "crease_angle",
+    "proposal",
 )
 #: the integer columns of the table
 _INTS = tuple(
-    c for c in COLUMNS if c not in ("kind", "tissue", "wm_thickness", "gap_width")
+    c
+    for c in COLUMNS
+    if c
+    not in ("kind", "tissue", "wm_thickness", "gap_width", "crease_angle", "proposal")
 )
+#: the columns that can be n/a (None in a row)
+_OPTIONAL = ("crease_angle", "proposal")
+#: the crease columns of a site with no crease
+NO_CREASE: dict[str, Any] = dict(creases=0, crease_angle=None, proposal=None)
+#: the proposal of a crease site, by whether its tip is in the WM mask
+PROPOSALS = {True: "remove-strand", False: "fill-gap"}
 
 #: voxels: a handle fix with a wall of this size or more is a site
 MIN_WALL = 10
 #: the kinds of site, in queue order (random sites are not in the file)
-KINDS = ("override", "misfacing", "handle-fix")
+KINDS = ("override", "misfacing", "crease", "handle-fix")
 
 #: docs/formats/wm-sites.md
 SITES_SPEC = SidecarSpec(
@@ -125,6 +153,8 @@ SITES_SPEC = SidecarSpec(
         Key("Hemisphere", "string", True, "R or L"),
         Key("FilledLabels", "array of integers", True, "labels of the WM mask"),
         Key("MisfacingFaces", "integer", True, "misfacing faces of the surface"),
+        Key("CreaseEdges", "integer", True, "crease edges of the surface"),
+        Key("CreaseCosine", "number", True, "the crease test's cut-off"),
         Key("Sites", "integer", True, "rows of the table"),
         Key("GroupVoxels", "number", True, "faces this close are one site"),
         Key("FixVoxels", "integer", True, "half-side of the fix window"),
@@ -161,6 +191,63 @@ def group(points: Float, radius: float = GROUP) -> Int:
     )
     lab: Int = connected_components(A, directed=False)[1].astype(np.int64)
     return lab
+
+
+@dataclass(frozen=True)
+class Creases:
+    """The crease edges of a surface (module docstring), k of them: their
+    vertices (k, 2), their two faces (k, 2), the cosine of the angle
+    between the faces' normals (k,), the edge's midpoint in voxels (k, 3)
+    and the tip (k, 3): a voxel of the grid."""
+
+    edges: Int
+    faces: Int
+    cos: Float
+    mid: Float
+    tip: Int
+
+    @property
+    def degrees(self) -> Float:
+        """The angle between the two faces' normals, in degrees."""
+        out: Float = np.degrees(np.arccos(np.clip(self.cos, -1.0, 1.0)))
+        return out
+
+
+def tips(v_vox: Float, keys: Int, shape: tuple[int, ...]) -> tuple[Int, Float]:
+    """Per vertex (v_vox in voxels, keys its grid-edge keys,
+    baillarger.mesh.edge_key, on a grid of shape): the end of its grid edge
+    that is nearer to it, and the distance to that end (voxels)."""
+    lo, hi = edge_points(keys, shape)
+    d = (hi - lo).astype(np.float64)
+    t = np.einsum("ij,ij->i", v_vox - lo, d) / np.einsum("ij,ij->i", d, d)
+    near: Int = np.where((t < 0.5)[:, None], lo, hi)
+    dist: Float = np.minimum(t, 1 - t) * np.linalg.norm(d, axis=1)
+    return near, dist
+
+
+def creases(
+    v_vox: Float,
+    f: Int,
+    v_mm: Float,
+    keys: Int,
+    shape: tuple[int, ...],
+    fold_cos: float = FOLD_COS,
+) -> Creases:
+    """The crease edges of the surface (v_mm in mm for the normals; v_vox
+    the same vertices in voxels of a grid of shape; keys their grid-edge
+    keys): the shared test, mesh_checks.edge_folds at fold_cos. The tip of
+    a crease is the nearer grid point (tips) of whichever of the two
+    vertices opposite the edge is closer to its own."""
+    E, P = edge_face_pairs(f, len(v_mm))
+    fold = edge_folds(v_mm, f, P, fold_cos)
+    E, P = E[fold], P[fold]
+    cos = pair_cosines(v_mm, f, P)
+    opp = f[P].sum(2) - E.sum(1)[:, None]  # (k, 2): the vertex off the edge
+    near, dist = tips(v_vox[opp.ravel()], keys[opp.ravel()], shape)
+    pick = np.argmin(dist.reshape(-1, 2), 1)
+    tip = near.reshape(-1, 2, 3)[np.arange(len(E)), pick]
+    mid = v_vox[E].mean(1)
+    return Creases(E, P, cos, mid, tip.astype(np.int64))
 
 
 def _window(a: npt.NDArray[Any], c: Int, h: int) -> npt.NDArray[Any]:
@@ -207,34 +294,71 @@ def measure(
 
 @dataclass(frozen=True)
 class Sites:
-    """The sites of a white surface, in queue order: one dict per site (the
-    table's columns) and the number of misfacing faces."""
+    """The sites of a white surface: the misfacing sites and the crease
+    sites, each in queue order (one dict per site, the table's columns), the
+    number of misfacing faces and of crease edges."""
 
     rows: list[dict[str, Any]]
     misfacing_faces: int
+    crease_rows: list[dict[str, Any]]
+    crease_edges: int
+
+
+def _crease_columns(C: Creases, members: Int, mask: Bool) -> dict[str, Any]:
+    """The crease columns of a site whose creases are members (indices
+    into C), and the tip of the largest angle."""
+    if not len(members):
+        return dict(NO_CREASE)
+    top = members[np.argmin(C.cos[members])]
+    tip = C.tip[top]
+    return dict(
+        creases=len(members),
+        crease_angle=round(float(C.degrees[top]), 1),
+        proposal=PROPOSALS[bool(mask[tuple(tip)])],
+    )
 
 
 def find_sites(
     v_vox: Float,
     f: Int,
     v_mm: Float,
+    keys: Int,
     seg: npt.NDArray[np.integer[Any]],
     filled: tuple[int, ...],
     fixes: npt.NDArray[np.integer[Any]],
 ) -> Sites:
     """The sites of the surface (v_mm in mm for the normals; v_vox the same
-    vertices in voxels of seg's grid), from the corrected segmentation seg (its
-    WM mask: filled) and its fixes."""
+    vertices in voxels of seg's grid; keys their grid-edge keys), from the
+    corrected segmentation seg (its WM mask: filled) and its fixes."""
     bad = np.flatnonzero(misfacing(v_mm, f))
     cen = v_vox[f[bad]].mean(1)
     lab = group(cen)
     mask = np.isin(seg, filled)
+    C = creases(v_vox, f, v_mm, keys, seg.shape)
+    # crease groups; a group near a misfacing face joins that face's site
+    clab = group(C.mid)
+    joins: dict[int, list[int]] = {}
+    alone: list[Int] = []
+    tree = cKDTree(cen) if len(cen) else None
+    for g in range(int(clab.max()) + 1 if len(clab) else 0):
+        members = np.flatnonzero(clab == g)
+        if tree is not None:
+            q = tree.query(C.mid[members])
+            d, at = np.asarray(q[0]), np.asarray(q[1])
+            if d.min() <= GROUP:
+                site = int(lab[at[np.argmin(d)]])
+                joins.setdefault(site, []).extend(members.tolist())
+                continue
+        alone.append(members)
     rows = []
     for s in range(int(lab.max()) + 1 if len(lab) else 0):
         m = lab == s
         c = np.round(cen[m].mean(0)).astype(np.int64)
-        row = dict(i=int(c[0]), j=int(c[1]), k=int(c[2]), faces=int(m.sum()))
+        row: dict[str, Any] = dict(
+            i=int(c[0]), j=int(c[1]), k=int(c[2]), faces=int(m.sum())
+        )
         row.update(measure(seg, mask, fixes, c))
+        row.update(_crease_columns(C, np.array(joins.get(s, []), np.int64), mask))
         rows.append(row)
     order = sorted(
         range(len(rows)),
@@ -248,7 +372,22 @@ def find_sites(
     out = []
     for rank, r in enumerate(order, 1):
         out.append(dict(rank=rank, kind="misfacing", **rows[r], fix=0, wall=0))
-    return Sites(out, len(bad))
+    crows = []
+    for members in alone:
+        cc = _crease_columns(C, members, mask)
+        c = C.tip[members[np.argmin(C.cos[members])]]
+        row = dict(rank=0, kind="crease", i=int(c[0]), j=int(c[1]), k=int(c[2]))
+        row.update(faces=0, **measure(seg, mask, fixes, c), fix=0, wall=0, **cc)
+        crows.append(row)
+    crows.sort(
+        key=lambda r: (
+            TISSUES.index(r["tissue"]),
+            -r["creases"],
+            -r["crease_angle"],
+            (r["i"], r["j"], r["k"]),
+        )
+    )
+    return Sites(out, len(bad), crows, len(C.cos))
 
 
 def fix_sites(
@@ -282,17 +421,19 @@ def fix_sites(
             rank=0, kind=kind, i=int(c[0]), j=int(c[1]), k=int(c[2]), faces=0
         )
         row.update(measure(seg, mask, fixes, c))
-        row.update(fix=int(r["id"]), wall=int(r["wall"] or 0))
+        row.update(fix=int(r["id"]), wall=int(r["wall"] or 0), **NO_CREASE)
         out.append(row)
     return out
 
 
 def queue(
-    misfacing_rows: list[dict[str, Any]], fix_rows: list[dict[str, Any]]
+    misfacing_rows: list[dict[str, Any]],
+    fix_rows: list[dict[str, Any]],
+    crease_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """The queue: override sites (by fix id), then the misfacing sites (in
-    their order), then the handle-fix sites (larger walls first; ties: by fix
-    id), ranked from 1."""
+    their order), then the crease sites (in their order), then the
+    handle-fix sites (larger walls first; ties: by fix id), ranked from 1."""
     over = sorted(
         (r for r in fix_rows if r["kind"] == "override"), key=lambda r: r["fix"]
     )
@@ -300,7 +441,8 @@ def queue(
         (r for r in fix_rows if r["kind"] == "handle-fix"),
         key=lambda r: (-r["wall"], r["fix"]),
     )
-    return [dict(r, rank=k) for k, r in enumerate(over + misfacing_rows + hand, 1)]
+    rows = over + misfacing_rows + list(crease_rows or []) + hand
+    return [dict(r, rank=k) for k, r in enumerate(rows, 1)]
 
 
 def sites_paths(surf: Path, out: Path | None = None) -> dict[str, Path]:
@@ -322,6 +464,7 @@ class _Loaded:
     v_vox: Float
     v_mm: Float
     f: Int
+    keys: Int
     seg: npt.NDArray[np.integer[Any]]
     fx: npt.NDArray[np.integer[Any]]
     filled: tuple[int, ...]
@@ -346,6 +489,7 @@ def _load(surf: Path) -> _Loaded:
         np.asarray(W.v, np.float64),
         np.asarray(pts, np.float64),
         W.f,
+        W.vertex_key,
         seg,
         fx,
         filled,
@@ -378,7 +522,7 @@ def random_sites(
             rank=0, kind="random", i=int(c[0]), j=int(c[1]), k=int(c[2]), faces=0
         )
         row.update(measure(seg, mask, fixes, c))
-        row.update(fix=0, wall=0)
+        row.update(fix=0, wall=0, **NO_CREASE)
         rows.append(row)
     return rows
 
@@ -398,21 +542,21 @@ def write_sites(surf: Path, out: Path | None = None) -> dict[str, Path]:
     L = _load(surf)
     dseg, fixes, side = L.dseg, L.fixes, L.side
     filled = L.filled
-    S = find_sites(L.v_vox, L.f, L.v_mm, L.seg, filled, L.fx)
+    S = find_sites(L.v_vox, L.f, L.v_mm, L.keys, L.seg, filled, L.fx)
     table_path = output_paths(dseg)["table"]
     extra: list[Path] = []
     fix_rows: list[dict[str, Any]] = []
     if table_path.exists():
         fix_rows = fix_sites(read_table(table_path), L.seg, filled, L.fx)
         extra = [table_path]
-    rows = queue(S.rows, fix_rows)
+    rows = queue(S.rows, fix_rows, S.crease_rows)
     p = sites_paths(surf, out)
     p["table"].parent.mkdir(parents=True, exist_ok=True)
     dat = surf.with_name(surf.name.removesuffix(".surf.gii") + ".dat")
     with p["table"].open("w") as fh:
         fh.write("\t".join(COLUMNS) + "\n")
         for r in rows:
-            fh.write("\t".join(str(r[c]) for c in COLUMNS) + "\n")
+            fh.write("\t".join(_cell(r[c]) for c in COLUMNS) + "\n")
     write_sidecar(
         p["sidecar"],
         SITES_SPEC,
@@ -425,6 +569,8 @@ def write_sites(surf: Path, out: Path | None = None) -> dict[str, Path]:
             Hemisphere=side["Hemisphere"],
             FilledLabels=list(filled),
             MisfacingFaces=S.misfacing_faces,
+            CreaseEdges=S.crease_edges,
+            CreaseCosine=FOLD_COS,
             Sites=len(rows),
             GroupVoxels=GROUP,
             FixVoxels=FIX,
@@ -436,6 +582,10 @@ def write_sites(surf: Path, out: Path | None = None) -> dict[str, Path]:
         ),
     )
     return p
+
+
+def _cell(x: Any) -> str:
+    return "n/a" if x is None else str(x)
 
 
 def read_sites(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -450,9 +600,11 @@ def read_sites(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     for line in lines[1:]:
         d: dict[str, Any] = dict(zip(head, line.split("\t"), strict=True))
         for k in COLUMNS:
-            if k in _INTS:
+            if k in _OPTIONAL and d[k] == "n/a":
+                d[k] = None
+            elif k in _INTS:
                 d[k] = int(d[k])
-            elif k in ("wm_thickness", "gap_width"):
+            elif k in ("wm_thickness", "gap_width", "crease_angle"):
                 d[k] = float(d[k])
         rows.append(d)
     return rows, side

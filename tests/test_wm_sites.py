@@ -11,6 +11,8 @@ import pytest
 
 from baillarger import white_dseg, white_surf
 from baillarger import wm_sites as WS
+from baillarger.mesh import edge_key
+from baillarger.mesh_checks import FOLD_COS
 
 type Float = npt.NDArray[np.float64]
 type Int = npt.NDArray[np.int64]
@@ -113,7 +115,11 @@ def test_find_sites_groups_folds_and_orders_the_queue() -> None:
     seg = np.zeros(shape, np.int16)
     seg[:, :, :5] = 41  # WM below the sheet
     seg[:11, :11, 5:] = 42  # cortex above, round the first fold only
-    S = WS.find_sites(v, f, v * 0.16, seg, (41,), np.zeros(shape, np.uint8))
+    keys = np.zeros(len(v), np.int64)
+    S = WS.find_sites(v, f, v * 0.16, keys, seg, (41,), np.zeros(shape, np.uint8))
+    # a fold in the plane has opposed normals: its creases join its site
+    assert S.crease_edges > 0 and S.crease_rows == []
+    assert sum(r["creases"] for r in S.rows) == S.crease_edges
     assert S.misfacing_faces >= len(t1) + len(t2) - 2
     assert len(S.rows) == 2
     first, second = S.rows
@@ -152,7 +158,12 @@ def test_the_sites_command_writes_and_reads_the_files(surf: Path) -> None:
     dseg = surf.with_name("sub-T01_ses-S1_desc-wmtopo_dseg.nii.gz")
     assert any(Path(s).name == dseg.name for s in side["Sources"])
     assert [r["rank"] for r in rows] == list(range(1, len(rows) + 1))
-    assert {r["kind"] for r in rows} <= {"misfacing"}
+    assert {r["kind"] for r in rows} <= {"misfacing", "crease"}
+    assert side["CreaseCosine"] == FOLD_COS and side["CreaseEdges"] >= 0
+    for r in rows:
+        # no crease: n/a in the file, None in the row
+        none = r["proposal"] is None
+        assert (r["creases"] == 0) == none == (r["crease_angle"] is None)
     # a table with another header is refused
     bad = p["table"].with_name("bad_desc-wmsites_sites.tsv")
     bad.write_text("rank\ti\n")
@@ -169,7 +180,7 @@ def test_the_sites_command_writes_to_another_directory(
     p = WS.sites_paths(surf, out)
     assert p["table"].parent == out and p["sidecar"].exists()
     rows, _ = WS.read_sites(p["table"])
-    assert {r["kind"] for r in rows} <= {"misfacing"}
+    assert {r["kind"] for r in rows} <= {"misfacing", "crease"}
 
 
 def test_random_sites_repeat_with_the_seed_and_differ_with_another() -> None:
@@ -287,13 +298,106 @@ def test_the_queue_order() -> None:
         dict(kind="handle-fix", fix=3, wall=40),
         dict(kind="override", fix=2, wall=0),
     ]
-    q = WS.queue(m, f)
+    c = [dict(kind="crease", fix=0, wall=0)]
+    q = WS.queue(m, f, c)
     assert [(r["kind"], r["fix"]) for r in q] == [
         ("override", 2),
         ("override", 7),
         ("misfacing", 0),
         ("misfacing", 0),
+        ("crease", 0),
         ("handle-fix", 3),
         ("handle-fix", 5),
     ]
-    assert [r["rank"] for r in q] == list(range(1, 7))
+    assert [r["rank"] for r in q] == list(range(1, 8))
+
+
+# ---------------------------------------------------------------- creases
+
+
+def _key(lo: tuple[int, int, int], step: tuple[int, int, int], shape: Any) -> int:
+    return int(edge_key(np.ravel_multi_index(lo, shape), np.array([step]))[0])
+
+
+def hinge(at: tuple[int, int, int], shape: Any) -> tuple[Float, Int, Int]:
+    """Two faces folded flat back on each other (about 169 degrees), as at
+    the tip of a strand one voxel thick: they share an edge at x = at_x - 1,
+    and the vertices opposite it lie 0.1 voxel above and below the grid
+    point at (the tip), on the grid edges through it along k. Vertices,
+    faces and the vertices' grid-edge keys."""
+    x, y, z = at
+    v = np.array(
+        [[x - 1, y - 0.4, z], [x - 1, y + 0.4, z], [x, y, z + 0.1], [x, y, z - 0.1]],
+        float,
+    )
+    keys = np.array(
+        [
+            _key((x - 1, y - 1, z), (0, 1, 0), shape),
+            _key((x - 1, y, z), (0, 1, 0), shape),
+            _key((x, y, z), (0, 0, 1), shape),
+            _key((x, y, z - 1), (0, 0, 1), shape),
+        ],
+        np.int64,
+    )
+    return v, np.array([[0, 1, 2], [1, 0, 3]], np.int64), keys
+
+
+def test_tips_are_the_nearer_end_of_each_vertex_grid_edge() -> None:
+    shape = (8, 8, 8)
+    keys = np.array(
+        [_key((2, 3, 4), (0, 0, 1), shape), _key((2, 3, 4), (1, 1, 0), shape)]
+    )
+    v = np.array([[2, 3, 4.1], [2.8, 3.8, 4.0]])
+    near, dist = WS.tips(v, keys, shape)
+    assert near.tolist() == [[2, 3, 4], [3, 4, 4]]
+    assert np.allclose(dist, [0.1, 0.2 * np.sqrt(2)])
+
+
+def test_creases_find_the_folded_edge_and_its_tip() -> None:
+    shape = (12, 12, 12)
+    v, f, keys = hinge((6, 5, 5), shape)
+    C = WS.creases(v, f, v * 0.16, keys, shape)
+    assert C.edges.tolist() == [[0, 1]] and C.faces.tolist() == [[0, 1]]
+    assert C.tip.tolist() == [[6, 5, 5]]
+    assert np.allclose(C.mid, [[5, 5, 5]])
+    assert 168 < C.degrees[0] < 169
+    # past the cut-off: no crease
+    assert len(WS.creases(v, f, v, keys, shape, fold_cos=-0.99).cos) == 0
+    assert not WS.misfacing(v, f).any()
+
+
+@pytest.mark.parametrize("near", [False, True])
+@pytest.mark.parametrize("in_wm", [False, True])
+def test_a_crease_is_its_own_site_or_joins_a_misfacing_site(
+    near: bool, in_wm: bool
+) -> None:
+    """A sheet with one fold (a misfacing site) and a crease hinge: far from
+    the fold, the crease is a site of its own at its tip; within GROUP
+    voxels of a misfacing face, it joins that site. The proposal follows
+    whether the tip is in the WM mask."""
+    v, f = sheet(16)
+    fold(v, f, (3, 3), 16)
+    shape = (24, 24, 12)
+    tip = (6, 6, 6) if near else (14, 14, 8)
+    hv, hf, hk = hinge(tip, shape)
+    V = np.r_[v, hv]
+    F = np.r_[f, hf + len(v)]
+    keys = np.r_[np.zeros(len(v), np.int64), hk]
+    seg = np.zeros(shape, np.int16)
+    seg[:, :, :5] = 41
+    seg[tip] = 41 if in_wm else 0
+    fx = np.zeros(shape, np.uint8)
+    B = WS.find_sites(v, f, v * 0.16, keys[: len(v)], seg, (41,), fx)
+    S = WS.find_sites(V, F, V * 0.16, keys, seg, (41,), fx)
+    # the fold in the plane is creased too (its creases join its site)
+    assert S.crease_edges == B.crease_edges + 1
+    joined = sum(r["creases"] for r in S.rows)
+    if near:
+        assert S.crease_rows == [] and joined == S.crease_edges
+        return
+    assert joined == B.crease_edges
+    (row,) = S.crease_rows
+    assert row["kind"] == "crease" and (row["i"], row["j"], row["k"]) == tip
+    assert row["faces"] == 0 and row["fix"] == 0 and row["creases"] == 1
+    want = "remove-strand" if in_wm else "fill-gap"
+    assert row["proposal"] == want and 168 < row["crease_angle"] < 169

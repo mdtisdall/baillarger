@@ -18,6 +18,7 @@ reads them.
 |---|---|---|
 | `override` | A fix that changes edited voxels (the fix table's `overrides` is not `n/a`, `wm-dseg-fixes/1`) | yes |
 | `misfacing` | Misfacing faces of the surface (below) | yes |
+| `crease` | Crease edges of the surface (Creases) that no misfacing site takes | yes |
 | `handle-fix` | A handle fix (`handle_cut` or `handle_fill`) with a wall of `MinWallVoxels` or more, that is not an override | yes |
 | `random` | A random vertex of the surface, drawn for a session (Random sites) | no |
 
@@ -27,6 +28,13 @@ fix's labels, the next `dseg` run does not change them, and the fix is not
 an override there. In the viewer's review pane, the choice `accept-fix` of an
 override site does this write (`wm-edits/1`). The answer log (`wm-edits/1`)
 is not read.
+
+A site with creases (a `crease` site, or a `misfacing` site that took
+creases) proposes a choice (`proposal`, `wm-choices`): `remove-strand` or
+`fill-gap`. To accept it, the reviewer picks that choice at the site: the
+review pane previews it, as any choice, and writes its labels into the label
+edits. The reviewer can also pick another choice, paint, or answer `leave`
+(the crease stays).
 
 Without a fix table next to the corrected segmentation (an output older
 than `wm-dseg-fixes/1` with its table), the file has misfacing sites only.
@@ -54,16 +62,45 @@ strand, the stub of a handle cut. Faces whose centroids are within
 `GroupVoxels` of each other (single linkage) are one site; its centre is the
 voxel nearest the mean of its faces' centroids.
 
+## Creases
+
+A crease is an edge of the white surface whose two faces are folded back on
+each other: the cosine of the angle between their normals (in mm) is at
+most `CreaseCosine` (−0.9, 154.16°). It is the shared test of
+`baillarger.mesh_checks` (`edge_folds`). The surface stays embedded at a
+crease, but its normals are not well defined there.
+
+The tip of a crease is a voxel: of the two vertices opposite the crease
+edge, take the one nearer to an end of its own grid edge (its edge key,
+`white-surf/1`); the tip is that end. On the first hemisphere (INDD121850,
+R; 162 creases), both opposite vertices lay within 0.35 voxel of a voxel
+centre, at one voxel or at two neighbouring voxels on the same side of the
+mask: the end of a WM strand one voxel thick (about three quarters) or of a
+gap one voxel wide (the rest).
+
+Creases whose edge midpoints are within `GroupVoxels` of each other (single
+linkage) are one group. A group with a midpoint within `GroupVoxels` of the
+centroid of a misfacing face joins that face's site. Every other group is a
+`crease` site, centred on the tip of its crease with the largest angle.
+
+The proposal of a site with creases comes from the tip of its crease with
+the largest angle: `remove-strand` if the tip is in the WM mask, `fill-gap`
+if not. The choice acts at the site's centre voxel; for a `misfacing` site
+that is not the tip, and the preview shows whether it reaches the tip. On
+the first hemisphere, 48 of the 57 proposals changed the tip voxel when run
+at the site's centre.
+
 ## The table
 
 Tab-separated, with a header row, one row per site, in queue order: the
 override sites (by fix id), then the misfacing sites (in their order,
-below), then the handle-fix sites (larger walls first; ties: by fix id).
+below), then the crease sites (in their order, below), then the handle-fix
+sites (larger walls first; ties: by fix id). An empty value is `n/a`.
 
 | Column | Type | Meaning |
 |---|---|---|
 | `rank` | integer | Place in the queue, from 1. 0 means no rank (a random site) |
-| `kind` | string | `override`, `misfacing`, `handle-fix` (in the file) or `random` (see Random sites) |
+| `kind` | string | `override`, `misfacing`, `crease`, `handle-fix` (in the file) or `random` (see Random sites) |
 | `i`, `j`, `k` | integer | The site's centre voxel (0-based) on the segmentation's grid |
 | `faces` | integer | Its misfacing faces (0 for the other kinds) |
 | `tissue` | string | The labels outside the WM mask within `TissueVoxels` (a cube): `grey matter` (cortex: 3 or 42), `fluid` (outside, 0; or a label of `baillarger.labels.TO_OUTSIDE`: 24, 4, 5, 31, 43, 44, 63, which `wm-dseg/1` sets to 0 and only a dseg written before that rule holds; ex vivo they hold outside medium), `mixed` (both) or `other` |
@@ -74,11 +111,17 @@ below), then the handle-fix sites (larger walls first; ties: by fix id).
 | `gap_width` | number | The same outside the mask; 1 for a gap one voxel wide |
 | `fix` | integer | The fix's id in the fix table, for `override` and `handle-fix`; 0 for the other kinds |
 | `wall` | integer | The fix's wall (the fix table's `wall`); 0 if none |
+| `creases` | integer | The crease edges of the site; 0 for `override`, `handle-fix` and `random` |
+| `crease_angle` | number or `n/a` | The largest angle (degrees, 1 decimal) between the normals of a crease's two faces; `n/a` with no crease |
+| `proposal` | string or `n/a` | The proposed choice: `remove-strand` or `fill-gap` (Creases); `n/a` with no crease |
 
-For a fix site, the centre voxel is the fix table's `i`, `j`, `k`.
+For a fix site, the centre voxel is the fix table's `i`, `j`, `k`. For a
+crease site, it is the tip; its measures are taken there.
 
 The order of the misfacing sites: by `tissue` (grey matter, mixed, fluid,
 other), then more faces first, then more fixes, then by the centre voxel.
+The order of the crease sites: by `tissue`, then more creases first, then
+the larger `crease_angle` first, then by the centre voxel.
 
 ## Random sites
 
@@ -101,7 +144,8 @@ sites.
 The site of a vertex is its position rounded to the nearest voxel (`np.rint`),
 then clipped into the grid. The row has the same columns as a ranked row. The
 measures are those of a ranked site, taken at that voxel. `kind` is `random`,
-`rank` is 0 and `faces` is 0. The rows are in the order of the draw.
+`rank` is 0, `faces` and `creases` are 0, and `crease_angle` and `proposal`
+are `n/a`. The rows are in the order of the draw.
 
 ## Sidecar keys: wm-sites/1
 
@@ -115,8 +159,10 @@ measures are those of a ranked site, taken at that voxel. `kind` is `random`,
 | `Hemisphere` | string | yes | `R` or `L` |
 | `FilledLabels` | array of integers | yes | The labels of the WM mask |
 | `MisfacingFaces` | integer | yes | Misfacing faces of the surface |
+| `CreaseEdges` | integer | yes | Crease edges of the surface |
+| `CreaseCosine` | number | yes | The crease test's cut-off: the cosine of the angle between the two normals at or below which an edge is a crease (`baillarger.mesh_checks.FOLD_COS`) |
 | `Sites` | integer | yes | Rows of the table |
-| `GroupVoxels` | number | yes | Faces whose centroids are this close are one site |
+| `GroupVoxels` | number | yes | Faces whose centroids are this close are one site; also the grouping of creases, and how near a misfacing face a crease group joins its site |
 | `FixVoxels` | integer | yes | Half-side of the cube in which fixes are counted |
 | `TissueVoxels` | integer | yes | Half-side of the cube that names the tissue |
 | `ContactVoxels` | integer | yes | Half-side of the cube in which pieces are counted |

@@ -256,9 +256,11 @@ function show(site) {   // the site is shown (the server recorded it): move ther
   const mm = site.mm, BV = R.api.BV; for (const t of BV.tiles) { BV.C[t.r] = mm[t.r]; BV.C[t.u] = mm[t.u]; }
   BV.s = Math.max(BV.s, SITE_PX / R.vs);   // at least SITE_PX px per voxel, so that the preview squares show; a closer zoom stays
   R.api.crossHere(mm); R.api.update();
-  $("rvsite").style.display = ""; $("rvsname").textContent = `site ${site.id}` + (site.kind ? ` (${site.kind})` : "");
+  $("rvsite").style.display = ""; $("rvsname").textContent = `site ${site.id}` + (site.kind ? ` (${site.kind})` : "") +
+    (site.proposal ? `, proposed: ${site.proposal}` : "");
   for (const b of document.querySelectorAll("#rvsite button[data-choice]")) {
     b.style.outline = ""; if (b.dataset.choice === "accept-fix") b.style.display = site.kind === "override" ? "" : "none";
+    b.style.borderStyle = b.dataset.choice === site.proposal ? "dashed" : "";   // the proposed choice (a site with creases)
   }
   $("rvprev").textContent = "pick a choice to see its preview"; $("rvprev").style.color = "";
   const s = R.sites.find(x => x.id === site.id); if (s && s.state === "not shown") s.state = "shown"; table();
