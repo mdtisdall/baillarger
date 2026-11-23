@@ -176,7 +176,8 @@ class Layer {   // one label volume on the brick pane
 }
 
 const OVL = window.OVL = { api: null, vols: [], layers: new Map(), show: [], alpha: 0.5, edge: false, outlines: true,
-                           ocache: new Map(), otimer: 0, cursor: null, ostat: new Map() };
+                           ocache: new Map(), otimer: 0, cursor: null, ostat: new Map(),
+                           sigma: { steps: [], step: null, on: true, cache: new Map(), follow: true } };
 const CHOICES = { none: [], wm: ["wm", "fixes"], labels: ["labels"], fixes: ["fixes"], both: ["labels", "fixes"] };
 const CHOICE_TEXT = { wm: "WM mask + fixes", both: "labels + fixes" };
 const KEY_MAX = 8;   // a layer whose table has at most this many values gets a key
@@ -221,6 +222,7 @@ function controls() {
   $("ovop").oninput = () => { OVL.alpha = Number($("ovop").value); OVL.api.draw(); };
   $("ovedge").onchange = () => { OVL.edge = $("ovedge").checked; OVL.api.draw(); };
   $("ovout").onchange = () => { OVL.outlines = $("ovout").checked; hooks.update(); OVL.api.draw(); };
+  scontrols(bar);
   return $("ovsel").value;
 }
 
@@ -270,6 +272,62 @@ function odraw(g, t) {   // the segments of the tile's plane: the newest loaded 
   g.stroke(); g.setLineDash([]);
 }
 
+// ------------------------------------------------------------------ Σ by step (viewer.sigma_steps)
+// /sigma/steps lists the steps of a run's Σ (a directory given with --sigma-dir; none: no control). The slider picks
+// one; its outline on each tile comes from /sigma/outline, as the white surface's does, and is drawn in cyan. The list
+// is read again every SIGMA_POLL_MS, so a run that is still going shows its new steps ("latest" follows them).
+const SIGMA_POLL_MS = 20000, SIGMA_CACHE = 96;
+async function slist() {
+  const S = OVL.sigma; let L;
+  try { L = await OVL.api.get("/sigma/steps"); } catch { return; }
+  S.steps = L.map(x => x.step); const $ = OVL.api.$, el = $("sgstep"); if (!el) return;
+  $("sgbox").style.display = S.steps.length ? "" : "none"; if (!S.steps.length) return;
+  el.max = S.steps.length - 1;
+  if (S.step === null || S.follow || !S.steps.includes(S.step)) S.step = S.steps[S.steps.length - 1];
+  el.value = S.steps.indexOf(S.step); $("sgtxt").textContent = `step ${S.step} of ${S.steps[S.steps.length - 1]}`;
+  hooks.update(); OVL.api.draw();
+}
+function scontrols(bar) {
+  const box = document.createElement("span"); box.id = "sgbox"; box.style.display = "none";
+  box.innerHTML = `<label title="Σ of a run at one step, where it crosses each slice (cyan)"><input type="checkbox" id="sgon" checked> Σ</label>
+    <input type="range" id="sgstep" min="0" max="0" step="1" value="0" style="width:140px"> <span id="sgtxt"></span>
+    <label title="stay on the newest step as the run writes them"><input type="checkbox" id="sgfollow" checked> latest</label>`;
+  bar.appendChild(box);
+  const $ = OVL.api.$, S = OVL.sigma;
+  $("sgon").onchange = () => { S.on = $("sgon").checked; hooks.update(); OVL.api.draw(); };
+  $("sgfollow").onchange = () => { S.follow = $("sgfollow").checked; if (S.follow) slist(); };
+  $("sgstep").oninput = () => { S.step = S.steps[Number($("sgstep").value)]; S.follow = false; $("sgfollow").checked = false;
+    $("sgtxt").textContent = `step ${S.step} of ${S.steps[S.steps.length - 1]}`; hooks.update(); OVL.api.draw(); };
+  slist(); setInterval(slist, SIGMA_POLL_MS);
+}
+async function sload(t, k, key) {
+  const S = OVL.sigma, c = { seg: null }; S.cache.set(key, c);
+  if (S.cache.size > SIGMA_CACHE) S.cache.delete(S.cache.keys().next().value);
+  try {
+    const r = await fetch(`/sigma/outline?step=${S.step}&axis=${t.n}&mm=${k.mm}&box=${[...k.lo, ...k.hi].join(",")}`);
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+    c.seg = new Float32Array(await r.arrayBuffer());
+  } catch (e) { S.cache.delete(key); OVL.api.log(`Σ outline: ${e.message}`); return; }
+  OVL.api.draw();
+}
+function supdate() {
+  const S = OVL.sigma; if (!S.on || S.step === null || !OVL.api.BV.tiles.length) return;
+  for (const t of OVL.api.BV.tiles) { const k = okey(t), key = `${S.step}|${k.key}`; t.skey = key; if (!S.cache.has(key)) sload(t, k, key); }
+}
+function sdraw(g, t) {   // the step's cut of this plane: this view's, else the newest loaded one of the same step and plane
+  const S = OVL.sigma; if (!S.on || S.step === null) return;
+  const mm = OVL.api.cross[t.n]; let c = t.skey && S.cache.get(t.skey);
+  if (!c || !c.seg) { c = null; for (const [k, v] of S.cache) if (v.seg && k.startsWith(`${S.step}|${t.n}|${mm.toFixed(4)}|`)) c = v; }
+  if (!c) return;
+  const s = c.seg, w2px = OVL.api.w2px; g.strokeStyle = "rgba(64, 224, 255, 0.95)"; g.lineWidth = 1.25; g.beginPath();
+  const a = [0, 0, 0], b = [0, 0, 0];
+  for (let i = 0; i < s.length; i += 6) {
+    a[0] = s[i]; a[1] = s[i + 1]; a[2] = s[i + 2]; b[0] = s[i + 3]; b[1] = s[i + 4]; b[2] = s[i + 5];
+    const p = w2px(t, a), q = w2px(t, b); g.moveTo(p[0], p[1]); g.lineTo(q[0], q[1]);
+  }
+  g.stroke();
+}
+
 // ------------------------------------------------------------------ the hooks
 const hooks = {
   async init(api) {
@@ -284,14 +342,14 @@ const hooks = {
     api.$("bvo").addEventListener("pointerleave", () => { OVL.cursor = null; api.draw(); });
     await choose(v);
   },
-  update() { if (!OVL.api || !(OVL.api.BV.s > 0)) return; const BV = OVL.api.BV; for (const l of OVL.show) l.update(BV.tiles, BV.s); oupdate(); },
+  update() { if (!OVL.api || !(OVL.api.BV.s > 0)) return; const BV = OVL.api.BV; for (const l of OVL.show) l.update(BV.tiles, BV.s); oupdate(); setTimeout(supdate, OUTLINE_WAIT_MS); },
   render(g, geoms, dpr) {
     if (!OVL.show.length || OVL.alpha <= 0) return;
     g.enable(g.BLEND); g.blendFunc(g.SRC_ALPHA, g.ONE_MINUS_SRC_ALPHA);
     for (const l of OVL.show) l.render(geoms, OVL.alpha, OVL.edge, dpr);
     g.disable(g.BLEND);
   },
-  draw2d(g, t) { if (OVL.outlines) odraw(g, t); },
+  draw2d(g, t) { if (OVL.outlines) odraw(g, t); sdraw(g, t); },
   text(t) {   // the tile's text line: what is under the cursor, and the outline's source
     let s = "";
     if (OVL.cursor && OVL.cursor.t === t)

@@ -42,6 +42,9 @@ Requests:
   /review/surface-preview/cut (the working field's surface preview).
 - Surface outlines (baillarger.viewer.outlines):
   /outline?axis=&mm=&box= (float32 segment ends, world mm).
+- Σ by step (baillarger.viewer.sigma_steps; with --sigma-dir): /sigma/steps (the
+  steps found in the directory), /sigma/outline?step=&axis=&mm=&box= (as /outline,
+  for one step's surface).
 - The columns pane (baillarger.viewer.columns.route): /columns/meta,
   /columns?v=&radius=..., /columns/profiles?..., /columns/<key>.tck.
 - Per-vertex scalar maps (baillarger.viewer.overlay; with --overlay): /overlay/meta,
@@ -67,6 +70,7 @@ from baillarger.viewer import columns as VC
 from baillarger.viewer import outlines as VO
 from baillarger.viewer import overlay as VOL
 from baillarger.viewer import review as VR
+from baillarger.viewer import sigma_steps as VS
 from baillarger.viewer import volumes as VV
 from baillarger.viewer.bricks import ArrayPyramid, LazyVolume, nifti
 from baillarger.viewer.white_view import WhiteView
@@ -125,6 +129,7 @@ class Handler(BaseHTTPRequestHandler):
     columns: VC.Columns | None = None
     wmreview: VR.Review | None = None  # the stream 1 review (baillarger.viewer.review)
     overlays: VOL.Overlays | None = None  # per-vertex maps (baillarger.viewer.overlay)
+    sigma: VS.SigmaSteps | None = None  # Σ by step (baillarger.viewer.sigma_steps)
     lock = threading.Lock()  # one computation at a time
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -252,6 +257,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if VR.route(self, "GET", u.path, q, {}):
             return
+        if VS.route(self, u.path, q):
+            return
         if VOL.route(self, u.path, q):
             return
         w = self.white
@@ -316,6 +323,7 @@ def serve(
     columns: VC.Columns | None = None,
     wmreview: VR.Review | None = None,
     overlays: VOL.Overlays | None = None,
+    sigma: VS.SigmaSteps | None = None,
 ) -> ThreadingHTTPServer:
     """The server on a white surface (white). volume: the bricks of the volume pane
     (baillarger.viewer.bricks); volumes, outlines, columns: the other panes' data, if
@@ -330,6 +338,7 @@ def serve(
     Handler.columns = columns
     Handler.wmreview = wmreview
     Handler.overlays = overlays
+    Handler.sigma = sigma
     Handler.shared = Shared()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     srv.daemon_threads = True
@@ -365,6 +374,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     VR.add_arguments(ap)
     VOL.add_arguments(ap)
+    VS.add_arguments(ap)
     ap.add_argument("--port", type=int, default=8790)
     a = ap.parse_args(argv)
     t0 = time.time()
@@ -427,6 +437,7 @@ def main(argv: list[str] | None = None) -> None:
         columns=columns,
         wmreview=wmreview,
         overlays=overlays,
+        sigma=VS.for_args(a),
     )
     print(
         f"serving on http://127.0.0.1:{a.port}/ ({time.time() - t0:.0f} s)", flush=True
