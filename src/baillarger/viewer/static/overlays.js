@@ -297,7 +297,7 @@ function scontrols(bar) {
   $("sgon").onchange = () => { S.on = $("sgon").checked; hooks.update(); OVL.api.draw(); };
   $("sgfollow").onchange = () => { S.follow = $("sgfollow").checked; if (S.follow) slist(); };
   $("sgstep").oninput = () => { S.step = S.steps[Number($("sgstep").value)]; S.follow = false; $("sgfollow").checked = false;
-    $("sgtxt").textContent = `step ${S.step} of ${S.steps[S.steps.length - 1]}`; hooks.update(); OVL.api.draw(); };
+    $("sgtxt").textContent = `step ${S.step} of ${S.steps[S.steps.length - 1]}`; supdate(); OVL.api.draw(); };
   slist(); setInterval(slist, SIGMA_POLL_MS);
 }
 async function sload(t, k, key) {
@@ -312,11 +312,13 @@ async function sload(t, k, key) {
 }
 function supdate() {
   const S = OVL.sigma; if (!S.on || S.step === null || !OVL.api.BV.tiles.length) return;
-  for (const t of OVL.api.BV.tiles) { const k = okey(t), key = `${S.step}|${k.key}`; t.skey = key; if (!S.cache.has(key)) sload(t, k, key); }
+  for (const t of OVL.api.BV.tiles) { const k = okey(t), key = `${S.step}|${k.key}`; if (!S.cache.has(key)) sload(t, k, key); }
 }
 function sdraw(g, t) {   // the step's cut of this plane: this view's, else the newest loaded one of the same step and plane
   const S = OVL.sigma; if (!S.on || S.step === null) return;
-  const mm = OVL.api.cross[t.n]; let c = t.skey && S.cache.get(t.skey);
+  // the key is made here, from the step and view of this draw: a key kept on the tile was the last step's until the
+  // delayed update ran, and stayed so when the new step's cut was already cached (the slider then showed the wrong step)
+  const mm = OVL.api.cross[t.n]; let c = S.cache.get(`${S.step}|${okey(t).key}`);
   if (!c || !c.seg) { c = null; for (const [k, v] of S.cache) if (v.seg && k.startsWith(`${S.step}|${t.n}|${mm.toFixed(4)}|`)) c = v; }
   if (!c) return;
   const s = c.seg, w2px = OVL.api.w2px; g.strokeStyle = "rgba(64, 224, 255, 0.95)"; g.lineWidth = 1.25; g.beginPath();
