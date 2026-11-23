@@ -183,7 +183,9 @@ def _closest_xyz(
     cx: float, cy: float, cz: float,
 ) -> tuple[float, float, float, float]:  # fmt: skip
     """The closest point q on the triangle a, b, c to the point p
-    (Ericson), and the distance |p - q|, in scalars: no temporary arrays."""
+    (Ericson), and the distance |p - q|, in scalars: no temporary arrays.
+    A triangle with no area does not divide by zero (a split of a sliver's
+    long edge makes one)."""
     abx, aby, abz = bx - ax, by - ay, bz - az
     acx, acy, acz = cx - ax, cy - ay, cz - az
     apx, apy, apz = px - ax, py - ay, pz - az
@@ -200,7 +202,7 @@ def _closest_xyz(
         else:
             vc = d1 * d4 - d3 * d2
             if vc <= 0 and d1 >= 0 and d3 <= 0:
-                t = d1 / (d1 - d3)
+                t = d1 / (d1 - d3) if d1 > d3 else 0.0  # a = b: the point a
                 qx, qy, qz = ax + t * abx, ay + t * aby, az + t * abz
             else:
                 cpx, cpy, cpz = px - cx, py - cy, pz - cz
@@ -211,21 +213,34 @@ def _closest_xyz(
                 else:
                     vb = d5 * d2 - d1 * d6
                     if vb <= 0 and d2 >= 0 and d6 <= 0:
-                        t = d2 / (d2 - d6)
+                        t = d2 / (d2 - d6) if d2 > d6 else 0.0  # a = c
                         qx, qy, qz = ax + t * acx, ay + t * acy, az + t * acz
                     else:
                         va = d3 * d6 - d5 * d4
                         if va <= 0 and (d4 - d3) >= 0 and (d5 - d6) >= 0:
-                            t = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+                            den = (d4 - d3) + (d5 - d6)
+                            t = (d4 - d3) / den if den > 0 else 0.0  # b = c
                             qx = bx + t * (cx - bx)
                             qy = by + t * (cy - by)
                             qz = bz + t * (cz - bz)
                         else:
-                            den = 1.0 / (va + vb + vc)
-                            v_, w_ = vb * den, vc * den
-                            qx = ax + abx * v_ + acx * w_
-                            qy = ay + aby * v_ + acy * w_
-                            qz = az + abz * v_ + acz * w_
+                            den = va + vb + vc
+                            if den > 0:
+                                v_, w_ = vb / den, vc / den
+                                qx = ax + abx * v_ + acx * w_
+                                qy = ay + aby * v_ + acy * w_
+                                qz = az + abz * v_ + acz * w_
+                            else:
+                                # a triangle with no area (its corners on one
+                                # line) that rounding sent here: the nearest of
+                                # its corners, so the distance is never too small
+                                qx, qy, qz = ax, ay, az
+                                best = apx * apx + apy * apy + apz * apz
+                                e = bpx * bpx + bpy * bpy + bpz * bpz
+                                if e < best:
+                                    qx, qy, qz, best = bx, by, bz, e
+                                if cpx * cpx + cpy * cpy + cpz * cpz < best:
+                                    qx, qy, qz = cx, cy, cz
     dx, dy, dz = px - qx, py - qy, pz - qz
     d: float = np.sqrt(dx * dx + dy * dy + dz * dz)
     return qx, qy, qz, d
@@ -1241,28 +1256,42 @@ def _closest_kernel(
     rad = int(np.ceil((r + Rmax) / cell))
     for i in range(len(P)):
         px, py, pz = P[i, 0], P[i, 1], P[i, 2]
-        d[i] = np.inf
-        face[i] = -1
         i0, j0, k0 = _q(px, lo[0], cell), _q(py, lo[1], cell), _q(pz, lo[2], cell)
-        for a in range(max(i0 - rad, 0), min(i0 + rad, _KMAX) + 1):
-            for b in range(max(j0 - rad, 0), min(j0 + rad, _KMAX) + 1):
-                for c in range(max(k0 - rad, 0), min(k0 + rad, _KMAX) + 1):
-                    key = _pack(a, b, c)
-                    s = _hslot(hkey, key)
-                    if hkey[s] != key:
-                        continue
-                    g = hhead[s]
-                    while g >= 0:
-                        u, v, w = F[g, 0], F[g, 1], F[g, 2]
-                        qx, qy, qz, dd = _closest_xyz(
-                            px, py, pz, V[u, 0], V[u, 1], V[u, 2],
-                            V[v, 0], V[v, 1], V[v, 2], V[w, 0], V[w, 1], V[w, 2],
-                        )  # fmt: skip
-                        if dd < r and dd < d[i]:
-                            d[i] = dd
-                            face[i] = g
-                            Q[i, 0], Q[i, 1], Q[i, 2] = qx, qy, qz
-                        g = gnext[g]
+        # Cubes of cells of growing half-width s (1, 2, 4, ... rad), each
+        # scanned whole in the same order. A face of a cell outside the cube
+        # is farther than s cell - Rmax (its centre is at least s cells away
+        # along an axis), so a best distance below that is the best of all,
+        # and the first face at that distance in this order is the first in
+        # the full cube's order. The cost follows the distance to the mesh,
+        # not r (2026-11-23: with the full cube at once, 61 % of the coarse
+        # Σ start's time was here, for points that lie on the mesh).
+        sw = 1
+        while True:
+            sw = min(sw, rad)
+            d[i] = np.inf
+            face[i] = -1
+            for a in range(max(i0 - sw, 0), min(i0 + sw, _KMAX) + 1):
+                for b in range(max(j0 - sw, 0), min(j0 + sw, _KMAX) + 1):
+                    for c in range(max(k0 - sw, 0), min(k0 + sw, _KMAX) + 1):
+                        key = _pack(a, b, c)
+                        s = _hslot(hkey, key)
+                        if hkey[s] != key:
+                            continue
+                        g = hhead[s]
+                        while g >= 0:
+                            u, v, w = F[g, 0], F[g, 1], F[g, 2]
+                            qx, qy, qz, dd = _closest_xyz(
+                                px, py, pz, V[u, 0], V[u, 1], V[u, 2],
+                                V[v, 0], V[v, 1], V[v, 2], V[w, 0], V[w, 1], V[w, 2],
+                            )  # fmt: skip
+                            if dd < r and dd < d[i]:
+                                d[i] = dd
+                                face[i] = g
+                                Q[i, 0], Q[i, 1], Q[i, 2] = qx, qy, qz
+                            g = gnext[g]
+            if sw >= rad or d[i] < sw * cell - Rmax:
+                break
+            sw *= 2
 
 
 @dataclass
