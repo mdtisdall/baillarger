@@ -30,6 +30,17 @@ input faces merged into it). A collapse is made only if all hold:
    its overview did); this test compares with the input, which does not
    change.
 
+Rules (class Rules) add further tests of a collapse, each off by default:
+5. A separate distance bound eps_in for an input vertex on the outer side of
+   its new face (eps stays the bound on the other side).
+6. The orientation of test 4 at an angle below 90 degrees (normal_cos).
+7. Size: no new face has an edge longer than size_factor times the smallest
+   target size at its corners, unless its old longest edge was longer.
+8. Shape: no new face has a circumradius over its shortest edge above a bound,
+   unless a face round the removed vertex was worse before.
+Without rules the result is as before, bit for bit, and the two workers still
+agree with rules on.
+
 A rejected collapse is tried again when the region around a or b changes.
 
 Repair: the distance bound lets faces that stand for two sheets of the input
@@ -79,6 +90,7 @@ brain would need the first pass read block by block from the mesh's files.
 
 import hashlib
 import heapq
+import math
 import os
 import resource
 import sys
@@ -230,6 +242,60 @@ def point_triangle_distance(p: Vec, a: Vec, b: Vec, c: Vec) -> float:
     return float(np.sqrt(_dot(e, e)))
 
 
+# ---------------------------------------------------------------- rules
+@dataclass(frozen=True)
+class Rules:
+    """Further tests of a collapse (2026-11-23: one decimation for the
+    overview and for the start of Σ). All off by default: decimate without
+    rules is as before, bit for bit. A face a collapse changes is "new"; the
+    same face before it is "old".
+
+    eps_in: the distance bound for an input vertex that lies on the outer
+      side of its new face (the face is inward of it, by the faces' own
+      orientation); eps stays the bound on the other side. None: eps.
+    normal_cos: each new face's normal is within arccos(normal_cos) of the
+      input surface it stands for (the sum of the input normals of its
+      corners and carried vertices; test 4 of the module is normal_cos = 0),
+      unless the old face was farther from that sum.
+    size, size_factor: a target edge length per input vertex. No new face
+      has an edge longer than size_factor × the smallest size at its
+      corners, unless its old longest edge was longer.
+    shape: no new face has circumradius / shortest edge above this (sqrt 2:
+      smallest angle 20.7 degrees), unless one of the faces round the
+      removed vertex was worse before (a collapse that removes a sliver may
+      leave a lesser one; with "unless that same face was worse", a mesh of
+      marching-tetrahedra slivers stopped at a third of its vertices).
+      0: off.
+    """
+
+    eps_in: float | None = None
+    normal_cos: float = 0.0
+    size: Float | None = None
+    size_factor: float = 1.0
+    shape: float = 0.0
+
+    def scalars(self, eps: float) -> tuple[float, float, float, float]:
+        return (
+            float(eps if self.eps_in is None else self.eps_in),
+            float(self.normal_cos),
+            float(self.size_factor if self.size is not None else 0.0),
+            float(self.shape),
+        )
+
+
+def _scalars(
+    rule: tuple[float, float, float, float] | None, eps: float
+) -> tuple[float, float, float, float]:
+    return (float(eps), 0.0, 0.0, 0.0) if rule is None else rule
+
+
+def _ratio(la: float, lb: float, lc: float, n2: float) -> float:
+    """Circumradius / shortest edge of a triangle with edges la, lb, lc and
+    twice the area n2 (inf with no area)."""
+    den = 2.0 * n2 * min(la, lb, lc)
+    return la * lb * lc / den if den > 0.0 else math.inf
+
+
 # ---------------------------------------------------------------- one block
 @dataclass
 class Block:
@@ -248,6 +314,7 @@ class Block:
     cpos: Float
     N: Float
     cnrm: Float
+    size: Float | None = None  # Rules.size at the block's vertices
 
 
 @dataclass
@@ -260,7 +327,9 @@ class BlockResult:
     qv: Int | None = None  # the vertices that Q is of (None: all)
 
 
-def decimate_block_py(B: Block, eps: float) -> BlockResult:
+def decimate_block_py(
+    B: Block, eps: float, rule: tuple[float, float, float, float] | None = None
+) -> BlockResult:
     """Collapse the block's edges whose ends are both unlocked, cheapest first,
     while a collapse passes the three tests (module docstring). The reference,
     in Python, for decimate_block: the faces round a vertex are taken in
@@ -276,6 +345,8 @@ def decimate_block_py(B: Block, eps: float) -> BlockResult:
     cpos: list[Vec] = [tuple(p) for p in B.cpos.tolist()]
     N: list[Vec] = [tuple(p) for p in B.N.tolist()]
     cn: list[Vec] = [tuple(p) for p in B.cnrm.tolist()]
+    eps_in, cos_t, size_f, shape = _scalars(rule, eps)
+    size: list[float] = B.size.tolist() if (B.size is not None and size_f > 0) else []
     carried: list[list[tuple[int, Vec, Vec]]] = [
         [(cid[k], cpos[k], cn[k]) for k in range(ptr[i], ptr[i + 1])]
         for i in range(len(F))
@@ -318,6 +389,8 @@ def decimate_block_py(B: Block, eps: float) -> BlockResult:
         moved = [i for i in fa if i not in shared]
         new: list[tuple[Vec, Vec, Vec]] = []
         n1s: list[Vec] = []
+        n0s: list[Vec] = []
+        worst_new = 0.0
         for i in moved:
             old = [P[x] for x in F[i]]
             tri = [P[b] if x == a else P[x] for x in F[i]]
@@ -325,14 +398,59 @@ def decimate_block_py(B: Block, eps: float) -> BlockResult:
             n1 = _cross(_sub(tri[1], tri[0]), _sub(tri[2], tri[0]))
             if _dot(n0, n1) <= 0:
                 return False
+            if size or shape > 0:
+                la, lb, lc = (
+                    math.sqrt(_dot(e, e))
+                    for e in (
+                        _sub(tri[1], tri[0]),
+                        _sub(tri[2], tri[1]),
+                        _sub(tri[0], tri[2]),
+                    )
+                )
+                oa, ob, oc = (
+                    math.sqrt(_dot(e, e))
+                    for e in (
+                        _sub(old[1], old[0]),
+                        _sub(old[2], old[1]),
+                        _sub(old[0], old[2]),
+                    )
+                )
+                if size:
+                    lim = size_f * min(size[b if x == a else x] for x in F[i])
+                    if max(la, lb, lc) > lim and max(la, lb, lc) > max(oa, ob, oc):
+                        return False
+                if shape > 0:
+                    worst_new = max(
+                        worst_new, _ratio(la, lb, lc, math.sqrt(_dot(n1, n1)))
+                    )
             new.append((tri[0], tri[1], tri[2]))
             n1s.append(n1)
+            n0s.append(n0)
+        if shape > 0 and worst_new > shape:
+            worst_old = 0.0
+            for i in fa:
+                o0, o1, o2 = (P[x] for x in F[i])
+                no = _cross(_sub(o1, o0), _sub(o2, o0))
+                worst_old = max(
+                    worst_old,
+                    _ratio(
+                        math.sqrt(_dot(_sub(o1, o0), _sub(o1, o0))),
+                        math.sqrt(_dot(_sub(o2, o1), _sub(o2, o1))),
+                        math.sqrt(_dot(_sub(o0, o2), _sub(o0, o2))),
+                        math.sqrt(_dot(no, no)),
+                    ),
+                )
+            if worst_new > worst_old:
+                return False
         pts = [(gid[a], P[a], N[a])] + [p for i in fa for p in carried[i]]
         home: list[int] = []
         for _, p, _ in pts:
             ds = [point_triangle_distance(p, *t) for t in new]
             k = min(range(len(ds)), key=ds.__getitem__)
-            if ds[k] > eps:
+            lim = eps
+            if eps_in != eps and _dot(_sub(p, new[k][0]), n1s[k]) >= 0:
+                lim = eps_in
+            if ds[k] > lim:
                 return False
             home.append(k)
         # each new face faces the way of the input surface it stands for: its
@@ -346,8 +464,14 @@ def decimate_block_py(B: Block, eps: float) -> BlockResult:
         for (_, _, nq), k in zip(pts, home, strict=True):
             S[k] = _add(S[k], nq)
         for m in range(len(moved)):
-            if _dot(n1s[m], S[m]) <= 0:
+            dn = _dot(n1s[m], S[m])
+            if dn <= 0:
                 return False
+            if cos_t > 0:
+                l1 = math.sqrt(_dot(n1s[m], n1s[m]))
+                if dn < cos_t * l1 * math.sqrt(_dot(S[m], S[m])):
+                    if dn * math.sqrt(_dot(n0s[m], n0s[m])) < _dot(n0s[m], S[m]) * l1:
+                        return False
         for i in shared:
             alive[i] = False
             for x in F[i]:
@@ -530,6 +654,15 @@ def _nb_insert(x: int, i: int, vf: Int, cnt: Int) -> None:
 
 
 @njit(cache=True)
+def _nb_ratio(la: float, lb: float, lc: float, n2: float) -> float:
+    """_ratio compiled."""
+    den = 2.0 * n2 * min(la, lb, lc)
+    if den > 0.0:
+        return la * lb * lc / den
+    return np.inf
+
+
+@njit(cache=True)
 def _nb_collapse(
     a: int,
     b: int,
@@ -548,6 +681,11 @@ def _nb_collapse(
     nn: Int,
     N: Float,
     node_n: Float,
+    eps_in: float,
+    cos_t: float,
+    size_f: float,
+    shape: float,
+    size: Float,
 ) -> bool:
     """collapse() of decimate_block_py: a into b if the tests pass."""
     na = cnt[a]
@@ -590,6 +728,9 @@ def _nb_collapse(
             nm += 1
     tri = np.empty((nm, 3, 3))
     n1 = np.empty((nm, 3))
+    n0 = np.empty((nm, 3))
+    use_size = size_f > 0 and size.shape[0] > 0
+    worst_new = 0.0
     for m in range(nm):
         t = F[moved[m]]
         o0, o1, o2 = P[t[0]], P[t[1]], P[t[2]]
@@ -613,7 +754,53 @@ def _nb_collapse(
         )
         if n0x * n1x + n0y * n1y + n0z * n1z <= 0:
             return False
+        if use_size or shape > 0:
+            g0x, g0y, g0z = T[2, 0] - T[1, 0], T[2, 1] - T[1, 1], T[2, 2] - T[1, 2]
+            la = np.sqrt(f1x * f1x + f1y * f1y + f1z * f1z)
+            lb = np.sqrt(g0x * g0x + g0y * g0y + g0z * g0z)
+            lc = np.sqrt(f2x * f2x + f2y * f2y + f2z * f2z)
+            h0x, h0y, h0z = o2[0] - o1[0], o2[1] - o1[1], o2[2] - o1[2]
+            oa = np.sqrt(e1x * e1x + e1y * e1y + e1z * e1z)
+            ob = np.sqrt(h0x * h0x + h0y * h0y + h0z * h0z)
+            oc = np.sqrt(e2x * e2x + e2y * e2y + e2z * e2z)
+            if use_size:
+                s0 = size[b] if t[0] == a else size[t[0]]
+                s1 = size[b] if t[1] == a else size[t[1]]
+                s2 = size[b] if t[2] == a else size[t[2]]
+                lim = size_f * min(s0, s1, s2)
+                if max(la, lb, lc) > lim and max(la, lb, lc) > max(oa, ob, oc):
+                    return False
+            if shape > 0:
+                worst_new = max(
+                    worst_new,
+                    _nb_ratio(la, lb, lc, np.sqrt(n1x * n1x + n1y * n1y + n1z * n1z)),
+                )
         n1[m, 0], n1[m, 1], n1[m, 2] = n1x, n1y, n1z
+        n0[m, 0], n0[m, 1], n0[m, 2] = n0x, n0y, n0z
+    if shape > 0 and worst_new > shape:
+        worst_old = 0.0
+        for j in range(na):
+            t = F[fa[j]]
+            o0, o1, o2 = P[t[0]], P[t[1]], P[t[2]]
+            e1x, e1y, e1z = o1[0] - o0[0], o1[1] - o0[1], o1[2] - o0[2]
+            e2x, e2y, e2z = o2[0] - o0[0], o2[1] - o0[1], o2[2] - o0[2]
+            h0x, h0y, h0z = o2[0] - o1[0], o2[1] - o1[1], o2[2] - o1[2]
+            nox, noy, noz = (
+                e1y * e2z - e1z * e2y,
+                e1z * e2x - e1x * e2z,
+                e1x * e2y - e1y * e2x,
+            )
+            worst_old = max(
+                worst_old,
+                _nb_ratio(
+                    np.sqrt(e1x * e1x + e1y * e1y + e1z * e1z),
+                    np.sqrt(h0x * h0x + h0y * h0y + h0z * h0z),
+                    np.sqrt(e2x * e2x + e2y * e2y + e2z * e2z),
+                    np.sqrt(nox * nox + noy * noy + noz * noz),
+                ),
+            )
+        if worst_new > worst_old:
+            return False
     # the points: a (a new node), then the nodes of a's faces in order
     npts = 1
     for j in range(na):
@@ -656,7 +843,14 @@ def _nb_collapse(
             )
             if bk < 0 or dm < best:
                 best, bk = dm, m
-        if best > eps:
+        lim = eps
+        if eps_in != eps:
+            T = tri[bk]
+            if (p[0] - T[0, 0]) * n1[bk, 0] + (p[1] - T[0, 1]) * n1[bk, 1] + (
+                p[2] - T[0, 2]
+            ) * n1[bk, 2] >= 0:
+                lim = eps_in
+        if best > lim:
             return False
         home[q] = bk
     # each new face faces the way of the input surface it stands for (the same
@@ -675,8 +869,22 @@ def _nb_collapse(
         S[m, 1] = S[m, 1] + node_n[k, 1]
         S[m, 2] = S[m, 2] + node_n[k, 2]
     for m in range(nm):
-        if n1[m, 0] * S[m, 0] + n1[m, 1] * S[m, 1] + n1[m, 2] * S[m, 2] <= 0:
+        dn = n1[m, 0] * S[m, 0] + n1[m, 1] * S[m, 1] + n1[m, 2] * S[m, 2]
+        if dn <= 0:
             return False
+        if cos_t > 0:
+            l1 = np.sqrt(
+                n1[m, 0] * n1[m, 0] + n1[m, 1] * n1[m, 1] + n1[m, 2] * n1[m, 2]
+            )
+            if dn < cos_t * l1 * np.sqrt(
+                S[m, 0] * S[m, 0] + S[m, 1] * S[m, 1] + S[m, 2] * S[m, 2]
+            ):
+                d0 = n0[m, 0] * S[m, 0] + n0[m, 1] * S[m, 1] + n0[m, 2] * S[m, 2]
+                l0 = np.sqrt(
+                    n0[m, 0] * n0[m, 0] + n0[m, 1] * n0[m, 1] + n0[m, 2] * n0[m, 2]
+                )
+                if dn * l0 < d0 * l1:
+                    return False
     # commit
     nn[0] += 1
     for j in range(2):
@@ -726,6 +934,11 @@ def _nb_block(
     eps: float,
     N: Float,
     cnrm: Float,
+    eps_in: float,
+    cos_t: float,
+    size_f: float,
+    shape: float,
+    size: Float,
 ) -> tuple[Int, Float, Int, Int, int, int]:
     """decimate_block on arrays. Returns faces kept, quadrics, the carried CSR,
     the collapses and the pushes."""
@@ -801,6 +1014,11 @@ def _nb_block(
             nn,
             N,
             node_n,
+            eps_in,
+            cos_t,
+            size_f,
+            shape,
+            size,
         ):
             continue
         ncol += 1
@@ -864,8 +1082,11 @@ def _nb_block(
     return Fk, Q, ptr, out_c, ncol, pushes
 
 
-def decimate_block(B: Block, eps: float) -> BlockResult:
+def decimate_block(
+    B: Block, eps: float, rule: tuple[float, float, float, float] | None = None
+) -> BlockResult:
     """decimate_block_py compiled (numba): the same result, bit for bit."""
+    eps_in, cos_t, size_f, shape = _scalars(rule, eps)
     F, Q, cptr, cids, n, _ = _nb_block(
         np.ascontiguousarray(B.P, np.float64),
         np.ascontiguousarray(B.gids, np.int64),
@@ -878,15 +1099,24 @@ def decimate_block(B: Block, eps: float) -> BlockResult:
         float(eps),
         np.ascontiguousarray(B.N, np.float64).reshape(-1, 3),
         np.ascontiguousarray(B.cnrm, np.float64).reshape(-1, 3),
+        eps_in,
+        cos_t,
+        size_f,
+        shape,
+        np.ascontiguousarray(
+            B.size if (B.size is not None and size_f > 0) else np.zeros(0), np.float64
+        ),
     )
     return BlockResult(F=F, Q=Q, cptr=cptr, cids=cids, collapses=int(n))
 
 
-def _run_block(args: tuple[Block, float, bool]) -> BlockResult:
+def _run_block(
+    args: tuple[Block, float, bool, tuple[float, float, float, float] | None],
+) -> BlockResult:
     """A block in a pass: its result with the quadrics of the vertices it keeps
     only (a removed vertex's quadric is never read again)."""
-    B, eps, reference = args
-    r = decimate_block_py(B, eps) if reference else decimate_block(B, eps)
+    B, eps, reference, rule = args
+    r = decimate_block_py(B, eps, rule) if reference else decimate_block(B, eps, rule)
     qv = np.unique(r.F)
     return BlockResult(
         F=r.F, Q=r.Q[qv], cptr=r.cptr, cids=r.cids, collapses=r.collapses, qv=qv
@@ -958,6 +1188,7 @@ def decimate_pass(
     log: Callable[[str], object] | None = None,
     pinned: npt.NDArray[np.bool_] | None = None,
     memo: dict[bytes, BlockResult] | None = None,
+    rules: Rules | None = None,
 ) -> tuple[Mesh, dict[str, Any]]:
     """One pass: the blocks of the grid of side `block` (from origin, default
     the minimum of v, shifted by offset blocks), each decimated on its own,
@@ -968,6 +1199,12 @@ def decimate_pass(
     inputs give the same result)."""
     lap = _Laps(log)
     v, f = M.v, M.f
+    rule = None if rules is None else rules.scalars(eps)
+    vsize = (
+        None
+        if rules is None or rules.size is None
+        else np.asarray(rules.size, np.float64)
+    )
     o = v.min(0) if origin is None else np.asarray(origin, float)
     g = np.floor((v - o) / block + offset).astype(np.int64)
     g -= g.min(0)
@@ -1007,6 +1244,7 @@ def decimate_pass(
                     cpos=v[cids],
                     N=M.N[gids],
                     cnrm=M.N[cids],
+                    size=None if vsize is None else vsize[gids],
                 ),
             )
 
@@ -1026,9 +1264,13 @@ def decimate_pass(
     reused = 0
 
     def block_key(B: Block) -> bytes:
-        h = hashlib.sha1(repr((eps, reference)).encode())
+        h = hashlib.sha1(
+            repr((eps, reference) if rule is None else (eps, reference, rule)).encode()
+        )
         for a in (B.gids, B.F, B.locked, B.Q, B.cptr, B.cids):
             h.update(np.ascontiguousarray(a).tobytes())
+        if B.size is not None:
+            h.update(np.ascontiguousarray(B.size).tobytes())
         return h.digest()
 
     def store(k: bytes | None, j: int, gids: Int, r: BlockResult) -> None:
@@ -1045,7 +1287,7 @@ def decimate_pass(
                     fold(j, gids, memo[k])
                     reused += 1
                     continue
-                pending[ex.submit(_run_block, (B, eps, reference))] = (k, j, gids)
+                pending[ex.submit(_run_block, (B, eps, reference, rule))] = (k, j, gids)
                 del B
                 while len(pending) >= 2 * workers:
                     done, _ = wait(pending, return_when=FIRST_COMPLETED)
@@ -1060,7 +1302,7 @@ def decimate_pass(
                 fold(j, gids, memo[k])
                 reused += 1
                 continue
-            store(k, j, gids, _run_block((B, eps, reference)))
+            store(k, j, gids, _run_block((B, eps, reference, rule)))
     lap("run blocks")
     results = [out[j] for j in range(len(out))]
     keep = np.sort(np.concatenate(kept))
@@ -1211,6 +1453,7 @@ def decimate(
     repair: bool = True,
     max_rounds: int = 10,
     pinned: npt.ArrayLike | None = None,
+    rules: Rules | None = None,
 ) -> Decimated:
     """Decimate mesh (v, f) within eps (in v's units) on blocks of side
     `block`: `passes` passes, on the grid shifted by half a block in every
@@ -1219,7 +1462,8 @@ def decimate(
     that intersect (mesh_checks: crossings and shared-vertex folds) and
     pinning what they stand for, until none do (a block
     whose inputs did not change is reused, not run); RuntimeError after
-    max_rounds."""
+    max_rounds. rules: further tests of each collapse (Rules); carried
+    distances are then within max(eps, rules.eps_in)."""
     lap = _Laps(log)
     V = np.asarray(v, np.float64)
     Fa = np.asarray(f, np.int64)
@@ -1256,6 +1500,7 @@ def decimate(
                 log=log,
                 pinned=pin,
                 memo=memo,
+                rules=rules,
             )
             s["seconds"] = round(time.time() - t0, 2)
             out.append(s)
