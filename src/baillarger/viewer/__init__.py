@@ -6,6 +6,8 @@ from the published samplers; any number of windows, kept in step by the server.
 - bricks: the brick pyramid of a volume, for the volume pane.
 - volumes, outlines: the named volumes (echoes, labels, WM mask, fixes) and the
   surface outlines on the brick pane.
+- sigma_steps: the surfaces Σ of a run's steps (--sigma-dir), as outlines on the
+  volume pane (/sigma/steps, /sigma/outline).
 - columns: the columns near a vertex, from the ray sampler and the column-volume
   sampler (the columns pane).
 - jobs: the job pattern (one long computation at a time, in a thread).
@@ -22,5 +24,5 @@ from the published samplers; any number of windows, kept in step by the server.
 - server: the local web server, its shared state and the page (static/index.html).
 
 Run: python -m baillarger.viewer --white <..._white.surf.gii> --cache DIR
-     [--echo-dir DIR] [--dseg ...]
+     [--echo-dir DIR] [--dseg ...] [--sigma-dir DIR]
 """

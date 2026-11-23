@@ -169,7 +169,7 @@ class Outlines:
         if not parts:
             return Outline(np.zeros((0, 2, 3), np.float32), "true", 0, in_box)
         f = np.concatenate(parts)
-        seg = _in_box(plane_cut(self.vertices, f, axis, mm), axis, lo_, hi_)
+        seg = segments_in_box(plane_cut(self.vertices, f, axis, mm), axis, lo_, hi_)
         return Outline(seg.astype(np.float32), "true", len(f), in_box)
 
     def _overview(
@@ -178,11 +178,11 @@ class Outlines:
         """The cut of the overview faces whose vertices' bounding box meets the box."""
         near = np.all(self._ov_lo <= hi, axis=1) & np.all(self._ov_hi >= lo, axis=1)
         f = self.ov_faces[near]
-        seg = _in_box(plane_cut(self.ov_vertices, f, axis, mm), axis, lo, hi)
+        seg = segments_in_box(plane_cut(self.ov_vertices, f, axis, mm), axis, lo, hi)
         return Outline(seg.astype(np.float32), "overview", len(f), in_box)
 
 
-def _in_box(seg: Float, axis: int, lo: Float, hi: Float) -> Float:
+def segments_in_box(seg: Float, axis: int, lo: Float, hi: Float) -> Float:
     """The segments with an end inside the box on the two in-plane axes."""
     if not len(seg):
         return seg
@@ -198,7 +198,7 @@ def encode(o: Outline) -> bytes:
     return np.ascontiguousarray(o.segments, dtype="<f4").tobytes()
 
 
-def _floats(s: str, n: int, name: str) -> list[float]:
+def parse_floats(s: str, n: int, name: str) -> list[float]:
     try:
         v = [float(x) for x in s.split(",")]
     except ValueError as e:
@@ -222,8 +222,8 @@ def outline_response(
         raise ValueError(f"axis: not an integer: {q['axis']!r}") from e
     if axis not in (0, 1, 2):
         raise ValueError(f"axis {axis} is not 0, 1 or 2")
-    mm = _floats(q["mm"], 1, "mm")[0]
-    box = _floats(q["box"], 6, "box")
+    mm = parse_floats(q["mm"], 1, "mm")[0]
+    box = parse_floats(q["box"], 6, "box")
     o = outlines.cut(axis, mm, box[:3], box[3:])
     headers = {
         "X-Outline-Source": o.source,
