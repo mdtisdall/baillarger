@@ -68,6 +68,7 @@
 </div>
 <div id="log"></div>
 <script type="module" src="/static/overlays.js"></script>
+<script type="module" src="/static/window.js"></script>
 <script type="module" src="/static/review.js"></script>
 <script type="module">
 const $ = id => document.getElementById(id);
@@ -363,6 +364,10 @@ async function volumeShiftClick(mm, axis) {
 // The slices are sampled in a shader from bricks in one 3D texture (the atlas), found through a page table per level; the
 // view asks only for the bricks its slices cross, at the level whose voxels are at least one CSS pixel (coarser when they
 // do not fit the atlas), and shows the finest level loaded at each point meanwhile. Voxels are nearest-neighbour.
+// The bricks hold the image's own values: the display window (BV.win: the values drawn black and white, linear between; the
+// volume's default from its meta, or the one set in static/window.js) is two numbers in the shader, so a new window needs
+// no bricks. BV.cpu[slot] keeps each loaded brick's values for the page ({data, n}: static/window.js reads them for its
+// histogram, through BV.pages as the shader does); BV.loads counts the loads.
 // Input: a pinch on a Mac trackpad is a wheel event with ctrlKey (Chrome, Firefox) or Safari's gesture events (e.scale), and
 // zooms about the cursor; a two-finger scroll (a plain wheel event) pans; the slices step with keys (↑ ↓ one voxel, page up
 // and page down ten) in the tile under the pointer.
@@ -374,7 +379,7 @@ const BVT = { ax: { r: 0, u: 1, n: 2, name: "axial" }, cor: { r: 0, u: 2, n: 1, 
 const SIDE = [["L", "R"], ["P", "A"], ["I", "S"]];   // world axes x, y, z (RAS): the minus and plus ends
 const BV = { on: false, g: null, M: null, C: [0, 0, 0], s: 1, fit: 1, tiles: [], hover: null, drag: null, gesture: null,
              cache: new Map(), pending: new Set(), free: [], want: new Set(), inflight: 0, frame: 0 };
-// plug-ins of the brick pane (static/overlays.js, ...): objects in window.BVP with hooks init(api), update(), render(g, geoms, dpr),
+// plug-ins of the brick pane (static/overlays.js, static/window.js, ...): objects in window.BVP with hooks init(api), update(), render(g, geoms, dpr),
 // draw2d(g2d, tile), text(tile) -> string, pointer(type, event, hit) -> true to take the event; api: window.BVAPI
 const BVP = window.BVP = window.BVP || [];
 const bvHook = (name, ...a) => { for (const p of BVP) if (p[name]) try { p[name](...a); } catch (e) { log(`${name}: ${e.message}`, true); } };
@@ -473,7 +478,7 @@ async function bvSource(name) {
   BV.atlas = g.createTexture(); g.bindTexture(g.TEXTURE_3D, BV.atlas);
   g.texStorage3D(g.TEXTURE_3D, 1, f32 ? g.R32F : g.R16I, BV.sx * B, BV.sy * B, BV.sz * B);
   for (const p of [g.TEXTURE_MIN_FILTER, g.TEXTURE_MAG_FILTER]) g.texParameteri(g.TEXTURE_3D, p, g.NEAREST);
-  BV.cache = new Map(); BV.pending = new Set(); BV.inflight = 0;
+  BV.cache = new Map(); BV.pending = new Set(); BV.inflight = 0; BV.cpu = []; BV.loads = 0;
   if (name) log(`volume pane: ${name} (${M.name}, ${((performance.now() - t0) / 1000).toFixed(1)} s)`);
 }
 // the tiles of the view (CSS px in the canvas): one slice, or axial, coronal and sagittal in a 2 x 2 grid (the fourth
@@ -555,14 +560,14 @@ async function bvLoad(L, bs, keys, gen) {
   g.bindTexture(g.TEXTURE_3D, BV.atlas);
   bs.forEach((b, m) => {
     const n = b.map((x, k) => Math.min(B, sh[k] - x * B)), len = n[0] * n[1] * n[2], data = new T(buf, o, len); o += len * T.BYTES_PER_ELEMENT;
-    const s = bvAlloc(keys[m]); if (s < 0) return; const sl = bvSlot(s);
+    const s = bvAlloc(keys[m]); if (s < 0) return; const sl = bvSlot(s); BV.cpu[s] = { data: data.slice(), n };   // a copy: the request's buffer is not kept
     g.texSubImage3D(g.TEXTURE_3D, 0, sl[0] * B, sl[1] * B, sl[2] * B, n[0], n[1], n[2], BV.f32 ? g.RED : g.RED_INTEGER, BV.f32 ? g.FLOAT : g.SHORT, data);
     BV.pages[bvPage(L, b)] = s + 1;
   });
   if (o !== buf.byteLength) log(`bricks: ${buf.byteLength} bytes for ${o} expected`);
   g.bindTexture(g.TEXTURE_3D, BV.ptex);
   g.texSubImage3D(g.TEXTURE_3D, 0, 0, 0, 0, BV.gx, BV.gy, BV.pages.length / (BV.gx * BV.gy), g.RED_INTEGER, g.UNSIGNED_INT, BV.pages);
-  bvDraw();
+  BV.loads++; bvDraw();
 }
 function bvDraw() { if (!BV.frame) BV.frame = requestAnimationFrame(bvRender); }
 function bvRender() {

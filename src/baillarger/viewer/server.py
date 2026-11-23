@@ -8,7 +8,9 @@ Any number of pages (windows, tabs, browsers) can be open at once; each shows th
 named in its address (static/index.html, ?panes=...). They share one state, kept here:
 two points, the crosshair (a world point: the slices of the volume pane) and the WM
 selection (a vertex of the white surface's overview and the true vertex it is), and the
-keys that the panes add (for example `columns`). A page sends its changes (POST /state)
+keys that the panes add (for example `columns`), and `windows`: the display window
+[lower, upper] of each volume whose window is not its default, by the volume's name
+(static/window.js). A page sends its changes (POST /state)
 and every page receives every change as it happens from the event stream (GET /events,
 Server-Sent Events), so a click in one window moves the point in all of them. In each
 pane a click moves that pane's own point (the slices: the crosshair; the surface: the
@@ -51,12 +53,16 @@ Requests:
   /overlay/<file>/<map>?agg=max|min (float32 on the overview vertices),
   /overlay/<file>/<map>/sites?n=&spacing=&order=, /overlay/at?v=1,2,3.
 - POST /state {from, patch}: merge patch into the state; every page gets
-  {from, seq, patch}.
+  {from, seq, patch}. `windows` in a patch names only the volumes that change
+  ({name: [lower, upper]}, or null for the volume's default again); the state and
+  the patch that the pages get hold the windows of every volume (merge_windows).
+  400: a window that is not two finite numbers with lower < upper.
 """
 
 import argparse
 import gzip
 import json
+import math
 import queue
 import threading
 import time
@@ -89,14 +95,24 @@ class Shared:
 
     def __init__(self) -> None:
         self.state: dict[str, Any] = dict(
-            crosshair=None, selection=None, frame=None, rotation=0.0, layer=None
+            crosshair=None,
+            selection=None,
+            frame=None,
+            rotation=0.0,
+            layer=None,
+            windows={},
         )
         self.seq = 0
         self.lock = threading.Lock()
         self.listeners: list[queue.Queue[str]] = []
 
     def update(self, sender: str, patch: dict[str, Any]) -> int:
+        """Merge patch into the state and send it to every page. ValueError: a
+        display window in it is not valid (the state does not change)."""
         with self.lock:
+            if "windows" in patch:  # every volume's window, to the pages too
+                windows = merge_windows(self.state["windows"], patch["windows"])
+                patch = dict(patch, windows=windows)
             self.state.update(patch)
             self.seq += 1
             msg = json.dumps(dict(sender=sender, seq=self.seq, patch=patch))
@@ -114,6 +130,37 @@ class Shared:
         with self.lock:
             if q in self.listeners:
                 self.listeners.remove(q)
+
+
+def merge_windows(old: dict[str, list[float]], patch: Any) -> dict[str, list[float]]:
+    """The display windows after a change: old with each volume of patch set to its
+    [lower, upper], or taken out (null: the volume's default window again).
+    ValueError: patch is not an object, or a window is not two finite numbers with
+    lower < upper."""
+    if not isinstance(patch, dict):
+        raise ValueError("windows: not an object of volume name to [lower, upper]")
+    out = dict(old)
+    for name, w in patch.items():
+        if w is None:
+            out.pop(str(name), None)
+            continue
+        ok = (
+            isinstance(w, list)
+            and len(w) == 2
+            and all(
+                isinstance(x, int | float)
+                and not isinstance(x, bool)
+                and math.isfinite(x)
+                for x in w
+            )
+            and w[0] < w[1]
+        )
+        if not ok:
+            raise ValueError(
+                f"windows: {name}: {w!r} is not [lower, upper] with lower < upper"
+            )
+        out[str(name)] = [float(w[0]), float(w[1])]
+    return out
 
 
 def floats(s: str | None) -> list[float] | None:
@@ -308,7 +355,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/state":
             self.send_error(404)
             return
-        seq = self.shared.update(sender, dict(req.get("patch", {})))
+        try:
+            seq = self.shared.update(sender, dict(req.get("patch", {})))
+        except ValueError as e:
+            self.send_error(400, str(e))
+            return
         self.send(json.dumps(dict(seq=seq)).encode(), "application/json")
 
 

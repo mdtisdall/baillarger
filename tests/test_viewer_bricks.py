@@ -295,3 +295,72 @@ def test_no_volume_is_404() -> None:
     finally:
         srv.shutdown()
         VS.Handler.white = None
+
+
+def test_merge_windows_sets_and_clears_each_volume() -> None:
+    old = {"echo1": [1.0, 2.0], "echo2": [3.0, 4.0]}
+    new = VS.merge_windows(old, {"echo2": None, "echo3": [-5, 7.5]})
+    assert new == {"echo1": [1.0, 2.0], "echo3": [-5.0, 7.5]}
+    assert old == {"echo1": [1.0, 2.0], "echo2": [3.0, 4.0]}  # not changed in place
+    assert VS.merge_windows(new, {"nothing": None}) == new
+    for bad in (
+        [1, 2],
+        {"e": [2, 2]},
+        {"e": [3, 2]},
+        {"e": [1]},
+        {"e": [1, 2, 3]},
+        {"e": ["1", 2]},
+        {"e": [True, 2]},
+        {"e": [0, float("inf")]},
+        {"e": [float("nan"), 1]},
+        {"e": "0,1"},
+    ):
+        with pytest.raises(ValueError):
+            VS.merge_windows({}, bad)
+
+
+def test_windows_are_shared_state_per_volume() -> None:
+    """A page sends the windows that change; the state and every other page get the
+    windows of every volume. A bad window is a 400 and changes nothing."""
+    srv = VS.serve(None, 0, white=object())  # type: ignore[arg-type]
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    q = VS.Handler.shared.listen()
+
+    def post(patch: dict[str, object]) -> int:
+        req = urllib.request.Request(
+            base + "/state",
+            json.dumps(dict(sender="a", patch=patch)).encode(),
+            {"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req) as r:
+                return int(r.status)
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def state() -> dict[str, object]:
+        st: dict[str, object] = json.loads(get(base + "/state")[0])["state"]
+        return st
+
+    try:
+        assert state()["windows"] == {}
+        assert post({"windows": {"echo1": [10, 200]}}) == 200
+        assert post({"windows": {"echo2": [0.5, 1.5]}}) == 200
+        sent = json.loads(q.get(timeout=5))
+        assert sent["patch"]["windows"] == {"echo1": [10.0, 200.0]}
+        sent = json.loads(q.get(timeout=5))
+        assert sent["patch"]["windows"] == {
+            "echo1": [10.0, 200.0],
+            "echo2": [0.5, 1.5],
+        }
+        assert post({"windows": {"echo1": None}}) == 200
+        assert json.loads(q.get(timeout=5))["patch"]["windows"] == {"echo2": [0.5, 1.5]}
+        assert post({"windows": {"echo2": [3, 1]}, "crosshair": [1, 2, 3]}) == 400
+        assert q.empty()
+        st = state()
+        assert st["windows"] == {"echo2": [0.5, 1.5]} and st["crosshair"] is None
+    finally:
+        VS.Handler.shared.drop(q)
+        srv.shutdown()
+        VS.Handler.white = None
