@@ -517,3 +517,51 @@ def test_face_angles_and_edge_dihedrals() -> None:
     V[3] = V[0]  # zero area: NaN dihedral; the zero-length corner gives 0
     assert np.isnan(C.edge_dihedrals(V, F)[0]).all()
     assert C.face_angles(V, F)[1].min() == 0.0
+
+
+def test_the_gap_check_takes_a_triangle_with_no_area() -> None:
+    """A face whose corners lie on one line (a split of a sliver's long
+    edge makes one) does not stop the closest-point test: the distance to
+    it is the distance to its line segment or more, never a division by
+    zero."""
+    p = np.array([0.3, 0.2, 0.1])
+    ts = np.linspace(0, 1, 2001)
+    for a, b, c in (
+        ((0, 0, 0), (1, 0, 0), (2, 0, 0)),
+        ((0, 0, 0), (2, 0, 0), (1, 0, 0)),
+        ((0, 0, 0), (0, 0, 0), (1, 0, 0)),
+        ((1, 1, 1), (1, 1, 1), (1, 1, 1)),
+    ):
+        A, B, Cc = (np.array(x, float) for x in (a, b, c))
+        d = C._ptd_xyz(*p, *A, *B, *Cc)
+        seg = min(np.linalg.norm(p - (A + t * (X - A))) for X in (B, Cc) for t in ts)
+        assert np.isfinite(d) and d >= seg - 1e-3
+    # and a whole check of a mesh that holds one
+    V = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0], [1, 1, 0], [1, -1, 0.0]])
+    F = np.array([[0, 1, 3], [1, 2, 3], [0, 4, 1], [1, 4, 2], [0, 1, 2]])
+    r = C.check_mesh(V, F, gap=0.05)
+    assert r.gap is not None
+
+
+def test_closest_is_the_brute_force_closest() -> None:
+    """Checker.closest (cubes of cells that grow until the best distance is
+    safe) against every face tried: the same distance and, where two faces
+    are equally near, a face at that distance; nothing beyond r."""
+    rng = np.random.default_rng(3)
+    V, F = sphere()
+    V = V * np.array([1.0, 0.7, 1.3])
+    chk = C.Checker(C.Topology.of(F, len(V)), V, 0.02)
+    pick = rng.integers(0, len(V), 360)
+    near = V[pick[:300]] + rng.normal(size=(300, 3)) * 0.3
+    far = V[pick[300:]] + rng.normal(size=(60, 3)) * 3.0
+    P = np.concatenate([V[:40], V[F[:40]].mean(1), near, far])
+    for r in (0.05, 0.4, 2.5):
+        Q, d, f = chk.closest(P, r)
+        for i, p in enumerate(P):
+            dd = np.array([C._ptd_xyz(*p, *V[t[0]], *V[t[1]], *V[t[2]]) for t in F])
+            if dd.min() < r:
+                assert d[i] == pytest.approx(dd.min(), abs=1e-12)
+                assert dd[f[i]] == pytest.approx(dd.min(), abs=1e-12)
+                assert np.linalg.norm(Q[i] - p) == pytest.approx(d[i], abs=1e-12)
+            else:
+                assert f[i] == -1 and not np.isfinite(d[i])
