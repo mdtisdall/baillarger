@@ -446,3 +446,126 @@ def test_on_a_thin_blade_each_vertex_is_carried_on_its_own_side() -> None:
     centre = v[out.vertex_ids[out.faces[face]]].mean(1)
     side = v[out.cids, 0] < 19.5 * 0.16
     assert np.array_equal(side[mid], centre[mid, 0] < 19.5 * 0.16)
+
+
+# ---------------------------------------------------------------- rules (2026-11-23)
+def _face_stats(v: Float, f: Int) -> tuple[Float, Float, Float]:
+    """Per face: longest edge, circumradius / shortest edge, unit normal."""
+    a, b, c = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
+    la, lb, lc = (np.linalg.norm(x, axis=1) for x in (b - a, c - b, a - c))
+    n = np.cross(b - a, c - a)
+    nn = np.linalg.norm(n, axis=1)
+    e = np.stack([la, lb, lc], 1)
+    return e.max(1), la * lb * lc / (2 * nn * e.min(1)), n / nn[:, None]
+
+
+def _rules_run(
+    rules: D.Rules, reference: bool = False, eps: float = 0.4
+) -> tuple[Float, Int, D.Decimated]:
+    v, f = sphere()
+    d = D.decimate(
+        v, f, eps, 8.0, workers=1, log=lambda s: None, reference=reference, rules=rules
+    )
+    return v, f, d
+
+
+def test_rules_off_is_the_same_decimation() -> None:
+    v, f = sphere()
+    a = D.decimate(v, f, 0.4, 8.0, workers=1, log=lambda s: None)
+    b = D.decimate(v, f, 0.4, 8.0, workers=1, log=lambda s: None, rules=D.Rules())
+    assert np.array_equal(a.vertex_ids, b.vertex_ids) and np.array_equal(
+        a.faces, b.faces
+    )
+    assert np.array_equal(a.cids, b.cids)
+
+
+def test_rules_compiled_is_the_python_worker() -> None:
+    v, f = sphere()
+    size = np.full(len(v), 2.5)
+    r = D.Rules(
+        eps_in=0.8,
+        normal_cos=float(np.cos(np.radians(30))),
+        size=size,
+        shape=float(np.sqrt(2)),
+    )
+    a = D.decimate(v, f, 0.4, 8.0, workers=1, log=lambda s: None, rules=r)
+    b = D.decimate(
+        v, f, 0.4, 8.0, workers=1, log=lambda s: None, rules=r, reference=True
+    )
+    assert np.array_equal(a.vertex_ids, b.vertex_ids) and np.array_equal(
+        a.faces, b.faces
+    )
+    assert np.array_equal(a.cptr, b.cptr) and np.array_equal(a.cids, b.cids)
+
+
+def test_size_rule_bounds_the_edges() -> None:
+    """With a size, no face made by a collapse has an edge above it: the
+    longest edge of the result is the size or an input edge."""
+    v, f = sphere()
+    e_in = _face_stats(v, f)[0].max()
+    for s_ in (1.5, 3.0):
+        _, _, d = _rules_run(D.Rules(size=np.full(len(v), s_)), eps=2.0)
+        emax = _face_stats(v[d.vertex_ids], d.faces)[0]
+        assert emax.max() <= max(s_, e_in) + 1e-12
+        assert np.median(emax) > 0.5 * s_  # and it does coarsen up to it
+    _, _, free = _rules_run(D.Rules(), eps=2.0)
+    assert _face_stats(v[free.vertex_ids], free.faces)[0].max() > 3.0
+
+
+def test_shape_rule_makes_fewer_slivers() -> None:
+    v, f = sphere()
+    k = float(np.sqrt(2))
+    _, _, a = _rules_run(D.Rules(), eps=0.4)
+    _, _, b = _rules_run(D.Rules(shape=k), eps=0.4)
+    ra = _face_stats(v[a.vertex_ids], a.faces)[1]
+    rb = _face_stats(v[b.vertex_ids], b.faces)[1]
+    r0 = _face_stats(v, f)[1]
+    assert (rb > k).mean() < (ra > k).mean()
+    assert (
+        rb.max() <= max(k, r0.max()) + 1e-9
+    )  # nothing worse than the bound or the input's worst
+    assert len(b.faces) < 0.5 * len(f)  # and it still decimates
+
+
+def test_normal_rule_on_a_smooth_surface() -> None:
+    """On a sphere, with the rule at 15 degrees every face is within 15
+    degrees of the summed input normals of its corners and carried
+    vertices (the old faces are never farther, so the escape is not used)."""
+    v, f = sphere()
+    N = D.normals(v, f)
+    cos_t = float(np.cos(np.radians(15)))
+    for rules, bound in ((D.Rules(normal_cos=cos_t), 15.0), (D.Rules(), 90.0)):
+        _, _, d = _rules_run(rules, eps=1.5)
+        n = _face_stats(v[d.vertex_ids], d.faces)[2]
+        S = N[d.vertex_ids[d.faces]].sum(1)
+        np.add.at(S, np.repeat(np.arange(len(d.faces)), np.diff(d.cptr)), N[d.cids])
+        ang = np.degrees(
+            np.arccos(np.clip((n * S).sum(1) / np.linalg.norm(S, axis=1), -1, 1))
+        )
+        assert ang.max() <= bound + 1e-6
+    assert ang.max() > 15.0  # without the rule, at this eps, some faces are farther
+
+
+def test_eps_in_is_one_sided() -> None:
+    """eps_in > eps: an input vertex may lie up to eps_in on the outer side
+    of its face (the face inward of it), and up to eps on the inner side."""
+    v, f = sphere()
+    _, _, d = _rules_run(D.Rules(eps_in=1.2), eps=0.3)
+    vv, ff = v[d.vertex_ids], d.faces
+    n = _face_stats(vv, ff)[2]
+    face = np.repeat(np.arange(len(ff)), np.diff(d.cptr))
+    p = v[d.cids]
+    dist = D.carried_distances(v, d.vertex_ids[ff], d.cptr, d.cids)
+    side = ((p - vv[ff[face, 0]]) * n[face]).sum(1)
+    assert dist[side < 0].max() <= 0.3 + 1e-12
+    assert dist[side >= 0].max() <= 1.2 + 1e-12
+    assert dist.max() > 0.3  # and the inward room is used
+    # on a convex surface every face is inward of what it stands for, so eps_in
+    # is the only bound in use
+    _, _, d1 = _rules_run(D.Rules(), eps=1.2)
+    assert np.array_equal(d.vertex_ids, d1.vertex_ids) and np.array_equal(
+        d.faces, d1.faces
+    )
+    _, _, d2 = _rules_run(D.Rules(eps_in=0.3), eps=1.2)
+    _, _, d3 = _rules_run(D.Rules(), eps=0.3)
+    assert np.array_equal(d2.faces, d3.faces)
