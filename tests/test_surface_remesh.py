@@ -239,7 +239,7 @@ def test_compiled_cross_and_turn_test_are_numpys_bit_for_bit() -> None:
     assert np.array_equal(SR.tri_cross(T), ref)
     assert np.array_equal(SR.face_cross(V, F), ref)
     assert np.array_equal(SR.face_cross(V, F), MC.face_normals(V, F))
-    R = rng.normal(size=ref.shape)
+    R = rng.normal(size=(len(ref), 3))
     for i in range(len(ref)):
         a, b = ref[i : i + 1], R[i : i + 1]
         assert SR.any_against(a, b) == bool(((a * b).sum(1) <= 0).any())
