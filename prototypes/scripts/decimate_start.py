@@ -5,7 +5,7 @@ JSON line.
 
 usage (from prototypes/scripts): decimate_start.py CROP OUT.npz [key=value ...]
   eps_out=0.5 eps_in=1.0 (voxels)  theta=30  shape=1.4142  size=5 (voxels; "field": the curvature
-  field 1..5; "none")  size_factor=1  block=10 (mm)  passes=4  workers=4  repair=true
+  field 1..5; "none")  size_factor=1  block=10 (mm)  passes=4  workers=4  repair=true  census=false (true: why the decimation stopped, D.census)
 OUT.npz holds V (the crop's mm) and F, the start= of stop_run.py.
 """
 import sys, json, time, numpy as np
@@ -16,7 +16,7 @@ from baillarger import decimate as D, mesh_checks as MC, surface_remesh as SR
 
 def main() -> None:
     site = CS.load_site(sys.argv[1]); out = sys.argv[2]
-    o = dict(eps_out="0.5", eps_in="1.0", theta="30", shape="1.4142135623730951", size="5", size_factor="1", block="10", passes="4", workers="4", repair="true")
+    o = dict(eps_out="0.5", eps_in="1.0", theta="30", shape="1.4142135623730951", size="5", size_factor="1", block="10", passes="4", workers="4", repair="true", census="false")
     o.update(kv.split("=") for kv in sys.argv[3:])
     h = float(site.vox.mean()); W = site.v * site.vox; Fw = np.asarray(site.f, np.int64); shape = np.array(site.labels.shape)
     t0 = time.time()
@@ -26,7 +26,7 @@ def main() -> None:
                     size=size, size_factor=float(o["size_factor"]), shape=float(o["shape"]))
     t0 = time.time()
     d = D.decimate(W, Fw, float(o["eps_out"]) * h, float(o["block"]), passes=int(o["passes"]), workers=int(o["workers"]), log=lambda s: None,
-                   repair=o["repair"] == "true", rules=rules)
+                   repair=o["repair"] == "true", rules=rules, with_census=o["census"] == "true")
     t_dec = time.time() - t0
     V, F = W[d.vertex_ids], d.faces
     np.savez(out, V=V, F=F)
@@ -45,6 +45,7 @@ def main() -> None:
     rim = MC.boundary_vertices(F, len(V))
     res = {"options": o, "size_s": round(t_size, 1), "decimate_s": round(t_dec, 1), "white_vertices": len(W), "vertices": len(V), "faces": len(F),
            "rim_vertices": int(rim.sum()), "pinned": int(len(d.pinned)), "repair_rounds": len(d.repairs), "passes": [(s["faces_after"], s["collapses"], s["seconds"]) for s in d.passes],
+           "refused": [s["refused"] for s in d.passes], "census": d.census,
            "inner_faces": int(inner.sum()),
            "edge_h_p5_50_95_max_inner": (np.percentile(e[inner], [5, 50, 95, 100]) / h).round(2).tolist(),
            "min_angle_deg_p1_5_50_inner": np.percentile(ang_min[inner], [1, 5, 50]).round(1).tolist(),
