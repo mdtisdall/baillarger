@@ -3,6 +3,7 @@ commands in one, written into a new directory, then moved over the old
 outputs."""
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -183,7 +184,8 @@ def ring_edits(tmp_path: Path) -> tuple[Path, Path]:
     """The synthetic aseg of test_white_dseg and a label-edits/1 diff: the
     ring and its hole with their input labels (so the correction must change
     edited voxels: an override), and the rod painted 2 voxels lower
-    (label_edits.paint). Returns the input labels and the diff."""
+    (label_edits.paint), at the standard path of the input labels
+    (label_edits.standard_path). Returns the input labels and the diff."""
     from edits_helpers import move_rod, ring_edits, write_edits
     from test_white_dseg import VOX, synthetic_aseg
 
@@ -191,10 +193,10 @@ def ring_edits(tmp_path: Path) -> tuple[Path, Path]:
 
     a = synthetic_aseg()
     A = np.diag([*VOX, 1.0])
-    inp = tmp_path / "in" / NAME
+    inp = tmp_path / "deriv" / "excise" / ANAT / NAME
     inp.parent.mkdir(parents=True)
     nib.save(nib.nifti1.Nifti1Image(a, A), inp)
-    edits = LE.bids_path(tmp_path / "edits", dict(sub="T01", ses="S1"), "R")
+    edits = LE.standard_path(inp, "R")
     write_edits(edits, move_rod(ring_edits(a), a), a.shape, A)
     return inp, edits
 
@@ -222,6 +224,41 @@ def test_the_command_with_edits_gives_the_files_of_the_four_commands(
     lines = [x for x in out.splitlines() if x.startswith("override: ")]
     assert len(lines) == 1 and " at voxel 27," in lines[0] and ",23 " in lines[0]
     assert "overrides: 1" in out
+
+
+def test_without_edits_the_command_uses_the_standard_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    inp, edits = ring_edits(tmp_path)
+    given, found = tmp_path / "given", tmp_path / "found"
+    regenerate.main([str(inp), "--edits", str(edits), "--root", str(given), *BLOCK])
+    with caplog.at_level(logging.INFO):
+        regenerate.main([str(inp), "--root", str(found), *BLOCK])
+    assert f"regenerate: edits {edits}" in caplog.text
+    assert_same(given, found)
+    # --no-edits: the files of a run with no standard file
+    caplog.clear()
+    none = tmp_path / "none"
+    with caplog.at_level(logging.INFO):
+        regenerate.main([str(inp), "--no-edits", "--root", str(none), *BLOCK])
+    assert "regenerate: edits none" in caplog.text
+    edits.rename(edits.with_name("moved.tsv"))
+    plain = tmp_path / "plain"
+    regenerate.main([str(inp), "--root", str(plain), *BLOCK])
+    assert_same(plain, none)
+    copy = none / ANAT / "sub-T01_ses-S1_desc-wmtopo_edits.tsv"
+    assert copy.read_bytes() == b"i\tj\tk\tlabel\n"
+
+
+def test_edits_and_no_edits_exclude_each_other(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        regenerate.main(
+            [NAME, "--edits", "e.tsv", "--no-edits", "--root", str(tmp_path)]
+        )
+
+
+def test_an_input_outside_a_root_has_no_standard_file(tmp_path: Path) -> None:
+    assert regenerate.standard_edits(tmp_path / NAME) is None
 
 
 # ------------------------------------------- a stopped move, the kept fix diffs

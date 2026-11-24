@@ -24,7 +24,7 @@ In the BIDS derivatives root `DERIV`, for an input with entities `sub` and
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_fixes.json` | Sidecar, `wm-dseg-fixes/1` (the same content) |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_diff.npy` | The fix diff: one record per changed voxel |
 | `sub-<sub>_ses-<ses>_desc-wmtopofixes_diff.json` | Sidecar, `wm-dseg-fixes/1` (the same content) |
-| `sub-<sub>_ses-<ses>_desc-wmtopo_edits.npy` | The copy of the label edits that the run used (`label-edits/1`; the empty diff without `--edits`) |
+| `sub-<sub>_ses-<ses>_desc-wmtopo_edits.tsv` | The copy of the label edits that the run used (`label-edits/1`; the empty diff without `--edits`) |
 | `sub-<sub>_ses-<ses>_desc-wmtopo_edits.json` | Its sidecar, `label-edits/1` |
 
 In `sub-<sub>/ses-<ses>/wmtopofixes-history/` (next to `anat/`):
@@ -163,7 +163,7 @@ change, and the result can have a handle or a cavity.
 Each run copies its diff, its table and its sidecar to
 `sub-<sub>/ses-<ses>/wmtopofixes-history/` (`white_dseg.history_dir`), named by the SHA-256 of the diff file.
 `DiffInputs` in the sidecar gives the SHA-256 of the input labels
-(`Labels`), of the label edits' `.npy` (`Edits`, if any) and of P (`Probability`, from
+(`Labels`), of the label edits' `.tsv` (`Edits`, if any) and of P (`Probability`, from
 phase 8), and the code (`Code`: the baillarger version and commit). Before
 it writes, `dseg` reads the kept sidecars. If one has the same `DiffInputs`,
 with no uncommitted change in either run (`Provenance` `Dirty` false), and
@@ -192,7 +192,7 @@ Each piece of the edited voxels whose label differs from the input
 (26-adjacency) is a fix of kind `manual_edit` and a move of kind `manual`.
 
 The output keeps a copy of the diff that the run used:
-`_desc-wmtopo_edits.npy` and its sidecar (`label-edits/1`), the empty diff
+`_desc-wmtopo_edits.tsv` and its sidecar (`label-edits/1`), the empty diff
 without `--edits`. `Sources` lists the copy; `DiffInputs` gives the SHA-256
 of the diff that was read. An older output can be made again from its input
 labels, its copy of the diff and its commit. The input segmentation is never
@@ -205,7 +205,7 @@ costs a `dseg` run.
 |---|---|---|---|
 | `SpecVersion` | string | yes | `wm-dseg/1` |
 | `Description` | string | yes | What the file is |
-| `Sources` | array of strings | yes | The input segmentation, then the copy of the label edits (`_desc-wmtopo_edits.npy`; not its sidecar, which holds the time of the run) (absolute paths) |
+| `Sources` | array of strings | yes | The input segmentation, then the copy of the label edits (`_desc-wmtopo_edits.tsv`; not its sidecar, which holds the time of the run) (absolute paths) |
 | `SourcesSHA256` | object | yes | SHA-256 of each source, by path |
 | `Provenance` | object | yes | `Created` (ISO 8601), `Function`, `Version` (baillarger), `Commit`, `Dirty` |
 | `Hemisphere` | string | yes | `R` or `L` |

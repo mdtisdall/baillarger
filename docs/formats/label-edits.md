@@ -1,7 +1,7 @@
 # label-edits: the label edits of a hemisphere
 
 SpecVersion `label-edits/1`. Written by `baillarger.label_edits.write` and
-`baillarger.label_edits.update` (the viewer's review pane, `baillarger.viewer.review` with `--edits`: the answers
+`baillarger.label_edits.update` (the viewer's review pane, `baillarger.viewer.review`: the answers
 of the review queue, the paint mode and its undo; and the copy that
 `python -m baillarger.white_dseg ASEG --edits EDITS --out DERIV` keeps). Read
 by `baillarger.label_edits.read` and by the dseg command (`--edits`,
@@ -57,36 +57,69 @@ not yet in the dseg. The review pane gets them from `/review/pending`, each
 with the label in the diff (an erased voxel: its input label), and draws
 them on the slice tiles after each paint and undo.
 
-The pane's regenerate button (`/review/regenerate`) runs
-`python -m baillarger.regenerate INPUT --edits EDITS --root ROOT` as a
-subprocess under `scripts/memguard`. The command reads the diff once, at its
-start, so the viewer refuses each write into the diff while it runs. When it
-ends, it has replaced the outputs, and the viewer refuses each write into the
-diff until it restarts (`baillarger.viewer.review`, Regenerate).
-
 ## Files
 
 | File | Content |
 |---|---|
-| `sub-<sub>_ses-<ses>_hemi-<h>_desc-labeledits_edits.npy` | The records (below) |
+| `sub-<sub>_ses-<ses>_hemi-<h>_desc-labeledits_edits.tsv` | The records (below) |
 | `sub-<sub>_ses-<ses>_hemi-<h>_desc-labeledits_edits.json` | Sidecar, `label-edits/1` |
 
 The files are in `sub-<sub>/ses-<ses>/anat/` of a BIDS derivatives root
 (`baillarger.label_edits.bids_path`). The copy that the dseg command keeps
-has the same format and the name `sub-<sub>_ses-<ses>_desc-wmtopo_edits.npy`
+has the same format and the name `sub-<sub>_ses-<ses>_desc-wmtopo_edits.tsv`
 (`wm-dseg/1`). The `edits` suffix and the `desc` values are ours.
+
+### The standard file
+
+A hemisphere has one edits file. Its path comes from the input labels
+(`baillarger.label_edits.standard_path(inp, hemisphere)`): for input labels at
+`<derivatives>/<root>/sub-<sub>/ses-<ses>/anat/<file>`, it is
+
+`<derivatives>/labeledits/sub-<sub>/ses-<ses>/anat/sub-<sub>_ses-<ses>_hemi-<h>_desc-labeledits_edits.tsv`
+
+So `labeledits` is a derivatives root of its own, beside the root of the input
+labels; `<h>` is the hemisphere of the input labels
+(`baillarger.white_dseg.hemisphere`). Input labels that are not in
+`sub-<sub>/ses-<ses>/anat/` of a root have no standard file (ValueError). The
+first write into a BIDS root (a diff in `sub-<sub>/ses-<ses>/anat/` of it)
+makes the root's `dataset_description.json` (`baillarger.bids.dataset_description`).
+`python -m baillarger.regenerate INPUT --root ROOT` uses the standard file of
+INPUT if it is there (`--edits PATH` gives another file, `--no-edits` none).
+The tool does not version the file; a user who wants a history of it uses
+version control as for any other file.
 
 ### The records
 
-A NumPy `.npy` file (no pickle) of one-dimensional structured records,
-12 bytes each (`baillarger.label_edits.EDITS_DTYPE`):
+A BIDS tabular file (`.tsv`): a header line, then one line for each edited
+voxel. The values are integers in decimal, with no sign for a value of 0 or
+more and no leading zeros, separated by one tab; each line ends with `\n`
+(also the last one).
 
-| Field | Type | Meaning |
-|---|---|---|
-| `index` | `<i8` | The voxel's linear index on the grid (C order of `Shape`) |
-| `label` | `<i4` | The voxel's label, in `label-set/1` |
+| Column | Meaning |
+|---|---|
+| `i` | The voxel's index on the grid's first axis (0 ≤ `i` < `Shape[0]`) |
+| `j` | The voxel's index on the grid's second axis |
+| `k` | The voxel's index on the grid's third axis |
+| `label` | The voxel's label, in `label-set/1` |
 
-The records are sorted by `index`, and each index is in the file one time.
+The header is `i`, `j`, `k`, `label`, in this order. The lines are sorted by
+`i`, then `j`, then `k` (the order of the linear index, C order of `Shape`),
+and each voxel is in the file one time. The writer is deterministic: the same
+diff gives the same bytes (`baillarger.label_edits.tsv_bytes`). A reader
+refuses (ValueError) a file with a column missing or another column, a line
+with another number of fields, a value that is not an integer, a voxel
+outside the grid, lines that are not sorted, a voxel two times, a label not
+in `label-set/1`, or any other form than the writer's. The file grows with
+the edited voxels (about 20 bytes a voxel), and a write replaces the whole
+file.
+
+The earlier form of the records, a NumPy `.npy` of (`index` `<i8`, `label`
+`<i4`) records, is read only by the one-time converter:
+`python -m baillarger.label_edits convert PATH.npy` checks the `.npy`
+against its sidecar, writes the `.tsv` and its sidecar next to it, reads
+them back and checks that the diff is the same. Both files have the same
+sidecar path, so the converter first copies the `.npy`'s sidecar to
+`PATH.npy.json`; it deletes nothing.
 
 ## Writes and reads
 
@@ -96,7 +129,8 @@ first, then the sidecar. After each rename it flushes the directory
 (`baillarger.fileops.write_atomic`). It holds an exclusive lock
 (`fcntl.flock` on the directory, `baillarger.fileops.flock`) while it does
 this. A read holds a shared lock on the directory, reads the sidecar and the
-records, and checks the records against the sidecar's `SHA256` and `Count`.
+records, and checks the records against the sidecar's `SHA256` and `Count`
+(a `Count` that does not agree with records of the right `SHA256` is refused).
 So a reader sees the old diff or the new diff, never a mix. A write refuses
 (ValueError, and writes nothing) a diff that is not sorted, has an index
 two times or outside the grid, or has a label that is not in `label-set/1`.
@@ -118,10 +152,10 @@ the ones that it wrote, the update reads only the sidecar.
 
 Recovery. A writer that stops between the two renames (a signal, the memory
 cap, a power loss) leaves the new records with the old sidecar. A reader
-that finds a `SHA256` or `Count` that does not agree with the records takes
+that finds a `SHA256` that does not agree with the records takes
 the sidecar as older than the records. It checks the records on the
-sidecar's `Shape` (sorted, each index once, inside the grid, labels in
-`label-set/1`), then writes a new sidecar with the records' `Count` and
+sidecar's `Shape` (as a read does: the form, sorted, each voxel once,
+inside the grid, labels in `label-set/1`), then writes a new sidecar with the records' `Count` and
 `SHA256` and the old sidecar's other facts, under the exclusive lock, and
 logs a warning. Records that are not a valid diff are refused (ValueError).
 A first write that stops between the renames leaves records with no
@@ -137,5 +171,9 @@ sidecar: an update writes the sidecar from its own grid and hemisphere.
 | `Shape` | array of integers | yes | The grid's shape (3 integers) |
 | `Affine` | array of numbers | yes | The grid's voxel-to-mm affine, 4 × 4, by rows (16 numbers) |
 | `Count` | integer | yes | The number of records (edited voxels) |
-| `SHA256` | string | yes | The SHA-256 of the `.npy` file |
+| `SHA256` | string | yes | The SHA-256 of the `.tsv` file |
 | `Provenance` | object | yes | `Created` (ISO 8601), `Function`, `Version` (baillarger), `Commit`, `Dirty` |
+| `i` | object | yes | The column `i`, as BIDS describes a column of a tabular file (`Description`) |
+| `j` | object | yes | The column `j` (`Description`) |
+| `k` | object | yes | The column `k` (`Description`) |
+| `label` | object | yes | The column `label` (`Description`) |

@@ -1,11 +1,14 @@
 """Regenerate the outputs of the label edits: the four white-surface commands
 in one command (docs/plans/label-editing.md, Part 5).
 
-    python -m baillarger.regenerate INPUT [--edits EDITS] --root ROOT
-        [--block-cells N] [--device DEVICE] [--workers N]
+    python -m baillarger.regenerate INPUT [--edits EDITS | --no-edits]
+        --root ROOT [--block-cells N] [--device DEVICE] [--workers N]
 
 INPUT is the input labels (the excised dseg). EDITS is the diff of the label
-edits. The command calls, in this order:
+edits. With neither --edits nor --no-edits, the edits are the standard edits
+file of INPUT (label_edits.standard_path, docs/formats/label-edits.md), if it
+is there; else, and with --no-edits, the command runs with no edits. It logs
+the edits file that it uses. The command calls, in this order:
 
 1. baillarger.white_dseg.write_wm_topo (INPUT, with EDITS);
 2. baillarger.white_surf.write_white_surface (the dseg of step 1);
@@ -61,7 +64,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from baillarger import backend, white_dseg, white_overview, white_surf, wm_sites
+import nibabel as nib
+import numpy as np
+
+from baillarger import (
+    backend,
+    label_edits,
+    white_dseg,
+    white_overview,
+    white_surf,
+    wm_sites,
+)
 from baillarger.bids import derivative_path, entities
 from baillarger.fileops import flock, write_atomic
 from baillarger.fix_diff import read_table
@@ -249,6 +262,22 @@ def regenerate(
     return Regenerated(written, overrides(final))
 
 
+def standard_edits(inp: Path) -> Path | None:
+    """The standard edits file of the input labels at inp
+    (label_edits.standard_path, of the hemisphere of the labels), if it is
+    there; None if it is not, or if inp is not in sub-<sub>/ses-<ses>/anat/
+    of a derivatives root (it has no standard file)."""
+    try:
+        paths = {h: label_edits.standard_path(inp, h) for h in ("R", "L")}
+    except ValueError:
+        return None
+    if not any(p.exists() for p in paths.values()):
+        return None
+    labels = np.asarray(nib.load(inp).dataobj)  # type: ignore[attr-defined]
+    p = paths[white_dseg.hemisphere(labels)]
+    return p if p.exists() else None
+
+
 def override_line(row: dict[str, Any]) -> str:
     """One printed line for a fix with overrides."""
     return (
@@ -267,7 +296,16 @@ def main(argv: list[str] | None = None) -> None:
         "the sites from the input labels and the label edits"
     )
     ap.add_argument("input", type=Path, help="the input labels (the excised dseg)")
-    ap.add_argument("--edits", type=Path, help="the diff of the label edits")
+    which = ap.add_mutually_exclusive_group()
+    which.add_argument(
+        "--edits",
+        type=Path,
+        help="the diff of the label edits (default: the standard edits file of "
+        "INPUT, if it is there)",
+    )
+    which.add_argument(
+        "--no-edits", action="store_true", help="run with no label edits"
+    )
     ap.add_argument("--root", required=True, type=Path, help="BIDS derivatives root")
     ap.add_argument("--block-cells", type=int, default=BLOCK, help="block size")
     ap.add_argument(
@@ -277,7 +315,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     ap.add_argument("--workers", type=int, default=4, help="processes to decimate")
     a = ap.parse_args(argv)
-    r = regenerate(a.input, a.edits, a.root, a.block_cells, a.device, a.workers)
+    edits = None if a.no_edits else a.edits or standard_edits(a.input)
+    log.info(f"regenerate: edits {edits if edits is not None else 'none'}")
+    r = regenerate(a.input, edits, a.root, a.block_cells, a.device, a.workers)
     for p in r.files:
         print(f"written: {p}")
     for row in r.overrides:
