@@ -58,13 +58,8 @@ def _closest_on_triangle(
 
 @nb.njit(cache=True)
 def _nearest_faces(
-    V: np.ndarray,
-    F: np.ndarray,
-    vox: np.ndarray,
-    shape: np.ndarray,
-    band: float,
-    dist2: np.ndarray,
-    near: np.ndarray,
+    V: np.ndarray, F: np.ndarray, vox: np.ndarray, shape: np.ndarray, band: float,
+    dist2: np.ndarray, near: np.ndarray,
 ) -> None:
     """For every voxel centre (k vox, mm) within band (mm) of a face: the
     squared distance to the nearest face and that face. Each face visits the
@@ -95,18 +90,14 @@ def _nearest_faces(
 
 
 @nb.njit(cache=True)
-def _closest_weights(
-    X: np.ndarray, A: np.ndarray, B: np.ndarray, C: np.ndarray
-) -> np.ndarray:
+def _closest_weights(X: np.ndarray, A: np.ndarray, B: np.ndarray, C: np.ndarray) -> np.ndarray:
     w = np.empty((len(X), 3))
     for i in range(len(X)):
         w[i, 0], w[i, 1], w[i, 2] = _closest_on_triangle(X[i], A[i], B[i], C[i])
     return w
 
 
-def _pseudonormals(
-    V: np.ndarray, F: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _pseudonormals(V: np.ndarray, F: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Unit face normals (nf, 3), the edge pseudonormal of each face's edge
     k = (F[k], F[k + 1]) (nf, 3, 3: the sum of the unit normals of the one or
     two faces on that edge) and the angle-weighted vertex pseudonormals (nv,
@@ -126,19 +117,13 @@ def _pseudonormals(
     for k in range(3):
         u = V[F[:, (k + 1) % 3]] - V[F[:, k]]
         w = V[F[:, (k + 2) % 3]] - V[F[:, k]]
-        cosang = (u * w).sum(1) / np.maximum(
-            np.linalg.norm(u, axis=1) * np.linalg.norm(w, axis=1), 1e-300
-        )
+        cosang = (u * w).sum(1) / np.maximum(np.linalg.norm(u, axis=1) * np.linalg.norm(w, axis=1), 1e-300)
         np.add.at(vn, F[:, k], np.arccos(np.clip(cosang, -1.0, 1.0))[:, None] * fn)
     return fn, en, vn
 
 
 def signed_distance_band(
-    V_mm: np.ndarray,
-    F: np.ndarray,
-    vox: np.ndarray,
-    shape: tuple[int, ...],
-    band_vox: float = BAND_VOX,
+    V_mm: np.ndarray, F: np.ndarray, vox: np.ndarray, shape: tuple[int, ...], band_vox: float = BAND_VOX
 ) -> dict[str, np.ndarray]:
     """The signed distance s (mm, positive outside Σ) from the voxel centres
     within band_vox × h of Σ, with what ∂s/∂V needs (user, 2026-11-19:
@@ -176,9 +161,7 @@ def signed_distance_band(
     pn = fn[fc].copy()
     one = cnt == 1  # at a vertex
     pn[one] = vn[Fc[fc[one], nz[one].argmax(1)]]
-    two = (
-        cnt == 2
-    )  # on an edge: the edge k = (F[k], F[k + 1]) is the one whose opposite weight is 0
+    two = cnt == 2  # on an edge: the edge k = (F[k], F[k + 1]) is the one whose opposite weight is 0
     k_edge = (np.argmin(nz[two], 1) + 1) % 3
     pn[two] = en[fc[two], k_edge]
     d = x - q
@@ -191,9 +174,7 @@ def signed_distance_band(
     return {"ijk": ijk, "s": s, "face": fc, "w": w, "u": u}
 
 
-def inside_from_band(
-    sd: dict[str, np.ndarray], shape: tuple[int, ...]
-) -> tuple[np.ndarray, dict[str, int]]:
+def inside_from_band(sd: dict[str, np.ndarray], shape: tuple[int, ...]) -> tuple[np.ndarray, dict[str, int]]:
     """Inside Σ for every voxel: s < 0 in the band; elsewhere, each
     connected part (6 neighbours) of the voxels off the band takes the side
     of the band voxels next to it. A step between two neighbouring centres

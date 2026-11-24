@@ -69,12 +69,8 @@ def main() -> None:
     ap.add_argument("--decay", action="store_true")
     ap.add_argument("--proximity", action="store_true")
     ap.add_argument("--delta", type=float, default=0.08)
-    ap.add_argument(
-        "--warp-from",
-        type=Path,
-        default=None,
-        help="the region's warp from an earlier run's npz (skips the fit)",
-    )
+    ap.add_argument("--warp-from", type=Path, default=None,
+                    help="the region's warp from an earlier run's npz (skips the fit)")
     ap.add_argument("--n-outer", type=int, default=4)
     ap.add_argument("--precond", default="jacobi", choices=["jacobi", "line"])
     ap.add_argument(
@@ -157,9 +153,7 @@ def main() -> None:
         warp = FG.Warp(float(z["s_lo"]), z["tau"], rr, int(z["anchor_level"]), [])
         say("warp from " + str(A.warp_from))
     else:
-        warp = FG.fit(
-            ps, n, p.s_lo, p.step, log=say, precond=A.precond, n_outer=A.n_outer
-        )
+        warp = FG.fit(ps, n, p.s_lo, p.step, log=say, precond=A.precond, n_outer=A.n_outer)
     stats["seconds_fit"] = round(time.time() - t, 1)
     stats["fit"] = warp.info
     say(f"fit; peak {peak_gb():.2f} GB")
@@ -279,12 +273,7 @@ def local(A, ps, warp, pairs, vox, voxel_mm, stats) -> None:  # type: ignore[no-
         )
         t = time.time()
         w = FG.fit(
-            sub,
-            len(sel),
-            warp.s_lo,
-            float(A.step_mm),
-            precond=A.precond,
-            n_outer=A.n_outer,
+            sub, len(sel), warp.s_lo, float(A.step_mm), precond=A.precond, n_outer=A.n_outer
         )
         dt = time.time() - t
         o = own[sel]
@@ -320,13 +309,9 @@ def local(A, ps, warp, pairs, vox, voxel_mm, stats) -> None:  # type: ignore[no-
         inside = (ml > mg[0]) & (ml < mg[-1])
         sizes = np.bincount(co)
         pieces = dict(
-            reparam_abs_dz_p50_p99_max=np.percentile(
-                drp[:, inside], [50, 99, 100]
-            ).tolist(),
+            reparam_abs_dz_p50_p99_max=np.percentile(drp[:, inside], [50, 99, 100]).tolist(),
             reparam_abs_dz_cortex_p50_p99_max=np.percentile(
-                drp[
-                    :, inside & (warp.s_lo + warp.tau > 0) & (warp.s_lo + warp.tau < 3)
-                ],
+                drp[:, inside & (warp.s_lo + warp.tau > 0) & (warp.s_lo + warp.tau < 3)],
                 [50, 99, 100],
             ).tolist(),
             pieces_with_owned=int((sizes > 0).sum()),

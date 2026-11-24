@@ -84,9 +84,7 @@ def trace_np(T, out0, R, N, Ainv, b, D, s_max, tstep, early_mm, s_grid):
             done = (hit[ia] >= 0) & ((k - hit[ia]) * tstep >= early_mm)
             act[ia[done]] = False
     share = (
-        float(
-            np.mean(np.where(hit >= 0, np.minimum(hit + early_mm / tstep, nt), nt)) / nt
-        )
+        float(np.mean(np.where(hit >= 0, np.minimum(hit + early_mm / tstep, nt), nt)) / nt)
         if early_mm > 0
         else 1.0
     )
@@ -159,11 +157,9 @@ def sample_t(vol, q):
             wy = f[:, 1] if dy else 1 - f[:, 1]
             for dz in (0, 1):
                 wz = f[:, 2] if dz else 1 - f[:, 2]
-                idx = (
-                    (i0[:, 0] + dx).clamp(max=X - 1) * (Y * Z)
-                    + (i0[:, 1] + dy).clamp(max=Y - 1) * Z
-                    + (i0[:, 2] + dz).clamp(max=Z - 1)
-                )
+                idx = (i0[:, 0] + dx).clamp(max=X - 1) * (Y * Z) + (i0[:, 1] + dy).clamp(
+                    max=Y - 1
+                ) * Z + (i0[:, 2] + dz).clamp(max=Z - 1)
                 # as scipy: a NaN corner gives NaN even at zero weight
                 out = out + flat[:, idx] * (wx * wy * wz).to(vol.dtype)
     return out
@@ -186,11 +182,7 @@ def leading_t(M):
     ps = torch.where(p > 1e-12, p, torch.ones_like(p))
     b00, b11, b22 = (a00 - q) / ps, (a11 - q) / ps, (a22 - q) / ps
     b01, b02, b12 = a01 / ps, a02 / ps, a12 / ps
-    det = (
-        b00 * (b11 * b22 - b12 * b12)
-        - b01 * (b01 * b22 - b12 * b02)
-        + b02 * (b01 * b12 - b11 * b02)
-    )
+    det = b00 * (b11 * b22 - b12 * b12) - b01 * (b01 * b22 - b12 * b02) + b02 * (b01 * b12 - b11 * b02)
     r = torch.clamp(det / 2, -1, 1)
     phi = torch.acos(r) / 3
     e1 = q + 2 * p * torch.cos(phi)
@@ -199,14 +191,7 @@ def leading_t(M):
     I3 = torch.eye(3, dtype=M.dtype, device=M.device)
     Rm = A - e1[:, None, None] * I3
     r0, r1, r2 = Rm[:, 0], Rm[:, 1], Rm[:, 2]
-    cs = torch.stack(
-        [
-            torch.linalg.cross(r0, r1),
-            torch.linalg.cross(r0, r2),
-            torch.linalg.cross(r1, r2),
-        ],
-        1,
-    )
+    cs = torch.stack([torch.linalg.cross(r0, r1), torch.linalg.cross(r0, r2), torch.linalg.cross(r1, r2)], 1)
     nr = torch.linalg.norm(cs, dim=2)
     best = nr.argmax(1)
     v = cs[torch.arange(n, device=M.device), best]
@@ -276,10 +261,7 @@ def trace_t(T, out0, R, N, Ainv, b, D, s_max, tstep, early_mm, s_grid):
             act[ia[done]] = False
     hit_n = hit.cpu().numpy()
     share = (
-        float(
-            np.mean(np.where(hit_n >= 0, np.minimum(hit_n + early_mm / tstep, nt), nt))
-            / nt
-        )
+        float(np.mean(np.where(hit_n >= 0, np.minimum(hit_n + early_mm / tstep, nt), nt)) / nt)
         if early_mm > 0
         else 1.0
     )
@@ -296,9 +278,7 @@ def _gauss_kernel(sigma, truncate=4.0):
 def profile_t(echo, Pq, trend_samples):
     """profile_np on a torch device: echo (1, X, Y, Z) tensor, Pq (m, ns, 3) tensor."""
     m, ns, _ = Pq.shape
-    v = torch.log(
-        torch.clamp(sample_t(echo, Pq.reshape(-1, 3))[0].reshape(m, ns), min=1.0)
-    )
+    v = torch.log(torch.clamp(sample_t(echo, Pq.reshape(-1, 3))[0].reshape(m, ns), min=1.0))
     k, r = _gauss_kernel(trend_samples)
     kt = torch.as_tensor(k, dtype=v.dtype, device=v.device).view(1, 1, -1)
     # scipy mode "nearest": the edge value repeated
@@ -313,9 +293,7 @@ def curves_t(fa, gb, pairs, top, sp, trim, shifts, min_n, kp):
     a = torch.as_tensor(pairs[:, 0], device=dev)
     b = torch.as_tensor(pairs[:, 1], device=dev)
     lim = np.fmin(top[pairs[:, 0]], top[pairs[:, 1]]) - trim
-    mk_n = (sp[None] >= trim) & (
-        sp[None] <= np.where(np.isfinite(lim), lim, -1)[:, None]
-    )
+    mk_n = (sp[None] >= trim) & (sp[None] <= np.where(np.isfinite(lim), lim, -1)[:, None])
     mk = torch.as_tensor(mk_n, device=dev)
     x0, y0 = fa[a], gb[b]
     out = torch.full((len(pairs), len(shifts)), float("nan"), dtype=dt, device=dev)

@@ -21,62 +21,28 @@ import nibabel as nib
 import numpy as np
 
 
-def write_step(
-    out: Path,
-    prefix: str,
-    step: int,
-    V_world: np.ndarray,
-    F: np.ndarray,
-    meta: dict[str, Any] | None = None,
-) -> Path:
+def write_step(out: Path, prefix: str, step: int, V_world: np.ndarray, F: np.ndarray, meta: dict[str, Any] | None = None) -> Path:
     """One step's surface (pointset in world mm, triangles) and its sidecar."""
     out.mkdir(parents=True, exist_ok=True)
     G: Any = nib.gifti
-    img = G.GiftiImage(
-        darrays=[
-            G.GiftiDataArray(
-                np.asarray(V_world, np.float32),
-                intent="NIFTI_INTENT_POINTSET",
-                datatype="NIFTI_TYPE_FLOAT32",
-            ),
-            G.GiftiDataArray(
-                np.asarray(F, np.int32),
-                intent="NIFTI_INTENT_TRIANGLE",
-                datatype="NIFTI_TYPE_INT32",
-            ),
-        ]
-    )
+    img = G.GiftiImage(darrays=[
+        G.GiftiDataArray(np.asarray(V_world, np.float32), intent="NIFTI_INTENT_POINTSET", datatype="NIFTI_TYPE_FLOAT32"),
+        G.GiftiDataArray(np.asarray(F, np.int32), intent="NIFTI_INTENT_TRIANGLE", datatype="NIFTI_TYPE_INT32"),
+    ])
     p = out / f"{prefix}_step-{step:03d}.surf.gii"
     tmp = out / f".{p.name}.tmp.gii"
     nib.save(img, tmp)
     tmp.rename(p)  # the viewer never reads half a file
-    side = {
-        "SpecVersion": "sigma-steps/1",
-        "Description": "Σ at one step of a run, world mm",
-        "Step": step,
-        "Vertices": len(V_world),
-        "Faces": len(F),
-        **(meta or {}),
-    }
-    p.with_name(p.name.replace(".surf.gii", ".json")).write_text(
-        json.dumps(side, indent=1, default=float)
-    )
+    side = {"SpecVersion": "sigma-steps/1", "Description": "Σ at one step of a run, world mm", "Step": step, "Vertices": len(V_world), "Faces": len(F), **(meta or {})}
+    p.with_name(p.name.replace(".surf.gii", ".json")).write_text(json.dumps(side, indent=1, default=float))
     return p
 
 
 def main() -> None:
     snaps, out, prefix = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
     a4 = sys.argv[4]  # numbers, or the grid's NIfTI (its affine's translation)
-    off = (
-        np.asarray(nib.load(a4).affine, float)[:3, 3]
-        if a4.endswith((".nii", ".nii.gz"))
-        else np.array([float(x) for x in a4.split(",")])
-    )
-    watch = (
-        float(sys.argv[sys.argv.index("--watch") + 1])
-        if "--watch" in sys.argv
-        else None
-    )
+    off = np.asarray(nib.load(a4).affine, float)[:3, 3] if a4.endswith((".nii", ".nii.gz")) else np.array([float(x) for x in a4.split(",")])
+    watch = float(sys.argv[sys.argv.index("--watch") + 1]) if "--watch" in sys.argv else None
     while True:
         new = 0
         for p in sorted(snaps.glob("solve-*.npz")):
@@ -89,9 +55,7 @@ def main() -> None:
                 meta = json.loads(str(z["meta"])) if "meta" in z.files else {}
             except Exception:  # noqa: BLE001 (a snapshot still being written: next round)
                 continue
-            keep = {
-                a: meta[a] for a in ("step", "energy", "E_stop", "E_tau") if a in meta
-            }
+            keep = {a: meta[a] for a in ("step", "energy", "E_stop", "E_tau") if a in meta}
             write_step(out, prefix, k, V + off, F, {"Source": str(p), **keep})
             new += 1
         if new:

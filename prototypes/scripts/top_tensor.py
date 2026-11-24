@@ -6,7 +6,6 @@ dilated band; detrending, gradients and the tensor use the dilated mask
 
 args: OUT RADIUS_MM   env: DEVICE (mps); inputs: top_paths.py
 """
-
 import json
 import os
 import sys
@@ -56,18 +55,13 @@ def tensor(e, ctx, dil, crop):
     del le
     sm = torch.where(td, O.masked_smooth(det, td, [O.taps(O.SD)] * 3), 0.0)
     del det
-    g = torch.where(
-        td, torch.stack([O.central(sm, a) / float(vs[a]) for a in range(3)], 1), 0.0
-    )
+    g = torch.where(td, torch.stack([O.central(sm, a) / float(vs[a]) for a in range(3)], 1), 0.0)
     del sm
     w = O._inv(O._noise_c(lv0, noise))
     del lv0
     h = torch.einsum("ef...,fa...->ea...", w, g)
     del w
-    comp = [
-        O.masked_smooth((g[:, i] * h[:, j]).sum(0), td, [O.taps(O.SI)] * 3)
-        for i, j in O.PAIRS
-    ]
+    comp = [O.masked_smooth((g[:, i] * h[:, j]).sum(0), td, [O.taps(O.SI)] * 3) for i, j in O.PAIRS]
     del g, h
     Jt = torch.where(td, torch.stack(comp, 0), torch.nan)
     return Jt[(slice(None), *crop)].float().cpu().numpy()
@@ -84,32 +78,15 @@ for i, sb in enumerate(sbs):
     reach = [r + extra for r in O.orient_reach(vs, sigma)]
     read = s.grow(out, reach)
     e, ctx = s.read(read)
-    dil = (
-        distance_transform_edt(~ctx, sampling=vs) <= RADIUS + 1e-6
-        if RADIUS > 0
-        else ctx
-    )
+    dil = distance_transform_edt(~ctx, sampling=vs) <= RADIUS + 1e-6 if RADIUS > 0 else ctx
     crop = tuple(slice(o.start - r.start, o.stop - r.start) for o, r in zip(out, read))
     if dil.any():
         J[(slice(None), *out)] = tensor(e, ctx, dil, crop)
         J.flush()
     done.append(list(sb))
     done_path.write_text(json.dumps(done))
-    print(
-        f"{i + 1}/{len(sbs)} {sb} {time.perf_counter() - t:.1f} s, peak {peak_rss_gb():.1f} GB",
-        flush=True,
-    )
-(OUT / "tensor.json").write_text(
-    json.dumps(
-        dict(
-            shape=shape,
-            dtype="float32",
-            affine=s.affine.tolist(),
-            seconds=time.perf_counter() - t0,
-            sigma=sigma,
-            dilate_mm=RADIUS,
-            device=DEV.name,
-        )
-    )
-)
+    print(f"{i + 1}/{len(sbs)} {sb} {time.perf_counter() - t:.1f} s, peak {peak_rss_gb():.1f} GB", flush=True)
+(OUT / "tensor.json").write_text(json.dumps(dict(shape=shape, dtype="float32", affine=s.affine.tolist(),
+                                                 seconds=time.perf_counter() - t0, sigma=sigma, dilate_mm=RADIUS,
+                                                 device=DEV.name)))
 print("done", time.perf_counter() - t0, flush=True)

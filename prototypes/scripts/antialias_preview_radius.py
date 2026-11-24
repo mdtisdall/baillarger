@@ -63,9 +63,7 @@ def log(msg):
 def wm_mask(dseg):
     side = read_sidecar(sidecar_path(Path(dseg)), DSEG_SPEC)
     vol = open_volume(Path(dseg))
-    return np.isin(
-        vol.read(tuple(slice(0, n) for n in vol.shape)), side["FilledLabels"]
-    )
+    return np.isin(vol.read(tuple(slice(0, n) for n in vol.shape)), side["FilledLabels"])
 
 
 def box(masks):
@@ -97,12 +95,8 @@ def iterate(m, start=None, held=None, signs=True):
 def take(a, sl, fill):
     """a[sl], with fill beyond a's edges."""
     out = np.full(tuple(t.stop - t.start for t in sl), fill, a.dtype)
-    src = tuple(
-        slice(max(t.start, 0), min(t.stop, n)) for t, n in zip(sl, a.shape, strict=True)
-    )
-    dst = tuple(
-        slice(u.start - t.start, u.stop - t.start) for t, u in zip(sl, src, strict=True)
-    )
+    src = tuple(slice(max(t.start, 0), min(t.stop, n)) for t, n in zip(sl, a.shape, strict=True))
+    dst = tuple(slice(u.start - t.start, u.stop - t.start) for t, u in zip(sl, src, strict=True))
     out[dst] = a[src]
     return out
 
@@ -129,10 +123,8 @@ def vertex_t(m, phi):
 
 def vertex_shift(m, phi, ref, near):
     """The largest |t - t_ref| over the boundary edges whose lower voxel is near."""
-    d = [
-        np.abs(t - tr)[near[tuple(ij.T)]]
-        for (ij, t), (_, tr) in zip(vertex_t(m, phi), vertex_t(m, ref), strict=True)
-    ]
+    d = [np.abs(t - tr)[near[tuple(ij.T)]]
+         for (ij, t), (_, tr) in zip(vertex_t(m, phi), vertex_t(m, ref), strict=True)]
     d = np.concatenate(d)
     return float(d.max()) if d.size else 0.0
 
@@ -162,9 +154,7 @@ def sites_of(m):
     bnd = np.argwhere(AA.next_to_boundary(m) & m)
     rng = np.random.default_rng(0)
     cand = bnd[rng.choice(len(bnd), 20000, replace=False)]
-    keep = np.all(
-        (cand >= SITE_MARGIN) & (cand < np.array(m.shape) - SITE_MARGIN), axis=1
-    )
+    keep = np.all((cand >= SITE_MARGIN) & (cand < np.array(m.shape) - SITE_MARGIN), axis=1)
     cand = cand[keep]
     cw = np.array([half[tuple(slice(p - 4, p + 5) for p in q)].max() for q in cand])
     out = []
@@ -213,33 +203,21 @@ def run_test(a):
                 dist = ndi.distance_transform_edt(~changed)
                 sdb = sd_of(m, big, mb, S + 2)
                 near = (dist <= S) & (np.abs(sdb) <= AA.BAND)
-                rec = dict(
-                    site=q.tolist(),
-                    c=cwid,
-                    kind=kind,
-                    radius=rad,
-                    changed=int(changed.sum()),
-                    con={},
-                    lin={},
-                )
+                rec = dict(site=q.tolist(), c=cwid, kind=kind, radius=rad,
+                           changed=int(changed.sum()), con={}, lin={})
                 sol = sweep(mb, sdb, dist, pa, RS, R_REF, True)
                 ref = sol[R_REF][0]
                 zone = (dist <= 14) & (np.abs(sdb) <= AA.BAND)
                 act = zone & (np.abs(ref) < AA.EPS + ACTIVE)
                 nb = zone & AA.next_to_boundary(mb)
-                rec["active"] = dict(
-                    band_voxels=int(zone.sum()),
-                    active=int(act.sum()),
-                    next_to_boundary=int(nb.sum()),
-                    active_next_to_boundary=int((act & nb).sum()),
-                )
+                rec["active"] = dict(band_voxels=int(zone.sum()), active=int(act.sum()),
+                                     next_to_boundary=int(nb.sum()),
+                                     active_next_to_boundary=int((act & nb).sum()))
                 for R in RS:
                     phi, it = sol[R]
-                    rec["con"][R] = dict(
-                        field=float(np.abs(phi - ref)[near].max()),
-                        vertex=vertex_shift(mb, phi, ref, dist <= S),
-                        iterations=it,
-                    )
+                    rec["con"][R] = dict(field=float(np.abs(phi - ref)[near].max()),
+                                         vertex=vertex_shift(mb, phi, ref, dist <= S),
+                                         iterations=it)
                 if rad == 3:
                     # the rim where sd of the box is not exact is held at sda
                     rim = np.ones(ma.shape, bool)
@@ -249,14 +227,11 @@ def run_test(a):
                     lref = lsol[R_REF_LIN][0]
                     for R in RS_LIN:
                         phi, it = lsol[R]
-                        rec["lin"][R] = dict(
-                            field=float(np.abs(phi - lref)[near].max()), iterations=it
-                        )
+                        rec["lin"][R] = dict(field=float(np.abs(phi - lref)[near].max()),
+                                             iterations=it)
                 res["edits"].append(rec)
-                log(
-                    f"{kind} r{rad} at {q.tolist()} c {cwid:.2f}: "
-                    + " ".join(f"{R}:{rec['con'][R]['field']:.1e}" for R in RS)
-                )
+                log(f"{kind} r{rad} at {q.tolist()} c {cwid:.2f}: "
+                    + " ".join(f"{R}:{rec['con'][R]['field']:.1e}" for R in RS))
                 Path(a.out).write_text(json.dumps(res, indent=1))
 
 
