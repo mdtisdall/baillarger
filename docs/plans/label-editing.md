@@ -1,9 +1,9 @@
 # Plan: label editing in the viewer
 
-Status: every part is built and merged: Part 1 (#168, #175), Part 2 (#181), Part 3
-(#195), Part 4a (#197), Part 4b (core #171, join #198) and Part 5 (core #167, #172,
-#177, join #196). Not yet checked in a browser on a whole hemisphere. Part 6 (the grow
-brush) is planned, not built.
+Status: Parts 1 to 6 are built and merged: Part 1 (#168, #175), Part 2 (#181), Part 3
+(#195), Part 4a (#197), Part 4b (core #171, join #198), Part 5 (core #167, #172,
+#177, join #196) and Part 6 (core #219, join #220, #223, the grow log #224). Part 7
+(the standard edits file) is planned, not built, and has decisions to make.
 
 ## Goal
 
@@ -23,8 +23,11 @@ An edit changes labels. Editing needs:
 5. a preview of the effect, and a regeneration.
 
 For these, the current state of the edits is sufficient: each edited voxel and its
-label. Editing does not keep a history of edits. These are not parts of editing, and
-this plan does not serve them:
+label. Editing does not keep a history of edits. The edits file is a file of a BIDS
+hierarchy: a user who wants its history puts it under version control, with any tool,
+as for any other file there. That is the user's choice. It is not a function of the
+tool, and not a step of editing (Part 7). These are not parts of editing, and this
+plan does not serve them:
 
 - labels to train the network (checking labels is not editing);
 - the success measure, and the other records of the review queue (sessions, sites
@@ -35,9 +38,13 @@ not come from that log.
 
 ## Decisions
 
-- The edits are one diff: each edited voxel and its label, a sparse file next to the
-  outputs (`label-edits/1`, below). `white_dseg --edits` reads the diff. Nothing else
-  applies edits.
+- The edits of a hemisphere are one diff: the difference between the input labels and
+  the labels after the user's edits. It has each edited voxel and its label, in one
+  sparse file (`label-edits/1`, below) at a standard BIDS path (Part 7).
+  `white_dseg --edits` reads the diff. Nothing else applies edits.
+- The tool keeps the edits file whole: the hash, the write that replaces the file, the
+  lock, and the undo of one viewer run. It keeps no history of the file. Version
+  control of the file is the user's choice (User, 2026-11-23).
 - Labels: the paint menu has three classes: outside, WM and cortex (right hemisphere 0,
   41, 42; left hemisphere 0, 2, 3; `docs/formats/label-set.md`), and "input label" (an
   eraser: it removes the voxels from the diff, so they take the input label again).
@@ -346,6 +353,76 @@ Tests (on a synthetic image, not the site):
 - An accepted proposal gives the same diff as `/review/paint` with the same voxels, and
   one undo restores the diff before it.
 
+## Part 7: the standard edits file
+
+**Why.** The path of the edits file is an argument of the viewer and of the
+regeneration (`--edits`), so each launch and each regenerate command names it by hand.
+The hashes, the kept fix diffs, the answer log and the grow log look like version
+tracking, but none of them gives back an earlier state of the edits. The user's
+decision (2026-11-23): each ex vivo hemisphere has one standard, BIDS-compliant edits
+file, the diff between the input labels and the user's edits. A user who wants to
+version-control this file does so as for any other file of a BIDS hierarchy.
+
+**The rule.**
+
+- A hemisphere has one edits file. Its path comes from the input labels:
+
+  `<derivatives>/labeledits/sub-<sub>/ses-<ses>/anat/sub-<sub>_ses-<ses>_hemi-<h>_desc-labeledits_edits.npy`
+
+  with its sidecar. `<derivatives>` is the directory that holds the derivatives root
+  of the input labels (the root is the directory above the input's
+  `sub-<sub>/ses-<ses>/anat/`). So `labeledits` is a derivatives root of its own,
+  beside the root of the input labels. `sub` and `ses` are the input's entities, and
+  `<h>` is the hemisphere of the input labels (`white_dseg.hemisphere`).
+- One function gives the path: `label_edits.standard_path(inp, hemisphere)`, from
+  `label_edits.bids_path`. The viewer and the regeneration call it. No other code
+  builds the path.
+- The first write makes the `labeledits` root and its `dataset_description.json`
+  (`bids.dataset_description`).
+- The tool does not version the file. No command, launch entry or document of the
+  project gives version control as a step of editing.
+
+**The viewer.** Without `--edits`, the viewer finds the file from the surface: the
+surface's dseg, then the dseg's input labels (`white_dseg.input_labels`), then the
+standard path. A hemisphere with no edits file starts with the empty diff. `--edits
+PATH` stays, for another file: the tests, and a run on a scratch copy. `--sites` needs
+`--log`, as now; the answer log has no standard path in this part.
+
+**The regeneration.** `python -m baillarger.regenerate INPUT --root ROOT` uses the
+standard file, if it is there. `--edits PATH` gives another file, and `--no-edits`
+runs with no edits. The command logs the edits file that it uses. The pane's button
+gives `--edits` with the file that the viewer writes, as now.
+
+**Not changed.** The format `label-edits/1` apart from the decision below; the undo
+stack (memory, one viewer run); the dseg's copy of the edits (the pending edits need
+it); the check of the outputs' identity after a regeneration.
+
+**To decide** (each with a recommendation; none is built before its decision):
+
+1. **The records: `.npy` or TSV.** The file's name follows BIDS, but the suffix
+   `edits` and the extension `.npy` are not in the standard. A TSV (`i`, `j`, `k`,
+   `label`, sorted) with the same sidecar is a BIDS tabular file, and a version
+   control tool shows its changes voxel by voxel. The cost is the size: about 0.2 MB
+   for 10,425 voxels, in proportion to the edited voxels. The dseg's copy takes the
+   same form. Recommended: TSV.
+2. **The guard, in place of the explicit `--edits`.** With the rule, each viewer on an
+   output set of the same input labels finds the same file: an old set that was
+   renamed, and a scratch set made from the real input labels. Recommended: without
+   `--edits`, the viewer starts with editing off. The pane shows the path of the edits
+   file and a switch. Each write is refused until the user has switched editing on.
+   The page never sends a path.
+3. **The grow log.** It is next to the edits, it has no format document, and no code
+   reads it. Recommended: off by default, on with a viewer option, with its path
+   given by that option.
+
+Tests: `standard_path` of input labels in a derivatives root gives the path above, and
+refuses input labels that are not in `sub-<sub>/ses-<ses>/anat/` of a root; a viewer
+without `--edits` on a phantom writes its paint into the standard file, and makes the
+root's `dataset_description.json`; a viewer with `--edits` writes into that file and
+makes no standard file; the regeneration without `--edits` gives the same files as
+with `--edits` on the standard file; `--no-edits` gives the same files as a root with
+no standard file.
+
 ## Order of the PRs
 
 The joins merge in this order. The cores can merge earlier (see Parallel work).
@@ -357,6 +434,7 @@ The joins merge in this order. The cores can merge earlier (see Parallel work).
 5. Part 4b.
 6. Part 5.
 7. Part 6: its core, then its join.
+8. Part 7: its core, then its join, after the decisions of Part 7.
 
 ## Parallel work
 
@@ -372,6 +450,7 @@ the cores into the routes and the pane, and they meet in a few shared files.
 | 4b | `antialias.py` (start, held), `white_surf.py` (the field derivative, the blocks' re-march), its format doc, their tests | `viewer/review.py` (route, working field), the 3D view and the slices (blocks) | the preview contract |
 | 5 | a new `regenerate` command, its tests | `viewer/review.py` (the subprocess), `static/review.js` (state, message) | the command's arguments |
 | 6 | `label_grow.py` (new), `tests/test_label_grow.py` | `viewer/review.py` (`/review/grow`, the echoes), `static/review.js` (grow mode, the proposal, accept) | the `label_grow` contract |
+| 7 | `label_edits.py` (`standard_path`), `regenerate.py` (`--edits` optional, `--no-edits`), `docs/formats/label-edits.md`, their tests | `viewer/review.py` (`--edits` optional; the guard), `static/review.js` (the guard) | the decisions of Part 7, `standard_path` |
 
 Waves:
 
@@ -485,12 +564,21 @@ The joins use these interfaces. A core must keep them, or change this plan first
   is the input labels (the excised dseg). It writes the dseg, the white surface, the
   overview and the queue of sites, replaces the outputs in ROOT, and prints the
   overrides.
+- Part 7: `label_edits.standard_path(inp, hemisphere) -> Path`: the edits file of the
+  hemisphere of the input labels `inp` (Part 7, The rule). It raises `ValueError` for
+  input labels that are not in `sub-<sub>/ses-<ses>/anat/` of a derivatives root.
+- Part 7: `python -m baillarger.regenerate INPUT [--edits EDITS | --no-edits] --root
+  ROOT`. With neither option, the edits are the standard file, if it is there.
 
 ## Not in this plan
 
 - Labels to train the network, and which labels train it.
 - The success measure, and the queue's answer log apart from what Part 1 changes.
-- A history of edits.
+- A history of edits, and version control of the edits file: the user's choice, outside
+  the tool.
+- The review as an ordinary pane of the viewer, next to the surface pane. With Part 7,
+  each viewer with `--white` can find the edits file, so this needs no new argument.
+  It is a change of the viewer, for a plan of its own.
 - Denser roots in the profile section.
 - A 3D brush, and labels other than outside, WM and cortex. (The grow brush grows in
   3D from 2D strokes.)
