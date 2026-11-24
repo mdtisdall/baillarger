@@ -217,11 +217,12 @@ class SolveRun:
         t0 = time.time()
         white = SU.counts(m, gap, s.fold_cos)
         sp, co = 0, 0
+        start_log: list[dict[str, Any]] = []
         if s.mesh == "remesh":
-            m, sp, co = SU.remesh(m, gap, sizes(m), s.fold_cos, h, passes=s.start_passes)
+            m, sp, co = SU.remesh(m, gap, sizes(m), s.fold_cos, h, passes=s.start_passes, log=start_log)
         cur = ev(m.V, m.F)
         self.initial = {"quality": quality(m.V, m.F, h, s.step_max_vox * h), "vertices": len(m.V), "faces": len(m.F),
-                        "white": white, "splits": sp, "collapses": co, "E": cur.E, "E_stop": cur.E,
+                        "white": white, "splits": sp, "collapses": co, "remesh": start_log, "E": cur.E, "E_stop": cur.E,
                         "eval": cur.info, "s": time.time() - t0}
         if self.progress:
             self.progress(f"start: E {cur.E:.1f}, {cur.info['s']:.1f} s")
@@ -231,6 +232,7 @@ class SolveRun:
         for k in range(1, s.max_steps + 1):
             t1 = time.time()
             chk = MC.Checker(m.top, m.V, gap, slack=s.step_max_vox * h)
+            parts = {"checker": time.time() - t1}
             tries: list[dict[str, Any]] = []
             accepted = False
             # the stop energy's pressure on Σ: per vertex, the force along its normal per area, as a
@@ -249,11 +251,15 @@ class SolveRun:
                 d[np.any((Vn < lo) | (Vn > hi), axis=1)] = 0.0  # never out of the crop
                 saved = m.save()
                 fl, _ = flagged_vertices(m.V, m.F, s.step_max_vox * h)
+                tm = time.time()
                 dd, cinfo = constrained_move(m, d, chk, s.fold_cos)
+                parts["move"] = parts.get("move", 0.0) + time.time() - tm
+                tm = time.time()
                 cinfo["halved_flagged"] = int((cinfo["_halved"] & fl).sum())
                 cinfo["refused_flagged"] = int((cinfo["_refused"] & fl).sum())
                 del cinfo["_halved"], cinfo["_refused"]
                 trial = ev(m.V + dd, m.F)
+                parts["eval"] = parts.get("eval", 0.0) + time.time() - tm
                 tries.append({"alpha": alpha, "E": trial.E, "max_step_vox": float(np.linalg.norm(dd, axis=1).max() / h),
                               **cinfo, "eval_s": trial.info["s"]})
                 if self.progress:  # each trial: why the line search refuses it (user, 2026-11-20)
@@ -278,6 +284,7 @@ class SolveRun:
                     self.progress(f"step {k}: no decrease in {len(tries)} tries; E {cur.E:.1f}")
                 break
             e_trial = trial.E
+            tm = time.time()
             q_before = quality(m.V, m.F, h, s.step_max_vox * h)
             if s.mesh == "none" or s.relax == "none":
                 r, nrel = np.zeros(len(m.V)), 0
@@ -288,18 +295,27 @@ class SolveRun:
             e_relax = None
             if nrel and s.measure_relax:
                 e_relax = ev(m.V, m.F).E  # E after the relaxation alone (diagnostic)
+            parts["relax"] = time.time() - tm
             m_pre = m  # a remesh returns a new Σ (flips alone included)
+            step_log: list[dict[str, Any]] = []
+            tm = time.time()
             if s.mesh == "none":
                 sp, co = 0, 0
             else:
-                m, sp, co = SU.remesh(m, gap, sizes(m), s.fold_cos, h)
+                m, sp, co = SU.remesh(m, gap, sizes(m), s.fold_cos, h, log=step_log)
+            parts["remesh"] = time.time() - tm
+            tm = time.time()
             cur = trial if m is m_pre and nrel == 0 else ev(m.V, m.F)
+            parts["eval"] += time.time() - tm
+            tm = time.time()
             c = SU.counts(m, gap, s.fold_cos)
+            parts["counts"] = time.time() - tm
             # E_stop: the same as E (the run logs of top_solve.py had both; readers use either)
             rec = {"step": k, "tries": tries, "accepted": True, "E_trial": e_trial, "E_relaxed": e_relax,
                    "E": cur.E, "E_stop": cur.E, "quality_before_relax": q_before,
                    "quality": quality(m.V, m.F, h, s.step_max_vox * h),
-                   "relaxed": nrel, "splits": sp, "collapses": co,
+                   "relaxed": nrel, "splits": sp, "collapses": co, "remesh": step_log,
+                   "parts_s": {kk: round(v, 2) for kk, v in parts.items()},
                    **c, "vertices": len(m.V), "faces": len(m.F), "eval": cur.info,
                    "max_step_vox": float(disp.max() / h), "s": time.time() - t1}
             self.log.append(rec)

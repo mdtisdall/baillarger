@@ -29,6 +29,8 @@ length at the white vertices (the curvature size field of a coarse start).
 
 from __future__ import annotations
 
+import time
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -399,26 +401,46 @@ class SigmaRemesher(SR.Remesher):
 
 def remesh(
     m: Mesh, gap: float, target: float | np.ndarray, fold_cos: float, h: float, passes: int = 1,
-    collapse: bool = True,
+    collapse: bool = True, log: list[dict[str, Any]] | None = None,
 ) -> tuple[Mesh, int, int]:
     """Σ remeshed toward a target edge length (one, or per vertex; e.g.
     StartSizes) with SigmaRemesher: `passes`
     rounds of splits, collapses (unless collapse is False) and valence
-    flips, no relaxation (T7's own tangential `relax` does that). Returns
+    flips, no relaxation (T7's own tangential `relax` does that); the rounds
+    end early at one that changes nothing. Returns
     the new Σ (m itself when nothing changed) and the numbers of splits and
-    collapses."""
+    collapses. log: gets one record per round run (splits, collapses, flips,
+    the refused tries by reason, seconds of each part), and one for the
+    setup (the Remesher and its Checker) and the result."""
+    t0 = time.time()
     rm = SigmaRemesher(m, gap, target, fold_cos, h)
+    t_setup = time.time() - t0
     sp = co = fl = 0
-    for _ in range(passes):
+    for k in range(passes):
+        before = Counter(rm.refused)
+        t1 = time.time()
         s1 = rm.split_all()
+        t2 = time.time()
         c1 = rm.collapse_all() if collapse else 0
+        t3 = time.time()
         f1 = rm.flip_all()
+        t4 = time.time()
         sp, co, fl = sp + s1, co + c1, fl + f1
+        if log is not None:
+            log.append({"pass": k + 1, "splits": s1, "collapses": c1, "flips": f1,
+                        "refused": dict(rm.refused - before),
+                        "s": {"split": round(t2 - t1, 3), "collapse": round(t3 - t2, 3), "flip": round(t4 - t3, 3)}})
         if s1 == 0 and c1 == 0 and f1 == 0:
             break
     if sp == 0 and co == 0 and fl == 0:
+        if log is not None:
+            log.append({"setup_s": round(t_setup, 3), "result_s": 0.0})
         return m, 0, 0
-    return rm.result(), sp, co
+    t5 = time.time()
+    out = rm.result()
+    if log is not None:
+        log.append({"setup_s": round(t_setup, 3), "result_s": round(time.time() - t5, 3)})
+    return out, sp, co
 
 
 # ------------------------------------------------------------ the size field of the white surface
