@@ -12,8 +12,14 @@ BAND_VOX voxels of Σ (s the signed distance), 1 inside Σ and 0 outside off
 that band.
 
 The band is found per face (band_sparse: each face visits the voxels of its
-widened bounding box; the pairs within the band are kept and the nearest
-face of each voxel taken), so the cost follows Σ's area, not the grid.
+widened bounding box, and each voxel within the band keeps its nearest
+face), so the cost follows Σ's area, not the grid. The grid is taken slab by
+slab along its first axis: a slab's faces write into one plane of distances,
+which is read in the order of the grid and cleared, so nothing is sorted and
+each (voxel, face) pair is computed once. Runs of slabs go to threads (the
+kernel holds no lock); each thread has its own plane. The result is the same
+for any number of threads, and the same, bit for bit, as collecting every
+pair and sorting them (test_stop_field.py keeps that form as the reference).
 
 Inside Σ off the band is kept, not found again: a voxel in the band has the
 sign of its s; a voxel that leaves the band keeps the side it was last seen
@@ -32,7 +38,9 @@ inside_from_band; tested against a copy of it, test_stop_field.py).
 
 from __future__ import annotations
 
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import crop_site as CS
@@ -41,69 +49,141 @@ import numpy as np
 import sigma_band as SB
 import stop_solve as SV
 
+#: runs of slabs per worker thread (band_sparse)
+PIECES = 4
+
 
 @nb.njit(cache=True)
-def _band_pairs(V: np.ndarray, F: np.ndarray, vox: np.ndarray, shape: np.ndarray, band: float,
-                lin: np.ndarray, face: np.ndarray, d2: np.ndarray) -> int:
-    """Every (voxel, face) pair with the voxel centre within band (mm) of
-    the face, face by face: the voxel's linear index, the face, the squared
-    distance. With arrays of length 0: the count only."""
-    n = 0
-    fill = len(lin) > 0
-    b2 = band * band
-    lo = np.empty(3, np.int64)
-    hi = np.empty(3, np.int64)
-    p = np.empty(3)
+def _slab_faces(V: np.ndarray, F: np.ndarray, vox: np.ndarray, shape: np.ndarray, band: float) -> tuple[np.ndarray, np.ndarray]:
+    """For each slab of the grid (one index i of the first axis): the faces
+    whose bounding box, widened by band (mm), reaches it, in the order of
+    the faces. Returns (start, faces): slab i has faces[start[i]:start[i + 1]]."""
+    n0 = shape[0]
+    lo = np.empty(len(F), np.int64)
+    hi = np.empty(len(F), np.int64)
+    start = np.zeros(n0 + 1, np.int64)
     for f in range(len(F)):
-        a, b, c = V[F[f, 0]], V[F[f, 1]], V[F[f, 2]]
-        for k in range(3):
-            mn = min(a[k], b[k], c[k]) - band
-            mx = max(a[k], b[k], c[k]) + band
-            lo[k] = max(0, int(np.ceil(mn / vox[k])))
-            hi[k] = min(shape[k] - 1, int(np.floor(mx / vox[k])))
-        for i in range(lo[0], hi[0] + 1):
-            p[0] = i * vox[0]
-            for j in range(lo[1], hi[1] + 1):
+        a, b, c = V[F[f, 0], 0], V[F[f, 1], 0], V[F[f, 2], 0]
+        mn = min(a, b, c) - band
+        mx = max(a, b, c) + band
+        lo[f] = max(0, int(np.ceil(mn / vox[0])))
+        hi[f] = min(n0 - 1, int(np.floor(mx / vox[0])))
+        for i in range(lo[f], hi[f] + 1):
+            start[i + 1] += 1
+    for i in range(n0):
+        start[i + 1] += start[i]
+    faces = np.empty(start[n0], np.int64)
+    at = start[:n0].copy()
+    for f in range(len(F)):
+        for i in range(lo[f], hi[f] + 1):
+            faces[at[i]] = f
+            at[i] += 1
+    return start, faces
+
+
+@nb.njit(cache=True, nogil=True)
+def _band_slabs(V: np.ndarray, F: np.ndarray, vox: np.ndarray, shape: np.ndarray, band: float,
+                i0: int, i1: int, start: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The band voxels of the slabs i0 <= i < i1, in the order of the grid:
+    ijk (n, 3), the nearest face of each (of equal ones the lowest) and the
+    weights of the closest point on it (n, 3).
+
+    Slab by slab: each face of the slab (_slab_faces) visits the voxels of
+    its widened bounding box in that slab and writes its squared distance
+    where it is within band and below the one there (D, N: one value per
+    voxel of a slab); then the rows that a box touched are read in order
+    and cleared. Holds no lock: several run at once on separate slabs."""
+    n1, n2 = shape[1], shape[2]
+    b2 = band * band
+    D = np.full((n1, n2), np.inf)  # the squared distance to the nearest face so far, inf: not in the band
+    N = np.empty((n1, n2), np.int64)  # that face
+    klo = np.full(n1, n2, np.int64)  # per row j: the range of k that a box touched in this slab
+    khi = np.full(n1, -1, np.int64)
+    cap = 1 << 16
+    ijk = np.empty((cap, 3), np.int64)
+    fc = np.empty(cap, np.int64)
+    w = np.empty((cap, 3))
+    n = 0
+    p = np.empty(3)
+    for i in range(i0, i1):
+        p[0] = i * vox[0]
+        jlo, jhi = n1, -1
+        for t in range(start[i], start[i + 1]):
+            f = faces[t]
+            a, b, c = V[F[f, 0]], V[F[f, 1]], V[F[f, 2]]
+            j0 = max(0, int(np.ceil((min(a[1], b[1], c[1]) - band) / vox[1])))
+            j1 = min(n1 - 1, int(np.floor((max(a[1], b[1], c[1]) + band) / vox[1])))
+            k0 = max(0, int(np.ceil((min(a[2], b[2], c[2]) - band) / vox[2])))
+            k1 = min(n2 - 1, int(np.floor((max(a[2], b[2], c[2]) + band) / vox[2])))
+            if j0 > j1 or k0 > k1:
+                continue
+            jlo, jhi = min(jlo, j0), max(jhi, j1)
+            for j in range(j0, j1 + 1):
                 p[1] = j * vox[1]
-                for k in range(lo[2], hi[2] + 1):
+                klo[j], khi[j] = min(klo[j], k0), max(khi[j], k1)
+                for k in range(k0, k1 + 1):
                     p[2] = k * vox[2]
                     w0, w1, w2 = SB._closest_on_triangle(p, a, b, c)
                     q0 = w0 * a[0] + w1 * b[0] + w2 * c[0] - p[0]
                     q1 = w0 * a[1] + w1 * b[1] + w2 * c[1] - p[1]
                     q2 = w0 * a[2] + w1 * b[2] + w2 * c[2] - p[2]
                     dd = q0 * q0 + q1 * q1 + q2 * q2
-                    if dd < b2:
-                        if fill:
-                            lin[n] = (i * shape[1] + j) * shape[2] + k
-                            face[n] = f
-                            d2[n] = dd
-                        n += 1
-    return n
+                    # the faces come in their order: of equal distances the lowest face stays
+                    if dd < b2 and dd < D[j, k]:
+                        D[j, k] = dd
+                        N[j, k] = f
+        for j in range(jlo, jhi + 1):
+            p[1] = j * vox[1]
+            for k in range(klo[j], khi[j] + 1):
+                if D[j, k] < np.inf:
+                    D[j, k] = np.inf
+                    if n == cap:
+                        cap *= 2
+                        ijk2, fc2, w2_ = np.empty((cap, 3), np.int64), np.empty(cap, np.int64), np.empty((cap, 3))
+                        ijk2[:n], fc2[:n], w2_[:n] = ijk, fc, w
+                        ijk, fc, w = ijk2, fc2, w2_
+                    f = N[j, k]
+                    p[2] = k * vox[2]
+                    w[n, 0], w[n, 1], w[n, 2] = SB._closest_on_triangle(p, V[F[f, 0]], V[F[f, 1]], V[F[f, 2]])
+                    ijk[n, 0], ijk[n, 1], ijk[n, 2] = i, j, k
+                    fc[n] = f
+                    n += 1
+            klo[j], khi[j] = n2, -1
+    return ijk[:n], fc[:n], w[:n]
 
 
 def band_sparse(V_mm: np.ndarray, F: np.ndarray, vox: np.ndarray, shape: tuple[int, ...],
-                band_vox: float = SB.BAND_VOX) -> dict[str, np.ndarray]:
+                band_vox: float = SB.BAND_VOX, workers: int | None = None) -> dict[str, np.ndarray]:
     """sigma_band.signed_distance_band with no array of the grid's size: the
     band voxels (ijk, in the order of the grid), s, the nearest face, its
-    weights w and u."""
+    weights w and u. On `workers` threads (default: the CPU count); the
+    result does not depend on their number."""
     vox = np.asarray(vox, float)
     h = float(vox.mean())
     shp = np.asarray(shape, np.int64)
     Vc = np.ascontiguousarray(V_mm, np.float64)
     Fc = np.ascontiguousarray(F, np.int64)
-    e = np.zeros(0, np.int64)
-    n = _band_pairs(Vc, Fc, vox, shp, band_vox * h, e, e, np.zeros(0))
-    lin, fc, d2 = np.empty(n, np.int64), np.empty(n, np.int64), np.empty(n)
-    _band_pairs(Vc, Fc, vox, shp, band_vox * h, lin, fc, d2)
-    # the nearest face of each voxel; of equal ones the first (the lowest face, as the dense kernel)
-    o = np.lexsort((fc, d2, lin))
-    lin, fc = lin[o], fc[o]
-    first = np.r_[True, lin[1:] != lin[:-1]] if n else np.zeros(0, bool)
-    lin, fc = lin[first], fc[first]
-    ijk = np.stack(np.unravel_index(lin, tuple(int(x) for x in shp)), 1).astype(np.int64)
+    band = band_vox * h
+    start, faces = _slab_faces(Vc, Fc, vox, shp, band)
+    nw = max(1, (os.cpu_count() or 1) if workers is None else workers)
+    # runs of slabs with about the same number of (slab, face) visits each, PIECES per worker: a thread that
+    # ends a run takes the next, so a run with more voxels per face than another does not leave threads idle
+    at = np.searchsorted(start, np.linspace(0, start[-1], PIECES * nw + 1)[1:-1]) if nw > 1 else []
+    cuts = np.unique(np.r_[0, at, shp[0]]).tolist()
+
+    def run(r: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return _band_slabs(Vc, Fc, vox, shp, band, r[0], r[1], start, faces)
+
+    runs = list(zip(cuts[:-1], cuts[1:]))
+    if nw > 1:
+        with ThreadPoolExecutor(max_workers=nw) as ex:
+            parts = list(ex.map(run, runs))  # in the order of the runs: the order of the grid
+    else:
+        parts = [run(r) for r in runs]
+    ijk, fc, w = (np.concatenate([p[k] for p in parts]) for k in range(3))
+    lin = (ijk[:, 0] * shp[1] + ijk[:, 1]) * shp[2] + ijk[:, 2]
     x = ijk * vox
     A, B, C = Vc[Fc[fc, 0]], Vc[Fc[fc, 1]], Vc[Fc[fc, 2]]
-    w = SB._closest_weights(x, A, B, C)
     q = w[:, :1] * A + w[:, 1:2] * B + w[:, 2:] * C
     fn, en, vn = SB._pseudonormals(Vc, Fc)
     nz = w > 0.0
@@ -125,9 +205,9 @@ def band_sparse(V_mm: np.ndarray, F: np.ndarray, vox: np.ndarray, shape: tuple[i
 class StopField:
     """E = E_stop on a sparse band (see the module docstring), as a
     stop_solve evaluator: site.labels (any integer array of the grid) and
-    site.vox (mm per axis)."""
+    site.vox (mm per axis). workers: the threads of band_sparse."""
 
-    def __init__(self, site: Any, progress: Any = None):
+    def __init__(self, site: Any, progress: Any = None, workers: int | None = None):
         self.labels = site.labels
         self.vox = np.asarray(site.vox, float)
         self.h = float(self.vox.mean())
@@ -135,6 +215,7 @@ class StopField:
         self.inside = np.zeros(self.shape, bool)  # the cortex and outside-medium voxels behind Σ, off the band too
         self.e_inside = 0.0  # Σ c over inside
         self.progress = progress or (lambda m: None)
+        self.workers = workers  # threads of band_sparse (None: the CPU count)
         self.setup: dict[str, Any] = {"kind": "stop energy on a sparse band"}
 
     def weights(self, ijk: np.ndarray) -> np.ndarray:
@@ -145,7 +226,7 @@ class StopField:
     def __call__(self, V: np.ndarray, F: np.ndarray) -> SV.State:
         t0 = time.time()
         h = self.h
-        band = band_sparse(V, F, self.vox, self.shape)
+        band = band_sparse(V, F, self.vox, self.shape, workers=self.workers)
         ijk = band["ijk"]
         X = (ijk[:, 0], ijk[:, 1], ijk[:, 2])
         cv = self.weights(ijk)
