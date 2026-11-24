@@ -67,13 +67,9 @@ def main() -> None:
     ap.add_argument("--outer", type=int, default=1)
     ap.add_argument("--reverse", action="store_true")
     ap.add_argument("--name", default="schwarz")
+    ap.add_argument("--no-gauge", action="store_true", help="no gauge_offsets after a sweep")
     ap.add_argument(
-        "--no-gauge", action="store_true", help="no gauge_offsets after a sweep"
-    )
-    ap.add_argument(
-        "--exact-iters",
-        type=int,
-        default=0,
+        "--exact-iters", type=int, default=0,
         help="linear: first run CG from the reference to rtol 1e-11 for this many "
         "iterations, report the difference, and use that as the reference",
     )
@@ -121,9 +117,7 @@ def main() -> None:
     h = A.halo_mm / rs.voxel_mm
 
     if A.mode == "linear":
-        Ad, bd, _ = FL.data_rows(
-            pairs, ps.shift, ps.weight, np.zeros((n, K)), tau, p.step
-        )
+        Ad, bd, _ = FL.data_rows(pairs, ps.shift, ps.weight, np.zeros((n, K)), tau, p.step)
         Mx = (Ad.T @ Ad + FL.prior_matrix(n, K, FG.EPS, 10.0, ja)).tocsr()
         rhs = Ad.T @ bd
         del Ad, bd
@@ -136,11 +130,7 @@ def main() -> None:
         if A.exact_iters:
             dg0 = Mx.diagonal()
             xe, fl = cg(
-                Mx,
-                rhs,
-                x0=r_ref.ravel(),
-                rtol=1e-11,
-                maxiter=A.exact_iters,
+                Mx, rhs, x0=r_ref.ravel(), rtol=1e-11, maxiter=A.exact_iters,
                 M=diags(1.0 / np.where(dg0 > 0, dg0, 1.0)),
             )
             xe = xe.reshape(n, K)
@@ -174,11 +164,7 @@ def main() -> None:
                 b = rhs[ix][fr] - Msel[fr][:, ~fr] @ Rw[sel[~o]].ravel()
                 dg = Mff.diagonal()
                 x, flag = cg(
-                    Mff,
-                    b,
-                    x0=Rw[sel[o]].ravel(),
-                    rtol=1e-7,
-                    maxiter=3000,
+                    Mff, b, x0=Rw[sel[o]].ravel(), rtol=1e-7, maxiter=3000,
                     M=diags(1.0 / np.where(dg > 0, dg, 1.0)),
                 )
                 Rw[sel[o]] = x.reshape(-1, K)
@@ -187,40 +173,22 @@ def main() -> None:
                 loc[sel] = np.arange(len(sel))
                 keep = np.all(loc[pairs] >= 0, axis=1)
                 tau_, r_, info = FL.fit_warp(
-                    loc[pairs[keep]],
-                    ps.shift[keep],
-                    ps.weight[keep],
-                    len(sel),
-                    p.step,
-                    dtau=FG.DTAU,
-                    tau_max=float(tau[-1]),
-                    eps=FG.EPS,
-                    n_outer=A.outer,
-                    r0=Rw[sel],
-                    anchor_level=ja,
-                    fixed=~o,
+                    loc[pairs[keep]], ps.shift[keep], ps.weight[keep], len(sel),
+                    p.step, dtau=FG.DTAU, tau_max=float(tau[-1]), eps=FG.EPS,
+                    n_outer=A.outer, r0=Rw[sel], anchor_level=ja, fixed=~o,
                 )
                 Rw[sel[o]] = r_[o]
             results.append(
                 FG.Flattened(
-                    edge_key=rays.roots.edge_key[sel[o]],
-                    s_lo=p.s_lo,
-                    step=p.step,
-                    tau=tau,
-                    r=Rw[sel[o]].copy(),
-                    anchor_level=ja,
+                    edge_key=rays.roots.edge_key[sel[o]], s_lo=p.s_lo, step=p.step,
+                    tau=tau, r=Rw[sel[o]].copy(), anchor_level=ja,
                     pair_key=np.zeros((0, 2), np.int64),
                     shift=np.zeros((0, 1), np.float32),
-                    weight=np.zeros((0, 1), np.float32),
-                    scales=ref["scales"],
-                    energy_ref=float(ref["energy_ref"]),
-                    info=[],
-                    n_columns=len(sel),
-                    n_pairs=0,
-                    misfit=np.zeros(int(o.sum())),
+                    weight=np.zeros((0, 1), np.float32), scales=ref["scales"],
+                    energy_ref=float(ref["energy_ref"]), info=[], n_columns=len(sel),
+                    n_pairs=0, misfit=np.zeros(int(o.sum())),
                     vertex=rays.roots.vertex[sel[o]],
-                    halo_key=rays.roots.edge_key[sel[~o]],
-                    halo_r=Rw[sel[~o]].copy(),
+                    halo_key=rays.roots.edge_key[sel[~o]], halo_r=Rw[sel[~o]].copy(),
                 )
             )
         lev, c = FG.gauge_offsets(results)
@@ -246,13 +214,9 @@ def main() -> None:
         say(json.dumps(row))
     A.out.mkdir(parents=True, exist_ok=True)
     (A.out / f"{A.name}.json").write_text(
-        json.dumps(
-            dict(args={k: str(v) for k, v in vars(A).items()}, sweeps=rows), indent=1
-        )
+        json.dumps(dict(args={k: str(v) for k, v in vars(A).items()}, sweeps=rows), indent=1)
     )
-    np.savez_compressed(
-        A.out / f"{A.name}.npz", r=Rw.astype(np.float32), edge_key=rays.roots.edge_key
-    )
+    np.savez_compressed(A.out / f"{A.name}.npz", r=Rw.astype(np.float32), edge_key=rays.roots.edge_key)
     say("done")
 
 

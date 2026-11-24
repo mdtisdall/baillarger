@@ -62,9 +62,7 @@ class Mesh:
     origin: np.ndarray
     state: np.ndarray  # (n,)
     travel: np.ndarray  # (n,) mm moved along the normals since the start
-    last: np.ndarray = field(
-        default_factory=lambda: np.zeros(0)
-    )  # (n,) mm moved in the last step (display)
+    last: np.ndarray = field(default_factory=lambda: np.zeros(0))  # (n,) mm moved in the last step (display)
     # (n, 3) voxel whose label stopped a TOP vertex (-1: none), for the isolated-TOP review list
     stopvox: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), np.int64))
     # (n,) the steps in a row in which the vertex's move was refused (0: it moved)
@@ -84,11 +82,7 @@ class Mesh:
         normals (the faces at `origin`): after any change of F or origin."""
         self.top = MC.Topology.of(self.F, len(self.V))
         self.F = self.top.F
-        self.ptr, self.nbr, self.boundary = (
-            self.top.ptr,
-            self.top.nbr,
-            self.top.boundary,
-        )
+        self.ptr, self.nbr, self.boundary = self.top.ptr, self.top.nbr, self.top.boundary
         self.pairs = MC.edge_face_pairs(self.F, len(self.V))[1]
         self.ref = MC.face_normals(self.origin, self.F)
         if FOLD_REFERENCE == "none":
@@ -177,6 +171,7 @@ def counts(m: Mesh, gap: float, fold_cos: float) -> dict[str, int]:
     return MC.check_mesh(m.V, m.F, fold_cos, reference=ref, gap=gap, top=m.top).counts()
 
 
+
 def start_mesh(site: CS.Site) -> Mesh:
     V = site.v * site.vox
     n = len(V)
@@ -214,9 +209,7 @@ def contacts(m: Mesh, vox: np.ndarray) -> dict[str, np.ndarray]:
         for di in range(-r, r + 1):
             for dj in range(-r, r + 1):
                 for dk in range(-r, r + 1):
-                    p = (
-                        base + np.array([di, dj, dk]) - o
-                    )  # voxel centre - ray origin (voxels)
+                    p = base + np.array([di, dj, dk]) - o  # voxel centre - ray origin (voxels)
                     t = (p * d).sum(1)
                     lat = np.linalg.norm(p - t[:, None] * d, axis=1)
                     free &= ~((t > 0) & (t < L) & (lat <= 0.5))
@@ -228,11 +221,7 @@ def contacts(m: Mesh, vox: np.ndarray) -> dict[str, np.ndarray]:
 
 
 def relax(
-    m: Mesh,
-    chk: MC.Checker,
-    fold_cos: float,
-    normal: float = 0.0,
-    only: np.ndarray | None = None,
+    m: Mesh, chk: MC.Checker, fold_cos: float, normal: float = 0.0, only: np.ndarray | None = None
 ) -> tuple[np.ndarray, int]:
     """One tangential relaxation step for the interior vertices (with only,
     for those of them where only is True); with
@@ -323,12 +312,8 @@ class SigmaRemesher(SR.Remesher):
     and the outward bound are off (they measure against the white surface,
     which Σ has left)."""
 
-    def __init__(
-        self, m: Mesh, gap: float, target: float | np.ndarray, fold_cos: float, h: float
-    ):
-        ref = SR.Reference(
-            m.V, m.F, np.broadcast_to(np.asarray(target, float), (len(m.V),)).copy()
-        )
+    def __init__(self, m: Mesh, gap: float, target: float | np.ndarray, fold_cos: float, h: float):
+        ref = SR.Reference(m.V, m.F, np.broadcast_to(np.asarray(target, float), (len(m.V),)).copy())
         super().__init__(ref, m.V, m.F, gap, fold_cos, h=h)
         self.last_edit: MC.EditCheck | None = None
         self._origin_now: dict[int, np.ndarray] = {}
@@ -358,11 +343,7 @@ class SigmaRemesher(SR.Remesher):
         for i, row in enumerate(Fc):
             for j, v in enumerate(row):
                 v = int(v)
-                O[i, j] = (
-                    self._origin_now[v]
-                    if v in self._origin_now
-                    else self.fields["origin"][v]
-                )
+                O[i, j] = self._origin_now[v] if v in self._origin_now else self.fields["origin"][v]
         R = np.cross(O[:, 1] - O[:, 0], O[:, 2] - O[:, 0])
         V = self.chk.V
         N = np.cross(V[Fc[:, 1]] - V[Fc[:, 0]], V[Fc[:, 2]] - V[Fc[:, 0]])
@@ -413,25 +394,11 @@ class SigmaRemesher(SR.Remesher):
         self._field_room(len(new) - 1)
         used = new >= 0
         out = {nm: x[: len(new)][used] for nm, x in self.fields.items()}
-        return Mesh(
-            V,
-            F,
-            out["origin"],
-            out["state"],
-            out["travel"],
-            out["last"],
-            out["stopvox"],
-            out["held"],
-        )
+        return Mesh(V, F, out["origin"], out["state"], out["travel"], out["last"], out["stopvox"], out["held"])
 
 
 def remesh(
-    m: Mesh,
-    gap: float,
-    target: float | np.ndarray,
-    fold_cos: float,
-    h: float,
-    passes: int = 1,
+    m: Mesh, gap: float, target: float | np.ndarray, fold_cos: float, h: float, passes: int = 1,
     collapse: bool = True,
 ) -> tuple[Mesh, int, int]:
     """Σ remeshed toward a target edge length (one, or per vertex; e.g.
@@ -480,15 +447,7 @@ def sizing(site: CS.Site, lmin_vox: float = LMIN_VOX) -> np.ndarray:
     tlo, thi = target_range(lmin_vox)
     V = site.v * site.vox
     facing = MS.facing_distances(V, site.f, site.normal, thi * h)
-    L, _ = MS.curvature_sizes(
-        V,
-        site.f,
-        site.normal,
-        EPS_VOX * h,
-        CURV_VOX * h,
-        tlo * h,
-        thi * h,
-        scale=0.75,
-        facing=facing,
-    )
+    L, _ = MS.curvature_sizes(V, site.f, site.normal, EPS_VOX * h, CURV_VOX * h, tlo * h, thi * h,
+                              scale=0.75, facing=facing)
     return L
+

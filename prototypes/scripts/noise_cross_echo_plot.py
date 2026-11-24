@@ -5,7 +5,6 @@ to the tissue and the echo 1 mean.
 
 usage: noise_cross_echo_plot.py <map_dir> <fig_dir>
 """
-
 import sys
 from pathlib import Path
 
@@ -32,12 +31,7 @@ for a in range(3):
     ax[1, a].imshow(np.nanmax(c, axis=a).T, **kw)
     ax[1, a].contour(t.max(axis=a).T, [0.5], colors="c", linewidths=0.8)
     ax[1, a].set_title(f"max along axis {a}")
-f.colorbar(
-    im,
-    ax=ax,
-    shrink=0.6,
-    label="echo 1-2 correlation of background residuals (16³ blocks)",
-)
+f.colorbar(im, ax=ax, shrink=0.6, label="echo 1-2 correlation of background residuals (16³ blocks)")
 f.savefig(fig / "cross_echo_map.png", dpi=80)
 
 ok = d["ok"]

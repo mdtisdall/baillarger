@@ -8,7 +8,6 @@ sheet score over cortex samples (for one global floor), and the column edges.
 
 args: SCAN_DIR (top_scan.py OUT, with diag/) OUT_DIR   env: DEVICE (mps), WORKERS (1), DILATE_MM (0.48); inputs: top_paths.py
 """
-
 import json
 import multiprocessing as mp
 import os
@@ -47,7 +46,6 @@ def init():
     from baillarger.backend import device as get_device
     from baillarger.orient_noise import read_noise
     import coarse_kernels as K
-
     G["O"], G["K"] = O, K
     G["dev"] = get_device(os.environ.get("DEVICE", "mps"))
     G["noise"] = read_noise(NOISE)
@@ -64,9 +62,7 @@ def one(f):
     own = z["owned"]
     vert_all = z["vert"]
     tri = z["tri"]
-    edges = np.unique(
-        np.sort(np.r_[tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [0, 2]]], 1), axis=0
-    )
+    edges = np.unique(np.sort(np.r_[tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [0, 2]]], 1), axis=0)
     edges_v = vert_all[edges]
     oi = np.flatnonzero(own)
     P = z["P"][oi].astype(np.float32)
@@ -93,19 +89,13 @@ def one(f):
     msk = dc <= DIL_MM + 1e-6
     outside = np.isin(lab, OUTSIDE)
     far_out = outside & (dc >= 2 * vs.min()) & (dc <= 6 * vs.min())
-    d_out = (
-        distance_transform_edt(~outside, sampling=vs).astype(np.float32)
-        if outside.any()
-        else np.full(lab.shape, 99, np.float32)
-    )
+    d_out = distance_transform_edt(~outside, sampling=vs).astype(np.float32) if outside.any() else np.full(lab.shape, 99, np.float32)
     wm_far = np.isin(lab, WM_FILLED) & (dc >= 1.0)
     del dc
     # class means of the log echoes (cortex, far WM, outside medium) for the GM-like run
     lraw = np.log(np.maximum(raw, 1e-6))
-    mu = {
-        n_: (np.median(lraw[:, s_], 1) if s_.sum() >= 100 else None)
-        for n_, s_ in (("gm", ctx), ("wm", wm_far), ("fl", far_out))
-    }
+    mu = {n_: (np.median(lraw[:, s_], 1) if s_.sum() >= 100 else None)
+          for n_, s_ in (("gm", ctx), ("wm", wm_far), ("fl", far_out))}
     del lraw
     td = dev.torch
     te = torch.as_tensor(raw, device=td)
@@ -123,12 +113,9 @@ def one(f):
     C = O._noise_c(medn.reshape(-1, 1, 1, 1), G["noise"])[..., 0, 0, 0]
     tfo = torch.as_tensor(far_out, device=td)
     if far_out.sum() >= 100:
-        c = (le[:, tfo] - med[:, None]).cpu().numpy().astype(np.float64)
-        c = np.median(c, 1)
+        c = (le[:, tfo] - med[:, None]).cpu().numpy().astype(np.float64); c = np.median(c, 1)
     else:
-        c = np.array(
-            [-2.78, -2.48, -2.03]
-        )  # superblock 2_2_4's, where this box has too little outside medium
+        c = np.array([-2.78, -2.48, -2.03])  # superblock 2_2_4's, where this box has too little outside medium
     Ci = np.linalg.inv(C)
     w = -(Ci @ c) / (c @ Ci @ c)
     u = torch.einsum("e,e...->...", torch.as_tensor(w, dtype=sm.dtype, device=td), sm)
@@ -145,35 +132,18 @@ def one(f):
                 d = O.central(O.central(u, i), j)
             Hc.append(d)
     # echoes in cortex units (for the mirror profiles)
-    ech = (
-        te
-        / torch.as_tensor(
-            np.array([float(np.median(raw[k][ctx])) for k in range(3)], np.float32),
-            device=td,
-        )[:, None, None, None]
-    )
-    vol = torch.stack(
-        [
-            *Hc,
-            torch.as_tensor(outside, dtype=torch.float32, device=td),
-            torch.as_tensor(np.isin(lab, WM_FILLED), dtype=torch.float32, device=td),
-            torch.as_tensor(d_out, device=td),
-            *ech,
-        ]
-    )
+    ech = te / torch.as_tensor(np.array([float(np.median(raw[k][ctx])) for k in range(3)], np.float32), device=td)[:, None, None, None]
+    vol = torch.stack([*Hc, torch.as_tensor(outside, dtype=torch.float32, device=td),
+                       torch.as_tensor(np.isin(lab, WM_FILLED), dtype=torch.float32, device=td),
+                       torch.as_tensor(d_out, device=td), *ech])
     del Hc, u, te
     qt = torch.as_tensor((q - lo).astype(np.float32), device=td)
     smp = K.sample_t(vol, qt)  # (12, m*ns)
     del vol
     H6 = smp[:6].T
-    M = torch.stack(
-        [
-            torch.stack([H6[:, 0], H6[:, 1], H6[:, 2]], 1),
-            torch.stack([H6[:, 1], H6[:, 3], H6[:, 4]], 1),
-            torch.stack([H6[:, 2], H6[:, 4], H6[:, 5]], 1),
-        ],
-        1,
-    )
+    M = torch.stack([torch.stack([H6[:, 0], H6[:, 1], H6[:, 2]], 1),
+                     torch.stack([H6[:, 1], H6[:, 3], H6[:, 4]], 1),
+                     torch.stack([H6[:, 2], H6[:, 4], H6[:, 5]], 1)], 1)
     _, l1, l2 = K.leading_t(M)
     S = torch.clamp(l1 - l2.abs(), min=0).reshape(m, ns).cpu().numpy()
     Ov = smp[6].reshape(m, ns).cpu().numpy()
@@ -185,33 +155,19 @@ def one(f):
     nin = int(round(INWARD_MM / STEP))
     d0 = P[:, 1] - P[:, 0]
     d0 /= np.maximum(np.linalg.norm(d0, axis=1, keepdims=True), 1e-9)
-    Pin = (
-        P[:, :1] - (np.arange(1, nin + 1)[None, :, None] * STEP) * d0[:, None]
-    )  # (m, nin, 3); j=0 next to the root
+    Pin = P[:, :1] - (np.arange(1, nin + 1)[None, :, None] * STEP) * d0[:, None]  # (m, nin, 3); j=0 next to the root
     qin = Pin.reshape(-1, 3).astype(np.float64) @ inv[:3, :3].T + inv[:3, 3] - lo
     qin = np.clip(qin, 0, np.array(lab.shape) - 1)
-    Iin = (
-        K.sample_t(ech, torch.as_tensor(qin.astype(np.float32), device=td))
-        .reshape(3, m, nin)
-        .permute(1, 2, 0)
-        .cpu()
-        .numpy()
-    )
+    Iin = K.sample_t(ech, torch.as_tensor(qin.astype(np.float32), device=td)).reshape(3, m, nin).permute(1, 2, 0).cpu().numpy()
     del ech
     # GM-like samples: nearest class mean in log echoes, distance weighted by C^-1
     cmed = np.log(np.array([float(np.median(raw[k][ctx])) for k in range(3)]))
     have_cls = all(v is not None for v in mu.values())
     if have_cls:
-        X = (
-            np.log(np.maximum(np.concatenate([Iin[:, ::-1], I], 1), 1e-6)) + cmed
-        )  # (m, nin+ns, 3), deepest inward first
-        cls = nearest_class(
-            X, np.array([mu["gm"], mu["wm"], mu["fl"]]), Ci
-        )  # 0 GM-like, 1 WM-like, 2 fluid-like
+        X = np.log(np.maximum(np.concatenate([Iin[:, ::-1], I], 1), 1e-6)) + cmed  # (m, nin+ns, 3), deepest inward first
+        cls = nearest_class(X, np.array([mu["gm"], mu["wm"], mu["fl"]]), Ci)  # 0 GM-like, 1 WM-like, 2 fluid-like
         del X
-        gm_behind, fl_behind = (
-            a.astype(np.float32) for a in behind_root_lengths(cls, nin, STEP)
-        )  # behind the root
+        gm_behind, fl_behind = (a.astype(np.float32) for a in behind_root_lengths(cls, nin, STEP))  # behind the root
         root_cls = cls[:, nin].astype(np.int8)
     else:
         gm_behind = np.full(m, np.nan, np.float32)
@@ -224,7 +180,7 @@ def one(f):
     # the run of samples inside outside medium from the first one
     run = np.zeros(m, int)
     for i_ in np.flatnonzero(first >= 0):
-        r = inside_o[i_, first[i_] :]
+        r = inside_o[i_, first[i_]:]
         run[i_] = r.argmin() if not r.all() else len(r)
     ctx_s = ~Wv & ~inside_o
     ctx_s[:, :kmin] = False
@@ -256,40 +212,16 @@ def one(f):
         ma = (a_ * okk).sum((1, 2)) / n_
         mb = (b_ * okk).sum((1, 2)) / n_
         da, db = (a_ - ma[:, None, None]) * okk, (b_ - mb[:, None, None]) * okk
-        mirror = (da * db).sum((1, 2)) / np.sqrt(
-            (da**2).sum((1, 2)) * (db**2).sum((1, 2))
-        )
+        mirror = (da * db).sum((1, 2)) / np.sqrt((da**2).sum((1, 2)) * (db**2).sum((1, 2)))
     mirror[ok.sum(1) < 10] = np.nan
-    out.update(
-        first=first.astype(np.int16),
-        run=run.astype(np.int16),
-        hist=hist,
-        floor_local=floor_local,
-        c_ci=ci.astype(np.int32),
-        c_k=ck.astype(np.int16),
-        c_lab=is_lab,
-        c_S=Sc.astype(np.float32),
-        c_at_label=at_label,
-        c_far_wm=far_wm,
-        c_mirror=mirror.astype(np.float32),
-        gm_behind=gm_behind,
-        fl_behind=fl_behind,
-        root_cls=root_cls,
-        w=w,
-        c=c,
-        mu=np.array(
-            [
-                mu[n_] if mu[n_] is not None else np.full(3, np.nan)
-                for n_ in ("gm", "wm", "fl")
-            ]
-        ),
-    )
+    out.update(first=first.astype(np.int16), run=run.astype(np.int16), hist=hist, floor_local=floor_local,
+               c_ci=ci.astype(np.int32), c_k=ck.astype(np.int16), c_lab=is_lab, c_S=Sc.astype(np.float32),
+               c_at_label=at_label, c_far_wm=far_wm, c_mirror=mirror.astype(np.float32), gm_behind=gm_behind, fl_behind=fl_behind, root_cls=root_cls, w=w, c=c,
+               mu=np.array([mu[n_] if mu[n_] is not None else np.full(3, np.nan) for n_ in ("gm", "wm", "fl")]))
     np.savez(OUT / f.name.replace("diag_", "feat_"), **out)
     if dev.name == "mps":
         torch.mps.empty_cache()
-    return (
-        f"{f.name}: {m} columns, {len(ci)} candidates, {time.perf_counter() - t0:.1f} s"
-    )
+    return f"{f.name}: {m} columns, {len(ci)} candidates, {time.perf_counter() - t0:.1f} s"
 
 
 def main():
@@ -307,11 +239,7 @@ def main():
             futs = [ex.submit(one, f) for f in todo]
             for i, fu in enumerate(as_completed(futs)):
                 print(f"{i + 1}/{len(todo)} {fu.result()}", flush=True)
-    (OUT / "features.json").write_text(
-        json.dumps(
-            {"seconds": time.perf_counter() - t0, "dilate_mm": DIL_MM, "workers": nw}
-        )
-    )
+    (OUT / "features.json").write_text(json.dumps({"seconds": time.perf_counter() - t0, "dilate_mm": DIL_MM, "workers": nw}))
     print("done", time.perf_counter() - t0, flush=True)
 
 

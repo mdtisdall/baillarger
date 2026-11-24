@@ -81,9 +81,7 @@ class SolveSettings:
     #: "none", or only the "flagged" ones (a face of theirs has its smallest
     #: altitude below the step cap step_max_vox × h: one step could flip it)
     relax: str = "all"
-    measure_relax: bool = (
-        False  # also E right after the relaxation (one more evaluation)
-    )
+    measure_relax: bool = False  # also E right after the relaxation (one more evaluation)
     #: the mesh after an accepted step: "remesh" (relax, then uniform splits,
     #: collapses and flips, T7) or "none" (Σ keeps its faces and vertices)
     mesh: str = "remesh"
@@ -102,16 +100,12 @@ class State:
 
 def min_altitude(V: np.ndarray, F: np.ndarray) -> np.ndarray:
     """The smallest altitude of each face (2 × area / its longest edge)."""
-    e = np.stack(
-        [V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 1]], V[F[:, 0]] - V[F[:, 2]]], 1
-    )
+    e = np.stack([V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 1]], V[F[:, 0]] - V[F[:, 2]]], 1)
     area2 = np.linalg.norm(np.cross(e[:, 0], -e[:, 2]), axis=1)
     return area2 / np.maximum(np.linalg.norm(e, axis=2).max(1), 1e-300)
 
 
-def flagged_vertices(
-    V: np.ndarray, F: np.ndarray, limit: float
-) -> tuple[np.ndarray, np.ndarray]:
+def flagged_vertices(V: np.ndarray, F: np.ndarray, limit: float) -> tuple[np.ndarray, np.ndarray]:
     """Vertices with a face whose smallest altitude is below limit; and the
     altitudes."""
     alt = min_altitude(V, F)
@@ -207,7 +201,6 @@ class SolveRun:
         med = float(np.median(np.linalg.norm(m.V[u[:, 0]] - m.V[u[:, 1]], axis=1)))
         self.median_edge = med
         if s.edge_target == "median":
-
             def sizes(_m: SU.Mesh) -> Any:
                 return s.edge_ratio * med
         elif s.edge_target == "start":
@@ -225,22 +218,11 @@ class SolveRun:
         white = SU.counts(m, gap, s.fold_cos)
         sp, co = 0, 0
         if s.mesh == "remesh":
-            m, sp, co = SU.remesh(
-                m, gap, sizes(m), s.fold_cos, h, passes=s.start_passes
-            )
+            m, sp, co = SU.remesh(m, gap, sizes(m), s.fold_cos, h, passes=s.start_passes)
         cur = ev(m.V, m.F)
-        self.initial = {
-            "quality": quality(m.V, m.F, h, s.step_max_vox * h),
-            "vertices": len(m.V),
-            "faces": len(m.F),
-            "white": white,
-            "splits": sp,
-            "collapses": co,
-            "E": cur.E,
-            "E_stop": cur.E,
-            "eval": cur.info,
-            "s": time.time() - t0,
-        }
+        self.initial = {"quality": quality(m.V, m.F, h, s.step_max_vox * h), "vertices": len(m.V), "faces": len(m.F),
+                        "white": white, "splits": sp, "collapses": co, "E": cur.E, "E_stop": cur.E,
+                        "eval": cur.info, "s": time.time() - t0}
         if self.progress:
             self.progress(f"start: E {cur.E:.1f}, {cur.info['s']:.1f} s")
         if self.snapshot:
@@ -255,11 +237,7 @@ class SolveRun:
             # fraction of the largest there can be (Σ wholly in cortex or wholly in outside medium:
             # LOG_ODDS / h³), times the cap. No α to keep between steps.
             nrm, area = CS.vertex_normals_areas(m.V, m.F)
-            p = np.clip(
-                (cur.grad * nrm).sum(1) * h**3 / (np.maximum(area, 1e-300) * LOG_ODDS),
-                -1.0,
-                1.0,
-            )
+            p = np.clip((cur.grad * nrm).sum(1) * h**3 / (np.maximum(area, 1e-300) * LOG_ODDS), -1.0, 1.0)
             g = (s.step_max_vox * h * p)[:, None] * nrm
             alpha = 1.0
             for _ in range(s.max_tries):
@@ -276,23 +254,13 @@ class SolveRun:
                 cinfo["refused_flagged"] = int((cinfo["_refused"] & fl).sum())
                 del cinfo["_halved"], cinfo["_refused"]
                 trial = ev(m.V + dd, m.F)
-                tries.append(
-                    {
-                        "alpha": alpha,
-                        "E": trial.E,
-                        "max_step_vox": float(np.linalg.norm(dd, axis=1).max() / h),
-                        **cinfo,
-                        "eval_s": trial.info["s"],
-                    }
-                )
-                if (
-                    self.progress
-                ):  # each trial: why the line search refuses it (user, 2026-11-20)
+                tries.append({"alpha": alpha, "E": trial.E, "max_step_vox": float(np.linalg.norm(dd, axis=1).max() / h),
+                              **cinfo, "eval_s": trial.info["s"]})
+                if self.progress:  # each trial: why the line search refuses it (user, 2026-11-20)
                     self.progress(
                         f"  try {len(tries)}: α {alpha:.3g}, max step {tries[-1]['max_step_vox']:.3f} h, "
                         f"E {trial.E:.1f} vs {cur.E:.1f}, moved {cinfo['moved']} halved {cinfo['halved']} "
-                        f"refused {cinfo['refused']}"
-                    )
+                        f"refused {cinfo['refused']}")
                 if trial.E < cur.E:
                     accepted = True
                     m.V = m.V + dd
@@ -303,31 +271,18 @@ class SolveRun:
                 alpha *= 0.5
             if not accepted:
                 self.ended = "no decrease"
-                self.log.append(
-                    {
-                        "step": k,
-                        "tries": tries,
-                        "accepted": False,
-                        "s": time.time() - t1,
-                    }
-                )
+                self.log.append({"step": k, "tries": tries, "accepted": False, "s": time.time() - t1})
                 if self.on_step:
                     self.on_step(self)
                 if self.progress:
-                    self.progress(
-                        f"step {k}: no decrease in {len(tries)} tries; E {cur.E:.1f}"
-                    )
+                    self.progress(f"step {k}: no decrease in {len(tries)} tries; E {cur.E:.1f}")
                 break
             e_trial = trial.E
             q_before = quality(m.V, m.F, h, s.step_max_vox * h)
             if s.mesh == "none" or s.relax == "none":
                 r, nrel = np.zeros(len(m.V)), 0
             else:
-                only = (
-                    flagged_vertices(m.V, m.F, s.step_max_vox * h)[0]
-                    if s.relax == "flagged"
-                    else None
-                )
+                only = flagged_vertices(m.V, m.F, s.step_max_vox * h)[0] if s.relax == "flagged" else None
                 r, nrel = SU.relax(m, chk, s.fold_cos, only=only)
             m.last = np.sqrt(disp**2 + r**2)
             e_relax = None
@@ -341,26 +296,12 @@ class SolveRun:
             cur = trial if m is m_pre and nrel == 0 else ev(m.V, m.F)
             c = SU.counts(m, gap, s.fold_cos)
             # E_stop: the same as E (the run logs of top_solve.py had both; readers use either)
-            rec = {
-                "step": k,
-                "tries": tries,
-                "accepted": True,
-                "E_trial": e_trial,
-                "E_relaxed": e_relax,
-                "E": cur.E,
-                "E_stop": cur.E,
-                "quality_before_relax": q_before,
-                "quality": quality(m.V, m.F, h, s.step_max_vox * h),
-                "relaxed": nrel,
-                "splits": sp,
-                "collapses": co,
-                **c,
-                "vertices": len(m.V),
-                "faces": len(m.F),
-                "eval": cur.info,
-                "max_step_vox": float(disp.max() / h),
-                "s": time.time() - t1,
-            }
+            rec = {"step": k, "tries": tries, "accepted": True, "E_trial": e_trial, "E_relaxed": e_relax,
+                   "E": cur.E, "E_stop": cur.E, "quality_before_relax": q_before,
+                   "quality": quality(m.V, m.F, h, s.step_max_vox * h),
+                   "relaxed": nrel, "splits": sp, "collapses": co,
+                   **c, "vertices": len(m.V), "faces": len(m.F), "eval": cur.info,
+                   "max_step_vox": float(disp.max() / h), "s": time.time() - t1}
             self.log.append(rec)
             if self.on_step:
                 self.on_step(self)
