@@ -346,9 +346,8 @@ class SigmaRemesher(SR.Remesher):
             for j, v in enumerate(row):
                 v = int(v)
                 O[i, j] = self._origin_now[v] if v in self._origin_now else self.fields["origin"][v]
-        R = np.cross(O[:, 1] - O[:, 0], O[:, 2] - O[:, 0])
-        V = self.chk.V
-        N = np.cross(V[Fc[:, 1]] - V[Fc[:, 0]], V[Fc[:, 2]] - V[Fc[:, 0]])
+        R = SR.tri_cross(O)
+        N = SR.face_cross(self.chk.V, Fc)
         return bool(_turned(N, R).any())
 
     def split(self, a: int, b: int) -> bool:

@@ -229,6 +229,53 @@ def _nb_closest_on(
     return Q, dist, face
 
 
+@njit(cache=True)
+def tri_cross(T: Float) -> Float:
+    """np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]) for triangles T (k, 3,
+    3), compiled, with numpy's operations in numpy's order (each component a
+    product minus a product, no fused multiply-add): the same bits."""
+    out = np.empty((T.shape[0], 3))
+    for i in range(T.shape[0]):
+        a0 = T[i, 1, 0] - T[i, 0, 0]
+        a1 = T[i, 1, 1] - T[i, 0, 1]
+        a2 = T[i, 1, 2] - T[i, 0, 2]
+        b0 = T[i, 2, 0] - T[i, 0, 0]
+        b1 = T[i, 2, 1] - T[i, 0, 1]
+        b2 = T[i, 2, 2] - T[i, 0, 2]
+        out[i, 0] = a1 * b2 - a2 * b1
+        out[i, 1] = a2 * b0 - a0 * b2
+        out[i, 2] = a0 * b1 - a1 * b0
+    return out
+
+
+@njit(cache=True)
+def face_cross(V: Float, F: Int) -> Float:
+    """tri_cross of the faces F of V (MC.face_normals' bits)."""
+    out = np.empty((F.shape[0], 3))
+    for i in range(F.shape[0]):
+        p, q, r = F[i, 0], F[i, 1], F[i, 2]
+        a0 = V[q, 0] - V[p, 0]
+        a1 = V[q, 1] - V[p, 1]
+        a2 = V[q, 2] - V[p, 2]
+        b0 = V[r, 0] - V[p, 0]
+        b1 = V[r, 1] - V[p, 1]
+        b2 = V[r, 2] - V[p, 2]
+        out[i, 0] = a1 * b2 - a2 * b1
+        out[i, 1] = a2 * b0 - a0 * b2
+        out[i, 2] = a0 * b1 - a1 * b0
+    return out
+
+
+@njit(cache=True)
+def any_against(N: Float, R: Float) -> bool:
+    """((N * R).sum(1) <= 0).any(), compiled (the row sums in numpy's
+    order for three terms: left to right)."""
+    for i in range(N.shape[0]):
+        if (N[i, 0] * R[i, 0] + N[i, 1] * R[i, 1]) + N[i, 2] * R[i, 2] <= 0:
+            return True
+    return False
+
+
 def closest_on(
     V: Float, F: Int, P: Float, k: int = 24, tree: cKDTree | None = None
 ) -> tuple[Float, Float, Int]:
@@ -502,9 +549,9 @@ class Remesher:
         if not len(faces):
             return False
         V, F = self.chk.V, self.chk.F[faces]
-        n = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+        n = face_cross(V, F)
         _, _, wf = self.ref.project(V[F].mean(1))
-        return bool(((n * self.ref.N[wf]).sum(1) <= 0).any())
+        return bool(any_against(n, self.ref.N[wf]))
 
     def _tris(self, faces: Int) -> Float:
         out: Float = self.chk.V[self.chk.F[faces]]

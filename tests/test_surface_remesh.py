@@ -228,3 +228,20 @@ def test_compiled_flip_all_is_the_loop_of_flips(mesh: Any) -> None:
     assert a.flip_all() == n_loop > 0
     for p, q in zip(a.chk.export(), b.chk.export(), strict=True):
         assert np.array_equal(p, q)
+
+
+def test_compiled_cross_and_turn_test_are_numpys_bit_for_bit() -> None:
+    rng = np.random.default_rng(3)
+    V = rng.normal(size=(400, 3)) * 10.0 ** rng.integers(-3, 3, size=(400, 1))
+    F = rng.integers(0, 400, size=(1000, 3))
+    T = V[F]
+    ref = np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0])
+    assert np.array_equal(SR.tri_cross(T), ref)
+    assert np.array_equal(SR.face_cross(V, F), ref)
+    assert np.array_equal(SR.face_cross(V, F), MC.face_normals(V, F))
+    R = rng.normal(size=ref.shape)
+    for i in range(len(ref)):
+        a, b = ref[i : i + 1], R[i : i + 1]
+        assert SR.any_against(a, b) == bool(((a * b).sum(1) <= 0).any())
+    zero = np.zeros((1, 3))
+    assert SR.any_against(zero, R[:1])  # a face of zero area is turned
