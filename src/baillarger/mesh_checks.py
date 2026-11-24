@@ -608,6 +608,57 @@ def _link_all(
 
 
 @njit(cache=True)
+def _faces_round(vhead: Int, cnext: Int, v: int) -> Int:
+    """The faces round vertex v, in the order of its corner list."""
+    n = 0
+    c = vhead[v]
+    while c >= 0:
+        n += 1
+        c = cnext[c]
+    out = np.empty(n, np.int64)
+    c = vhead[v]
+    for i in range(n):
+        out[i] = c // 3
+        c = cnext[c]
+    return out
+
+
+@njit(cache=True)
+def _neighbours_of(F: Int, vhead: Int, cnext: Int, v: int) -> Int:
+    """The vertices that share a face with v (each once, v not included)."""
+    fs = _faces_round(vhead, cnext, v)
+    out = np.empty(2 * len(fs), np.int64)
+    k = 0
+    for f in fs:
+        for r in range(3):
+            u = F[f, r]
+            if u == v:
+                continue
+            seen = False
+            for j in range(k):
+                if out[j] == u:
+                    seen = True
+                    break
+            if not seen:
+                out[k] = u
+                k += 1
+    return out[:k]
+
+
+@njit(cache=True)
+def _edge_faces_of(F: Int, vhead: Int, cnext: Int, a: int, b: int) -> Int:
+    """The faces round a that have b, in the order of a's corner list."""
+    fs = _faces_round(vhead, cnext, a)
+    out = np.empty(len(fs), np.int64)
+    k = 0
+    for f in fs:
+        if F[f, 0] == b or F[f, 1] == b or F[f, 2] == b:
+            out[k] = f
+            k += 1
+    return out[:k]
+
+
+@njit(cache=True)
 def _links_of(F: Int, vhead: Int, cnext: Int, vs: Int) -> int:
     """The number of faces round the vertices vs (with repeats): a bound on
     the grid links that moving them makes."""
@@ -1407,12 +1458,16 @@ class Checker:
 
     def faces_of(self, v: int) -> Int:
         """The faces round vertex v."""
-        out = []
-        c = int(self._vhead[v])
-        while c >= 0:
-            out.append(c // 3)
-            c = int(self._cnext[c])
-        return np.array(out, np.int64)
+        return _faces_round(self._vhead, self._cnext, v)
+
+    def neighbours_of(self, v: int) -> Int:
+        """The vertices that share a face with v (each once, in no fixed
+        order)."""
+        return _neighbours_of(self._F, self._vhead, self._cnext, v)
+
+    def edge_faces(self, a: int, b: int) -> Int:
+        """The faces of edge (a, b), in the order of faces_of(a)."""
+        return _edge_faces_of(self._F, self._vhead, self._cnext, a, b)
 
     def rebuild(self, links: int = 0) -> None:
         """The grid again from the live faces: cell = gap + the largest face

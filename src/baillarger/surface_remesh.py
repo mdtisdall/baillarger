@@ -68,9 +68,14 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+from llvmlite import ir
+from numba import types
+from numba.core import cgutils
+from numba.extending import intrinsic
 from scipy.spatial import cKDTree
 
 from baillarger import mesh_checks as MC
+from baillarger._jit import njit
 from baillarger.decimate import closest_points
 
 Float = npt.NDArray[np.float64]
@@ -81,12 +86,171 @@ Bool = npt.NDArray[np.bool_]
 HI, LO = 4.0 / 3.0, 4.0 / 5.0
 
 
+@intrinsic
+def _fma(typingctx: Any, a: Any, b: Any, c: Any) -> Any:
+    """a × b + c rounded once (llvm.fma)."""
+    sig = types.float64(types.float64, types.float64, types.float64)
+
+    def codegen(context: Any, builder: Any, signature: Any, args: Any) -> Any:
+        d = ir.DoubleType()
+        fn = cgutils.get_or_insert_function(
+            builder.module, ir.FunctionType(d, [d, d, d]), "llvm.fma.f64"
+        )
+        return builder.call(fn, args)
+
+    return sig, codegen
+
+
+@njit(cache=True, inline="always")
+def _dot3(
+    x0: float, x1: float, x2: float, y0: float, y1: float, y2: float, order: int
+) -> float:
+    """One row of np.einsum("ij,ij->i") over three columns, summed in the
+    order numpy uses on this machine (DOT_ORDER): 0, numpy 2.5 on arm64 (two
+    SIMD lanes with fused multiply-adds: the third product fused into the
+    first lane, then the lanes added); 1, left to right; 2, the first and
+    third products first; 3, a chain of fused multiply-adds."""
+    if order == 0:
+        out: float = _fma(x2, y2, x0 * y0) + x1 * y1
+    elif order == 1:
+        out = x0 * y0 + x1 * y1 + x2 * y2
+    elif order == 2:
+        out = x0 * y0 + x2 * y2 + x1 * y1
+    else:
+        out = _fma(x2, y2, _fma(x1, y1, x0 * y0))
+    return out
+
+
+@njit(cache=True)
+def _dot3_rows(x: Float, y: Float, order: int) -> Float:
+    out = np.empty(len(x))
+    for i in range(len(x)):
+        out[i] = _dot3(x[i, 0], x[i, 1], x[i, 2], y[i, 0], y[i, 1], y[i, 2], order)
+    return out
+
+
+def _dot_order() -> int:
+    """The order (_dot3) in which this machine's numpy sums np.einsum("ij,ij->i")
+    of three columns, found on random rows of mixed scales; -1 if none of
+    them: closest_on then runs in numpy."""
+    rng = np.random.default_rng(12345)
+    x = rng.normal(size=(4096, 3)) * 10.0 ** rng.integers(-3, 4, (4096, 1))
+    y = rng.normal(size=(4096, 3)) * 10.0 ** rng.integers(-3, 4, (4096, 1))
+    want = np.einsum("ij,ij->i", x, y)
+    for order in range(4):
+        if np.array_equal(_dot3_rows(x, y, order), want):
+            return order
+    return -1
+
+
+#: how numpy sums a three-column einsum here (_dot_order), found at import
+DOT_ORDER = _dot_order()
+
+
+@njit(cache=True, error_model="numpy")
+def _nb_closest_on(
+    V: Float, F: Int, P: Float, cand: Int, order: int
+) -> tuple[Float, Float, Int]:
+    """closest_on_py after its candidate search, compiled: per point, the
+    closest point on each candidate face by decimate.closest_points (the same
+    operations in the same order, so the same bits), the first nearest
+    candidate (np.argmin: a NaN distance is the minimum), and the point
+    again from its barycentric coordinates."""
+    n, k = cand.shape
+    Q = np.empty((n, 3))
+    dist = np.empty(n)
+    face = np.empty(n, np.int64)
+    for i in range(n):
+        px, py, pz = P[i, 0], P[i, 1], P[i, 2]
+        best, bd = -1, 0.0
+        g0 = g1 = g2 = 0.0
+        for j in range(k):
+            t = F[cand[i, j]]
+            ax, ay, az = V[t[0], 0], V[t[0], 1], V[t[0], 2]
+            bx, by, bz = V[t[1], 0], V[t[1], 1], V[t[1], 2]
+            cx, cy, cz = V[t[2], 0], V[t[2], 1], V[t[2], 2]
+            abx, aby, abz = bx - ax, by - ay, bz - az
+            acx, acy, acz = cx - ax, cy - ay, cz - az
+            apx, apy, apz = px - ax, py - ay, pz - az
+            bpx, bpy, bpz = px - bx, py - by, pz - bz
+            cpx, cpy, cpz = px - cx, py - cy, pz - cz
+            d1 = _dot3(abx, aby, abz, apx, apy, apz, order)
+            d2 = _dot3(acx, acy, acz, apx, apy, apz, order)
+            d3 = _dot3(abx, aby, abz, bpx, bpy, bpz, order)
+            d4 = _dot3(acx, acy, acz, bpx, bpy, bpz, order)
+            d5 = _dot3(abx, aby, abz, cpx, cpy, cpz, order)
+            d6 = _dot3(acx, acy, acz, cpx, cpy, cpz, order)
+            vc, vb, va = d1 * d4 - d3 * d2, d5 * d2 - d1 * d6, d3 * d6 - d5 * d4
+            if d1 <= 0 and d2 <= 0:
+                qx, qy, qz = ax, ay, az
+                w0, w1, w2 = 1.0, 0.0, 0.0
+            elif d3 >= 0 and d4 <= d3:
+                qx, qy, qz = bx, by, bz
+                w0, w1, w2 = 0.0, 1.0, 0.0
+            elif d6 >= 0 and d5 <= d6:
+                qx, qy, qz = cx, cy, cz
+                w0, w1, w2 = 0.0, 0.0, 1.0
+            elif vc <= 0 and d1 >= 0 and d3 <= 0:
+                tt = d1 / (d1 - d3)
+                qx, qy, qz = ax + tt * abx, ay + tt * aby, az + tt * abz
+                w0, w1, w2 = 1 - tt, tt, 0.0
+            elif vb <= 0 and d2 >= 0 and d6 <= 0:
+                tt = d2 / (d2 - d6)
+                qx, qy, qz = ax + tt * acx, ay + tt * acy, az + tt * acz
+                w0, w1, w2 = 1 - tt, 0.0, tt
+            elif va <= 0 and d4 - d3 >= 0 and d5 - d6 >= 0:
+                tt = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+                qx = bx + tt * (cx - bx)
+                qy = by + tt * (cy - by)
+                qz = bz + tt * (cz - bz)
+                w0, w1, w2 = 0.0, 1 - tt, tt
+            else:
+                s = 1.0 / (va + vb + vc)
+                v, w = vb * s, vc * s
+                qx = ax + v * abx + w * acx
+                qy = ay + v * aby + w * acy
+                qz = az + v * abz + w * acz
+                w0, w1, w2 = 1 - v - w, v, w
+            ex, ey, ez = px - qx, py - qy, pz - qz
+            dj = np.sqrt(ex * ex + ey * ey + ez * ez)
+            if best < 0 or dj < bd or (np.isnan(dj) and not np.isnan(bd)):
+                best, bd = j, dj
+                g0, g1, g2 = w0, w1, w2
+        t = F[cand[i, best]]
+        for r in range(3):
+            Q[i, r] = g0 * V[t[0], r] + g1 * V[t[1], r] + g2 * V[t[2], r]
+        dist[i] = bd
+        face[i] = cand[i, best]
+    return Q, dist, face
+
+
 def closest_on(
     V: Float, F: Int, P: Float, k: int = 24, tree: cKDTree | None = None
 ) -> tuple[Float, Float, Int]:
     """The closest point on the mesh (V, F) to each point P, among the k faces
     whose centroids are nearest (tree: a cKDTree of the face centroids, if
-    already made); its distance and its face."""
+    already made); its distance and its face. Compiled after the candidate
+    search, with numpy's order of sums (DOT_ORDER), so the same bits as
+    closest_on_py; in numpy where that order is not known."""
+    k = min(k, len(F))
+    t = cKDTree(V[F].mean(1)) if tree is None else tree
+    _, cand = t.query(P, k=k)
+    cand = np.asarray(cand, np.int64).reshape(len(P), k)
+    if DOT_ORDER < 0:
+        return closest_on_py(V, F, P, k, t)
+    return _nb_closest_on(
+        np.ascontiguousarray(V, np.float64),
+        np.ascontiguousarray(F, np.int64),
+        np.ascontiguousarray(P, np.float64).reshape(-1, 3),
+        cand,
+        DOT_ORDER,
+    )
+
+
+def closest_on_py(
+    V: Float, F: Int, P: Float, k: int = 24, tree: cKDTree | None = None
+) -> tuple[Float, Float, Int]:
+    """closest_on in numpy: the reference."""
     k = min(k, len(F))
     t = cKDTree(V[F].mean(1)) if tree is None else tree
     _, cand = t.query(P, k=k)
@@ -270,13 +434,12 @@ class Remesher:
 
     def nbrs(self, v: int) -> set[int]:
         """The neighbours of vertex v."""
-        F = self.chk.F
-        return {int(u) for f in self.chk.faces_of(v) for u in F[f]} - {v}
+        return set(self.chk.neighbours_of(v).tolist())
 
     def edge_faces(self, a: int, b: int) -> list[int]:
         """The faces of edge (a, b)."""
-        F = self.chk.F
-        return [int(f) for f in self.chk.faces_of(a) if b in F[f]]
+        out: list[int] = self.chk.edge_faces(a, b).tolist()
+        return out
 
     def turned(self, faces: Int) -> bool:
         """A face turned against the reference normal at its centroid's
