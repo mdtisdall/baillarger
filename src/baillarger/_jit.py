@@ -16,14 +16,19 @@ def njit[F: Callable[..., Any]](f: F, /) -> F: ...
 
 @overload
 def njit[F: Callable[..., Any]](
-    *, parallel: bool = ..., inline: str = ..., cache: bool = ...
+    *,
+    parallel: bool = ...,
+    inline: str = ...,
+    cache: bool = ...,
+    error_model: str = ...,
 ) -> Callable[[F], F]: ...
 
 
 def njit(f: Any = None, /, **options: Any) -> Any:
     """Compile f with numba.njit (nopython mode, compiled on the first call).
 
-    With keyword options only (parallel, inline, cache), return a decorator.
+    With keyword options only (parallel, inline, cache, error_model), return a
+    decorator.
     """
     if f is None:
         return numba.njit(**options)

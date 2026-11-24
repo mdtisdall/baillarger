@@ -64,14 +64,20 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
+from llvmlite import ir
+from numba import types
+from numba.core import cgutils
+from numba.extending import intrinsic
 from scipy.spatial import cKDTree
 
 from baillarger import mesh_checks as MC
+from baillarger._jit import njit
 from baillarger.decimate import closest_points
+from baillarger.mesh_checks import live_edge_faces, live_neighbours
 
 Float = npt.NDArray[np.float64]
 Int = npt.NDArray[np.int64]
@@ -81,12 +87,222 @@ Bool = npt.NDArray[np.bool_]
 HI, LO = 4.0 / 3.0, 4.0 / 5.0
 
 
+@intrinsic
+def _fma_intrinsic(typingctx: Any, a: Any, b: Any, c: Any) -> Any:
+    """a × b + c rounded once (llvm.fma)."""
+    sig = types.float64(types.float64, types.float64, types.float64)
+
+    def codegen(context: Any, builder: Any, signature: Any, args: Any) -> Any:
+        d = ir.DoubleType()
+        fn = cgutils.get_or_insert_function(
+            builder.module, ir.FunctionType(d, [d, d, d]), "llvm.fma.f64"
+        )
+        return builder.call(fn, args)
+
+    return sig, codegen
+
+
+#: _fma_intrinsic as compiled code calls it
+_fma = cast(Callable[[float, float, float], float], _fma_intrinsic)
+
+
+@njit(cache=True, inline="always")
+def _dot3(
+    x0: float, x1: float, x2: float, y0: float, y1: float, y2: float, order: int
+) -> float:
+    """One row of np.einsum("ij,ij->i") over three columns, summed in the
+    order numpy uses on this machine (DOT_ORDER): 0, numpy 2.5 on arm64 (two
+    SIMD lanes with fused multiply-adds: the third product fused into the
+    first lane, then the lanes added); 1, left to right; 2, the first and
+    third products first; 3, a chain of fused multiply-adds."""
+    if order == 0:
+        out: float = _fma(x2, y2, x0 * y0) + x1 * y1
+    elif order == 1:
+        out = x0 * y0 + x1 * y1 + x2 * y2
+    elif order == 2:
+        out = x0 * y0 + x2 * y2 + x1 * y1
+    else:
+        out = _fma(x2, y2, _fma(x1, y1, x0 * y0))
+    return out
+
+
+@njit(cache=True)
+def _dot3_rows(x: Float, y: Float, order: int) -> Float:
+    out = np.empty(len(x))
+    for i in range(len(x)):
+        out[i] = _dot3(x[i, 0], x[i, 1], x[i, 2], y[i, 0], y[i, 1], y[i, 2], order)
+    return out
+
+
+def _dot_order() -> int:
+    """The order (_dot3) in which this machine's numpy sums np.einsum("ij,ij->i")
+    of three columns, found on random rows of mixed scales; -1 if none of
+    them: closest_on then runs in numpy."""
+    rng = np.random.default_rng(12345)
+    x = rng.normal(size=(4096, 3)) * 10.0 ** rng.integers(-3, 4, (4096, 1))
+    y = rng.normal(size=(4096, 3)) * 10.0 ** rng.integers(-3, 4, (4096, 1))
+    want = np.einsum("ij,ij->i", x, y)
+    for order in range(4):
+        if np.array_equal(_dot3_rows(x, y, order), want):
+            return order
+    return -1
+
+
+#: how numpy sums a three-column einsum here (_dot_order), found at import
+DOT_ORDER = _dot_order()
+
+
+@njit(cache=True, error_model="numpy")
+def _nb_closest_on(
+    V: Float, F: Int, P: Float, cand: Int, order: int
+) -> tuple[Float, Float, Int]:
+    """closest_on_py after its candidate search, compiled: per point, the
+    closest point on each candidate face by decimate.closest_points (the same
+    operations in the same order, so the same bits), the first nearest
+    candidate (np.argmin: a NaN distance is the minimum), and the point
+    again from its barycentric coordinates."""
+    n, k = cand.shape
+    Q = np.empty((n, 3))
+    dist = np.empty(n)
+    face = np.empty(n, np.int64)
+    for i in range(n):
+        px, py, pz = P[i, 0], P[i, 1], P[i, 2]
+        best, bd = -1, 0.0
+        g0 = g1 = g2 = 0.0
+        for j in range(k):
+            t = F[cand[i, j]]
+            ax, ay, az = V[t[0], 0], V[t[0], 1], V[t[0], 2]
+            bx, by, bz = V[t[1], 0], V[t[1], 1], V[t[1], 2]
+            cx, cy, cz = V[t[2], 0], V[t[2], 1], V[t[2], 2]
+            abx, aby, abz = bx - ax, by - ay, bz - az
+            acx, acy, acz = cx - ax, cy - ay, cz - az
+            apx, apy, apz = px - ax, py - ay, pz - az
+            bpx, bpy, bpz = px - bx, py - by, pz - bz
+            cpx, cpy, cpz = px - cx, py - cy, pz - cz
+            d1 = _dot3(abx, aby, abz, apx, apy, apz, order)
+            d2 = _dot3(acx, acy, acz, apx, apy, apz, order)
+            d3 = _dot3(abx, aby, abz, bpx, bpy, bpz, order)
+            d4 = _dot3(acx, acy, acz, bpx, bpy, bpz, order)
+            d5 = _dot3(abx, aby, abz, cpx, cpy, cpz, order)
+            d6 = _dot3(acx, acy, acz, cpx, cpy, cpz, order)
+            vc, vb, va = d1 * d4 - d3 * d2, d5 * d2 - d1 * d6, d3 * d6 - d5 * d4
+            if d1 <= 0 and d2 <= 0:
+                qx, qy, qz = ax, ay, az
+                w0, w1, w2 = 1.0, 0.0, 0.0
+            elif d3 >= 0 and d4 <= d3:
+                qx, qy, qz = bx, by, bz
+                w0, w1, w2 = 0.0, 1.0, 0.0
+            elif d6 >= 0 and d5 <= d6:
+                qx, qy, qz = cx, cy, cz
+                w0, w1, w2 = 0.0, 0.0, 1.0
+            elif vc <= 0 and d1 >= 0 and d3 <= 0:
+                tt = d1 / (d1 - d3)
+                qx, qy, qz = ax + tt * abx, ay + tt * aby, az + tt * abz
+                w0, w1, w2 = 1 - tt, tt, 0.0
+            elif vb <= 0 and d2 >= 0 and d6 <= 0:
+                tt = d2 / (d2 - d6)
+                qx, qy, qz = ax + tt * acx, ay + tt * acy, az + tt * acz
+                w0, w1, w2 = 1 - tt, 0.0, tt
+            elif va <= 0 and d4 - d3 >= 0 and d5 - d6 >= 0:
+                tt = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+                qx = bx + tt * (cx - bx)
+                qy = by + tt * (cy - by)
+                qz = bz + tt * (cz - bz)
+                w0, w1, w2 = 0.0, 1 - tt, tt
+            else:
+                s = 1.0 / (va + vb + vc)
+                v, w = vb * s, vc * s
+                qx = ax + v * abx + w * acx
+                qy = ay + v * aby + w * acy
+                qz = az + v * abz + w * acz
+                w0, w1, w2 = 1 - v - w, v, w
+            ex, ey, ez = px - qx, py - qy, pz - qz
+            dj = np.sqrt(ex * ex + ey * ey + ez * ez)
+            if best < 0 or dj < bd or (np.isnan(dj) and not np.isnan(bd)):
+                best, bd = j, dj
+                g0, g1, g2 = w0, w1, w2
+        t = F[cand[i, best]]
+        for r in range(3):
+            Q[i, r] = g0 * V[t[0], r] + g1 * V[t[1], r] + g2 * V[t[2], r]
+        dist[i] = bd
+        face[i] = cand[i, best]
+    return Q, dist, face
+
+
+@njit(cache=True)
+def tri_cross(T: Float) -> Float:
+    """np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]) for triangles T (k, 3,
+    3), compiled, with numpy's operations in numpy's order (each component a
+    product minus a product, no fused multiply-add): the same bits."""
+    out = np.empty((T.shape[0], 3))
+    for i in range(T.shape[0]):
+        a0 = T[i, 1, 0] - T[i, 0, 0]
+        a1 = T[i, 1, 1] - T[i, 0, 1]
+        a2 = T[i, 1, 2] - T[i, 0, 2]
+        b0 = T[i, 2, 0] - T[i, 0, 0]
+        b1 = T[i, 2, 1] - T[i, 0, 1]
+        b2 = T[i, 2, 2] - T[i, 0, 2]
+        out[i, 0] = a1 * b2 - a2 * b1
+        out[i, 1] = a2 * b0 - a0 * b2
+        out[i, 2] = a0 * b1 - a1 * b0
+    return out
+
+
+@njit(cache=True)
+def face_cross(V: Float, F: Int) -> Float:
+    """tri_cross of the faces F of V (MC.face_normals' bits)."""
+    out = np.empty((F.shape[0], 3))
+    for i in range(F.shape[0]):
+        p, q, r = F[i, 0], F[i, 1], F[i, 2]
+        a0 = V[q, 0] - V[p, 0]
+        a1 = V[q, 1] - V[p, 1]
+        a2 = V[q, 2] - V[p, 2]
+        b0 = V[r, 0] - V[p, 0]
+        b1 = V[r, 1] - V[p, 1]
+        b2 = V[r, 2] - V[p, 2]
+        out[i, 0] = a1 * b2 - a2 * b1
+        out[i, 1] = a2 * b0 - a0 * b2
+        out[i, 2] = a0 * b1 - a1 * b0
+    return out
+
+
+@njit(cache=True)
+def any_against(N: Float, R: Float) -> bool:
+    """((N * R).sum(1) <= 0).any(), compiled (the row sums in numpy's
+    order for three terms: left to right)."""
+    for i in range(N.shape[0]):
+        if (N[i, 0] * R[i, 0] + N[i, 1] * R[i, 1]) + N[i, 2] * R[i, 2] <= 0:
+            return True
+    return False
+
+
 def closest_on(
     V: Float, F: Int, P: Float, k: int = 24, tree: cKDTree | None = None
 ) -> tuple[Float, Float, Int]:
     """The closest point on the mesh (V, F) to each point P, among the k faces
     whose centroids are nearest (tree: a cKDTree of the face centroids, if
-    already made); its distance and its face."""
+    already made); its distance and its face. Compiled after the candidate
+    search, with numpy's order of sums (DOT_ORDER), so the same bits as
+    closest_on_py; in numpy where that order is not known."""
+    k = min(k, len(F))
+    t = cKDTree(V[F].mean(1)) if tree is None else tree
+    _, cand = t.query(P, k=k)
+    cand = np.asarray(cand, np.int64).reshape(len(P), k)
+    if DOT_ORDER < 0:
+        return closest_on_py(V, F, P, k, t)
+    return _nb_closest_on(
+        np.ascontiguousarray(V, np.float64),
+        np.ascontiguousarray(F, np.int64),
+        np.ascontiguousarray(P, np.float64).reshape(-1, 3),
+        cand,
+        DOT_ORDER,
+    )
+
+
+def closest_on_py(
+    V: Float, F: Int, P: Float, k: int = 24, tree: cKDTree | None = None
+) -> tuple[Float, Float, Int]:
+    """closest_on in numpy: the reference."""
     k = min(k, len(F))
     t = cKDTree(V[F].mean(1)) if tree is None else tree
     _, cand = t.query(P, k=k)
@@ -190,6 +406,61 @@ class _Assignment:
     removed: set[int]
 
 
+@njit(cache=True)
+def _flip_next(
+    F: Int, vhead: Int, cnext: Int, rim: Bool, E: Int, start: int
+) -> tuple[int, int, int, int, int, int, int]:
+    """The first edge of E from index start whose flip Remesher.flip would
+    try (the valences nearer to 6 inside, 4 on the rim; no edge c-d yet;
+    no valence of a or b below 3): its index and a, b, c, d (oriented as
+    flip orients them) and its faces f, g; index -1 if none. Read only."""
+    for i in range(start, len(E)):
+        a, b = E[i, 0], E[i, 1]
+        if vhead[a] < 0:
+            continue
+        ef = live_edge_faces(F, vhead, cnext, a, b)
+        if len(ef) != 2:
+            continue
+        f, g = ef[0], ef[1]
+        k = 0
+        while F[f, k] != a:
+            k += 1
+        if F[f, (k + 1) % 3] != b:
+            a, b = b, a
+            k = 0
+            while F[f, k] != a:
+                k += 1
+        c = F[f, (k + 2) % 3]
+        d = -1
+        for r in range(3):
+            if F[g, r] != a and F[g, r] != b:
+                d = F[g, r]
+                break
+        nc = live_neighbours(F, vhead, cnext, c)
+        if (nc == d).any():
+            continue
+        va = len(live_neighbours(F, vhead, cnext, a))
+        vb = len(live_neighbours(F, vhead, cnext, b))
+        vc = len(nc)
+        vd = len(live_neighbours(F, vhead, cnext, d))
+        ta, tb = 4 if rim[a] else 6, 4 if rim[b] else 6
+        tc, td = 4 if rim[c] else 6, 4 if rim[d] else 6
+        before = (va - ta) ** 2 + (vb - tb) ** 2 + (vc - tc) ** 2 + (vd - td) ** 2
+        va, vb, vc, vd = va - 1, vb - 1, vc + 1, vd + 1
+        if min(va, vb) < 3:
+            continue
+        after = (va - ta) ** 2 + (vb - tb) ** 2 + (vc - tc) ** 2 + (vd - td) ** 2
+        if after >= before:
+            continue
+        return i, a, b, c, d, f, g
+    return -1, 0, 0, 0, 0, 0, 0
+
+
+#: the memo's grid (mm): cell size, margin round the start mesh, and the
+#: factor on the checks' reach (2 rloc + gap) when a kept edit stamps cells
+_MEMO_CELL, _MEMO_PAD, _MEMO_SAFETY = 0.25, 2.0, 1.5
+
+
 class Remesher:
     """The sequential remesher on a live mesh (V, F) over a Reference.
 
@@ -197,6 +468,10 @@ class Remesher:
     outward bound (None: off); corner: rim vertices that stay (default: where
     the rim turns by more than 45 degrees); h: the voxel size (the normal
     check's search radius)."""
+
+    #: remember the refusals of the gap, crossing and crease checks (see
+    #: _memo_grid); False: check every try (the same result, slower)
+    memo: bool = True
 
     def __init__(
         self,
@@ -231,6 +506,12 @@ class Remesher:
         )
         self.t: Float = ref.target(Vf)
         self.refused: Counter[str] = Counter()
+        #: remembered refusals: edit -> (reason, stamp, box lo, box hi)
+        self._memo: dict[tuple[Any, ...], tuple[str, int, Float, Float]] = {}
+        self._nstamp = 0
+        #: tries answered from the memo
+        self.memo_hits = 0
+        self._memo_grid()
         #: places (mm) where measures() reports the dihedral angles
         self.places: Float = np.zeros((0, 3))
         nw = len(ref.V)
@@ -269,14 +550,16 @@ class Remesher:
             self.Cf = np.r_[self.Cf, np.zeros(k, np.int64)]
 
     def nbrs(self, v: int) -> set[int]:
-        """The neighbours of vertex v."""
-        F = self.chk.F
-        return {int(u) for f in self.chk.faces_of(v) for u in F[f]} - {v}
+        """The neighbours of vertex v. The set is built as the uncompiled
+        code built it (the corners of v's faces in order, v included, then
+        v taken out), so that it iterates in the same order: relax_all sums
+        the neighbours' positions in that order."""
+        return set(self.chk.F[self.chk.faces_of(v)].ravel().tolist()) - {v}
 
     def edge_faces(self, a: int, b: int) -> list[int]:
         """The faces of edge (a, b)."""
-        F = self.chk.F
-        return [int(f) for f in self.chk.faces_of(a) if b in F[f]]
+        out: list[int] = self.chk.edge_faces(a, b).tolist()
+        return out
 
     def turned(self, faces: Int) -> bool:
         """A face turned against the reference normal at its centroid's
@@ -284,9 +567,9 @@ class Remesher:
         if not len(faces):
             return False
         V, F = self.chk.V, self.chk.F[faces]
-        n = np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]])
+        n = face_cross(V, F)
         _, _, wf = self.ref.project(V[F].mean(1))
-        return bool(((n * self.ref.N[wf]).sum(1) <= 0).any())
+        return bool(any_against(n, self.ref.N[wf]))
 
     def _tris(self, faces: Int) -> Float:
         out: Float = self.chk.V[self.chk.F[faces]]
@@ -424,6 +707,35 @@ class Remesher:
         check), else undo it (None)."""
         mv0 = [] if move is None else [int(v) for v in move]
         rem = [] if remove_faces is None else [int(x) for x in remove_faces]
+        key: tuple[Any, ...] | None = None
+        if self.memo:
+            # the checks' answer does not depend on the order of the removed
+            # faces or of the new rows (a try's order follows the order of
+            # each vertex's faces, which every rollback changes)
+            af = (
+                None
+                if add_faces is None
+                else np.asarray(add_faces, np.int64).reshape(-1, 3)
+            )
+            key = (
+                kind,
+                np.asarray(mv0, np.int64).tobytes(),
+                None if to is None else np.asarray(to, np.float64).tobytes(),
+                np.sort(np.asarray(rem, np.int64)).tobytes(),
+                None if af is None else af[np.lexsort(af.T[::-1])].tobytes(),
+                None
+                if add_vertices is None
+                else np.asarray(add_vertices, np.float64).tobytes(),
+            )
+            hit = self._memo.get(key)
+            if hit is not None:
+                if self._quiet(hit[2], hit[3], hit[1]):
+                    self.chk.touch(mv0, to, rem, add_faces, add_vertices)
+                    self.refused[f"{kind}_{hit[0]}"] += 1
+                    self.memo_hits += 1
+                    return None
+                del self._memo[key]
+            box = self._box(mv0, to, rem, add_faces, add_vertices)
         ofaces = np.zeros(0, np.int64)
         old = np.zeros((0, 3, 3))
         cos_old: dict[int, float] = {}
@@ -463,12 +775,89 @@ class Remesher:
         if reason:
             self.chk.rollback()
             self.refused[f"{kind}_{reason}"] += 1
+            if key is not None and reason in ("gap", "cross", "crease"):
+                self._memo[key] = (reason, self._nstamp, box[0], box[1])
             return None
         self.chk.commit()
+        if key is not None:
+            self._stamp_box(*box)
         self._grow()
         if state is not None:
             self._apply(state)
         return r
+
+    # ------------------------------------------------------------ the memo
+    #
+    # The Checker's answer to an edit depends only on the live mesh within
+    # reach of the edit's triangles: the affected vertices are within rloc of
+    # them, the faces each one is checked against within gap of it, its
+    # patch within rloc of it; crossings, folds and creases involve faces
+    # that touch the edit's own. A refusal by those checks (gap, cross,
+    # crease) is remembered with the box of every vertex the edit touches
+    # (the removed faces and the faces round the moved vertices, before and
+    # after). Each kept edit stamps the cells of a coarse grid that its own
+    # box, grown by the reach, meets. The same edit tried again, with no
+    # stamp since in the cells its box meets, gets the same answer: it is
+    # applied and undone without the checks (Checker.touch), so the live
+    # mesh ends exactly as after the checked try.
+
+    def _memo_grid(self) -> None:
+        V = self.chk.V
+        lo = np.nanmin(V, 0) - _MEMO_PAD
+        hi = np.nanmax(V, 0) + _MEMO_PAD
+        self._mlo = lo
+        shape = np.maximum(np.ceil((hi - lo) / _MEMO_CELL).astype(np.int64), 1)
+        self._mshape = shape
+        self._mstamp = np.zeros(tuple(shape.tolist()), np.int32)
+        prm = self.chk._prm
+        self._reach = _MEMO_SAFETY * (2.0 * float(prm[3]) + float(prm[2]))
+
+    def _cells(self, lo: Float, hi: Float) -> tuple[slice, slice, slice]:
+        i0 = np.floor((lo - self._mlo) / _MEMO_CELL).astype(np.int64)
+        i1 = np.floor((hi - self._mlo) / _MEMO_CELL).astype(np.int64)
+        i0 = np.clip(i0, 0, self._mshape - 1)
+        i1 = np.clip(i1, 0, self._mshape - 1)
+        return (
+            slice(int(i0[0]), int(i1[0]) + 1),
+            slice(int(i0[1]), int(i1[1]) + 1),
+            slice(int(i0[2]), int(i1[2]) + 1),
+        )
+
+    def _box(
+        self,
+        mv0: list[int],
+        to: Float | None,
+        rem: list[int],
+        add_faces: npt.ArrayLike | None,
+        add_vertices: Float | None,
+    ) -> tuple[Float, Float]:
+        """The box of every vertex an edit touches, before and after."""
+        chk = self.chk
+        fs = [np.asarray(rem, np.int64)] + [chk.faces_of(v) for v in mv0]
+        vs = [chk.F[np.concatenate(fs)].ravel()]
+        if add_faces is not None:
+            a = np.asarray(add_faces, np.int64).ravel()
+            vs.append(a[a >= 0])
+        P = [chk.V[np.concatenate(vs)]]
+        if to is not None:
+            P.append(np.asarray(to, np.float64).reshape(-1, 3))
+        if add_vertices is not None:
+            P.append(np.asarray(add_vertices, np.float64).reshape(-1, 3))
+        Q = np.concatenate(P)
+        return Q.min(0), Q.max(0)
+
+    def _stamp_box(self, lo: Float, hi: Float) -> None:
+        self._nstamp += 1
+        self._mstamp[self._cells(lo - self._reach, hi + self._reach)] = self._nstamp
+
+    def _prune(self) -> None:
+        """Forget the refusals that an edit kept since then may change."""
+        for k in [k for k, x in self._memo.items() if not self._quiet(*x[2:], x[1])]:
+            del self._memo[k]
+
+    def _quiet(self, lo: Float, hi: Float, made: int) -> bool:
+        """No edit kept since stamp `made` within reach of the box."""
+        return bool(self._mstamp[self._cells(lo, hi)].max() <= made)
 
     def _edges(self) -> tuple[Int, Float]:
         """The live edges (a < b) and their lengths over their targets."""
@@ -631,6 +1020,7 @@ class Remesher:
 
     def collapse_all(self) -> int:
         """Collapse the short edges, shortest first."""
+        self._prune()
         E, r = self._edges()
         o = np.argsort(r)
         o = o[r[o] < LO]
@@ -645,15 +1035,20 @@ class Remesher:
         return n
 
     def flip_all(self) -> int:
-        """Flip the edges whose flip improves the valences."""
+        """Flip the edges whose flip improves the valences: flip() on each
+        edge in turn, with the test before the try compiled (_flip_next)."""
         E, _ = self._edges()
-        n = 0
-        for a, b in E:
-            a, b = int(a), int(b)
-            if len(self.chk.faces_of(a)) == 0 or b not in self.nbrs(a):
-                continue
-            n += bool(self.flip(a, b))
-        return n
+        n, i = 0, 0
+        chk = self.chk
+        while True:
+            i, a, b, c, d, f, g = _flip_next(
+                chk._F, chk._vhead, chk._cnext, self.rim, E, i
+            )
+            if i < 0:
+                return n
+            r = self._try("flip", remove_faces=[f, g], add_faces=[[c, a, d], [c, d, b]])
+            n += r is not None
+            i += 1
 
     def relax_all(self, lam: float = 0.5, mu: float = -0.53) -> int:
         """One Taubin step: a sweep with lam, then one with mu. Each sweep is

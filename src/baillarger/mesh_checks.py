@@ -608,6 +608,57 @@ def _link_all(
 
 
 @njit(cache=True)
+def live_faces_round(vhead: Int, cnext: Int, v: int) -> Int:
+    """The faces round vertex v, in the order of its corner list."""
+    n = 0
+    c = vhead[v]
+    while c >= 0:
+        n += 1
+        c = cnext[c]
+    out = np.empty(n, np.int64)
+    c = vhead[v]
+    for i in range(n):
+        out[i] = c // 3
+        c = cnext[c]
+    return out
+
+
+@njit(cache=True)
+def live_neighbours(F: Int, vhead: Int, cnext: Int, v: int) -> Int:
+    """The vertices that share a face with v (each once, v not included)."""
+    fs = live_faces_round(vhead, cnext, v)
+    out = np.empty(2 * len(fs), np.int64)
+    k = 0
+    for f in fs:
+        for r in range(3):
+            u = F[f, r]
+            if u == v:
+                continue
+            seen = False
+            for j in range(k):
+                if out[j] == u:
+                    seen = True
+                    break
+            if not seen:
+                out[k] = u
+                k += 1
+    return out[:k]
+
+
+@njit(cache=True)
+def live_edge_faces(F: Int, vhead: Int, cnext: Int, a: int, b: int) -> Int:
+    """The faces round a that have b, in the order of a's corner list."""
+    fs = live_faces_round(vhead, cnext, a)
+    out = np.empty(len(fs), np.int64)
+    k = 0
+    for f in fs:
+        if F[f, 0] == b or F[f, 1] == b or F[f, 2] == b:
+            out[k] = f
+            k += 1
+    return out[:k]
+
+
+@njit(cache=True)
 def _links_of(F: Int, vhead: Int, cnext: Int, vs: Int) -> int:
     """The number of faces round the vertices vs (with repeats): a bound on
     the grid links that moving them makes."""
@@ -1407,12 +1458,16 @@ class Checker:
 
     def faces_of(self, v: int) -> Int:
         """The faces round vertex v."""
-        out = []
-        c = int(self._vhead[v])
-        while c >= 0:
-            out.append(c // 3)
-            c = int(self._cnext[c])
-        return np.array(out, np.int64)
+        return live_faces_round(self._vhead, self._cnext, v)
+
+    def neighbours_of(self, v: int) -> Int:
+        """The vertices that share a face with v (each once, in no fixed
+        order)."""
+        return live_neighbours(self._F, self._vhead, self._cnext, v)
+
+    def edge_faces(self, a: int, b: int) -> Int:
+        """The faces of edge (a, b), in the order of faces_of(a)."""
+        return live_edge_faces(self._F, self._vhead, self._cnext, a, b)
 
     def rebuild(self, links: int = 0) -> None:
         """The grid again from the live faces: cell = gap + the largest face
@@ -1480,6 +1535,36 @@ class Checker:
         remove_faces go, the vertices `move` go to `to`, add_faces come (a
         vertex -1 - j in add_faces is new vertex j). A vertex left with no
         face is freed at commit."""
+        r = self._propose(
+            move, to, remove_faces, add_faces, add_vertices, want_dmin, True
+        )
+        assert r is not None
+        return r
+
+    def touch(
+        self,
+        move: npt.ArrayLike | None = None,
+        to: npt.ArrayLike | None = None,
+        remove_faces: npt.ArrayLike | None = None,
+        add_faces: npt.ArrayLike | None = None,
+        add_vertices: npt.ArrayLike | None = None,
+    ) -> None:
+        """propose() and rollback() without the checks: the live mesh ends as
+        after a refused edit (the same order of each vertex's faces and of
+        the free ids), for a caller that already knows the checks' answer."""
+        self._propose(move, to, remove_faces, add_faces, add_vertices, False, False)
+        self.rollback()
+
+    def _propose(
+        self,
+        move: npt.ArrayLike | None,
+        to: npt.ArrayLike | None,
+        remove_faces: npt.ArrayLike | None,
+        add_faces: npt.ArrayLike | None,
+        add_vertices: npt.ArrayLike | None,
+        want_dmin: bool,
+        check: bool,
+    ) -> EditCheck | None:
         if self._pending is not None:
             raise RuntimeError("an edit is pending: commit() or rollback() first")
         mv = np.asarray([] if move is None else move, np.int64).ravel()
@@ -1501,6 +1586,8 @@ class Checker:
         )
         newv, newf, old, rows, Told = _apply(self._M(), mv, P, rm, add, addv)
         self._pending = (mv, old, rm, rows, newv, newf)
+        if not check:
+            return None
         cv = np.r_[mv, newv]
         return self._run(cv, newf, Told, False, True, want_dmin, newv, newf)
 
