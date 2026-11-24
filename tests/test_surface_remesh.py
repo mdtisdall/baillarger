@@ -602,7 +602,7 @@ def test_the_checks_do_not_read_row_order_face_order_or_free_ids(mesh: str) -> N
             continue
         per[(key[0], why)] = per.get((key[0], why), 0) + 1
         to = None if key[2] is None else np.frombuffer(key[2], np.float64)
-        e = {
+        e: dict[str, Any] = {
             "move": np.frombuffer(key[1], np.int64).tolist(),
             "to": None if to is None else to.reshape(-1, 3),
             "remove_faces": np.frombuffer(key[3], np.int64).tolist(),
@@ -664,7 +664,7 @@ def test_the_checks_do_not_read_row_order_face_order_or_free_ids(mesh: str) -> N
             expect = (_reason(ref), _triples(base, ref))
             base.rollback()
             # the edit in the variant: the same vertices, the face ids mapped
-            e2 = dict(e)
+            e2: dict[str, Any] = dict(e)
             if "remove_faces" in e2:  # the face ids follow the rows
                 e2["remove_faces"] = [int(p[x]) for x in e2["remove_faces"]]
             r = chk.propose(**e2)
