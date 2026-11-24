@@ -1535,6 +1535,36 @@ class Checker:
         remove_faces go, the vertices `move` go to `to`, add_faces come (a
         vertex -1 - j in add_faces is new vertex j). A vertex left with no
         face is freed at commit."""
+        r = self._propose(
+            move, to, remove_faces, add_faces, add_vertices, want_dmin, True
+        )
+        assert r is not None
+        return r
+
+    def touch(
+        self,
+        move: npt.ArrayLike | None = None,
+        to: npt.ArrayLike | None = None,
+        remove_faces: npt.ArrayLike | None = None,
+        add_faces: npt.ArrayLike | None = None,
+        add_vertices: npt.ArrayLike | None = None,
+    ) -> None:
+        """propose() and rollback() without the checks: the live mesh ends as
+        after a refused edit (the same order of each vertex's faces and of
+        the free ids), for a caller that already knows the checks' answer."""
+        self._propose(move, to, remove_faces, add_faces, add_vertices, False, False)
+        self.rollback()
+
+    def _propose(
+        self,
+        move: npt.ArrayLike | None,
+        to: npt.ArrayLike | None,
+        remove_faces: npt.ArrayLike | None,
+        add_faces: npt.ArrayLike | None,
+        add_vertices: npt.ArrayLike | None,
+        want_dmin: bool,
+        check: bool,
+    ) -> EditCheck | None:
         if self._pending is not None:
             raise RuntimeError("an edit is pending: commit() or rollback() first")
         mv = np.asarray([] if move is None else move, np.int64).ravel()
@@ -1556,6 +1586,8 @@ class Checker:
         )
         newv, newf, old, rows, Told = _apply(self._M(), mv, P, rm, add, addv)
         self._pending = (mv, old, rm, rows, newv, newf)
+        if not check:
+            return None
         cv = np.r_[mv, newv]
         return self._run(cv, newf, Told, False, True, want_dmin, newv, newf)
 

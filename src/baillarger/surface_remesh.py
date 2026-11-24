@@ -456,6 +456,11 @@ def _flip_next(
     return -1, 0, 0, 0, 0, 0, 0
 
 
+#: the memo's grid (mm): cell size, margin round the start mesh, and the
+#: factor on the checks' reach (2 rloc + gap) when a kept edit stamps cells
+_MEMO_CELL, _MEMO_PAD, _MEMO_SAFETY = 0.25, 2.0, 1.5
+
+
 class Remesher:
     """The sequential remesher on a live mesh (V, F) over a Reference.
 
@@ -463,6 +468,10 @@ class Remesher:
     outward bound (None: off); corner: rim vertices that stay (default: where
     the rim turns by more than 45 degrees); h: the voxel size (the normal
     check's search radius)."""
+
+    #: remember the refusals of the gap, crossing and crease checks (see
+    #: _memo_grid); False: check every try (the same result, slower)
+    memo: bool = True
 
     def __init__(
         self,
@@ -497,6 +506,12 @@ class Remesher:
         )
         self.t: Float = ref.target(Vf)
         self.refused: Counter[str] = Counter()
+        #: remembered refusals: edit -> (reason, stamp, box lo, box hi)
+        self._memo: dict[tuple[Any, ...], tuple[str, int, Float, Float]] = {}
+        self._nstamp = 0
+        #: tries answered from the memo
+        self.memo_hits = 0
+        self._memo_grid()
         #: places (mm) where measures() reports the dihedral angles
         self.places: Float = np.zeros((0, 3))
         nw = len(ref.V)
@@ -689,6 +704,35 @@ class Remesher:
         check), else undo it (None)."""
         mv0 = [] if move is None else [int(v) for v in move]
         rem = [] if remove_faces is None else [int(x) for x in remove_faces]
+        key: tuple[Any, ...] | None = None
+        if self.memo:
+            # the checks' answer does not depend on the order of the removed
+            # faces or of the new rows (a try's order follows the order of
+            # each vertex's faces, which every rollback changes)
+            af = (
+                None
+                if add_faces is None
+                else np.asarray(add_faces, np.int64).reshape(-1, 3)
+            )
+            key = (
+                kind,
+                np.asarray(mv0, np.int64).tobytes(),
+                None if to is None else np.asarray(to, np.float64).tobytes(),
+                np.sort(np.asarray(rem, np.int64)).tobytes(),
+                None if af is None else af[np.lexsort(af.T[::-1])].tobytes(),
+                None
+                if add_vertices is None
+                else np.asarray(add_vertices, np.float64).tobytes(),
+            )
+            hit = self._memo.get(key)
+            if hit is not None:
+                if self._quiet(hit[2], hit[3], hit[1]):
+                    self.chk.touch(mv0, to, rem, add_faces, add_vertices)
+                    self.refused[f"{kind}_{hit[0]}"] += 1
+                    self.memo_hits += 1
+                    return None
+                del self._memo[key]
+            box = self._box(mv0, to, rem, add_faces, add_vertices)
         ofaces = np.zeros(0, np.int64)
         old = np.zeros((0, 3, 3))
         cos_old: dict[int, float] = {}
@@ -728,12 +772,89 @@ class Remesher:
         if reason:
             self.chk.rollback()
             self.refused[f"{kind}_{reason}"] += 1
+            if key is not None and reason in ("gap", "cross", "crease"):
+                self._memo[key] = (reason, self._nstamp, box[0], box[1])
             return None
         self.chk.commit()
+        if key is not None:
+            self._stamp_box(*box)
         self._grow()
         if state is not None:
             self._apply(state)
         return r
+
+    # ------------------------------------------------------------ the memo
+    #
+    # The Checker's answer to an edit depends only on the live mesh within
+    # reach of the edit's triangles: the affected vertices are within rloc of
+    # them, the faces each one is checked against within gap of it, its
+    # patch within rloc of it; crossings, folds and creases involve faces
+    # that touch the edit's own. A refusal by those checks (gap, cross,
+    # crease) is remembered with the box of every vertex the edit touches
+    # (the removed faces and the faces round the moved vertices, before and
+    # after). Each kept edit stamps the cells of a coarse grid that its own
+    # box, grown by the reach, meets. The same edit tried again, with no
+    # stamp since in the cells its box meets, gets the same answer: it is
+    # applied and undone without the checks (Checker.touch), so the live
+    # mesh ends exactly as after the checked try.
+
+    def _memo_grid(self) -> None:
+        V = self.chk.V
+        lo = np.nanmin(V, 0) - _MEMO_PAD
+        hi = np.nanmax(V, 0) + _MEMO_PAD
+        self._mlo = lo
+        shape = np.maximum(np.ceil((hi - lo) / _MEMO_CELL).astype(np.int64), 1)
+        self._mshape = shape
+        self._mstamp = np.zeros(tuple(shape.tolist()), np.int32)
+        prm = self.chk._prm
+        self._reach = _MEMO_SAFETY * (2.0 * float(prm[3]) + float(prm[2]))
+
+    def _cells(self, lo: Float, hi: Float) -> tuple[slice, slice, slice]:
+        i0 = np.floor((lo - self._mlo) / _MEMO_CELL).astype(np.int64)
+        i1 = np.floor((hi - self._mlo) / _MEMO_CELL).astype(np.int64)
+        i0 = np.clip(i0, 0, self._mshape - 1)
+        i1 = np.clip(i1, 0, self._mshape - 1)
+        return (
+            slice(int(i0[0]), int(i1[0]) + 1),
+            slice(int(i0[1]), int(i1[1]) + 1),
+            slice(int(i0[2]), int(i1[2]) + 1),
+        )
+
+    def _box(
+        self,
+        mv0: list[int],
+        to: Float | None,
+        rem: list[int],
+        add_faces: npt.ArrayLike | None,
+        add_vertices: Float | None,
+    ) -> tuple[Float, Float]:
+        """The box of every vertex an edit touches, before and after."""
+        chk = self.chk
+        fs = [np.asarray(rem, np.int64)] + [chk.faces_of(v) for v in mv0]
+        vs = [chk.F[np.concatenate(fs)].ravel()]
+        if add_faces is not None:
+            a = np.asarray(add_faces, np.int64).ravel()
+            vs.append(a[a >= 0])
+        P = [chk.V[np.concatenate(vs)]]
+        if to is not None:
+            P.append(np.asarray(to, np.float64).reshape(-1, 3))
+        if add_vertices is not None:
+            P.append(np.asarray(add_vertices, np.float64).reshape(-1, 3))
+        Q = np.concatenate(P)
+        return Q.min(0), Q.max(0)
+
+    def _stamp_box(self, lo: Float, hi: Float) -> None:
+        self._nstamp += 1
+        self._mstamp[self._cells(lo - self._reach, hi + self._reach)] = self._nstamp
+
+    def _prune(self) -> None:
+        """Forget the refusals that an edit kept since then may change."""
+        for k in [k for k, x in self._memo.items() if not self._quiet(*x[2:], x[1])]:
+            del self._memo[k]
+
+    def _quiet(self, lo: Float, hi: Float, made: int) -> bool:
+        """No edit kept since stamp `made` within reach of the box."""
+        return bool(self._mstamp[self._cells(lo, hi)].max() <= made)
 
     def _edges(self) -> tuple[Int, Float]:
         """The live edges (a < b) and their lengths over their targets."""
@@ -896,6 +1017,7 @@ class Remesher:
 
     def collapse_all(self) -> int:
         """Collapse the short edges, shortest first."""
+        self._prune()
         E, r = self._edges()
         o = np.argsort(r)
         o = o[r[o] < LO]

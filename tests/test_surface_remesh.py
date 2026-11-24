@@ -245,3 +245,36 @@ def test_compiled_cross_and_turn_test_are_numpys_bit_for_bit() -> None:
         assert SR.any_against(a, b) == bool(((a * b).sum(1) <= 0).any())
     zero = np.zeros((1, 3))
     assert SR.any_against(zero, R[:1])  # a face of zero area is turned
+
+
+def two_sheets() -> tuple[np.ndarray, np.ndarray]:
+    """The bumpy sheet and a copy above it, 0.2 (closer than GAP) for x < 8,
+    0.6 for x > 12: as at the hemisphere's gap sites, edits near the close
+    part are refused by the gap check, pass after pass."""
+    V, F = sheet()
+    up = 0.2 + 0.4 * np.clip((V[:, 0] - 8) / 4, 0, 1)
+    return np.r_[V, V + np.c_[0 * up, 0 * up, up]], np.r_[F, F + len(V)]
+
+
+@pytest.mark.parametrize("mesh", ["two_sheets", "u_plate", "sphere"])
+def test_the_memo_of_refusals_changes_nothing(mesh: str) -> None:
+    V0, F0 = {"two_sheets": two_sheets, "u_plate": u_plate, "sphere": sphere}[mesh]()
+    out = []
+    for memo in (False, True):
+        ref = SR.Reference(V0, F0, np.full(len(V0), 2.0))
+        rm = SR.Remesher(ref, V0.copy(), F0.copy(), GAP)
+        rm.memo = memo
+        log = SR.remesh(rm, 1.0, max_passes=6)
+        out.append(
+            (
+                rm.chk.export(),
+                [(r["refused"], r["splits"], r["collapses"], r["flips"]) for r in log],
+                rm.memo_hits,
+            )
+        )
+    (a, la, _), (b, lb, hits) = out
+    for x, y in zip(a, b, strict=True):
+        assert np.array_equal(x, y)
+    assert la == lb  # the same edits and refusals, pass by pass
+    if mesh == "two_sheets":
+        assert hits > 0  # the memo answered some tries
