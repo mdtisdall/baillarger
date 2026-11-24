@@ -1,0 +1,10 @@
+"""Which _dot3 order (surface_remesh) BLAS ddot of 3 elements matches here."""
+import numpy as np
+from baillarger import surface_remesh as SR
+rng = np.random.default_rng(1)
+X = rng.normal(size=(20000, 3)) * 10.0 ** rng.integers(-3, 4, (20000, 1))
+blas = np.array([x.dot(x) for x in X])
+m = [o for o in range(4) if np.array_equal(SR._dot3_rows(X, X, o), blas)]
+print("blas", np.show_config(mode="dicts")["Build Dependencies"]["blas"]["name"], "ddot order", m,
+      "einsum order", SR.DOT_ORDER,
+      "norm1d==sqrt(ddot)", np.array_equal([np.linalg.norm(x) for x in X], np.sqrt(blas)))

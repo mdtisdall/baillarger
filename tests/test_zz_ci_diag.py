@@ -18,12 +18,21 @@ import numpy as np
 sys.path.insert(0, "tests")
 import test_surface_remesh as T
 from baillarger import surface_remesh as SR
+import os
+if os.environ.get("FIXNORM"):
+    _norm = np.linalg.norm
+    def norm(x, *a, **k):
+        x = np.asarray(x)
+        if x.ndim == 1 and not a and not k:
+            return np.sqrt((x[0] * x[0] + x[1] * x[1]) + x[2] * x[2])
+        return _norm(x, *a, **k)
+    np.linalg.norm = norm
 V0, F0 = T.finger()
 ref = SR.Reference(V0, F0, np.full(len(V0), 4.0))
 rm = SR.Remesher(ref, V0.copy(), F0.copy(), T.GAP, theta_deg=30.0, d_out=0.5)
 start = rm.measures(1.0)
 log = SR.remesh(rm, 1.0, max_passes=4)
-V, F = rm.chk.V, rm.chk.F
+V, F, _ = rm.chk.export()
 h = hashlib.sha1(np.ascontiguousarray(V).tobytes() + np.ascontiguousarray(F).tobytes()).hexdigest()[:12]
 print(json.dumps(dict(dot=getattr(SR, "DOT_ORDER", None), hits=getattr(rm, "memo_hits", None), src=SR.__file__,
     angle=[start["face_angle_p50_90_99_max"][3], log[-1]["face_angle_p50_90_99_max"][3]],
@@ -88,10 +97,21 @@ def test_ci_diag(tmp_path: object) -> None:
     tmp = str(tmp_path)
     rep: dict[str, object] = {"machine": machine()}
     ms = main_src(tmp)
+    probe = subprocess.run(
+        [
+            sys.executable,
+            os.path.join(os.path.dirname(__file__), "_diag_main", "probe.py.txt"),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    rep["blas_probe"] = probe.stdout.strip() or probe.stderr[-400:]
     variants = {
         "pr": {},
+        "pr_fixnorm": {"FIXNORM": "1"},
+        "main_fixnorm": {"PYTHONPATH": ms, "FIXNORM": "1"},
+        "pr_openblas_haswell": {"OPENBLAS_CORETYPE": "Haswell"},
         "pr_np_no_avx512": {"NPY_DISABLE_CPU_FEATURES": AVX512},
-        "pr_numba_v3": {"NUMBA_CPU_NAME": "x86-64-v3", "NUMBA_CACHE_DIR": tmp + "/nc1"},
         "main": {"PYTHONPATH": ms},
         "main_np_no_avx512": {"PYTHONPATH": ms, "NPY_DISABLE_CPU_FEATURES": AVX512},
     }
