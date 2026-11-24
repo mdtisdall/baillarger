@@ -218,8 +218,9 @@ class SolveRun:
         white = SU.counts(m, gap, s.fold_cos)
         sp, co = 0, 0
         start_log: list[dict[str, Any]] = []
+        carry: dict[str, Any] = {}  # the remembered refusals of one remesh, for the next
         if s.mesh == "remesh":
-            m, sp, co = SU.remesh(m, gap, sizes(m), s.fold_cos, h, passes=s.start_passes, log=start_log)
+            m, sp, co = SU.remesh(m, gap, sizes(m), s.fold_cos, h, passes=s.start_passes, log=start_log, carry=carry)
         cur = ev(m.V, m.F)
         self.initial = {"quality": quality(m.V, m.F, h, s.step_max_vox * h), "vertices": len(m.V), "faces": len(m.F),
                         "white": white, "splits": sp, "collapses": co, "remesh": start_log, "E": cur.E, "E_stop": cur.E,
@@ -302,7 +303,7 @@ class SolveRun:
             if s.mesh == "none":
                 sp, co = 0, 0
             else:
-                m, sp, co = SU.remesh(m, gap, sizes(m), s.fold_cos, h, log=step_log)
+                m, sp, co = SU.remesh(m, gap, sizes(m), s.fold_cos, h, log=step_log, carry=carry)
             parts["remesh"] = time.time() - tm
             tm = time.time()
             cur = trial if m is m_pre and nrel == 0 else ev(m.V, m.F)

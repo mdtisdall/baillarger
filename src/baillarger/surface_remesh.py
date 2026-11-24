@@ -709,24 +709,7 @@ class Remesher:
         rem = [] if remove_faces is None else [int(x) for x in remove_faces]
         key: tuple[Any, ...] | None = None
         if self.memo:
-            # the checks' answer does not depend on the order of the removed
-            # faces or of the new rows (a try's order follows the order of
-            # each vertex's faces, which every rollback changes)
-            af = (
-                None
-                if add_faces is None
-                else np.asarray(add_faces, np.int64).reshape(-1, 3)
-            )
-            key = (
-                kind,
-                np.asarray(mv0, np.int64).tobytes(),
-                None if to is None else np.asarray(to, np.float64).tobytes(),
-                np.sort(np.asarray(rem, np.int64)).tobytes(),
-                None if af is None else af[np.lexsort(af.T[::-1])].tobytes(),
-                None
-                if add_vertices is None
-                else np.asarray(add_vertices, np.float64).tobytes(),
-            )
+            key = self._memo_key(kind, mv0, to, rem, add_faces, add_vertices)
             hit = self._memo.get(key)
             if hit is not None:
                 if self._quiet(hit[2], hit[3], hit[1]):
@@ -801,6 +784,34 @@ class Remesher:
     # applied and undone without the checks (Checker.touch), so the live
     # mesh ends exactly as after the checked try.
 
+    @staticmethod
+    def _memo_key(
+        kind: str,
+        mv0: npt.ArrayLike,
+        to: npt.ArrayLike | None,
+        rem: npt.ArrayLike,
+        add_faces: npt.ArrayLike | None,
+        add_vertices: npt.ArrayLike | None,
+    ) -> tuple[Any, ...]:
+        """The key of an edit. The checks' answer does not depend on the
+        order of the removed faces or of the new rows (a try's order follows
+        the order of each vertex's faces, which every rollback changes)."""
+        af = (
+            None
+            if add_faces is None
+            else np.asarray(add_faces, np.int64).reshape(-1, 3)
+        )
+        return (
+            kind,
+            np.asarray(mv0, np.int64).tobytes(),
+            None if to is None else np.asarray(to, np.float64).tobytes(),
+            np.sort(np.asarray(rem, np.int64)).tobytes(),
+            None if af is None else af[np.lexsort(af.T[::-1])].tobytes(),
+            None
+            if add_vertices is None
+            else np.asarray(add_vertices, np.float64).tobytes(),
+        )
+
     def _memo_grid(self) -> None:
         V = self.chk.V
         lo = np.nanmin(V, 0) - _MEMO_PAD
@@ -858,6 +869,144 @@ class Remesher:
     def _quiet(self, lo: Float, hi: Float, made: int) -> bool:
         """No edit kept since stamp `made` within reach of the box."""
         return bool(self._mstamp[self._cells(lo, hi)].max() <= made)
+
+    # ------------------------------------------------------ the memo, carried
+    #
+    # Between two remeshes of a run only the positions of the vertices change
+    # (the faces stay as the first remeshing returned them). The first
+    # remesher's remembered refusals are exported with the mesh they were
+    # made on; a second remesher on the same faces, with the same checks,
+    # imports them, and stamps, in the way of a kept edit, the cells within
+    # reach of every face that has a vertex whose position differs (old and
+    # new) in even one bit. A carried refusal is then reused exactly where
+    # one remembered within a run would be: where nothing within the
+    # checks' reach has changed since it was made.
+
+    def _checks_inputs(self) -> Float:
+        """The parameters of the Checker that its gap, crossing and crease
+        answers read, bit for bit: gap, rloc (= 2 gap), fold_cos, and the
+        slack (which only enters the grid's cell, so it is compared as a
+        precaution).
+
+        What those answers read (mesh_checks._check_kernel, read in full):
+        the live positions V and faces F (rows used as they are: a triangle
+        keeps its vertex order), gap, rloc, fold_cos, and the grid's cell,
+        Rmax and origin, which only choose the candidate faces to test
+        (radius ceil((gap + Rmax) / cell) cells, which holds every face
+        within gap). The reason (gap / cross / crease) is a yes or a no on
+        counts that do not depend on the order of the face rows, of the
+        faces round a vertex (it only changes the order in which pairs are
+        found, and the facing test's round-off, which sets `facing` and not
+        the reason), or on free ids. The per-vertex target and the reference
+        are not read: they only decide which edits are tried and the `to`
+        position, which is in the key. tests/test_surface_remesh.py checks
+        this."""
+        out: Float = np.r_[self.chk._prm[2:], self.chk.slack]
+        return out
+
+    def memo_export(self, V: Float, F: Int, new: Int) -> dict[str, Any] | None:
+        """The remembered refusals, in the ids of the compacted mesh (V, F,
+        new: what self.chk.export() returned), or None (memo off). Only the
+        refusals that no kept edit has come near since are exported; one
+        that names a free vertex or a removed face is left out."""
+        if not self.memo:
+            return None
+        self._prune()
+        cf = self.chk.F
+        live = cf[:, 0] >= 0
+        fmap = np.full(len(cf), -1, np.int64)
+        fmap[live] = np.arange(int(live.sum()))
+        entries: list[tuple[tuple[Any, ...], str, Float, Float]] = []
+        for key, (reason, _, lo, hi) in self._memo.items():
+            kind, bmv, bto, brem, baf, bav = key
+            mv = np.frombuffer(bmv, np.int64)
+            rem = np.frombuffer(brem, np.int64)
+            if len(mv) and (new[mv] < 0).any():
+                continue
+            if len(rem) and (fmap[rem] < 0).any():
+                continue
+            af = None
+            if baf is not None:
+                af = np.frombuffer(baf, np.int64).reshape(-1, 3).copy()
+                pos = af >= 0
+                ids = new[af[pos]]
+                if (ids < 0).any():
+                    continue
+                af[pos] = ids
+            to = None if bto is None else np.frombuffer(bto, np.float64)
+            av = None if bav is None else np.frombuffer(bav, np.float64)
+            k2 = self._memo_key(
+                kind, new[mv], to, fmap[rem], af, None if av is None else av
+            )
+            entries.append((k2, reason, lo.copy(), hi.copy()))
+        return {
+            "V": np.array(V, copy=True),
+            "F": np.array(F, copy=True),
+            "prm": self._checks_inputs(),
+            "entries": entries,
+        }
+
+    def memo_import(self, carried: dict[str, Any] | None) -> tuple[int, int]:
+        """Take the refusals of memo_export() (before the first try). They
+        are taken only if the faces, the number of vertices and the checks'
+        parameters are the same, bit for bit. Returns the number of entries
+        carried in and the number that no moved vertex is within reach of."""
+        chk = self.chk
+        if (
+            not self.memo
+            or carried is None
+            or self._memo
+            or self._nstamp
+            or carried["F"].shape != chk.F.shape
+            or len(carried["V"]) != len(chk.V)
+            or carried["prm"].tobytes() != self._checks_inputs().tobytes()
+            or not np.array_equal(carried["F"], chk.F)
+        ):
+            return 0, 0
+        V0, V1 = carried["V"], chk.V
+        moved = (V0.view(np.int64) != np.ascontiguousarray(V1).view(np.int64)).any(1)
+        if moved.any():
+            fm = moved[chk.F].any(1)
+            P = np.concatenate([V0[chk.F[fm]], V1[chk.F[fm]]], axis=1)
+            if not np.isfinite(P).all():
+                return 0, 0
+            self._nstamp = 1
+            self._stamp_boxes(P.min(1), P.max(1))
+        n = 0
+        for key, reason, lo, hi in carried["entries"]:
+            if self._quiet(lo, hi, 0):
+                self._memo[key] = (reason, 0, lo, hi)
+                n += 1
+        return len(carried["entries"]), n
+
+    def _stamp_boxes(self, lo: Float, hi: Float) -> None:
+        """_stamp_box for every box (rows of lo, hi) with the current stamp
+        number: the union of the same cell ranges."""
+        a = lo - self._reach
+        b = hi + self._reach
+        i0 = np.clip(
+            np.floor((a - self._mlo) / _MEMO_CELL).astype(np.int64), 0, self._mshape - 1
+        )
+        i1 = np.clip(
+            np.floor((b - self._mlo) / _MEMO_CELL).astype(np.int64), 0, self._mshape - 1
+        )
+        if len(a) <= 64:
+            for p, q in zip(i0, i1, strict=True):
+                self._mstamp[p[0] : q[0] + 1, p[1] : q[1] + 1, p[2] : q[2] + 1] = (
+                    self._nstamp
+                )
+            return
+        # a difference array: +1 / -1 at the corners, summed along each axis
+        D = np.zeros(tuple((self._mshape + 1).tolist()), np.int32)
+        for c in range(8):
+            sel = [(c >> k) & 1 for k in range(3)]
+            idx = [(i1[:, k] + 1) if sel[k] else i0[:, k] for k in range(3)]
+            sign = -1 if sum(sel) % 2 else 1
+            np.add.at(D, (idx[0], idx[1], idx[2]), sign)
+        for ax in range(3):
+            np.cumsum(D, axis=ax, out=D)
+        cover = D[: self._mshape[0], : self._mshape[1], : self._mshape[2]] > 0
+        self._mstamp[cover] = self._nstamp
 
     def _edges(self) -> tuple[Int, Float]:
         """The live edges (a < b) and their lengths over their targets."""

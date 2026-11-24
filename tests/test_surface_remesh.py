@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 import pytest
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
 from baillarger import mesh_checks as MC
 from baillarger import surface_remesh as SR
@@ -293,3 +295,380 @@ def test_the_memo_of_refusals_changes_nothing(mesh: str) -> None:
     assert la == lb  # the same edits and refusals, pass by pass
     if mesh == "two_sheets":
         assert hits > 0  # the memo answered some tries
+
+
+# ---------------------------------------------------- the memo, carried over
+
+
+def small_sheet() -> tuple[np.ndarray, np.ndarray]:
+    """The bumpy sheet over [0, 8]², spacing 0.5 (the carried-memo tests'
+    meshes are small: they must run in seconds)."""
+    s = np.linspace(0.0, 8.0, 17)
+    X, Y = np.meshgrid(s, s, indexing="ij")
+    V = np.c_[X.ravel(), Y.ravel(), (5 + np.sin(X / 2) * np.cos(Y / 2.5)).ravel()]
+    n = len(s)
+    F = []
+    for i in range(n - 1):
+        for j in range(n - 1):
+            a, b, c, d = i * n + j, (i + 1) * n + j, (i + 1) * n + j + 1, i * n + j + 1
+            F += [[a, b, c], [a, c, d]]
+    return V, np.array(F, np.int64)
+
+
+def small_sphere() -> tuple[np.ndarray, np.ndarray]:
+    x = np.arange(16, dtype=float)
+    X, Y, Z = np.meshgrid(x, x, x, indexing="ij")
+    v, f = marching_tetrahedra(
+        np.sqrt((X - 7.3) ** 2 + (Y - 7.6) ** 2 + (Z - 7.4) ** 2), 5.0
+    )
+    return v.astype(np.float64), f.astype(np.int64)
+
+
+def small_two_sheets() -> tuple[np.ndarray, np.ndarray]:
+    """small_sheet and a copy above it, 0.2 (closer than GAP) for x < 3,
+    0.6 for x > 5."""
+    V, F = small_sheet()
+    up = 0.2 + 0.4 * np.clip((V[:, 0] - 3) / 2, 0, 1)
+    return np.r_[V, V + np.c_[0 * up, 0 * up, up]], np.r_[F, F + len(V)]
+
+
+def offset_sheets() -> tuple[np.ndarray, np.ndarray]:
+    """small_sheet and a copy shifted 0.37 in x and 0.21 in y, 0.15 to 0.3
+    above it (closer than GAP), its triangles not on the first's."""
+    V, F = small_sheet()
+    up = 0.15 + 0.15 * V[:, 1] / 8
+    W = V + np.c_[0 * up + 0.37, 0 * up + 0.21, up]
+    return np.r_[V, W], np.r_[F, F + len(V)]
+
+
+def _first(
+    V0: np.ndarray, F0: np.ndarray
+) -> tuple[SR.Remesher, np.ndarray, np.ndarray, dict[str, Any]]:
+    rm = SR.Remesher(
+        SR.Reference(V0, F0, np.full(len(V0), 2.0)), V0.copy(), F0.copy(), GAP
+    )
+    SR.remesh(rm, 1.0, max_passes=2)
+    V, F, new = rm.chk.export()
+    carried = rm.memo_export(V, F, new)
+    assert carried is not None
+    return rm, V, F, carried
+
+
+def _second(
+    V: np.ndarray, F: np.ndarray, carried: dict[str, Any] | None
+) -> tuple[SR.Remesher, tuple[int, int], tuple[Any, ...], list[Any]]:
+    rm = SR.Remesher(SR.Reference(V, F, np.full(len(V), 2.0)), V.copy(), F.copy(), GAP)
+    n = rm.memo_import(carried) if carried is not None else (0, 0)
+    log = SR.remesh(rm, 1.0, max_passes=3)
+    rows = [(r["refused"], r["splits"], r["collapses"], r["flips"]) for r in log]
+    return rm, n, rm.chk.export(), rows
+
+
+def _same_run(a: tuple[Any, ...], b: tuple[Any, ...]) -> None:
+    for x, y in zip(a[2], b[2], strict=True):
+        assert np.array_equal(x, y)
+    assert a[3] == b[3]
+    ma, mb = a[0]._memo, b[0]._memo
+    assert set(mb) <= set(ma)  # carried extras were never tried again
+    assert all(ma[k][0] == mb[k][0] for k in mb)
+
+
+def _moves(V: np.ndarray) -> dict[str, np.ndarray]:
+    rng = np.random.default_rng(3)
+    far = V.copy()  # the upper sheet's far part (x > 5.5) only
+    sel = (V[:, 0] > 5.5) & (V[:, 2] > 5.3)
+    far[sel] += rng.normal(0, 0.01, (int(sel.sum()), 3))
+    everywhere = V + rng.normal(0, 0.005, V.shape)
+    return {"none": V.copy(), "far": far, "everywhere": everywhere}
+
+
+@pytest.mark.parametrize(
+    ("mesh", "move"),
+    [
+        ("two_sheets", "none"),
+        ("two_sheets", "far"),
+        ("two_sheets", "everywhere"),
+        ("offset_sheets", "far"),
+    ],
+)
+def test_carried_refusals_change_nothing(mesh: str, move: str) -> None:
+    V0, F0 = {"two_sheets": small_two_sheets, "offset_sheets": offset_sheets}[mesh]()
+    _, V, F, carried = _first(V0, F0)
+    assert carried["entries"]
+    V2 = _moves(V)[move]
+    plain = _second(V2, F, None)
+    carry = _second(V2, F, carried)
+    _same_run(carry, plain)
+    n_in, n_alive = carry[1]
+    assert n_in == len(carried["entries"])
+    if move == "none":
+        assert n_alive == n_in
+        assert carry[0].memo_hits > plain[0].memo_hits
+    if move == "far":
+        assert 0 < n_alive <= n_in
+        assert carry[0].memo_hits > plain[0].memo_hits
+    if move == "everywhere":
+        assert n_alive == 0  # every cell is stamped
+
+
+def test_a_refusal_is_not_reused_where_the_gap_has_opened() -> None:
+    V0, F0 = small_two_sheets()
+    _, V, F, carried = _first(V0, F0)
+    gap_keys = [k for k, r, _, _ in carried["entries"] if r == "gap"]
+    assert gap_keys
+    V2 = V.copy()
+    # the upper sheet (the component with the higher mean z) leaves
+    A = coo_matrix((np.ones(len(F)), (F[:, 0], F[:, 1])), (len(V), len(V)))
+    B = coo_matrix((np.ones(len(F)), (F[:, 1], F[:, 2])), (len(V), len(V)))
+    nc, lab = connected_components(A + B, directed=False)
+    assert nc == 2
+    up = lab == (0 if V[lab == 0, 2].mean() > V[lab == 1, 2].mean() else 1)
+    V2[up] += [0.0, 0.0, 3.0]
+    assert (V2 != V).any()
+    plain = _second(V2, F, None)
+    carry = _second(V2, F, carried)
+    _same_run(carry, plain)
+    assert carry[1][1] == 0  # nothing near the moved sheet survives
+    assert carry[0].memo_hits == plain[0].memo_hits
+    # the edits that the gap refused are kept now
+    assert sum(x[1] + x[2] + x[3] for x in carry[3]) > 0
+    assert carry[3][0][0].get("collapse_gap", 0) == 0
+
+
+def test_the_carried_memo_is_rejected_when_the_inputs_differ() -> None:
+    V0, F0 = small_two_sheets()
+    _, V, F, carried = _first(V0, F0)
+
+    def build(F_: np.ndarray, gap: float = GAP) -> SR.Remesher:
+        return SR.Remesher(
+            SR.Reference(V, F_, np.full(len(V), 2.0)), V.copy(), F_.copy(), gap
+        )
+
+    assert build(F).memo_import(carried)[0] == len(carried["entries"])
+    F2 = F.copy()
+    F2[5] = F2[5][[1, 2, 0]]  # one face row, rotated
+    assert build(F2).memo_import(carried) == (0, 0)
+    F3 = F.copy()
+    F3[[3, 4]] = F3[[4, 3]]  # two rows swapped
+    assert build(F3).memo_import(carried) == (0, 0)
+    assert build(F, GAP * 1.01).memo_import(carried) == (0, 0)
+    rm = SR.Remesher(
+        SR.Reference(V, F, np.full(len(V), 2.0)), V.copy(), F.copy(), GAP, fold_cos=-0.5
+    )
+    assert rm.memo_import(carried) == (0, 0)
+    rm = build(F)
+    rm.chk.slack = 0.1
+    assert rm.memo_import(carried) == (0, 0)
+    rm = build(F)
+    rm.memo = False
+    assert rm.memo_import(carried) == (0, 0)
+    assert rm.memo_export(*rm.chk.export()) is None
+    V3 = np.r_[V, V[:1]]  # a vertex more
+    rm = SR.Remesher(SR.Reference(V3, F, np.full(len(V3), 2.0)), V3, F.copy(), GAP)
+    assert rm.memo_import(carried) == (0, 0)
+    carried2 = dict(carried, V=carried["V"].copy())
+    carried2["V"][0] = np.nan  # a non-finite moved vertex: nothing is carried
+    assert build(F).memo_import(carried2) == (0, 0)
+
+
+def test_the_carried_keys_are_those_that_try_builds() -> None:
+    V0, F0 = small_two_sheets()
+    rm1, V, F, carried = _first(V0, F0)
+    rm2 = SR.Remesher(SR.Reference(V, F, np.full(len(V), 2.0)), V.copy(), F.copy(), GAP)
+    assert rm2.memo_import(carried)[0] == len(carried["entries"])
+    seen = set()
+    for key, reason, _, _ in carried["entries"]:
+        kind = key[0]
+        mv = np.frombuffer(key[1], np.int64)
+        rem = np.frombuffer(key[3], np.int64)
+        assert (mv < len(V)).all() and (rem < len(F)).all()
+        if kind in seen or len(mv) != 1 and kind == "collapse":
+            continue
+        seen.add(kind)
+        # the edit, built from the exported ids, gives the key, and the
+        # Checker of the new mesh refuses it for the same reason
+        to = None if key[2] is None else np.frombuffer(key[2], np.float64)
+        af = None if key[4] is None else np.frombuffer(key[4], np.int64).reshape(-1, 3)
+        av = (
+            None if key[5] is None else np.frombuffer(key[5], np.float64).reshape(-1, 3)
+        )
+        assert SR.Remesher._memo_key(kind, mv, to, rem, af, av) == key
+        assert key in rm2._memo
+        # the edit's faces are live faces of the new mesh, and its vertices
+        # exist: propose it and get the same reason
+        r = rm2.chk.propose(mv, None if to is None else to.reshape(-1, 3), rem, af, av)
+        got = (
+            "gap"
+            if r.gap_pairs
+            else "cross"
+            if (r.intersecting_pairs or r.vertex_fold_pairs)
+            else "crease"
+            if r.creases
+            else ""
+        )
+        rm2.chk.rollback()
+        assert got == reason
+    assert len(seen) >= 2
+
+
+# the checks' answers do not depend on the order of the face rows, of the
+# faces round a vertex, or on free ids
+
+
+def _reason(r: Any) -> str:
+    return (
+        "gap"
+        if r.gap_pairs
+        else "cross"
+        if (r.intersecting_pairs or r.vertex_fold_pairs)
+        else "crease"
+        if r.creases
+        else ""
+    )
+
+
+def _triples(chk: MC.Checker, r: Any) -> Any:
+    """The result's pairs, the faces named by their vertex triples."""
+
+    def tri(f: int) -> tuple[int, ...]:
+        return tuple(sorted(int(v) for v in chk.F[f]))
+
+    return (
+        sorted(int(v) for v in r.bad),
+        sorted(tri(int(f)) for f in r.cross_faces),
+        sorted(tri(int(f)) for f in r.crease_faces),
+        r.gap_pairs,
+        r.intersecting_pairs,
+        r.vertex_fold_pairs,
+        r.creases,
+    )
+
+
+def _edits(
+    chk: MC.Checker, V: np.ndarray, F: np.ndarray
+) -> list[tuple[str, dict[str, Any]]]:
+    """Edits the Checker refuses with each reason, found by trying moves and flips."""
+    found: dict[str, tuple[str, dict[str, Any]]] = {}
+    rng = np.random.default_rng(1)
+    cand: list[dict[str, Any]] = []
+    for v in rng.choice(len(V), min(400, len(V)), replace=False):
+        for d in (
+            [0, 0, 0.1],
+            [0, 0, -0.3],
+            [0, 0, 0.5],
+            [0.3, 0.2, -0.6],
+            [0, 0, 1.2],
+        ):
+            cand.append({"move": [int(v)], "to": (V[v] + d)[None]})
+    for x in rng.choice(len(F), min(400, len(F)), replace=False):
+        # a vertex pushed through the sheet
+        v = int(F[x][0])
+        cand.append({"move": [v], "to": (V[v] + [0, 0, 2.5])[None]})
+        cand.append({"move": [v], "to": (V[v] + [0, 0, -2.5])[None]})
+        cand.append({"move": [v], "to": (V[v] + [1.5, 0, 0])[None]})
+    for c in cand:
+        r = chk.propose(**c)
+        reason = _reason(r)
+        chk.rollback()
+        if reason and reason not in found:
+            found[reason] = (reason, c)
+    return list(found.values())
+
+
+@pytest.mark.parametrize("mesh", ["two_sheets", "sphere", "offset_sheets"])
+def test_the_checks_do_not_read_row_order_face_order_or_free_ids(mesh: str) -> None:
+    V0, F0 = {
+        "two_sheets": small_two_sheets,
+        "sphere": small_sphere,
+        "offset_sheets": offset_sheets,
+    }[mesh]()
+    # the same mesh as a remesh returns it
+    rm = SR.Remesher(
+        SR.Reference(V0, F0, np.full(len(V0), 2.0)), V0.copy(), F0.copy(), GAP
+    )
+    SR.remesh(rm, 1.0, max_passes=2)
+    V, F, new = rm.chk.export()
+    base = MC.Checker(MC.Topology.of(F, len(V)), V, GAP)
+    edits = _edits(base, V, F)
+    reasons = {e[0] for e in edits}
+    # the remesher's own refused edits (collapses: removed and added faces),
+    # decoded from the exported memo, a few of each kind and reason
+    carried = rm.memo_export(V, F, new)
+    assert carried is not None
+    per: dict[tuple[str, str], int] = {}
+    n_collapse = 0
+    for key, why, _, _ in carried["entries"]:
+        if per.get((key[0], why), 0) >= 3:
+            continue
+        per[(key[0], why)] = per.get((key[0], why), 0) + 1
+        to = None if key[2] is None else np.frombuffer(key[2], np.float64)
+        e = {
+            "move": np.frombuffer(key[1], np.int64).tolist(),
+            "to": None if to is None else to.reshape(-1, 3),
+            "remove_faces": np.frombuffer(key[3], np.int64).tolist(),
+            "add_faces": None
+            if key[4] is None
+            else np.frombuffer(key[4], np.int64).reshape(-1, 3),
+            "add_vertices": None
+            if key[5] is None
+            else np.frombuffer(key[5], np.float64).reshape(-1, 3),
+        }
+        edits.append((why, e))
+        n_collapse += key[0] == "collapse"
+    if any(k[0] == "collapse" for k in per):
+        assert n_collapse >= 1
+        assert any(
+            e.get("add_faces") is not None and len(e["remove_faces"]) > 1
+            for _, e in edits
+        )
+    want = {
+        "two_sheets": {"gap", "cross"},
+        "offset_sheets": {"gap"},
+        "sphere": {"cross", "crease"},
+    }[mesh]
+    assert want <= reasons
+    rng = np.random.default_rng(7)
+
+    def variants() -> list[tuple[str, MC.Checker, np.ndarray]]:
+        out = []
+        # (a) the face rows permuted: old row -> new row
+        p = rng.permutation(len(F))
+        Fp = np.empty_like(F)
+        Fp[p] = F
+        out.append(("rows", MC.Checker(MC.Topology.of(Fp, len(V)), V, GAP), p))
+        # (b) another order of the faces round each vertex: edits tried and rolled back
+        cb = MC.Checker(MC.Topology.of(F, len(V)), V, GAP)
+        for v in rng.choice(len(V), min(300, len(V)), replace=False):
+            cb.touch([int(v)], (V[v] + [0, 0, 0.05])[None])
+        for v in rng.choice(len(V), min(200, len(V)), replace=False):
+            fs = cb.faces_of(int(v))
+            if len(fs) >= 2:
+                cb.touch(remove_faces=[int(fs[0])])
+        out.append(("faces", cb, np.arange(len(F))))
+        # (c) free vertex and face rows: a split and its rollback, a grown Checker
+        cc = MC.Checker(MC.Topology.of(F, len(V)), V, GAP)
+        for _ in range(120):
+            f = int(rng.integers(len(F)))
+            a, b, c = (int(x) for x in F[f])
+            cc.touch(
+                remove_faces=[f],
+                add_faces=[[a, b, -1], [b, c, -1], [c, a, -1]],
+                add_vertices=V[[a, b, c]].mean(0)[None],
+            )
+        out.append(("free", cc, np.arange(len(F))))
+        return out
+
+    for name, chk, p in variants():
+        for reason, e in edits:
+            ref = base.propose(**e)
+            expect = (_reason(ref), _triples(base, ref))
+            base.rollback()
+            # the edit in the variant: the same vertices, the face ids mapped
+            e2 = dict(e)
+            if "remove_faces" in e2:  # the face ids follow the rows
+                e2["remove_faces"] = [int(p[x]) for x in e2["remove_faces"]]
+            r = chk.propose(**e2)
+            got = (_reason(r), _triples(chk, r))
+            chk.rollback()
+            assert expect[0] == reason, name
+            assert got == expect, (name, reason)
