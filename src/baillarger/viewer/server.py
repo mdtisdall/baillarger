@@ -33,13 +33,15 @@ Requests:
 - Named volumes (baillarger.viewer.volumes: echo, echo1 to echo3, labels, input,
   wm, fixes):
   /volume/list, /volume/<name>/meta, /volume/<name>/bricks?level=&b=.
-- The stream 1 review (baillarger.viewer.review; with --sites, --log and
-  --edits, or paint only with --edits alone):
-  GET /review/queue, /review/next, /review/preview?job=, /review/pending,
-  /review/regenerate; POST /review/session, /review/skip, /review/preview,
-  /review/answer, /review/scribble, /review/paint, /review/undo,
-  /review/regenerate (the regenerate command as a subprocess under
-  scripts/memguard); with a white surface, POST and GET
+- The stream 1 review (baillarger.viewer.review; with --sites and --log, or
+  paint only without them; the label edits: the standard edits file of the
+  dseg's input labels with editing off at start, or --edits with editing on;
+  --grow-log: the grow brush's debugging log):
+  GET /review/queue (with the regenerate command as text), /review/next,
+  /review/preview?job=, /review/pending, /review/grow?job=; POST
+  /review/session, /review/skip, /review/preview, /review/answer,
+  /review/scribble, /review/paint, /review/undo, /review/grow,
+  /review/editing (editing on or off); with a white surface, POST and GET
   /review/surface-preview, GET /review/surface-preview/mesh and
   /review/surface-preview/cut (the working field's surface preview).
 - Surface outlines (baillarger.viewer.outlines):

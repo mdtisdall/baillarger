@@ -636,27 +636,26 @@ def test_accept_fix_is_only_a_choice_of_an_override_site(server: Any) -> None:
 # ------------------------------------------------------- the command line
 
 
-def test_sites_need_the_log_and_the_edits(files: dict[str, Path]) -> None:
+def test_sites_need_the_log(files: dict[str, Path]) -> None:
+    """--sites and --log go together; --edits is optional (the standard edits
+    file: tests/test_viewer_editing.py)."""
     import argparse
 
     ap = argparse.ArgumentParser()
     VR.add_arguments(ap)
     for argv in (
-        ["--sites", "q.tsv", "--log", "l.jsonl"],
         ["--sites", "q.tsv", "--edits", "e.tsv"],
         ["--log", "l.jsonl"],
         ["--log", "l.jsonl", "--edits", "e.tsv"],
     ):
         a = ap.parse_args(argv)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="needs"):
             VR.for_white(a, Path("s"), Path("d"), lambda: np.zeros(1), A)
-    a = ap.parse_args([])
-    assert VR.for_white(a, Path("s"), Path("d"), lambda: np.zeros(1), A) is None
-    # --edits alone: paint only, no queue and no log
+    # --edits without --sites: paint only, no queue and no log, editing on
     paint_only(files)
     a = ap.parse_args(["--edits", str(files["edits"])])
     rv = VR.for_white(a, Path("s"), files["dseg"], lambda: np.zeros(1), A)
-    assert rv is not None and rv.queue()["paint_only"] is True
+    assert rv is not None and rv.queue()["paint_only"] is True and rv.editing
 
 
 def test_the_fix_diff_path_is_the_dseg_commands() -> None:
