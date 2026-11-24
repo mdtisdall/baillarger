@@ -84,8 +84,16 @@ def pair(a: argparse.Namespace) -> None:
     dt = time.perf_counter() - t
     lo = [max(p.start, q.start) for p, q in zip(ba, bb, strict=True)]
     hi = [min(p.stop, q.stop) for p, q in zip(ba, bb, strict=True)]
-    x = da[tuple(slice(i - q.start, j - q.start) for i, j, q in zip(lo, hi, ba, strict=True))]
-    y = db[tuple(slice(i - q.start, j - q.start) for i, j, q in zip(lo, hi, bb, strict=True))]
+    x = da[
+        tuple(
+            slice(i - q.start, j - q.start) for i, j, q in zip(lo, hi, ba, strict=True)
+        )
+    ]
+    y = db[
+        tuple(
+            slice(i - q.start, j - q.start) for i, j, q in zip(lo, hi, bb, strict=True)
+        )
+    ]
     same_nan = bool(np.array_equal(np.isnan(x), np.isnan(y)))
     f = np.isfinite(x) & np.isfinite(y)
     diff = np.abs(x[f] - y[f])
@@ -133,18 +141,30 @@ def figure(a: argparse.Namespace) -> None:
         cls[lab == 0] = 0
         cls[lab == int(z["cortex"])] = 1
         cls[np.isin(lab, z["filled"])] = 2
-        ax[0, c].imshow(cls.T, origin="lower", cmap=lab_cmap, vmin=0, vmax=3, interpolation="nearest")
+        ax[0, c].imshow(
+            cls.T,
+            origin="lower",
+            cmap=lab_cmap,
+            vmin=0,
+            vmax=3,
+            interpolation="nearest",
+        )
         ax[0, c].set_title(f"{n}: labels, axial k = {int(z['k'])}", fontsize=9)
         shown = np.where(np.isinf(d), np.nan, d)
         im = ax[1, c].imshow(
-            shown.T, origin="lower", cmap=dist_cmap,
-            norm=TwoSlopeNorm(vcenter=0.0, vmin=-8.0, vmax=8.0), interpolation="nearest",
+            shown.T,
+            origin="lower",
+            cmap=dist_cmap,
+            norm=TwoSlopeNorm(vcenter=0.0, vmin=-8.0, vmax=8.0),
+            interpolation="nearest",
         )
         inf = np.isinf(d)
         over = np.zeros((*d.shape, 4))
         over[inf & (d > 0)] = (0.15, 0.15, 0.15, 1.0)
         over[inf & (d < 0)] = (0.55, 0.0, 0.55, 1.0)
-        ax[1, c].imshow(np.transpose(over, (1, 0, 2)), origin="lower", interpolation="nearest")
+        ax[1, c].imshow(
+            np.transpose(over, (1, 0, 2)), origin="lower", interpolation="nearest"
+        )
         ax[1, c].set_title(f"{n}: D (mm), cap 8 mm", fontsize=9)
         for r in (0, 1):
             ax[r, c].set_xticks([])
@@ -161,7 +181,10 @@ def figure(a: argparse.Namespace) -> None:
             Patch(color=(0.55, 0.0, 0.55), label="-inf (WM deeper than cap)"),
             Patch(facecolor="#ffffff", edgecolor="#999999", label="NaN (obstacle)"),
         ],
-        loc="lower center", ncol=4, fontsize=8, frameon=False,
+        loc="lower center",
+        ncol=4,
+        fontsize=8,
+        frameon=False,
     )
     assert im is not None
     cb = fig.colorbar(im, ax=ax[1, :], shrink=0.8, pad=0.01)

@@ -60,7 +60,9 @@ LOG: dict = {"patch": NAME, "stages": []}
 def stage(name: str, t: float) -> float:
     now = time.time()
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e9
-    LOG["stages"].append(dict(stage=name, seconds=round(now - t, 1), peak_gb=round(peak, 2)))
+    LOG["stages"].append(
+        dict(stage=name, seconds=round(now - t, 1), peak_gb=round(peak, 2))
+    )
     print(f"[{now - T0:6.0f}s] {name}: {now - t:.1f} s; peak {peak:.2f} GB", flush=True)
     return now
 
@@ -99,7 +101,11 @@ def main():
     v, f, n = P.white_surface(wm)
     vi = np.clip(np.round(v).astype(int), 0, np.array(wm.shape) - 1)
     near_face = B["dface"][tuple(vi.T)] < FACE_MM
-    LOG.update(vertices=int(len(v)), faces=int(len(f)), vertices_near_box_face=int(near_face.sum()))
+    LOG.update(
+        vertices=int(len(v)),
+        faces=int(len(f)),
+        vertices_near_box_face=int(near_face.sum()),
+    )
     t = stage(f"white surface: {len(v):,} vertices", t)
     g = P.march_from_mesh(v, f, wm, ctx, fluid, dirv, RATIO)
     t = stage("march", t)
@@ -124,7 +130,10 @@ def main():
     h = P.H_MM
     diff = np.abs(t_lab - t_one) * h
     LOG["columns"] = dict(
-        stop={P.STOP_NAMES[k]: int(np.sum(keep & (cols.stop_why == k))) for k in P.STOP_NAMES},
+        stop={
+            P.STOP_NAMES[k]: int(np.sum(keep & (cols.stop_why == k)))
+            for k in P.STOP_NAMES
+        },
         extended_past_ridge=int(np.sum(keep & cols.extended)),
         reached_fluid=int(np.sum(keep & np.isfinite(cols.fluid_s))),
         length_mm=pct(cols.stop_s[keep] * h),
@@ -133,13 +142,17 @@ def main():
         LOG[nm] = dict(
             kind={P.TOP_NAMES[k]: int(np.sum(keep & (kk == k))) for k in P.TOP_NAMES},
             thickness_mm=pct(tt[keep] * h),
-            thickness_mm_by_kind={P.TOP_NAMES[k]: pct(tt[keep & (kk == k)] * h) for k in P.TOP_NAMES},
+            thickness_mm_by_kind={
+                P.TOP_NAMES[k]: pct(tt[keep & (kk == k)] * h) for k in P.TOP_NAMES
+            },
         )
     LOG["difference_mm"] = dict(
         all=pct(diff[keep], (50, 75, 90, 95, 99)),
         over_0p16=round(float(np.mean(diff[keep] > 0.16)), 3),
         over_0p5=round(float(np.mean(diff[keep] > 0.5)), 3),
-        both_fluid=pct(diff[keep & (k_lab == P.TOP_FLUID) & (k_one == P.TOP_FLUID)], (50, 95, 99)),
+        both_fluid=pct(
+            diff[keep & (k_lab == P.TOP_FLUID) & (k_one == P.TOP_FLUID)], (50, 95, 99)
+        ),
     )
 
     # ---- outputs
@@ -149,20 +162,52 @@ def main():
         bad = ~np.isfinite(arr).all(1)
         arr[bad] = v[bad]
     face = near_face.astype(float)
-    write_vtk(f"{DATA}/pial_{NAME}_white.vtk", aff, v, f, {
-        "near_box_face": face, "ridge_mm": cols.ridge_s * h, "fluid_mm": cols.fluid_s * h,
-        "stop_why": cols.stop_why.astype(float), "extended": cols.extended.astype(float)})
-    write_vtk(f"{DATA}/pial_{NAME}_label.vtk", aff, Pl, f, {
-        "t_mm": t_lab * h, "kind": k_lab.astype(float), "diff_mm": diff, "near_box_face": face})
-    write_vtk(f"{DATA}/pial_{NAME}_onepass_equal.vtk", aff, Po, f, {
-        "t_mm": t_one * h, "kind": k_one.astype(float), "diff_mm": diff, "near_box_face": face})
+    write_vtk(
+        f"{DATA}/pial_{NAME}_white.vtk",
+        aff,
+        v,
+        f,
+        {
+            "near_box_face": face,
+            "ridge_mm": cols.ridge_s * h,
+            "fluid_mm": cols.fluid_s * h,
+            "stop_why": cols.stop_why.astype(float),
+            "extended": cols.extended.astype(float),
+        },
+    )
+    write_vtk(
+        f"{DATA}/pial_{NAME}_label.vtk",
+        aff,
+        Pl,
+        f,
+        {
+            "t_mm": t_lab * h,
+            "kind": k_lab.astype(float),
+            "diff_mm": diff,
+            "near_box_face": face,
+        },
+    )
+    write_vtk(
+        f"{DATA}/pial_{NAME}_onepass_equal.vtk",
+        aff,
+        Po,
+        f,
+        {
+            "t_mm": t_one * h,
+            "kind": k_one.astype(float),
+            "diff_mm": diff,
+            "near_box_face": face,
+        },
+    )
     ov = np.zeros(wm.shape, np.uint8)
     for lab, pts in ((1, v), (2, Pl), (3, Po)):
         q = np.clip(np.round(pts).astype(int), 0, np.array(wm.shape) - 1)
         ov[tuple(q.T)] = lab
     nib.save(nib.Nifti1Image(ov, aff), f"{DATA}/pial_{NAME}_overlay.nii.gz")
-    nib.save(nib.Nifti1Image(np.where(ctx, B["disp"], 0.0).astype(np.float32), aff),
-             f"{DATA}/pial_{NAME}_echo2_detrended.nii.gz")
+    nib.save(
+        nib.Nifti1Image(np.where(ctx, B["disp"], 0.0).astype(np.float32), aff),
+        f"{DATA}/pial_{NAME}_echo2_detrended.nii.gz",
+    )
     with open(f"{DATA}/pial_labels.txt", "w") as fh:
         fh.write("# ITK-SNAP label description file\n")
         fh.write('0 0 0 0 0 0 0 "Clear Label"\n')
@@ -170,11 +215,29 @@ def main():
         fh.write(f'2 42 120 214 1 1 1 "top: label boundary (fluid, else ridge)"\n')
         fh.write(f'3 235 104 52 1 1 1 "top: one pass, equal weights"\n')
     # everything the editor's session needs (pial_edit/editor_server.py), uncompressed
-    np.savez(f"{DATA}/pial_{NAME}_session.npz", v=v, f=f, n=n, affine=aff, shape=np.array(wm.shape),
-             near_face=near_face, pts=cols.pts, cnt=cols.n, s=cols.s.astype(np.float32),
-             ridge_s=cols.ridge_s, fluid_s=cols.fluid_s, stop_s=cols.stop_s, stop_why=cols.stop_why,
-             extended=cols.extended, length=g.length.astype(np.float32), root=g.root.astype(np.float32),
-             t_label=t_lab, kind_label=k_lab, t_onepass_equal=t_one, kind_onepass_equal=k_one)
+    np.savez(
+        f"{DATA}/pial_{NAME}_session.npz",
+        v=v,
+        f=f,
+        n=n,
+        affine=aff,
+        shape=np.array(wm.shape),
+        near_face=near_face,
+        pts=cols.pts,
+        cnt=cols.n,
+        s=cols.s.astype(np.float32),
+        ridge_s=cols.ridge_s,
+        fluid_s=cols.fluid_s,
+        stop_s=cols.stop_s,
+        stop_why=cols.stop_why,
+        extended=cols.extended,
+        length=g.length.astype(np.float32),
+        root=g.root.astype(np.float32),
+        t_label=t_lab,
+        kind_label=k_lab,
+        t_onepass_equal=t_one,
+        kind_onepass_equal=k_one,
+    )
     t = stage("outputs", t)
 
     # ---- figure: three planes through the centre
@@ -185,16 +248,26 @@ def main():
         sl = [slice(None)] * 3
         sl[a] = c[a]
         other = [i for i in range(3) if i != a]
-        ax.imshow(img[tuple(sl)].T, cmap="gray", origin="lower", vmin=-0.25, vmax=0.25,
-                  interpolation="nearest")
+        ax.imshow(
+            img[tuple(sl)].T,
+            cmap="gray",
+            origin="lower",
+            vmin=-0.25,
+            vmax=0.25,
+            interpolation="nearest",
+        )
         for pts, col, lw in ((v, AQUA, 0.8), (Pl, BLUE, 0.8), (Po, ORANGE, 0.8)):
             seg = P.plane_section(pts, f, a, float(c[a]))
             for sgm in seg:
                 ax.plot(sgm[:, other[0]], sgm[:, other[1]], color=col, lw=lw)
         ax.set_title(f"plane {'ijk'[a]} = {c[a]}", fontsize=10)
-        ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle(f"{NAME}: white surface (green), top at the label boundary or the ridge (blue), "
-                 "top of the one pass with equal weights (orange); echo 2, trend removed", fontsize=11)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    fig.suptitle(
+        f"{NAME}: white surface (green), top at the label boundary or the ridge (blue), "
+        "top of the one pass with equal weights (orange); echo 2, trend removed",
+        fontsize=11,
+    )
     fig.tight_layout()
     fig.savefig(f"{FIG}/pial_{NAME}_sections.png", dpi=110)
     plt.close(fig)
@@ -202,7 +275,12 @@ def main():
 
     with open(f"{DATA}/pial_{NAME}.json", "w") as fh:
         json.dump(LOG, fh, indent=1)
-    print(json.dumps({k: LOG[k] for k in ("columns", "label", "onepass_equal", "difference_mm")}, indent=1))
+    print(
+        json.dumps(
+            {k: LOG[k] for k in ("columns", "label", "onepass_equal", "difference_mm")},
+            indent=1,
+        )
+    )
 
 
 if __name__ == "__main__":

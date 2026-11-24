@@ -65,7 +65,9 @@ LOG: dict = {"patch": NAME, "stages": []}
 def stage(name, t):
     now = time.time()
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e9
-    LOG["stages"].append(dict(stage=name, seconds=round(now - t, 1), peak_gb=round(peak, 2)))
+    LOG["stages"].append(
+        dict(stage=name, seconds=round(now - t, 1), peak_gb=round(peak, 2))
+    )
     print(f"[{now - T0:6.0f}s] {name}: {now - t:.1f} s; peak {peak:.2f} GB", flush=True)
     return now
 
@@ -105,11 +107,17 @@ def main():
     carve = (cls != 2) & ~near
     names = {1: "contact-like", 2: "fold-like", 3: "overlap-like", 4: "mixed"}
     LOG["contacts"] = dict(
-        pairs=int(c.p.size), near_box_face=int(near.sum()),
+        pairs=int(c.p.size),
+        near_box_face=int(near.sum()),
         classes={names[k]: int(np.sum(cls == k)) for k in names},
-        classes_away_from_faces={names[k]: int(np.sum((cls == k) & ~near)) for k in names},
-        carved=int(carve.sum()), patches_with_tops=round(float(has.mean()), 3),
-        expected_thickness_mm_p5_50_95=np.percentile(mu * vox.mean(), [5, 50, 95]).round(2).tolist(),
+        classes_away_from_faces={
+            names[k]: int(np.sum((cls == k) & ~near)) for k in names
+        },
+        carved=int(carve.sum()),
+        patches_with_tops=round(float(has.mean()), 3),
+        expected_thickness_mm_p5_50_95=np.percentile(mu * vox.mean(), [5, 50, 95])
+        .round(2)
+        .tolist(),
     )
     print(json.dumps(LOG["contacts"]), flush=True)
 
@@ -128,8 +136,16 @@ def main():
 
     # the label base for comparison (from the session file of pial_height_run.py)
     z = np.load(f"{DATA}/pial_{NAME}_session.npz")
-    cols = P.Columns(z["pts"], z["cnt"].astype(np.int64), z["s"].astype(np.float64), z["ridge_s"], z["fluid_s"],
-                     z["stop_s"], z["stop_why"].astype(np.int64), z["extended"])
+    cols = P.Columns(
+        z["pts"],
+        z["cnt"].astype(np.int64),
+        z["s"].astype(np.float64),
+        z["ridge_s"],
+        z["fluid_s"],
+        z["stop_s"],
+        z["stop_why"].astype(np.int64),
+        z["extended"],
+    )
     wv, wf = z["v"], z["f"]
     base = P.point_at(cols, z["t_label"])
     bad = ~np.isfinite(base).all(1)
@@ -149,14 +165,31 @@ def main():
         xf, nx = intersecting_faces(v, fc)
         inside = ~nf[fc].any(1)
         topo = topology(fc, len(v))
-        r = dict(vertices=int(len(v)), faces=int(len(fc)), carved_voxels=int(np.unique(idx).size),
-                 topology={k: (float(x) if isinstance(x, float) else x) for k, x in topo.items()},
-                 intersecting_faces=int(xf.sum()), intersecting_faces_inside=int((xf & inside).sum()))
+        r = dict(
+            vertices=int(len(v)),
+            faces=int(len(fc)),
+            carved_voxels=int(np.unique(idx).size),
+            topology={
+                k: (float(x) if isinstance(x, float) else x) for k, x in topo.items()
+            },
+            intersecting_faces=int(xf.sum()),
+            intersecting_faces_inside=int((xf & inside).sum()),
+        )
         LOG["variants"][name] = r
         meshes[name] = (v, fc, n, nf)
         print(name, json.dumps(r), flush=True)
-        write_vtk(f"{DATA}/pial_{NAME}_contour_{name}.vtk", aff, v, fc,
-                  {"near_box_face": nf.astype(float), "intersecting": np.bincount(fc[xf].ravel(), minlength=len(v)).clip(0, 1).astype(float)})
+        write_vtk(
+            f"{DATA}/pial_{NAME}_contour_{name}.vtk",
+            aff,
+            v,
+            fc,
+            {
+                "near_box_face": nf.astype(float),
+                "intersecting": np.bincount(fc[xf].ravel(), minlength=len(v))
+                .clip(0, 1)
+                .astype(float),
+            },
+        )
         # view
         cen = np.array(wm.shape) // 2
         fig, axs = plt.subplots(1, 3, figsize=(18, 6.4))
@@ -164,14 +197,29 @@ def main():
             sl = [slice(None)] * 3
             sl[a] = cen[a]
             o = [i for i in range(3) if i != a]
-            ax.imshow(img[tuple(sl)].T, cmap="gray", origin="lower", vmin=-0.25, vmax=0.25, interpolation="nearest")
-            for pts, ff, col, lw in ((wv, wf, "#1baf7a", 0.8), (base, wf, "#eb6834", 0.6), (v, fc, "#2a78d6", 1.0)):
+            ax.imshow(
+                img[tuple(sl)].T,
+                cmap="gray",
+                origin="lower",
+                vmin=-0.25,
+                vmax=0.25,
+                interpolation="nearest",
+            )
+            for pts, ff, col, lw in (
+                (wv, wf, "#1baf7a", 0.8),
+                (base, wf, "#eb6834", 0.6),
+                (v, fc, "#2a78d6", 1.0),
+            ):
                 for sg in P.plane_section(pts, ff, a, float(cen[a])):
                     ax.plot(sg[:, o[0]], sg[:, o[1]], color=col, lw=lw)
             ax.set_title(f"plane {'ijk'[a]} = {cen[a]}", fontsize=10)
-            ax.set_xticks([]); ax.set_yticks([])
-        fig.suptitle(f"{NAME}: white surface (green), label base top (orange), contoured pial, {name} (blue); "
-                     "echo 2, trend removed", fontsize=11)
+            ax.set_xticks([])
+            ax.set_yticks([])
+        fig.suptitle(
+            f"{NAME}: white surface (green), label base top (orange), contoured pial, {name} (blue); "
+            "echo 2, trend removed",
+            fontsize=11,
+        )
         fig.tight_layout()
         fig.savefig(f"{FIG}/pial_contour_{NAME}_{name}.png", dpi=110)
         plt.close(fig)
@@ -179,14 +227,25 @@ def main():
 
     nib.save(nib.Nifti1Image(ov, aff), f"{DATA}/pial_{NAME}_contour_overlay.nii.gz")
     with open(f"{DATA}/pial_contour_labels.txt", "w") as fh:
-        fh.write("# ITK-SNAP label description file\n0 0 0 0 0 0 0 \"Clear Label\"\n")
+        fh.write('# ITK-SNAP label description file\n0 0 0 0 0 0 0 "Clear Label"\n')
         fh.write('1 42 120 214 1 1 1 "contact, carved (slit1 and slit2)"\n')
         fh.write('2 27 175 122 1 1 1 "contact, carved (slit2 only)"\n')
         fh.write('3 98 80 214 1 1 1 "fold-like boundary, not carved"\n')
-        fh.write('4 138 137 132 1 1 1 "boundary within 2 mm of a box face, not carved"\n')
+        fh.write(
+            '4 138 137 132 1 1 1 "boundary within 2 mm of a box face, not carved"\n'
+        )
     for name, (v, fc, n, nf) in meshes.items():
-        np.savez(f"{DATA}/pial_{NAME}_contour_{name}_session.npz", kind="surface", white_v=wv, white_f=wf,
-                 v=v, f=fc, n=n, near_face=nf, affine=aff)
+        np.savez(
+            f"{DATA}/pial_{NAME}_contour_{name}_session.npz",
+            kind="surface",
+            white_v=wv,
+            white_f=wf,
+            v=v,
+            f=fc,
+            n=n,
+            near_face=nf,
+            affine=aff,
+        )
     with open(f"{DATA}/pial_{NAME}_contour.json", "w") as fh:
         json.dump(LOG, fh, indent=1)
 

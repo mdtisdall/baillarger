@@ -13,16 +13,22 @@ import pytest
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 TAG = "V1V2_banks_s0.16"
-pytestmark = pytest.mark.skipif(not (HERE / f"joint_{TAG}.npz").exists(), reason="no V1V2 joint result")
+pytestmark = pytest.mark.skipif(
+    not (HERE / f"joint_{TAG}.npz").exists(), reason="no V1V2 joint result"
+)
 
 
 def test_replay_matches_live_steps_under_any_rand_state(tmp_path):
     import pia_editor as PE
 
-    E = PE.Editor(str(HERE), TAG, edits_path=str(tmp_path / "e.json"), log=lambda m: None)
+    E = PE.Editor(
+        str(HERE), TAG, edits_path=str(tmp_path / "e.json"), log=lambda m: None
+    )
     libc = ctypes.CDLL(None)
     for seed, (t, d) in zip((3, 11), ((22649, 2.02), (22343, 2.1))):
-        libc.srand(seed)  # a rand() state that, unseeded, changes the first step (measured)
+        libc.srand(
+            seed
+        )  # a rand() state that, unseeded, changes the first step (measured)
         E.add_edit(t, d)
         E.resolve(2.0)
     libc.srand(3)

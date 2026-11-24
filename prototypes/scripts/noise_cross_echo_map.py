@@ -11,6 +11,7 @@ structure need not.
 
 usage: noise_cross_echo_map.py <data_dir> <out_dir>
 """
+
 import json
 import sys
 from pathlib import Path
@@ -21,7 +22,10 @@ from scipy import ndimage
 
 data, out = Path(sys.argv[1]), Path(sys.argv[2])
 sub = "sub-INDD121850_ses-7THemix20250516"
-echo_f = lambda e: data / f"{sub}_acq-channelCOMBx160um_dir-positive_run-02_echo-{e}_part-mag_FLASH.nii.gz"
+echo_f = lambda e: (
+    data
+    / f"{sub}_acq-channelCOMBx160um_dir-positive_run-02_echo-{e}_part-mag_FLASH.nii.gz"
+)
 B = 16
 aseg_img = nib.load(data / f"{sub}_aseg.nii.gz")
 tis = np.asarray(aseg_img.dataobj) != 0
@@ -55,36 +59,63 @@ R, means = {}, {}
 m = bg.astype(np.float32)
 den = ndimage.gaussian_filter(m, 4.0)
 for e in (1, 2, 3):
-    img = np.asarray(nib.load(echo_f(e)).dataobj)[: sh[0], : sh[1], : sh[2]].astype(np.float32)
+    img = np.asarray(nib.load(echo_f(e)).dataobj)[: sh[0], : sh[1], : sh[2]].astype(
+        np.float32
+    )
     means[e] = bsum(np.where(bg, img, 0)) / np.maximum(nbg, 1)
-    R[e] = np.where(bg, img - ndimage.gaussian_filter(img * m, 4.0) / np.maximum(den, 1e-3), 0).astype(np.float32)
+    R[e] = np.where(
+        bg, img - ndimage.gaussian_filter(img * m, 4.0) / np.maximum(den, 1e-3), 0
+    ).astype(np.float32)
     del img
 del den, m
 ss = {e: bsum(R[e] ** 2) for e in R}
 corr = {}
 for a_, b_ in ((1, 2), (1, 3), (2, 3)):
-    corr[f"{a_}{b_}"] = bsum(R[a_] * R[b_]) / np.sqrt(np.maximum(ss[a_] * ss[b_], 1e-12))
+    corr[f"{a_}{b_}"] = bsum(R[a_] * R[b_]) / np.sqrt(
+        np.maximum(ss[a_] * ss[b_], 1e-12)
+    )
 del R
 
 ok = nbg >= 0.9 * B**3
 np.savez_compressed(
     out / "noise_cross_echo_map.npz",
-    nbg=nbg, ok=ok, dmin=dmin, shadow=np.stack(shadow), mean1=means[1], mean2=means[2], mean3=means[3],
-    **{f"corr{k}": v for k, v in corr.items()}, tissue_frac=bsum(tis.astype(np.float32)) / B**3,
+    nbg=nbg,
+    ok=ok,
+    dmin=dmin,
+    shadow=np.stack(shadow),
+    mean1=means[1],
+    mean2=means[2],
+    mean3=means[3],
+    **{f"corr{k}": v for k, v in corr.items()},
+    tissue_frac=bsum(tis.astype(np.float32)) / B**3,
 )
 c = corr["12"]
-summ = {"blocks_used": int(ok.sum()), "by_distance_vox": {}, "by_shadow": {}, "by_mean1_over_median": {}}
+summ = {
+    "blocks_used": int(ok.sum()),
+    "by_distance_vox": {},
+    "by_shadow": {},
+    "by_mean1_over_median": {},
+}
 for lo, hi in ((2, 10), (10, 20), (20, 40), (40, 80), (80, 1e9)):
     s = ok & (dmin >= lo) & (dmin < hi)
-    summ["by_distance_vox"][f"{lo}-{hi:g}"] = {"blocks": int(s.sum()), "median_corr12": round(float(np.median(c[s])), 4) if s.any() else None,
-                                              "p90_corr12": round(float(np.percentile(c[s], 90)), 4) if s.any() else None}
+    summ["by_distance_vox"][f"{lo}-{hi:g}"] = {
+        "blocks": int(s.sum()),
+        "median_corr12": round(float(np.median(c[s])), 4) if s.any() else None,
+        "p90_corr12": round(float(np.percentile(c[s], 90)), 4) if s.any() else None,
+    }
 for a in range(3):
     for name, s in (("in", shadow[a] > 0.9), ("out", shadow[a] < 0.1)):
         s = ok & s & (dmin >= 20)
-        summ["by_shadow"][f"ax{a}_{name}"] = {"blocks": int(s.sum()), "median_corr12": round(float(np.median(c[s])), 4) if s.any() else None}
+        summ["by_shadow"][f"ax{a}_{name}"] = {
+            "blocks": int(s.sum()),
+            "median_corr12": round(float(np.median(c[s])), 4) if s.any() else None,
+        }
 rel = means[1] / np.median(means[1][ok])
 for lo, hi in ((0, 1.2), (1.2, 1.5), (1.5, 3), (3, 1e9)):
     s = ok & (rel >= lo) & (rel < hi) & (dmin >= 20)
-    summ["by_mean1_over_median"][f"{lo}-{hi:g}"] = {"blocks": int(s.sum()), "median_corr12": round(float(np.median(c[s])), 4) if s.any() else None}
+    summ["by_mean1_over_median"][f"{lo}-{hi:g}"] = {
+        "blocks": int(s.sum()),
+        "median_corr12": round(float(np.median(c[s])), 4) if s.any() else None,
+    }
 (out / "noise_cross_echo_map.json").write_text(json.dumps(summ, indent=1))
 print(json.dumps(summ, indent=1))

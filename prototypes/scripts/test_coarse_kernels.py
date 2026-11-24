@@ -30,7 +30,10 @@ def spd(n, gap):
 
 def test_sample_matches_map_coordinates_inside_outside_and_at_nodes() -> None:
     vol = RNG.normal(size=(2, 10, 12, 9))
-    q = np.r_[RNG.uniform(-2, 13, size=(300, 3)), RNG.integers(0, 9, size=(20, 3)).astype(float)]
+    q = np.r_[
+        RNG.uniform(-2, 13, size=(300, 3)),
+        RNG.integers(0, 9, size=(20, 3)).astype(float),
+    ]
     nan_close(K.sample_t(t64(vol), t64(q)).numpy(), K.sample_np(vol, q), 1e-12)
 
 
@@ -93,7 +96,9 @@ def trace_case():
 def test_trace_matches_numpy(early: float) -> None:
     T, out0, R, N, Ainv, b, D, s_grid = trace_case()
     P_n, sh_n = K.trace_np(T, out0, R, N, Ainv, b, D, 2.4, 0.16, early, s_grid)
-    P_t, sh_t = K.trace_t(t64(T), t64(out0[None]), R, N, Ainv, b, D, 2.4, 0.16, early, s_grid)
+    P_t, sh_t = K.trace_t(
+        t64(T), t64(out0[None]), R, N, Ainv, b, D, 2.4, 0.16, early, s_grid
+    )
     assert sh_t == sh_n
     assert np.allclose(P_t, P_n, atol=1e-9)
 
@@ -134,7 +139,9 @@ def test_mps_float32_close_to_numpy() -> None:
 
     T, out0, R, N, Ainv, b, D, s_grid = trace_case()
     P_n, _ = K.trace_np(T, out0, R, N, Ainv, b, D, 2.4, 0.16, 0.5, s_grid)
-    P_t, _ = K.trace_t(f32(T), f32(out0[None]), R, N, Ainv, b, D, 2.4, 0.16, 0.5, s_grid)
+    P_t, _ = K.trace_t(
+        f32(T), f32(out0[None]), R, N, Ainv, b, D, 2.4, 0.16, 0.5, s_grid
+    )
     assert np.abs(P_t - P_n).max() < 1e-4
     fa, gb, pairs, top, sp = curves_case()
     sh = np.arange(-4, 5)

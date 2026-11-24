@@ -49,7 +49,7 @@ def write(path: Path, e: LE.Edits, shape: tuple[int, ...] = SHAPE) -> None:
 
 def test_write_and_read_give_the_same_diff(tmp_path: Path) -> None:
     p = LE.bids_path(tmp_path, dict(sub="T01", ses="S1"), "R")
-    assert p.name == "sub-T01_ses-S1_hemi-R_desc-labeledits_edits.npy"
+    assert p.name == "sub-T01_ses-S1_hemi-R_desc-labeledits_edits.tsv"
     e = edits({(1, 2, 3): 41, (0, 0, 0): 0, (11, 9, 7): 42})
     write(p, e)
     got, side, sha = LE.read_with_sidecar(p)
@@ -58,10 +58,13 @@ def test_write_and_read_give_the_same_diff(tmp_path: Path) -> None:
     assert side["Shape"] == list(SHAPE) and side["Hemisphere"] == "R"
     assert side["SHA256"] == sha == bids.file_sha256(p)
     assert np.allclose(np.reshape(side["Affine"], (4, 4)), AFFINE)
-    rec = np.load(p, allow_pickle=False)
-    assert rec.dtype == LE.EDITS_DTYPE and rec["index"].tolist() == sorted(
-        rec["index"].tolist()
+    assert p.read_bytes() == (
+        b"i\tj\tk\tlabel\n0\t0\t0\t0\n1\t2\t3\t41\n11\t9\t7\t42\n"
     )
+    for c in LE.COLUMNS:
+        assert side[c]["Description"]
+    # the root's dataset_description.json is made by the first write
+    assert (tmp_path / "dataset_description.json").is_file()
     write(p, LE.empty())
     assert len(LE.read(p)) == 0
     # no file of the writes is left in the directory
@@ -71,17 +74,15 @@ def test_write_and_read_give_the_same_diff(tmp_path: Path) -> None:
 
 
 def test_a_reader_checks_the_sha256(tmp_path: Path) -> None:
-    p = tmp_path / "e_edits.npy"
+    p = tmp_path / "e_edits.tsv"
     write(p, edits({(1, 1, 1): 41}))
-    raw = bytearray(p.read_bytes())
-    raw[-1] ^= 1  # the label
-    p.write_bytes(bytes(raw))
+    p.write_bytes(p.read_bytes().replace(b"\t41\n", b"\t40\n"))  # the label
     with pytest.raises(ValueError, match="SHA-256"):
         LE.read(p)
 
 
 def test_a_bad_diff_is_not_written(tmp_path: Path) -> None:
-    p = tmp_path / "e_edits.npy"
+    p = tmp_path / "e_edits.tsv"
     unsorted = LE.Edits(np.array([5, 2], np.int64), np.array([41, 41], np.int32))
     twice = LE.Edits(np.array([2, 2], np.int64), np.array([41, 42], np.int32))
     off = LE.Edits(np.array([int(np.prod(SHAPE))], np.int64), np.array([41], np.int32))
@@ -97,6 +98,146 @@ def test_a_bad_diff_is_not_written(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="hemisphere"):
         LE.write(p, LE.empty(), hemisphere="X", shape=SHAPE, affine=AFFINE)
     assert not p.exists() and not list(tmp_path.iterdir())
+
+
+def test_the_same_diff_gives_the_same_bytes(tmp_path: Path) -> None:
+    e = edits({(1, 2, 3): 41, (0, 0, 0): 0, (11, 9, 7): 42})
+    p, q = tmp_path / "a_edits.tsv", tmp_path / "b_edits.tsv"
+    write(p, e)
+    write(q, build_edits({(11, 9, 7): 42, (0, 0, 0): 0, (1, 2, 3): 41}, SHAPE))
+    assert p.read_bytes() == q.read_bytes()
+    write(p, LE.empty())
+    assert p.read_bytes() == b"i\tj\tk\tlabel\n" and len(LE.read(p)) == 0
+
+
+def _side_for(p: Path, body: bytes) -> None:
+    """Records body at p, with a sidecar that agrees with them (SHA256,
+    Count: the lines after the header), so that only the reader's checks
+    of the records can refuse them."""
+    p.write_bytes(body)
+    sp = bids.sidecar_path(p)
+    side = json.loads(sp.read_text())
+    side["SHA256"] = hashlib.sha256(body).hexdigest()
+    side["Count"] = body.count(b"\n") - 1
+    sp.write_text(json.dumps(side))
+
+
+@pytest.mark.parametrize(
+    ("body", "msg"),
+    [
+        (b"i\tj\tk\tlabel\n2\t0\t0\t41\n1\t0\t0\t41\n", "sorted"),
+        (b"i\tj\tk\tlabel\n1\t0\t0\t41\n1\t0\t0\t42\n", "twice"),
+        (b"i\tj\tk\tlabel\n0\t10\t0\t41\n", "outside"),
+        (b"i\tj\tk\tlabel\n-1\t0\t0\t41\n", "outside"),
+        (b"i\tj\tk\tlabel\n0\t0\t0\t7\n", "label-set"),
+        (b"i\tj\tlabel\n0\t0\t41\n", "missing"),
+        (b"i\tk\tj\tlabel\n0\t0\t0\t41\n", "columns"),
+        (b"i\tj\tk\tlabel\n0\t0\t41\n", "fields"),
+        (b"i\tj\tk\tlabel\n0\t0\t0\t4.1\n", "integer"),
+        (b"i\tj\tk\tlabel\r\n0\t0\t0\t41\r\n", "missing"),
+        (b"i\tj\tk\tlabel\n0\t0\t0\t041\n", "form"),
+        (b"i\tj\tk\tlabel\n0\t0\t0\t41", "line end"),
+    ],
+)
+def test_a_reader_refuses_a_bad_records_file(
+    tmp_path: Path, body: bytes, msg: str
+) -> None:
+    p = tmp_path / "e_edits.tsv"
+    write(p, edits({(1, 1, 1): 41}))
+    _side_for(p, body)
+    with pytest.raises(ValueError, match=msg):
+        LE.read(p)
+    with pytest.raises(ValueError, match=msg):
+        LE.update(p, lambda c: None, hemisphere="R", shape=SHAPE, affine=AFFINE)
+
+
+def test_the_diff_is_a_tsv_file(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="tsv"):
+        write(tmp_path / "e_edits.npy", LE.empty())
+
+
+def test_standard_path_is_beside_the_input_root(tmp_path: Path) -> None:
+    inp = tmp_path / "deriv" / "excise" / "sub-T01" / "ses-S1" / "anat"
+    inp = inp / "sub-T01_ses-S1_desc-excised_dseg.nii.gz"
+    p = LE.standard_path(inp, "L")
+    assert p == (
+        tmp_path
+        / "deriv"
+        / "labeledits"
+        / "sub-T01"
+        / "ses-S1"
+        / "anat"
+        / "sub-T01_ses-S1_hemi-L_desc-labeledits_edits.tsv"
+    )
+    assert p == LE.bids_path(tmp_path / "deriv" / "labeledits", bids.entities(inp), "L")
+    for bad in (
+        tmp_path / "sub-T01_ses-S1_dseg.nii.gz",
+        tmp_path / "r" / "sub-T01" / "ses-S1" / "sub-T01_ses-S1_dseg.nii.gz",
+        tmp_path / "r" / "sub-T01" / "ses-S2" / "anat" / "sub-T01_ses-S1_dseg.nii.gz",
+        tmp_path / "r" / "sub-T02" / "ses-S1" / "anat" / "sub-T01_ses-S1_dseg.nii.gz",
+    ):
+        with pytest.raises(ValueError, match="sub-<sub>/ses-<ses>/anat"):
+            LE.standard_path(bad, "R")
+
+
+def test_the_first_write_makes_the_root(tmp_path: Path) -> None:
+    inp = tmp_path / "deriv" / "excise" / "sub-T01" / "ses-S1" / "anat"
+    p = LE.standard_path(inp / "sub-T01_ses-S1_dseg.nii.gz", "R")
+    root = tmp_path / "deriv" / "labeledits"
+    assert not root.exists()
+    LE.update(
+        p, lambda c: edits({(1, 1, 1): 41}), hemisphere="R", shape=SHAPE, affine=AFFINE
+    )
+    d = json.loads((root / "dataset_description.json").read_text())
+    assert d["DatasetType"] == "derivative"
+    # a diff outside a BIDS root makes no dataset_description.json
+    write(tmp_path / "e_edits.tsv", LE.empty())
+    assert not (tmp_path / "dataset_description.json").exists()
+
+
+def test_the_converter_keeps_the_diff_and_the_npy_files(tmp_path: Path) -> None:
+    e = edits({(1, 2, 3): 41, (0, 0, 0): 0, (11, 9, 7): 42})
+    npy = tmp_path / "sub-T01_ses-S1_hemi-R_desc-labeledits_edits.npy"
+    rec = np.zeros(len(e), LE.EDITS_DTYPE)
+    rec["index"], rec["label"] = e.index, e.label
+    np.save(npy, rec, allow_pickle=False)
+    old = dict(
+        SpecVersion="label-edits/1",
+        Description="The label edits of a hemisphere.",
+        Hemisphere="R",
+        Shape=list(SHAPE),
+        Affine=AFFINE.ravel().tolist(),
+        Count=len(e),
+        SHA256=bids.file_sha256(npy),
+        Provenance=bids.provenance("tests"),
+    )
+    side = bids.sidecar_path(npy)
+    side.write_text(json.dumps(old))
+    before = npy.read_bytes(), side.read_bytes()
+    LE.main(["convert", str(npy)])
+    tsv = npy.with_suffix(".tsv")
+    got, new, _ = LE.read_with_sidecar(tsv, shape=SHAPE, affine=AFFINE, hemisphere="R")
+    assert same(got, e) and new["Description"] == old["Description"]
+    # the .npy and its sidecar (under a new name) are kept, unchanged
+    assert npy.read_bytes() == before[0]
+    assert npy.with_name(npy.name + ".json").read_bytes() == before[1]
+    # once only
+    with pytest.raises(ValueError, match="already there"):
+        LE.convert(npy)
+
+
+def test_the_converter_refuses_a_npy_that_disagrees_with_its_sidecar(
+    tmp_path: Path,
+) -> None:
+    npy = tmp_path / "e_edits.npy"
+    rec = np.zeros(1, LE.EDITS_DTYPE)
+    np.save(npy, rec, allow_pickle=False)
+    bids.sidecar_path(npy).write_text(
+        json.dumps(dict(SpecVersion="label-edits/1", SHA256="0" * 64, Count=1))
+    )
+    with pytest.raises(ValueError, match="SHA-256"):
+        LE.convert(npy)
+    assert not npy.with_suffix(".tsv").exists()
 
 
 def _writer(path: str, n: int) -> None:
@@ -115,7 +256,7 @@ def _writer(path: str, n: int) -> None:
 
 
 def test_a_reader_sees_the_old_or_the_new_diff_not_a_mix(tmp_path: Path) -> None:
-    p = tmp_path / "e_edits.npy"
+    p = tmp_path / "e_edits.tsv"
     _writer(str(p), 1)
     n = 300
     proc = mp.get_context("spawn").Process(target=_writer, args=(str(p), n))
@@ -136,7 +277,7 @@ def test_a_reader_sees_the_old_or_the_new_diff_not_a_mix(tmp_path: Path) -> None
 def test_a_stop_between_the_two_renames_is_repaired_by_the_next_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    p = tmp_path / "e_edits.npy"
+    p = tmp_path / "e_edits.tsv"
     write(p, edits({(1, 1, 1): 41}))
     new = edits({(1, 1, 1): 0, (2, 3, 4): 42})
     real = os.replace
@@ -170,7 +311,7 @@ def test_a_stop_between_the_two_renames_is_repaired_by_the_next_read(
 def test_an_update_repairs_a_stopped_write_too(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    p = tmp_path / "e_edits.npy"
+    p = tmp_path / "e_edits.tsv"
     real = os.replace
     calls: list[Any] = []
 
@@ -203,7 +344,7 @@ def test_an_update_repairs_a_stopped_write_too(
 
 
 def test_the_reader_checks_the_grid_affine_and_hemisphere(tmp_path: Path) -> None:
-    p = tmp_path / "e_edits.npy"
+    p = tmp_path / "e_edits.tsv"
     write(p, edits({(1, 1, 1): 41}))
     LE.read(p, shape=SHAPE, affine=AFFINE, hemisphere="R")
     with pytest.raises(ValueError, match="grid"):
@@ -283,7 +424,7 @@ def _switches(order: list[int]) -> int:
 
 
 def test_two_processes_that_paint_keep_all_their_voxels(tmp_path: Path) -> None:
-    p = tmp_path / "e_edits.npy"
+    p = tmp_path / "e_edits.tsv"
     order = _paint_in_two_processes(p, lock=True)
     s = _switches(order)
     assert s >= 10, f"the updates of the two processes did not overlap ({s} switches)"
@@ -297,7 +438,7 @@ def test_two_processes_that_paint_without_the_lock_lose_voxels(
 ) -> None:
     """The control for the test above: the same scenario with no lock loses
     voxels, so the test above can see a missing lock."""
-    p = tmp_path / "e_edits.npy"
+    p = tmp_path / "e_edits.tsv"
     order = _paint_in_two_processes(p, lock=False)
     s = _switches(order)
     assert s >= 10, f"the updates of the two processes did not overlap ({s} switches)"
@@ -308,7 +449,7 @@ def test_two_processes_that_paint_without_the_lock_lose_voxels(
 def test_an_update_reads_only_the_sidecar_when_its_copy_is_current(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    p = tmp_path / "e_edits.npy"
+    p = tmp_path / "e_edits.tsv"
     kw: dict[str, Any] = dict(hemisphere="R", shape=SHAPE, affine=AFFINE)
     cur = LE.update(p, lambda c: edits({(1, 1, 1): 41}), **kw)
     reads: list[Path] = []
@@ -334,7 +475,7 @@ def test_an_update_reads_only_the_sidecar_when_its_copy_is_current(
 
 
 def test_an_update_whose_change_raises_writes_nothing(tmp_path: Path) -> None:
-    p = tmp_path / "e_edits.npy"
+    p = tmp_path / "e_edits.tsv"
     write(p, edits({(1, 1, 1): 41}))
     before = p.read_bytes(), bids.sidecar_path(p).read_bytes()
 
@@ -347,7 +488,7 @@ def test_an_update_whose_change_raises_writes_nothing(tmp_path: Path) -> None:
 
 
 def test_an_update_whose_after_raises_writes_the_diff_back(tmp_path: Path) -> None:
-    p = tmp_path / "e_edits.npy"
+    p = tmp_path / "e_edits.tsv"
     kw: dict[str, Any] = dict(hemisphere="R", shape=SHAPE, affine=AFFINE)
     write(p, edits({(1, 1, 1): 41}))
     before = p.read_bytes()
@@ -365,7 +506,7 @@ def test_an_update_whose_after_raises_writes_the_diff_back(tmp_path: Path) -> No
     assert same(seen[0][0], edits({(2, 2, 2): 42})) and seen[0][1]
     assert p.read_bytes() == before and same(LE.read(p), edits({(1, 1, 1): 41}))
     # no file before the update: the empty diff is written back
-    q = tmp_path / "f_edits.npy"
+    q = tmp_path / "f_edits.tsv"
     with pytest.raises(OSError, match="the log refuses"):
         LE.update(q, lambda c: edits({(2, 2, 2): 42}), after=refuse, **kw)
     assert len(LE.read(q)) == 0
@@ -375,7 +516,7 @@ def test_an_update_whose_after_raises_writes_the_diff_back(tmp_path: Path) -> No
 
 
 def test_after_holds_the_lock_so_another_update_waits(tmp_path: Path) -> None:
-    p = tmp_path / "e_edits.npy"
+    p = tmp_path / "e_edits.tsv"
     kw: dict[str, Any] = dict(hemisphere="R", shape=SHAPE, affine=AFFINE)
     write(p, edits({(1, 1, 1): 41}))
     started, done = threading.Event(), threading.Event()
@@ -738,7 +879,7 @@ def test_the_dseg_command_takes_the_edits(tmp_path: Path) -> None:
     side = bids.read_sidecar(
         anat / "sub-T01_ses-S1_desc-wmtopo_dseg.json", white_dseg.DSEG_SPEC
     )
-    copy = anat / "sub-T01_ses-S1_desc-wmtopo_edits.npy"
+    copy = anat / "sub-T01_ses-S1_desc-wmtopo_edits.tsv"
     want = [str(p.resolve()) for p in (src, copy)]
     assert side["Sources"] == want and set(side["SourcesSHA256"]) == set(want)
     # the copy is the diff that the run used
@@ -768,7 +909,7 @@ def test_the_dseg_command_takes_the_edits(tmp_path: Path) -> None:
 
 def test_edits_on_another_grid_or_hemisphere_are_refused(tmp_path: Path) -> None:
     src = written_aseg(tmp_path)
-    ep = tmp_path / "e_edits.npy"
+    ep = tmp_path / "e_edits.tsv"
     e = aseg_edits(dict.fromkeys(ROD, 0))
     A = np.diag([*VOX, 1.0])
     LE.write(ep, e, hemisphere="R", shape=ASEG_SHAPE, affine=A)

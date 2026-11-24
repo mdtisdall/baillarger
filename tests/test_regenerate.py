@@ -216,7 +216,7 @@ def test_the_command_with_edits_gives_the_files_of_the_four_commands(
     out = capsys.readouterr().out
     assert_same(hand, regen)
     # the dseg's copy of the diff is among the outputs, equal to the diff
-    copy = regen / ANAT / "sub-T01_ses-S1_desc-wmtopo_edits.npy"
+    copy = regen / ANAT / "sub-T01_ses-S1_desc-wmtopo_edits.tsv"
     assert copy.read_bytes() == edits.read_bytes()
     # the edit that the correction must change (the moved rod) is printed
     lines = [x for x in out.splitlines() if x.startswith("override: ")]
@@ -374,5 +374,5 @@ def test_a_second_command_in_the_same_root_stops(tmp_path: Path) -> None:
 def test_a_diff_in_root_itself_is_refused(tmp_path: Path) -> None:
     # its reader's lock on ROOT would wait for the run's lock on ROOT
     with pytest.raises(ValueError, match="in ROOT"):
-        regenerate.regenerate(tmp_path / NAME, tmp_path / "x_edits.npy", tmp_path)
+        regenerate.regenerate(tmp_path / NAME, tmp_path / "x_edits.tsv", tmp_path)
     assert not any(tmp_path.glob(regenerate.STAGE_PREFIX + "*"))

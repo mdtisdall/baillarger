@@ -48,8 +48,19 @@ def run(name, mask, true_normal, true_dist, a):
     sdf = np.where(mask, din - 0.5, 0.5 - dout).astype(np.float32)
     np.clip(sdf, -(a.band + 3), a.band + 3, out=sdf)
     phi, solve = AA.thin_plate(
-        sdf, mask, a.band, a.eps, a.device, a.iters, a.tol, fused=not a.unfused,
-        stop=a.stop, start=a.start, levels=a.levels, quiet=True, restart=a.restart,
+        sdf,
+        mask,
+        a.band,
+        a.eps,
+        a.device,
+        a.iters,
+        a.tol,
+        fused=not a.unfused,
+        stop=a.stop,
+        start=a.start,
+        levels=a.levels,
+        quiet=True,
+        restart=a.restart,
     )
     vr, fr, br = marching_tetrahedra_blocks(mask.view(np.uint8), 0.5, 16, np.float32)
     v, f, b = marching_tetrahedra_blocks(phi, 0.0, 16, np.float32)
@@ -59,9 +70,11 @@ def run(name, mask, true_normal, true_dist, a):
     # leave out vertices near the volume's faces (the problem's own border)
     keep = np.all((v > a.band + 3) & (v < np.array(mask.shape) - a.band - 4), axis=1)
     vr64, v64 = vr.astype(float), v.astype(float)
-    print(f"\n== {name}: {len(v)} vertices ({keep.sum()} away from the border); "
-          f"same triangles {same}; self-intersecting faces {nx}; solver {solve['iterations']} "
-          f"iterations, last change {solve['last_change']:.1e}; levels {solve['levels']}")
+    print(
+        f"\n== {name}: {len(v)} vertices ({keep.sum()} away from the border); "
+        f"same triangles {same}; self-intersecting faces {nx}; solver {solve['iterations']} "
+        f"iterations, last change {solve['last_change']:.1e}; levels {solve['levels']}"
+    )
     for label, vv, ff, nn in (
         ("raw, mesh normals", vr64, fr, S.vertex_normals(vr64, fr)),
         ("antialiased, mesh normals", v64, f, S.vertex_normals(v64, f)),
@@ -70,7 +83,9 @@ def run(name, mask, true_normal, true_dist, a):
         err = angle(nn, true_normal(vv))[keep]
         print(f"  {label:32s} normal error (deg): {stats(err)}")
     for label, vv in (("raw", vr64), ("antialiased", v64)):
-        print(f"  {label:32s} distance to true surface (vox): {stats(np.abs(true_dist(vv))[keep])}")
+        print(
+            f"  {label:32s} distance to true surface (vox): {stats(np.abs(true_dist(vv))[keep])}"
+        )
 
 
 def main():
@@ -93,7 +108,13 @@ def main():
     n /= np.linalg.norm(n)
     c = np.array([23.3, 24.1, 23.7])
     plane = np.einsum("i...,i->...", x - c[:, None, None, None], n) < 0
-    run("tilted plane", plane, lambda v: np.tile(n, (len(v), 1)), lambda v: (v - c) @ n, a)
+    run(
+        "tilted plane",
+        plane,
+        lambda v: np.tile(n, (len(v), 1)),
+        lambda v: (v - c) @ n,
+        a,
+    )
     # a sphere of radius 12
     R = 12.0
     sphere = np.sqrt(((x - c[:, None, None, None]) ** 2).sum(0)) < R

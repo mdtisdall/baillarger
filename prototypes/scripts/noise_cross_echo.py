@@ -9,6 +9,7 @@ only the voxel scale.
 
 usage: noise_cross_echo.py <data_dir> <out_dir>
 """
+
 import json
 import sys
 from pathlib import Path
@@ -19,7 +20,10 @@ from scipy import ndimage
 
 data, out = Path(sys.argv[1]), Path(sys.argv[2])
 sub = "sub-INDD121850_ses-7THemix20250516"
-echo_f = lambda e: data / f"{sub}_acq-channelCOMBx160um_dir-positive_run-02_echo-{e}_part-mag_FLASH.nii.gz"
+echo_f = lambda e: (
+    data
+    / f"{sub}_acq-channelCOMBx160um_dir-positive_run-02_echo-{e}_part-mag_FLASH.nii.gz"
+)
 aseg = np.asarray(nib.load(data / f"{sub}_aseg.nii.gz").dataobj).astype(np.int16)
 tis = aseg != 0
 deep = ndimage.binary_erosion(aseg == 41, iterations=6)  # >= 6 voxels from any non-WM

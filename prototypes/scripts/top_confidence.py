@@ -6,6 +6,7 @@ Terms as top_conf.py (provisional forms; scales from the data where possible).
 
 args: FEAT_DIR OUT_DIR
 """
+
 import glob
 import heapq
 import json
@@ -37,8 +38,14 @@ for f in sorted(glob.glob(str(FEAT / "feat_*.npz"))):
     if "empty" in z.files:
         continue
     n = len(z["vert"])
-    V.append(z["vert"]); PP.append(z["P"]); FI.append(z["first"].astype(np.int32)); RU.append(z["run"].astype(np.int32))
-    HI.append(z["hist"]); GB.append(z["gm_behind"]); FB.append(z["fl_behind"]); RC.append(z["root_cls"])
+    V.append(z["vert"])
+    PP.append(z["P"])
+    FI.append(z["first"].astype(np.int32))
+    RU.append(z["run"].astype(np.int32))
+    HI.append(z["hist"])
+    GB.append(z["gm_behind"])
+    FB.append(z["fl_behind"])
+    RC.append(z["root_cls"])
     CC["ci"].append(z["c_ci"].astype(np.int64) + base)
     for k in ("k", "lab", "S", "at_label", "far_wm", "mirror"):
         CC[k].append(z["c_" + k])
@@ -55,7 +62,10 @@ m, ns, _ = P.shape
 C = {k: np.concatenate(v) for k, v in CC.items()}
 C["k"] = C["k"].astype(np.int64)
 assert len(np.unique(vert)) == m, "a column is owned twice"
-print(f"{m} columns, {len(C['k'])} candidates, read in {time.perf_counter() - t0:.0f} s", flush=True)
+print(
+    f"{m} columns, {len(C['k'])} candidates, read in {time.perf_counter() - t0:.0f} s",
+    flush=True,
+)
 
 # the global column graph from the superblocks' triangles (vertex pairs)
 order = np.argsort(vert)
@@ -76,7 +86,10 @@ dst = np.r_[ib, ia]
 o = np.argsort(src, kind="stable")
 nb_ptr = np.r_[0, np.cumsum(np.bincount(src, minlength=m))]
 nb_idx = dst[o]
-print(f"{len(ia)} edges; columns with no neighbour: {int((np.diff(nb_ptr) == 0).sum())}", flush=True)
+print(
+    f"{len(ia)} edges; columns with no neighbour: {int((np.diff(nb_ptr) == 0).sum())}",
+    flush=True,
+)
 
 # global sheet floor (90th percentile of the cortex samples' score)
 hist = np.sum(HI, 0)
@@ -94,7 +107,10 @@ dens = np.convolve(dens, kern, "same")
 # peaks; each side relative to its own peak, so neither mode penalises the other
 logg, pk, trough = two_mode_log_prior(dens)
 modes = (grid[pk] if len(pk) else grid[[np.argmax(dens)]]).round(2).tolist()
-print(f"floor {S_floor:.5f}, clear label tops {clear.sum()}, modes {modes} mm, trough {grid[trough] if trough >= 0 else None} mm", flush=True)
+print(
+    f"floor {S_floor:.5f}, clear label tops {clear.sum()}, modes {modes} mm, trough {grid[trough] if trough >= 0 else None} mm",
+    flush=True,
+)
 
 # evidence of each candidate (terms independent of the neighbours)
 lab = C["lab"]
@@ -105,18 +121,27 @@ lab = C["lab"]
 ci, ck = C["ci"], C["k"]
 t_glob = logg[ck]
 t_lab = np.where(lab, np.where(run[ci] >= SEED_RUN, 1.0, 0.0), np.nan)
-t_sheet = np.where(lab, np.nan, np.clip(np.log(np.maximum(C["S"], 1e-12) / S_floor), -1, 2))
+t_sheet = np.where(
+    lab, np.nan, np.clip(np.log(np.maximum(C["S"], 1e-12) / S_floor), -1, 2)
+)
 atl = C["at_label"]
 t_at = np.where(atl, 1.0, np.nan)
 mr = C["mirror"]
-t_mir = np.where(atl, np.nan, np.where(np.isfinite(mr), np.clip(2 * (mr - 0.3), -2, 1), -1.0))
+t_mir = np.where(
+    atl, np.nan, np.where(np.isfinite(mr), np.clip(2 * (mr - 0.3), -2, 1), -1.0)
+)
 t_fwm = np.where(atl, np.nan, np.where(C["far_wm"], 0.5, -0.5))
 # non-WM signal behind the root (1.5 mm inward; GM-like or fluid-like): cortex the
 # column does not account for, or a root not on tissue; a property of the column
 excess = nonwm[ci]
-ref = clear & (first * STEP > (grid[trough] if trough >= 0 else 0.0)) & np.isfinite(nonwm)
+ref = (
+    clear & (first * STEP > (grid[trough] if trough >= 0 else 0.0)) & np.isfinite(nonwm)
+)
 sigma_gm = max(float(np.sqrt(np.mean(nonwm[ref] ** 2))), STEP)
-print(f"non-WM behind the root, clear cortical label tops: p50/90/99 {np.percentile(nonwm[ref], [50, 90, 99]).round(3).tolist()} mm, sigma {sigma_gm:.3f} mm", flush=True)
+print(
+    f"non-WM behind the root, clear cortical label tops: p50/90/99 {np.percentile(nonwm[ref], [50, 90, 99]).round(3).tolist()} mm, sigma {sigma_gm:.3f} mm",
+    flush=True,
+)
 t_gm = gaussian_log_term(excess, sigma_gm)
 TERMS = np.stack([t_glob, t_lab, t_at, t_sheet, t_mir, t_fwm, t_gm], 1)
 ev = np.nansum(TERMS, 1)
@@ -126,7 +151,10 @@ for k in ("ci", "k", "lab"):
 ev, TERMS = ev[co], TERMS[co]
 ci, ck, lab = C["ci"], C["k"], C["lab"]
 c_ptr = np.r_[0, np.cumsum(np.bincount(ci, minlength=m))]
-print(f"{len(ci)} candidates kept; evidence ready at {time.perf_counter() - t0:.0f} s", flush=True)
+print(
+    f"{len(ci)} candidates kept; evidence ready at {time.perf_counter() - t0:.0f} s",
+    flush=True,
+)
 
 top_k = np.full(m, -1, np.int64)
 top_c = np.full(m, -1, np.int64)  # the candidate row chosen
@@ -141,7 +169,7 @@ def tangent(c, k):
 
 def prediction(b):
     preds = []
-    for c in nb_idx[nb_ptr[b]:nb_ptr[b + 1]]:
+    for c in nb_idx[nb_ptr[b] : nb_ptr[b + 1]]:
         k = top_k[c]
         if k < 0:
             continue
@@ -152,7 +180,9 @@ def prediction(b):
         sc = np.flatnonzero(np.signbit(h[1:]) != np.signbit(h[:-1]))
         if len(sc):
             preds.append(sc[0])
-        elif h[0] >= 0:  # the neighbour's top plane lies at or behind this root: zero thickness
+        elif (
+            h[0] >= 0
+        ):  # the neighbour's top plane lies at or behind this root: zero thickness
             preds.append(0)
     return int(np.median(preds)) if preds else None
 
@@ -174,7 +204,10 @@ for b_ in cs:
 res = np.array(res)
 sigma_loc = max(1.4826 * float(np.median(np.abs(res - np.median(res)))), STEP)
 top_k[:] = -1
-print(f"local sigma {sigma_loc:.3f} mm from {len(res)} clear label tops (residual median {np.median(res):+.3f} mm)", flush=True)
+print(
+    f"local sigma {sigma_loc:.3f} mm from {len(res)} clear label tops (residual median {np.median(res):+.3f} mm)",
+    flush=True,
+)
 heap = []
 for r in np.flatnonzero(lab):
     heap.append((-float(ev[r]), int(ci[r]), int(r)))
@@ -204,17 +237,30 @@ while heap:
         continue
     top_k[b], top_c[b] = ck[r], r
     nf += 1
-    for c in nb_idx[nb_ptr[b]:nb_ptr[b + 1]]:
+    for c in nb_idx[nb_ptr[b] : nb_ptr[b + 1]]:
         if top_k[c] < 0:
             offer(c)
     if nf % 100000 == 0:
-        print(f"  fixed {nf} ({time.perf_counter() - tl:.0f} s, heap {len(heap)})", flush=True)
+        print(
+            f"  fixed {nf} ({time.perf_counter() - tl:.0f} s, heap {len(heap)})",
+            flush=True,
+        )
 print(f"propagation: {nf} tops in {time.perf_counter() - tl:.0f} s", flush=True)
 
 # final score: the candidate's evidence, the local term against the final
 # neighbours, and the opposite-bank term
 has = top_k >= 0
-names = ["thick_global", "label_clear", "at_label", "sheet", "mirror", "far_wm", "non_wm_behind_root", "thick_local", "bank"]
+names = [
+    "thick_global",
+    "label_clear",
+    "at_label",
+    "sheet",
+    "mirror",
+    "far_wm",
+    "non_wm_behind_root",
+    "thick_local",
+    "bank",
+]
 T = np.full((m, len(names)), np.nan, np.float32)
 T[has, :7] = TERMS[top_c[has]]
 for b in np.flatnonzero(has):
@@ -222,7 +268,11 @@ for b in np.flatnonzero(has):
     top_k[b] = -1
     kp = prediction(b)
     top_k[b] = k
-    T[b, 7] = max(-0.5 * (((k - kp) * STEP) / sigma_loc) ** 2, -8.0) if kp is not None else 0.0
+    T[b, 7] = (
+        max(-0.5 * (((k - kp) * STEP) / sigma_loc) ** 2, -8.0)
+        if kp is not None
+        else 0.0
+    )
 print(f"local term at {time.perf_counter() - t0:.0f} s", flush=True)
 hid = np.flatnonzero(has)
 Xt = P[hid, top_k[hid]].astype(np.float64)
@@ -233,7 +283,7 @@ for j, b in enumerate(hid):
 bank = np.zeros(len(hid))
 tree = cKDTree(Xt)
 for s0 in range(0, len(hid), 200000):
-    L = tree.query_ball_point(Xt[s0:s0 + 200000], 0.5, workers=-1)
+    L = tree.query_ball_point(Xt[s0 : s0 + 200000], 0.5, workers=-1)
     for j, near in enumerate(L):
         near = np.asarray(near)
         if len(near) and (Tt[near] @ Tt[s0 + j] < -0.3).any():
@@ -245,7 +295,7 @@ ksub = np.arange(0, ns, SUB)
 rtree = cKDTree(Pq.reshape(-1, 3))
 nsub = Pq.shape[1]
 for s0 in range(0, len(hid), 200000):
-    L = rtree.query_ball_point(Xt[s0:s0 + 200000], 0.2, workers=-1)
+    L = rtree.query_ball_point(Xt[s0 : s0 + 200000], 0.2, workers=-1)
     for j, hits in enumerate(L):
         if not hits:
             continue
@@ -255,7 +305,10 @@ for s0 in range(0, len(hid), 200000):
         bad = (tk >= 0) & (tk > kq + int(0.5 / STEP))
         if not bad.any():
             continue
-        dirs = P[c_[bad], np.minimum(kq[bad] + 1, ns - 1)] - P[c_[bad], np.maximum(kq[bad] - 1, 0)]
+        dirs = (
+            P[c_[bad], np.minimum(kq[bad] + 1, ns - 1)]
+            - P[c_[bad], np.maximum(kq[bad] - 1, 0)]
+        )
         if (dirs @ Tt[s0 + j] < -0.3 * np.linalg.norm(dirs, axis=1)).any():
             bank[s0 + j] = -2.0
 T[hid, 8] = bank
@@ -263,16 +316,44 @@ conf = np.where(has, np.nansum(T, 1), -np.inf)
 rank = np.empty(m, np.int64)
 rank[np.argsort(conf, kind="stable")] = np.arange(m)
 top_mm = np.where(has, top_k * STEP, np.nan)
-summary = {"columns": int(m), "with_top": int(has.sum()), "no_top": int((~has).sum()),
-           "from_label": int((has & lab[np.maximum(top_c, 0)]).sum()),
-           "conf_p10_25_50_75_90": np.percentile(conf[has], [10, 25, 50, 75, 90]).round(2).tolist(),
-           "S_floor": S_floor, "sigma_local_mm": sigma_loc, "modes_mm": modes, "trough_mm": float(grid[trough]) if trough >= 0 else None, "sigma_gm_mm": sigma_gm,
-           "zero_tops": int((has & (top_k <= 1)).sum()),
-           "tops_over_4.5mm": int((top_mm > 4.5).sum()), "conf_median_tops_le_4.5": float(np.median(conf[has & (top_mm <= 4.5)])),
-           "conf_median_tops_gt_4.5": float(np.median(conf[has & (top_mm > 4.5)])) if (top_mm > 4.5).any() else None,
-           "bank_disagree": int((bank < 0).sum()), "seconds": time.perf_counter() - t0}
+summary = {
+    "columns": int(m),
+    "with_top": int(has.sum()),
+    "no_top": int((~has).sum()),
+    "from_label": int((has & lab[np.maximum(top_c, 0)]).sum()),
+    "conf_p10_25_50_75_90": np.percentile(conf[has], [10, 25, 50, 75, 90])
+    .round(2)
+    .tolist(),
+    "S_floor": S_floor,
+    "sigma_local_mm": sigma_loc,
+    "modes_mm": modes,
+    "trough_mm": float(grid[trough]) if trough >= 0 else None,
+    "sigma_gm_mm": sigma_gm,
+    "zero_tops": int((has & (top_k <= 1)).sum()),
+    "tops_over_4.5mm": int((top_mm > 4.5).sum()),
+    "conf_median_tops_le_4.5": float(np.median(conf[has & (top_mm <= 4.5)])),
+    "conf_median_tops_gt_4.5": float(np.median(conf[has & (top_mm > 4.5)]))
+    if (top_mm > 4.5).any()
+    else None,
+    "bank_disagree": int((bank < 0).sum()),
+    "seconds": time.perf_counter() - t0,
+}
 print(json.dumps(summary, indent=1), flush=True)
 (OUT / "summary.json").write_text(json.dumps(summary, indent=1))
-np.savez(OUT / "top_confidence.npz", vert=vert, root=P[:, 0], top_k=top_k, top_mm=top_mm, is_lab=lab[np.maximum(top_c, 0)] & has,
-         conf=conf, terms=T, gm_behind=gm_behind, fl_behind=fl_behind, root_cls=root_cls, term_names=np.array(names), rank=rank, first=first)
+np.savez(
+    OUT / "top_confidence.npz",
+    vert=vert,
+    root=P[:, 0],
+    top_k=top_k,
+    top_mm=top_mm,
+    is_lab=lab[np.maximum(top_c, 0)] & has,
+    conf=conf,
+    terms=T,
+    gm_behind=gm_behind,
+    fl_behind=fl_behind,
+    root_cls=root_cls,
+    term_names=np.array(names),
+    rank=rank,
+    first=first,
+)
 print("done", time.perf_counter() - t0, flush=True)

@@ -42,7 +42,14 @@ from matplotlib.colors import ListedColormap
 from scipy import ndimage as ndi
 
 from baillarger import phantoms
-from onepass_lib import contact_points, contacts, open_thickness, pure_voronoi, run, setup
+from onepass_lib import (
+    contact_points,
+    contacts,
+    open_thickness,
+    pure_voronoi,
+    run,
+    setup,
+)
 
 FIG = Path(sys.argv[1])
 WORK = Path(sys.argv[2])
@@ -51,7 +58,9 @@ CV = 0.1
 BLUE, ORANGE, AQUA, RED = "#2a78d6", "#eb6834", "#1baf7a", "#e34948"
 
 
-def wedge_distance(x: np.ndarray, z: np.ndarray, cx: float, zo: float, alpha: float) -> np.ndarray:
+def wedge_distance(
+    x: np.ndarray, z: np.ndarray, cx: float, zo: float, alpha: float
+) -> np.ndarray:
     """Distance in (x, z) from the upward wedge with apex (cx, zo), half-angle alpha."""
     px, pz = x - cx, z - zo
     inside = (pz >= 0) & (np.abs(px) <= pz * np.tan(alpha))
@@ -76,8 +85,16 @@ def u_slab(R: float, t: float = 16.0) -> dict:
     fluid = ~wm & ~cortex
     hmax = (t - R) / np.sin(alpha) if R < t else 0.0
     return dict(
-        name=f"uslab_R{int(R)}", wm=wm, cortex=cortex, fluid=fluid, cx=cx, zo=zo,
-        zmax=zo + hmax, R=R, t=t, y0=ny // 2,
+        name=f"uslab_R{int(R)}",
+        wm=wm,
+        cortex=cortex,
+        fluid=fluid,
+        cx=cx,
+        zo=zo,
+        zmax=zo + hmax,
+        R=R,
+        t=t,
+        y0=ny // 2,
     )
 
 
@@ -92,8 +109,14 @@ def from_phantom(name: str) -> dict:
     nx = rim.shape[0]
     region = e["patch_mask"].any(0)  # (y, z) lines through the contact
     return dict(
-        name=name, wm=wm, cortex=cortex, fluid=fluid, known=known, region=region,
-        side_split=nx / 2, y0=20,
+        name=name,
+        wm=wm,
+        cortex=cortex,
+        fluid=fluid,
+        known=known,
+        region=region,
+        side_split=nx / 2,
+        y0=20,
     )
 
 
@@ -115,8 +138,16 @@ def omega() -> dict:
     zneck = zc + np.sqrt(rc**2 - 15.0**2)
     region = np.broadcast_to(((zz > zneck + 1) & (zz < ztop))[None, :], (ny, nz))
     return dict(
-        name="omega", wm=wm, cortex=cortex, fluid=fluid, known=cx - 3.5,
-        region=region, side_split=cx, y0=ny // 2, tl=tl, tr=tr,
+        name="omega",
+        wm=wm,
+        cortex=cortex,
+        fluid=fluid,
+        known=cx - 3.5,
+        region=region,
+        side_split=cx,
+        y0=ny // 2,
+        tl=tl,
+        tr=tr,
     )
 
 
@@ -126,8 +157,10 @@ def accuracy(s, f, keep) -> dict:
     ra = np.abs(f.arrival[keep] - ex) / ex
     rl = np.abs(f.length[keep] - ex) / ex
     return dict(
-        arrival_median=float(np.median(ra)), arrival_p95=float(np.percentile(ra, 95)),
-        length_median=float(np.median(rl)), length_p95=float(np.percentile(rl, 95)),
+        arrival_median=float(np.median(ra)),
+        arrival_p95=float(np.percentile(ra, 95)),
+        length_median=float(np.median(rl)),
+        length_p95=float(np.percentile(rl, 95)),
     )
 
 
@@ -149,8 +182,11 @@ def score_lines(pts, ax, region, known) -> dict:
         return dict(lines=nlines, found=0)
     q1, q3 = np.percentile(ev, [25, 75])
     return dict(
-        lines=nlines, found=int(ev.size), median=float(np.median(ev)),
-        iqr=float(q3 - q1), median_abs=float(np.median(np.abs(ev))),
+        lines=nlines,
+        found=int(ev.size),
+        median=float(np.median(ev)),
+        iqr=float(q3 - q1),
+        median_abs=float(np.median(np.abs(ev))),
         max_abs=float(np.max(np.abs(ev))),
     )
 
@@ -161,14 +197,20 @@ def pure_lines(plab, region, known) -> dict:
     errs = []
     for y, z in zip(*np.nonzero(region), strict=True):
         line = plab[:, y, z]
-        ch = np.flatnonzero((line[:-1] != line[1:]) & (line[:-1] >= 0) & (line[1:] >= 0)) + 0.5
+        ch = (
+            np.flatnonzero((line[:-1] != line[1:]) & (line[:-1] >= 0) & (line[1:] >= 0))
+            + 0.5
+        )
         if ch.size:
             errs.append(ch[np.argmin(np.abs(ch - known))] - known)
     ev = np.array(errs)
     if ev.size == 0:
         return dict(found=0)
-    return dict(found=int(ev.size), median=float(np.median(ev)),
-                median_abs=float(np.median(np.abs(ev))))
+    return dict(
+        found=int(ev.size),
+        median=float(np.median(ev)),
+        median_abs=float(np.median(np.abs(ev))),
+    )
 
 
 def main() -> None:
@@ -184,7 +226,11 @@ def main() -> None:
         per[s.seeds] = np.arange(s.seeds.sum())
         res["accuracy"] = {
             name: accuracy(s, run(s, ratio=RATIO, labels=lab), keep)
-            for name, lab in (("one label", one), ("patches", s.patch), ("per voxel", per))
+            for name, lab in (
+                ("one label", one),
+                ("patches", s.patch),
+                ("per voxel", per),
+            )
         }
         mu_open, has = open_thickness(s, cs["fluid"], RATIO)
         mu_col, _ = open_thickness(s, cs["fluid"], RATIO, along=True)
@@ -219,12 +265,18 @@ def main() -> None:
             c = contacts(s, f, mu, sig)
             pts = contact_points(c, s.cortex.shape)
             mua, mub = mu[c.a], mu[c.b]
-            r: dict = dict(pairs=int(c.p.size), exact_frac=float(np.mean(c.exact)) if c.p.size else None)
+            r: dict = dict(
+                pairs=int(c.p.size),
+                exact_frac=float(np.mean(c.exact)) if c.p.size else None,
+            )
             if c.p.size:
                 r["arrival_over_mu_all"] = [
-                    float(np.median(c.da / mua)), float(np.median(c.db / mub)),
+                    float(np.median(c.da / mua)),
+                    float(np.median(c.db / mub)),
                 ]
-                r["sep_median"] = float(np.median(np.where(np.isinf(c.sep), 999, c.sep)))
+                r["sep_median"] = float(
+                    np.median(np.where(np.isinf(c.sep), 999, c.sep))
+                )
             # the pure weighted Voronoi partition (no crystal growth) as a check
             plab, _ = pure_voronoi(s, mu, sig, RATIO)
             dom = s.domain & (f.label >= 0)
@@ -233,24 +285,39 @@ def main() -> None:
                 r["score"] = score_lines(pts, c.axis, cs["region"], cs["known"])
                 k = c.axis == 0
                 yz = np.round(pts[:, 1:]).astype(int)
-                inr = k & cs["region"][yz[:, 0], yz[:, 1]] & (np.abs(pts[:, 0] - cs["known"]) < 6)
+                inr = (
+                    k
+                    & cs["region"][yz[:, 0], yz[:, 1]]
+                    & (np.abs(pts[:, 0] - cs["known"]) < 6)
+                )
                 if inr.any():
                     r["at_contact"] = dict(
-                        mu_a=float(np.median(mua[inr])), mu_b=float(np.median(mub[inr])),
-                        da=float(np.median(c.da[inr])), db=float(np.median(c.db[inr])),
-                        sep=float(np.median(np.where(np.isinf(c.sep[inr]), 999, c.sep[inr]))),
+                        mu_a=float(np.median(mua[inr])),
+                        mu_b=float(np.median(mub[inr])),
+                        da=float(np.median(c.da[inr])),
+                        db=float(np.median(c.db[inr])),
+                        sep=float(
+                            np.median(np.where(np.isinf(c.sep[inr]), 999, c.sep[inr]))
+                        ),
                     )
                 r["pure_score"] = pure_lines(plab, cs["region"], cs["known"])
             else:
                 if c.p.size:
                     k = c.axis == 0
-                    r["x_err_median"] = float(np.median(pts[k, 0] - cs["cx"])) if k.any() else None
+                    r["x_err_median"] = (
+                        float(np.median(pts[k, 0] - cs["cx"])) if k.any() else None
+                    )
                     r["z_range"] = [float(pts[:, 2].min()), float(pts[:, 2].max())]
                 r["z_expected"] = [cs["zo"], cs["zmax"]] if cs["R"] < cs["t"] else None
             # display: d / mu in own front, on the slice y0
             d = mu[np.maximum(f.label, 0)] + sig[np.maximum(f.label, 0)] * f.arrival
-            runs[wname] = dict(d_over_mu=np.where(cs["cortex"], d / mu[np.maximum(f.label, 0)], np.nan),
-                               pts=pts, c=c)
+            runs[wname] = dict(
+                d_over_mu=np.where(
+                    cs["cortex"], d / mu[np.maximum(f.label, 0)], np.nan
+                ),
+                pts=pts,
+                c=c,
+            )
             res[wname] = r
         results[cs["name"]] = res
         figure(cs, s, runs)
@@ -261,7 +328,9 @@ def main() -> None:
 def figure(cs, s, runs) -> None:
     y0 = cs["y0"]
     names = list(runs)
-    fig, axs = plt.subplots(2, len(names), figsize=(4.4 * len(names), 8.6), squeeze=False)
+    fig, axs = plt.subplots(
+        2, len(names), figsize=(4.4 * len(names), 8.6), squeeze=False
+    )
     gray = ListedColormap(["#ffffff", "#bdbcb6"])
     # the zoom: round the known contact, or the focal sheet, or the whole slice
     if "known" in cs:
@@ -276,29 +345,63 @@ def figure(cs, s, runs) -> None:
         for ax, wname in zip(axs[row], names):
             rr = runs[wname]
             ax.imshow(cs["wm"][:, y0, :].T, origin="lower", cmap=gray, vmin=0, vmax=1)
-            im = ax.imshow(rr["d_over_mu"][:, y0, :].T, origin="lower", cmap="Blues", vmin=0, vmax=1.4)
+            im = ax.imshow(
+                rr["d_over_mu"][:, y0, :].T,
+                origin="lower",
+                cmap="Blues",
+                vmin=0,
+                vmax=1.4,
+            )
             if "known" in cs:
                 zz = np.nonzero(cs["region"][y0])[0]
                 if zz.size:
-                    ax.plot([cs["known"]] * 2, [zz.min(), zz.max()], "--", color=RED, lw=1.0, zorder=2,
-                            label="known contact")
+                    ax.plot(
+                        [cs["known"]] * 2,
+                        [zz.min(), zz.max()],
+                        "--",
+                        color=RED,
+                        lw=1.0,
+                        zorder=2,
+                        label="known contact",
+                    )
             elif cs["R"] < cs["t"]:
-                ax.plot([cs["cx"]] * 2, [cs["zo"], cs["zmax"]], "--", color=RED, lw=1.0, zorder=2,
-                        label="focal sheet (fold)")
+                ax.plot(
+                    [cs["cx"]] * 2,
+                    [cs["zo"], cs["zmax"]],
+                    "--",
+                    color=RED,
+                    lw=1.0,
+                    zorder=2,
+                    label="focal sheet (fold)",
+                )
             pts = rr["pts"]
             k = np.abs(pts[:, 1] - y0) <= 0.5
-            ax.plot(pts[k, 0], pts[k, 2], "o", color=ORANGE, ms=3.5 if row else 2.5, mec="none", zorder=3,
-                    label="label boundary, roots\n> 3 mm apart on the WM")
+            ax.plot(
+                pts[k, 0],
+                pts[k, 2],
+                "o",
+                color=ORANGE,
+                ms=3.5 if row else 2.5,
+                mec="none",
+                zorder=3,
+                label="label boundary, roots\n> 3 mm apart on the WM",
+            )
             if row == 0:
                 ax.set_title(f"{cs['name']}: {wname} weights", fontsize=10)
             elif win is not None:
-                ax.set_xlim(win[0], win[1]); ax.set_ylim(win[2], win[3])
+                ax.set_xlim(win[0], win[1])
+                ax.set_ylim(win[2], win[3])
                 ax.set_title("zoom", fontsize=9)
             ax.set_xlabel("x (voxels)")
             ax.set_ylabel("z (voxels)")
     axs[0][0].legend(loc="upper left", fontsize=7, framealpha=0.9)
-    fig.colorbar(im, ax=axs.ravel().tolist(), shrink=0.6, label="arrival in own front / its mu")
-    fig.suptitle(f"{cs['name']}: one-pass weighted competition (3D; slice y = {y0}; WM grey, fluid white)", fontsize=10)
+    fig.colorbar(
+        im, ax=axs.ravel().tolist(), shrink=0.6, label="arrival in own front / its mu"
+    )
+    fig.suptitle(
+        f"{cs['name']}: one-pass weighted competition (3D; slice y = {y0}; WM grey, fluid white)",
+        fontsize=10,
+    )
     fig.savefig(FIG / f"onepass_synth_{cs['name']}.png", dpi=120, bbox_inches="tight")
     plt.close(fig)
 

@@ -22,8 +22,16 @@ from scipy import ndimage as ndi
 
 # outcome codes of trace
 RUNNING, WM, FLUID, MISSING, FACE, OTHER, TURN, LENGTH = range(8)
-OUTCOME = {RUNNING: "running", WM: "WM", FLUID: "fluid", MISSING: "missing", FACE: "face",
-           OTHER: "other", TURN: "turn", LENGTH: "length"}
+OUTCOME = {
+    RUNNING: "running",
+    WM: "WM",
+    FLUID: "fluid",
+    MISSING: "missing",
+    FACE: "face",
+    OTHER: "other",
+    TURN: "turn",
+    LENGTH: "length",
+}
 STEP_MM = 0.04  # sample spacing along paths
 
 
@@ -45,8 +53,20 @@ def _dir_at(Tc, x, ref):
     return d
 
 
-def trace(Tc, labels, dface, x0, d0, vox, step_mm=STEP_MM, lmax=8.0, face_mm=2.0, wm_after=0.0,
-          turn_deg=60.0, turn_mm=0.3):
+def trace(
+    Tc,
+    labels,
+    dface,
+    x0,
+    d0,
+    vox,
+    step_mm=STEP_MM,
+    lmax=8.0,
+    face_mm=2.0,
+    wm_after=0.0,
+    turn_deg=60.0,
+    turn_mm=0.3,
+):
     """Streamlines of the unsigned layer normal from x0 (n, 3; voxel coords), first direction
     agreeing with d0 (n, 3). labels: 0 cortex, 1 fluid, 2 WM, 3 missing, anything else other.
     Stops: WM (only after wm_after mm), fluid, missing, other, within face_mm of a box face, a
@@ -96,7 +116,9 @@ def trace(Tc, labels, dface, x0, d0, vox, step_mm=STEP_MM, lmax=8.0, face_mm=2.0
 
 
 def arclength(p, vox):
-    return np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(p, axis=0) * np.asarray(vox), axis=1))]
+    return np.r_[
+        0.0, np.cumsum(np.linalg.norm(np.diff(p, axis=0) * np.asarray(vox), axis=1))
+    ]
 
 
 def resample(p, vox, step_mm=STEP_MM):
@@ -131,16 +153,23 @@ def profile(imgs, mask, p, vox, radius=0.3):
         coords.append(xi[None] + _disc(ti, radius) / vox)
     c = np.concatenate(coords, 0)
     k = c.shape[0] // p.shape[0]
-    m = ndi.map_coordinates(mask.astype(float), c.T, order=1, mode="nearest").reshape(-1, k)
+    m = ndi.map_coordinates(mask.astype(float), c.T, order=1, mode="nearest").reshape(
+        -1, k
+    )
     msum = m.sum(1)
     out = []
     for img in imgs:
-        v = ndi.map_coordinates(img * mask, c.T, order=1, mode="nearest").reshape(-1, k).sum(1)
+        v = (
+            ndi.map_coordinates(img * mask, c.T, order=1, mode="nearest")
+            .reshape(-1, k)
+            .sum(1)
+        )
         out.append(np.where(msum > 1e-3, v / np.maximum(msum, 1e-12), np.nan))
     return np.array(out)
 
 
 # ---------------------------------------------------------------- depth maps
+
 
 def depth_map(s, t, t0, kind, a_frac=0.5):
     """Template depth r (0 at the WM, t0 at the top) of arc length s in a column of thickness t.
@@ -165,7 +194,9 @@ class Template:
     kind: str
 
 
-def build_template(profiles, thick, kind, step_mm=STEP_MM, sd_floor_frac=0.1, min_cols=5):
+def build_template(
+    profiles, thick, kind, step_mm=STEP_MM, sd_floor_frac=0.1, min_cols=5
+):
     """profiles: list of (features, m_i) along open columns from root (s = 0) to top (s = t_i),
     thick: their t_i. Each is mapped onto r in [0, t0] with depth_map, then the median and spread
     are taken per r. sd is floored at sd_floor_frac of its median (a few columns can agree by
@@ -207,8 +238,14 @@ def build_template(profiles, thick, kind, step_mm=STEP_MM, sd_floor_frac=0.1, mi
             d = pr[f, ok] - np.interp(rr[ok], r, med[f])
             for b, v in zip(np.minimum((rr[ok] / bin_mm).astype(int), nb - 1), d):
                 res[b].append(v)
-        sb = np.array([1.4826 * np.median(np.abs(np.array(v) - np.median(v))) if len(v) > 4 else np.nan
-                       for v in res])
+        sb = np.array(
+            [
+                1.4826 * np.median(np.abs(np.array(v) - np.median(v)))
+                if len(v) > 4
+                else np.nan
+                for v in res
+            ]
+        )
         ok = np.isfinite(sb)
         if not ok.any():
             return None
@@ -229,6 +266,7 @@ def expect(tpl, s, t):
 
 
 # ---------------------------------------------------------------- split estimators
+
 
 def xgrid(L, lo=0.15, hi=0.85, step_mm=0.02):
     return np.arange(lo * L, hi * L + 1e-9, step_mm)
@@ -266,7 +304,7 @@ def loglik(y, tplA, tplB, L, xs, step_mm=STEP_MM, eff_mm=0.24):
             mu, sd = expect(tpl, ss, t)
             for f in range(y.shape[0]):
                 z, sdo = _side_fit(y[f, side], mu[f], sd[f])
-                tot += -0.5 * np.sum(z ** 2) - np.sum(np.log(sdo))
+                tot += -0.5 * np.sum(z**2) - np.sum(np.log(sdo))
         out[j] = tot * step_mm / eff_mm
     return out
 
@@ -277,8 +315,8 @@ def gauss_prior(xs, L, muA, sdA, muB, sdB):
 
 def pairwise_posterior(L, muA, sdA, muB, sdB):
     """The main plan's pairwise posterior (COHIBA): x = muA + sdA^2/(sdA^2 + sdB^2)(L - muA - muB)."""
-    x = muA + sdA ** 2 / (sdA ** 2 + sdB ** 2) * (L - muA - muB)
-    return x, sdA * sdB / np.sqrt(sdA ** 2 + sdB ** 2)
+    x = muA + sdA**2 / (sdA**2 + sdB**2) * (L - muA - muB)
+    return x, sdA * sdB / np.sqrt(sdA**2 + sdB**2)
 
 
 def summarize(xs, logp):
@@ -289,7 +327,11 @@ def summarize(xs, logp):
     w = np.nan_to_num(w)
     w /= w.sum()
     m = float(np.sum(w * xs))
-    return dict(mean=m, sd=float(np.sqrt(np.sum(w * (xs - m) ** 2))), map=float(xs[np.argmax(logp)]))
+    return dict(
+        mean=m,
+        sd=float(np.sqrt(np.sum(w * (xs - m) ** 2))),
+        map=float(xs[np.argmax(logp)]),
+    )
 
 
 def symmetry(y, L, xs, step_mm=STEP_MM, nv=40):
@@ -312,7 +354,9 @@ def symmetry(y, L, xs, step_mm=STEP_MM, nv=40):
 def darkest(y0, L, lo=0.3, hi=0.7, step_mm=STEP_MM, smooth_mm=0.08):
     """E-dark: the darkest point of one feature within [lo L, hi L], lightly smoothed."""
     s = np.arange(y0.size) * step_mm
-    v = ndi.gaussian_filter1d(np.nan_to_num(y0, nan=np.nanmedian(y0)), smooth_mm / step_mm)
+    v = ndi.gaussian_filter1d(
+        np.nan_to_num(y0, nan=np.nanmedian(y0)), smooth_mm / step_mm
+    )
     win = (s >= lo * L) & (s <= hi * L)
     if not win.any():
         return np.nan
@@ -321,8 +365,21 @@ def darkest(y0, L, lo=0.3, hi=0.7, step_mm=STEP_MM, smooth_mm=0.08):
 
 # ---------------------------------------------------------------- the column volume
 
-def trace_array(Tc, labels, dface, x0, d0, vox, nmax, step_mm=STEP_MM, face_mm=2.0, wm_after=0.3,
-                turn_deg=60.0, turn_mm=0.3):
+
+def trace_array(
+    Tc,
+    labels,
+    dface,
+    x0,
+    d0,
+    vox,
+    nmax,
+    step_mm=STEP_MM,
+    face_mm=2.0,
+    wm_after=0.3,
+    turn_deg=60.0,
+    turn_mm=0.3,
+):
     """As trace, for many paths at once, stored in arrays: positions (n, nmax, 3) float32 (nan past
     each end; sample i at arc length i step_mm), the number of samples, and the outcome. A path
     still running after nmax - 1 steps ends as LENGTH."""
@@ -362,7 +419,10 @@ def trace_array(Tc, labels, dface, x0, d0, vox, nmax, step_mm=STEP_MM, face_mm=2
         old = hist[i % (lag + 1)][act]  # the direction lag steps ago
         hist[i % (lag + 1)][act] = d2
         if i > lag:
-            code[(code == RUNNING) & (np.abs((old * d2).sum(1)) < np.cos(np.radians(turn_deg)))] = TURN
+            code[
+                (code == RUNNING)
+                & (np.abs((old * d2).sum(1)) < np.cos(np.radians(turn_deg)))
+            ] = TURN
         if i == nmax - 1:
             code[code == RUNNING] = LENGTH
         out[act] = code
@@ -375,7 +435,9 @@ CONTACT, RIDGE = 8, 9
 OUTCOME.update({CONTACT: "contact", RIDGE: "ridge"})
 
 
-def ascend(u, labels, dface, x0, vox, nmax, far, step_mm=STEP_MM, face_mm=2.0, wm_after=0.3):
+def ascend(
+    u, labels, dface, x0, vox, nmax, far, step_mm=STEP_MM, face_mm=2.0, wm_after=0.3
+):
     """Columns of an arrival field: ascent of grad u from x0 (n, 3), many at once, in arrays as
     trace_array. far(i_paths, q) -> bool per path: the voxel q belongs to a root far from that path's
     own (the pass's contact). Stops: fluid, WM (after wm_after), missing, other, face, CONTACT, RIDGE
@@ -395,7 +457,9 @@ def ascend(u, labels, dface, x0, vox, nmax, far, step_mm=STEP_MM, face_mm=2.0, w
         if not act.size:
             break
         xa = x[act]
-        v = np.stack([ndi.map_coordinates(c, xa.T, order=1, mode="nearest") for c in g], 1)
+        v = np.stack(
+            [ndi.map_coordinates(c, xa.T, order=1, mode="nearest") for c in g], 1
+        )
         nv = np.linalg.norm(v * (1.0 / vox), axis=1, keepdims=True)  # direction in mm
         dirn = v / vox / np.maximum(nv, 1e-12)
         xa = xa + dirn * step_mm / vox
@@ -414,7 +478,9 @@ def ascend(u, labels, dface, x0, vox, nmax, far, step_mm=STEP_MM, face_mm=2.0, w
         code[(lab > 3) | (lab < 0)] = OTHER
         code[(code == RUNNING) & ((dface[tuple(q.T)] < face_mm) | ~inside)] = FACE
         code[(code == RUNNING) & far(act, q)] = CONTACT
-        code[(code == RUNNING) & (ui < prev[act] - 1e-6) & (i * step_mm > wm_after)] = RIDGE
+        code[(code == RUNNING) & (ui < prev[act] - 1e-6) & (i * step_mm > wm_after)] = (
+            RIDGE
+        )
         prev[act] = ui
         if i == nmax - 1:
             code[code == RUNNING] = LENGTH
@@ -428,12 +494,14 @@ def sample_traces(imgs, pos, chunk=20000):
     n, m, _ = pos.shape
     out = np.full((len(imgs), n, m), np.nan, np.float32)
     for a in range(0, n, chunk):
-        p = pos[a:a + chunk].reshape(-1, 3)
+        p = pos[a : a + chunk].reshape(-1, 3)
         ok = np.isfinite(p[:, 0])
         for k, img in enumerate(imgs):
             v = np.full(p.shape[0], np.nan, np.float32)
-            v[ok] = ndi.map_coordinates(img, p[ok].T.astype(float), order=1, mode="nearest")
-            out[k, a:a + chunk] = v.reshape(-1, m)
+            v[ok] = ndi.map_coordinates(
+                img, p[ok].T.astype(float), order=1, mode="nearest"
+            )
+            out[k, a : a + chunk] = v.reshape(-1, m)
     return out
 
 

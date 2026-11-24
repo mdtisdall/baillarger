@@ -55,37 +55,71 @@ def main() -> None:
 
     def snapshot(name: str, m: SU.Mesh, disp: np.ndarray, meta: dict) -> None:
         c = SU.contacts(m, site.vox)
-        meta = {**meta, "contact_vertices": int(c["contact"].sum()),
-                "title": f"stop energy: step {meta.get('step')}, E {meta.get('energy', 0):.1f}"}
+        meta = {
+            **meta,
+            "contact_vertices": int(c["contact"].sum()),
+            "title": f"stop energy: step {meta.get('step')}, E {meta.get('energy', 0):.1f}",
+        }
         np.savez(
             sd / f"{name}.npz",
-            V=m.V.astype(np.float32), F=m.F.astype(np.int32), disp=disp.astype(np.float32),
-            state=m.state.astype(np.int8), held=m.held.astype(np.float32), contact=c["contact"],
-            facing_mm=c["facing_mm"].astype(np.float32), meta=json.dumps(meta),
+            V=m.V.astype(np.float32),
+            F=m.F.astype(np.int32),
+            disp=disp.astype(np.float32),
+            state=m.state.astype(np.int8),
+            held=m.held.astype(np.float32),
+            contact=c["contact"],
+            facing_mm=c["facing_mm"].astype(np.float32),
+            meta=json.dumps(meta),
         )
 
     m0 = None
     if start is not None:
         z = np.load(start)
         V = np.asarray(z["V"], float)
-        m0 = SU.Mesh(V.copy(), np.asarray(z["F"], np.int64), V.copy(), np.zeros(len(V), np.int64), np.zeros(len(V)))
+        m0 = SU.Mesh(
+            V.copy(),
+            np.asarray(z["F"], np.int64),
+            V.copy(),
+            np.zeros(len(V), np.int64),
+            np.zeros(len(V)),
+        )
     t0 = time.time()
 
     def write_log(run: SV.SolveRun, total: float | None = None) -> None:
-        log = {"settings": asdict(s), "evaluator": field.setup, "start": str(start), "median_edge_mm": run.median_edge,
-               "initial": run.initial, "steps": run.log, "ended": run.ended if total is not None else "running",
-               "s": time.time() - t0 if total is None else total}
+        log = {
+            "settings": asdict(s),
+            "evaluator": field.setup,
+            "start": str(start),
+            "median_edge_mm": run.median_edge,
+            "initial": run.initial,
+            "steps": run.log,
+            "ended": run.ended if total is not None else "running",
+            "s": time.time() - t0 if total is None else total,
+        }
         if run.contacts:
             log["contact_vertices"] = int(run.contacts["contact"].sum())
         (out / "log.json").write_text(json.dumps(log, indent=1, default=float))
 
-    run = SV.SolveRun(site, s, progress=prog, snapshot=snapshot if snaps else None, start=m0, evaluator=field,
-                      on_step=write_log)
+    run = SV.SolveRun(
+        site,
+        s,
+        progress=prog,
+        snapshot=snapshot if snaps else None,
+        start=m0,
+        evaluator=field,
+        on_step=write_log,
+    )
     m = run.run()
     total = time.time() - t0
     np.savez(
-        out / "result.npz", V=m.V, F=m.F, travel=m.travel, origin=m.origin, held=m.held,
-        contact=run.contacts["contact"], facing_mm=run.contacts["facing_mm"],
+        out / "result.npz",
+        V=m.V,
+        F=m.F,
+        travel=m.travel,
+        origin=m.origin,
+        held=m.held,
+        contact=run.contacts["contact"],
+        facing_mm=run.contacts["facing_mm"],
     )
     write_log(run, total)
     print(f"done {total:.0f} s, {len(run.log)} steps, ended: {run.ended}", flush=True)

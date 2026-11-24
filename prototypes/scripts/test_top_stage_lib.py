@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
-from top_stage_lib import behind_root_lengths, gaussian_log_term, nearest_class, two_mode_log_prior
+from top_stage_lib import (
+    behind_root_lengths,
+    gaussian_log_term,
+    nearest_class,
+    two_mode_log_prior,
+)
 
 
 def _bump(n: int, at: int, height: float, width: float) -> np.ndarray:
@@ -9,7 +14,9 @@ def _bump(n: int, at: int, height: float, width: float) -> np.ndarray:
 
 
 def test_two_modes_each_scored_against_its_own_peak() -> None:
-    dens = _bump(120, 1, 10.0, 3.0) + _bump(120, 60, 2.0, 8.0)  # the near-0 mode is the taller one
+    dens = _bump(120, 1, 10.0, 3.0) + _bump(
+        120, 60, 2.0, 8.0
+    )  # the near-0 mode is the taller one
     logg, pk, trough = two_mode_log_prior(dens)
     assert pk.tolist() == [1, 60]
     assert 1 < trough < 60
@@ -39,7 +46,9 @@ def test_nearest_class_uses_the_weighted_distance() -> None:
     mid = np.array([[0.4, 0.45]])
     assert nearest_class(mid, means, np.diag([1e-6, 1.0])).tolist() == [0]
     assert nearest_class(mid, means, np.diag([1.0, 1e-6])).tolist() == [0]
-    assert nearest_class(np.array([[0.7, 0.45]]), means, np.diag([1.0, 1e-6])).tolist() == [1]
+    assert nearest_class(
+        np.array([[0.7, 0.45]]), means, np.diag([1.0, 1e-6])
+    ).tolist() == [1]
 
 
 def test_behind_root_lengths() -> None:

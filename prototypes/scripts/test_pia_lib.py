@@ -111,9 +111,27 @@ def test_multi_matches_brute_force(seed):
     cons = []
     for s_ in (0, 1):
         lo = np.round(rng.uniform(-0.12, 0.0, len(pairs)), 2)
-        cons.append((s_, s_, pairs[:, 0], pairs[:, 1], lo, lo + np.round(rng.uniform(0, 0.16, len(pairs)), 2)))
+        cons.append(
+            (
+                s_,
+                s_,
+                pairs[:, 0],
+                pairs[:, 1],
+                lo,
+                lo + np.round(rng.uniform(0, 0.16, len(pairs)), 2),
+            )
+        )
     lo = np.round(rng.uniform(-0.1, 0.1, n), 2)
-    cons.append((0, 1, np.arange(n), np.arange(n), lo, lo + np.round(rng.uniform(0.0, 0.2, n), 2)))
+    cons.append(
+        (
+            0,
+            1,
+            np.arange(n),
+            np.arange(n),
+            lo,
+            lo + np.round(rng.uniform(0.0, 0.2, n), 2),
+        )
+    )
     best, _ = brute_multi([g0, g1], costs, cons)
     if not np.isfinite(best):
         with pytest.raises(ValueError):
@@ -156,7 +174,9 @@ def test_ordering_rejects_the_decoy():
     g = 0.04 * np.arange(10, 126)  # 0.4-5.0 mm
     dark = lambda m: -np.exp(-0.5 * ((g - m) / 0.08) ** 2)  # noqa: E731
     D = (dark(1.0) + dark(2.7))[None]
-    contact_alone = g[PL.min_surface(D, np.zeros((0, 2), int), np.zeros(0, int), np.zeros(0, int))[0]]
+    contact_alone = g[
+        PL.min_surface(D, np.zeros((0, 2), int), np.zeros(0, int), np.zeros(0, int))[0]
+    ]
     assert abs(contact_alone - 2.7) < 0.05 or abs(contact_alone - 1.0) < 0.05
     pref = np.where(np.abs(g - 2.0) < 0.3, -0.05, 0.0)[None]  # a faint contact
     one = np.array([0])

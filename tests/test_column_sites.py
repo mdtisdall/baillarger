@@ -272,7 +272,7 @@ def test_the_command_writes_sites_that_the_answer_log_takes(
     (ans,) = L.answers()
     vox, lab, _ = L.voxels(ans["Id"])
     diff, _ = LE.paint(LE.empty(), labels, vox, lab)
-    path = tmp_path / "sub-T01_ses-S1_hemi-R_desc-labeledits_edits.npy"
+    path = tmp_path / "sub-T01_ses-S1_hemi-R_desc-labeledits_edits.tsv"
     write_edits(path, diff, labels.shape, img.affine)
     edited = LE.apply(labels, LE.read(path))
     assert edited[site] == 0 and int((edited != labels).sum()) == 1

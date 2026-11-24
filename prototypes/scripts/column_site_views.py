@@ -27,7 +27,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 SITES, CONF, FEAT, ECHO1, OUT = (Path(a) for a in sys.argv[1:6])
 OUT.mkdir(parents=True, exist_ok=True)
 rows, side = C.read_column_sites(SITES)
-p = C.sites_paths(Path(SITES.name.replace("_desc-columnsites_sites.tsv", "_white.surf.gii")), SITES.parent)
+p = C.sites_paths(
+    Path(SITES.name.replace("_desc-columnsites_sites.tsv", "_white.surf.gii")),
+    SITES.parent,
+)
 mv, ms = C.read_members(p["members"])
 z = np.load(CONF)
 vert, conf, top_k, rank = z["vert"], z["conf"], z["top_k"], z["rank"]
@@ -35,7 +38,11 @@ names = [str(t) for t in z["term_names"]]
 nwt = z["terms"][:, names.index(C.NON_WM_TERM)]
 cause_col = C.column_causes(top_k, z["terms"], names)
 s_of = np.empty(len(vert), np.int64)
-s_of[np.searchsorted(vert, mv) if np.all(np.diff(vert) > 0) else np.argsort(vert)[np.searchsorted(np.sort(vert), mv)]] = ms
+s_of[
+    np.searchsorted(vert, mv)
+    if np.all(np.diff(vert) > 0)
+    else np.argsort(vert)[np.searchsorted(np.sort(vert), mv)]
+] = ms
 n_sites = len(rows)
 cols = np.array([r["columns"] for r in rows])
 ext = np.array([r["extent_mm"] for r in rows])
@@ -50,7 +57,9 @@ stats = dict(
     sites=n_sites,
     columns=int(cols.sum()),
     by_kind={k: int((kind == k).sum()) for k in C.KINDS},
-    columns_per_site_p10_50_90_99_max=np.percentile(cols, [10, 50, 90, 99, 100]).tolist(),
+    columns_per_site_p10_50_90_99_max=np.percentile(
+        cols, [10, 50, 90, 99, 100]
+    ).tolist(),
     single_column_sites=int((cols == 1).sum()),
     columns_in_single_sites=int(cols[cols == 1].sum()),
     extent_mm_p10_50_90=np.round(np.percentile(ext, [10, 50, 90]), 3).tolist(),
@@ -62,14 +71,20 @@ stats = dict(
 for share in (0.01, 0.05, 0.1, 0.2):
     m = int(round(share * len(vert)))  # the front of the column queue
     front = np.argsort(rank)[:m]
-    stats[f"sites_holding_front_{int(share * 100)}pct_columns"] = int(len(np.unique(s_of[front])))
+    stats[f"sites_holding_front_{int(share * 100)}pct_columns"] = int(
+        len(np.unique(s_of[front]))
+    )
 first_top = int(np.flatnonzero(kind == "column-top")[0]) + 1
 stats["first_column_top_rank"] = first_top
 nw = nwt[cause_col == 1]
-stats["non_wm_cause_term_p10_50_90"] = np.round(np.percentile(nw, [10, 50, 90]), 3).tolist()
+stats["non_wm_cause_term_p10_50_90"] = np.round(
+    np.percentile(nw, [10, 50, 90]), 3
+).tolist()
 stats["non_wm_cause_columns_term_below_minus1"] = int((nw < -1).sum())
 for k in (1000, 10000):
-    stats[f"first_{k}_sites_by_cause"] = {c: int((dom[:k] == c).sum()) for c in C.CAUSES}
+    stats[f"first_{k}_sites_by_cause"] = {
+        c: int((dom[:k] == c).sum()) for c in C.CAUSES
+    }
 lt = {}
 for r in rows[:20000]:
     lt[r["lowest_term"]] = lt.get(r["lowest_term"], 0) + 1
@@ -81,13 +96,24 @@ fig, axs = plt.subplots(1, 3, figsize=(15, 4.2))
 ax = axs[0]
 b = np.unique(np.round(np.logspace(0, np.log10(cols.max() + 1), 40)))
 for k, c in zip(C.KINDS, ("#d62728", "#1f77b4")):
-    ax.hist(cols[kind == k], bins=b, histtype="step", lw=1.6, color=c, label=f"{k} ({(kind == k).sum():,})")
-ax.set_xscale("log"); ax.set_yscale("log")
-ax.set_xlabel("columns per site"); ax.set_ylabel("sites"); ax.legend(fontsize=8)
+    ax.hist(
+        cols[kind == k],
+        bins=b,
+        histtype="step",
+        lw=1.6,
+        color=c,
+        label=f"{k} ({(kind == k).sum():,})",
+    )
+ax.set_xscale("log")
+ax.set_yscale("log")
+ax.set_xlabel("columns per site")
+ax.set_ylabel("sites")
+ax.legend(fontsize=8)
 ax.set_title("Site sizes")
 ax = axs[1]
 ax.hist(ext, bins=50, color="#555")
-ax.set_xlabel("extent: largest root distance to the seed, mm"); ax.set_ylabel("sites")
+ax.set_xlabel("extent: largest root distance to the seed, mm")
+ax.set_ylabel("sites")
 ax.set_title(f"Site extent (radius {side['RadiusMm']} mm)")
 ax = axs[2]
 cum = np.cumsum(cols) / cols.sum()
@@ -97,8 +123,11 @@ for c, colr in zip(C.CAUSES, ("#d62728", "#9467bd", "#8c564b")):
     v = by_cause[c]
     ax.plot(x, 100 * np.cumsum(v) / max(v.sum(), 1), color=colr, label=f"{c} columns")
 ax.axvline(first_top, color="#1f77b4", ls=":", lw=1, label="first column-top site")
-ax.set_xscale("log"); ax.set_xlabel("sites reviewed, in queue order"); ax.set_ylabel("% of columns covered")
-ax.legend(fontsize=8); ax.set_title("Columns covered by the front of the site queue")
+ax.set_xscale("log")
+ax.set_xlabel("sites reviewed, in queue order")
+ax.set_ylabel("% of columns covered")
+ax.legend(fontsize=8)
+ax.set_title("Columns covered by the front of the site queue")
 ax2 = ax.twinx()
 ax2.plot(x, score, ",", color="#2ca02c", alpha=0.3)
 ax2.set_ylabel("seed confidence (green)", color="#2ca02c")
@@ -110,7 +139,14 @@ plt.close(fig)
 if len(sys.argv) > 6:
     pick = [int(a) for a in sys.argv[6:]]
 else:
-    pick = [1, 2, first_top, int(0.05 * n_sites), int(0.2 * n_sites), int(0.5 * n_sites)]
+    pick = [
+        1,
+        2,
+        first_top,
+        int(0.05 * n_sites),
+        int(0.2 * n_sites),
+        int(0.5 * n_sites),
+    ]
 want = {}
 for rk in pick:
     for i in np.flatnonzero(s_of == rk):
@@ -139,20 +175,37 @@ for rk in pick:
     lab = np.asarray(dseg.dataobj[box], np.int16)
     e1 = np.asarray(eimg.dataobj[box], np.float32)
     fig, axs = plt.subplots(1, 3, figsize=(16, 5.8))
-    for ax, ax_i, name in zip(axs, range(3), ("plane x (sagittal)", "plane y (coronal)", "plane z (axial)")):
+    for ax, ax_i, name in zip(
+        axs, range(3), ("plane x (sagittal)", "plane y (coronal)", "plane z (axial)")
+    ):
         a, b = [d for d in range(3) if d != ax_i]
         U, V = np.meshgrid(t, t, indexing="xy")
         X = np.repeat(c_mm[None, None], len(t), 0).repeat(len(t), 1)
         X = X.copy()
-        X[..., a] += U; X[..., b] += V
+        X[..., a] += U
+        X[..., b] += V
         q = (X @ inv[:3, :3].T + inv[:3, 3] - lo).reshape(-1, 3).T
         img = map_coordinates(e1, q, order=1, mode="nearest").reshape(U.shape)
         lb = map_coordinates(lab, q, order=0, mode="nearest").reshape(U.shape)
         vlo, vhi = np.percentile(img, [1, 99])
         ext_ = (t[0], t[-1], t[0], t[-1])
         ax.imshow(img, cmap="gray", vmin=vlo, vmax=vhi, origin="lower", extent=ext_)
-        ax.contour(t, t, np.isin(lb, (3, 42)).astype(float), [0.5], colors="#ffd400", linewidths=1.0)
-        ax.contour(t, t, np.isin(lb, (0, 24, 4, 5, 31, 43, 44, 63)).astype(float), [0.5], colors="#00e5ff", linewidths=1.0)
+        ax.contour(
+            t,
+            t,
+            np.isin(lb, (3, 42)).astype(float),
+            [0.5],
+            colors="#ffd400",
+            linewidths=1.0,
+        )
+        ax.contour(
+            t,
+            t,
+            np.isin(lb, (0, 24, 4, 5, 31, 43, 44, 63)).astype(float),
+            [0.5],
+            colors="#00e5ff",
+            linewidths=1.0,
+        )
         # the site's columns: roots (filled, by confidence), rays to the top (thin), tops (X)
         for i in mem:
             X_ = P[int(i)]
@@ -163,17 +216,30 @@ for rk in pick:
             alpha = 0.9 if near else 0.25
             end = k if k >= 0 else len(X_) - 1
             ax.plot(d[: end + 1, a], d[: end + 1, b], color=col, lw=0.6, alpha=alpha)
-            ax.plot(d[0, a], d[0, b], "o", ms=4, mfc=col, mec="black", mew=0.4, alpha=alpha)
+            ax.plot(
+                d[0, a], d[0, b], "o", ms=4, mfc=col, mec="black", mew=0.4, alpha=alpha
+            )
             if k >= 0:
-                ax.plot(d[k, a], d[k, b], "X", ms=6, mfc="#ff3df0", mec="black", mew=0.4, alpha=alpha)
+                ax.plot(
+                    d[k, a],
+                    d[k, b],
+                    "X",
+                    ms=6,
+                    mfc="#ff3df0",
+                    mec="black",
+                    mew=0.4,
+                    alpha=alpha,
+                )
         ax.plot(0, 0, "o", ms=10, mfc="white", mec="black")
-        ax.set_xlim(t[0], t[-1]); ax.set_ylim(t[0], t[-1])
+        ax.set_xlim(t[0], t[-1])
+        ax.set_ylim(t[0], t[-1])
         ax.set_title(name, fontsize=9)
-        ax.set_xlabel("mm"); ax.set_ylabel("mm")
+        ax.set_xlabel("mm")
+        ax.set_ylabel("mm")
     sc = "n/a" if r["score"] is None else f"{r['score']:.2f}"
     fig.suptitle(
         f"Site {rk} of {n_sites:,} ({r['kind']}): {r['columns']} columns, {r['no_top']} with no top, "
-        f"seed confidence {sc}, lowest term {r["lowest_term"] or "n/a"}, voxel ({r['i']}, {r['j']}, {r['k']})\n"
+        f"seed confidence {sc}, lowest term {r['lowest_term'] or 'n/a'}, voxel ({r['i']}, {r['j']}, {r['k']})\n"
         "echo 1; yellow: cortex label; cyan: outside medium label; white dot: seed root; "
         "red: no-top column (root, ray); orange: column with a top (root, ray to the top); magenta X: top; "
         "faint: more than 1 mm from the plane",

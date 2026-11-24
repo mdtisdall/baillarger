@@ -64,8 +64,10 @@ def cotan_matrices(v: Float, f: Int) -> tuple[sparse.csr_matrix, Float]:
         rows += [f[:, i], f[:, j], f[:, i], f[:, j]]
         cols += [f[:, j], f[:, i], f[:, i], f[:, j]]
         vals += [-w, -w, w, w]
-    K = sparse.coo_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
-                          shape=(n, n)).tocsr()
+    K = sparse.coo_matrix(
+        (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(n, n),
+    ).tocsr()
     mass = np.zeros(n)
     for k in range(3):
         np.add.at(mass, f[:, k], dbl / 6.0)
@@ -88,7 +90,9 @@ def weld(v: Float, f: Int, rel: float) -> tuple[Int, Int, int]:
     n = len(v)
     if len(pairs) == 0:
         return np.arange(n), f, 0
-    G = sparse.coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(n, n))
+    G = sparse.coo_matrix(
+        (np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(n, n)
+    )
     _, rep = connected_components(G, directed=False)
     fw = rep[f]
     keep = (fw[:, 0] != fw[:, 1]) & (fw[:, 1] != fw[:, 2]) & (fw[:, 2] != fw[:, 0])
@@ -98,8 +102,14 @@ def weld(v: Float, f: Int, rel: float) -> tuple[Int, Int, int]:
 class Prior:
     """The Matern-type prior on a mesh, factored for solves with Q."""
 
-    def __init__(self, v_mm: Float, f: Int, range_mm: float = 2.0, sd_mm: float = 0.5,
-                 weld_rel: float = 1e-3):
+    def __init__(
+        self,
+        v_mm: Float,
+        f: Int,
+        range_mm: float = 2.0,
+        sd_mm: float = 0.5,
+        weld_rel: float = 1e-3,
+    ):
         t0 = time.perf_counter()
         self.v, self.f = np.asarray(v_mm, np.float64), np.asarray(f, np.int64)
         # Vertices closer than weld_rel x the median edge are one point: a triangle with
@@ -126,8 +136,12 @@ class Prior:
         # L is symmetric positive definite: pivot on the diagonal so the symmetric
         # ordering survives (SuperLU's default partial pivoting destroys it: on a 320k
         # vertex mesh, > 10 min and > 11 GB against 2.4 s and 1.3 GB)
-        self.lu = splu(L, permc_spec="MMD_AT_PLUS_A", diag_pivot_thresh=0.0,
-                       options=dict(SymmetricMode=True))
+        self.lu = splu(
+            L,
+            permc_spec="MMD_AT_PLUS_A",
+            diag_pivot_thresh=0.0,
+            options=dict(SymmetricMode=True),
+        )
         self.seconds_factor = time.perf_counter() - t0
 
     @property
@@ -209,7 +223,9 @@ class Field:
         keys = list(self.obs)
         X = np.stack([self.cols[k] for k in keys], 1)
         A_idx = [self.obs[k] for k in keys]
-        AX = np.stack([np.sum(X[o.idx] * o.w[:, None], 0) for o in A_idx], 0)  # (k, k) = A X
+        AX = np.stack(
+            [np.sum(X[o.idx] * o.w[:, None], 0) for o in A_idx], 0
+        )  # (k, k) = A X
         S = 0.5 * (AX + AX.T) + self.sd_obs**2 * np.eye(len(keys))
         r = np.array([o.y - np.dot(self.base[o.idx], o.w) for o in A_idx])
         return X @ np.linalg.solve(S, r)
@@ -226,8 +242,11 @@ def barycentric(P: Float, tri: Float) -> Float:
     onto the triangle's plane."""
     a, b, c = tri[:, 0], tri[:, 1], tri[:, 2]
     v0, v1, v2 = b - a, c - a, P - a
-    d00 = np.sum(v0 * v0, 1); d01 = np.sum(v0 * v1, 1); d11 = np.sum(v1 * v1, 1)
-    d20 = np.sum(v2 * v0, 1); d21 = np.sum(v2 * v1, 1)
+    d00 = np.sum(v0 * v0, 1)
+    d01 = np.sum(v0 * v1, 1)
+    d11 = np.sum(v1 * v1, 1)
+    d20 = np.sum(v2 * v0, 1)
+    d21 = np.sum(v2 * v1, 1)
     den = np.maximum(d00 * d11 - d01 * d01, 1e-300)
     w1 = (d11 * d20 - d01 * d21) / den
     w2 = (d00 * d21 - d01 * d20) / den
@@ -290,10 +309,17 @@ class Locator:
             ok = c >= 0
             cc = np.where(ok, c, 0)
             tri = self.f[cc]
-            q, bary = M._closest_on_tri(X, self.v[tri[:, 0]], self.v[tri[:, 1]], self.v[tri[:, 2]])
+            q, bary = M._closest_on_tri(
+                X, self.v[tri[:, 0]], self.v[tri[:, 1]], self.v[tri[:, 2]]
+            )
             d = np.where(ok, np.sum((q - X) ** 2, 1), np.inf)
             better = d < best
-            best[better], P[better], F[better], B[better] = d[better], q[better], cc[better], bary[better]
+            best[better], P[better], F[better], B[better] = (
+                d[better],
+                q[better],
+                cc[better],
+                bary[better],
+            )
         return P, F, B
 
 
@@ -305,14 +331,20 @@ class Edit:
     kind: str  # "top", "contact", "free"
     mm: list  # world position
     vox: list  # crop voxel position (0-based)
-    roots: list = field(default_factory=list)  # root positions (voxels) at the time of the edit
+    roots: list = field(
+        default_factory=list
+    )  # root positions (voxels) at the time of the edit
     s_mm: list = field(default_factory=list)  # arc lengths at the time of the edit
     miss_mm: list = field(default_factory=list)
     fallback: bool = False  # a top edit that fell back to a free edit
     time: float = 0.0
-    obs: list = field(default_factory=list)  # (field name, observation key) pairs, not saved
+    obs: list = field(
+        default_factory=list
+    )  # (field name, observation key) pairs, not saved
     vertex: int = -1  # a drag's base vertex
-    pushes: list = field(default_factory=list)  # a drag's pushes: [vertex, obs pairs, target voxels]
+    pushes: list = field(
+        default_factory=list
+    )  # a drag's pushes: [vertex, obs pairs, target voxels]
 
 
 class Session:
@@ -320,19 +352,38 @@ class Session:
     Geometry g; the traced Columns cols of every vertex; the base thickness t_base
     (voxels, per vertex); affine: voxel -> world mm."""
 
-    def __init__(self, v, f, n, g, cols, t_base, affine=None, range_mm=2.0, sd_mm=0.5,
-                 sd_edit_mm=0.03, miss_max_vox=1.0, contact_min_sep_mm=1.0):
+    def __init__(
+        self,
+        v,
+        f,
+        n,
+        g,
+        cols,
+        t_base,
+        affine=None,
+        range_mm=2.0,
+        sd_mm=0.5,
+        sd_edit_mm=0.03,
+        miss_max_vox=1.0,
+        contact_min_sep_mm=1.0,
+    ):
         import pial_height as P
 
         self.P = P
         self.h = P.H_MM
-        self.v, self.f, self.n = np.asarray(v, np.float64), np.asarray(f, np.int64), np.asarray(n, np.float64)
+        self.v, self.f, self.n = (
+            np.asarray(v, np.float64),
+            np.asarray(f, np.int64),
+            np.asarray(n, np.float64),
+        )
         self.g, self.cols = g, cols
         self.affine = np.eye(4) if affine is None else np.asarray(affine, np.float64)
         self.prior = Prior(self.v * self.h, self.f, range_mm, sd_mm)
         self.t_base = np.asarray(t_base, np.float64)  # voxels
         self.thick = Field(self.prior, self.t_base * self.h, sd_edit_mm)
-        self.free = [Field(self.prior, np.zeros(len(self.v)), sd_edit_mm) for _ in range(3)]
+        self.free = [
+            Field(self.prior, np.zeros(len(self.v)), sd_edit_mm) for _ in range(3)
+        ]
         self.miss_max = miss_max_vox
         self.contact_min_sep = contact_min_sep_mm / self.h
         self.edits: list[Edit] = []
@@ -406,8 +457,15 @@ class Session:
         R, s = self.P.click_column(self.g, x)
         idx, w = self._root_obs(R[0])
         miss, s_line = polyline_nearest(self._column_of(idx, w), x)
-        e = Edit(kind, self.to_mm(x).tolist(), x.tolist(), [R[0].tolist()], [float(s[0]) * self.h],
-                 [miss * self.h], time=time.time())
+        e = Edit(
+            kind,
+            self.to_mm(x).tolist(),
+            x.tolist(),
+            [R[0].tolist()],
+            [float(s[0]) * self.h],
+            [miss * self.h],
+            time=time.time(),
+        )
         if not np.isfinite(s[0]) or miss > self.miss_max:
             e.fallback = True
             if defer_free:
@@ -481,7 +539,9 @@ class Session:
 
     def add_free(self, x_vox) -> Edit:
         x = self._finite(x_vox)
-        return self._free(x, Edit("free", self.to_mm(x).tolist(), x.tolist(), time=time.time()))
+        return self._free(
+            x, Edit("free", self.to_mm(x).tolist(), x.tolist(), time=time.time())
+        )
 
     def _free(self, x, e: Edit, append: bool = True) -> Edit:
         """Observe the free displacement at the point nearest x of the pial surface
@@ -533,15 +593,21 @@ class Session:
 
     # -- persistence
     def save(self, path) -> None:
-        out = [{k: val for k, val in asdict(e).items() if k != "obs"} for e in self.edits]
-        Path(path).write_text(json.dumps(dict(range_mm=self.prior.range_mm, edits=out), indent=1))
+        out = [
+            {k: val for k, val in asdict(e).items() if k != "obs"} for e in self.edits
+        ]
+        Path(path).write_text(
+            json.dumps(dict(range_mm=self.prior.range_mm, edits=out), indent=1)
+        )
 
     def replay(self, path) -> list[Edit]:
         """Apply the edits of a file to this session, from their world positions."""
         d = json.loads(Path(path).read_text())
         if abs(d.get("range_mm", self.prior.range_mm) - self.prior.range_mm) > 1e-12:
             self.set_range(d["range_mm"])
-        return self.rebuild([(e["kind"], self.to_vox(np.asarray(e["mm"]))) for e in d["edits"]])
+        return self.rebuild(
+            [(e["kind"], self.to_vox(np.asarray(e["mm"]))) for e in d["edits"]]
+        )
 
 
 # ------------------------------------------------------------------ touching: one set of definitions
@@ -570,7 +636,9 @@ def face_normals(pos: Float, f: Int, sign: Float | None = None) -> Float:
 
 
 def vertex_normals_from(pos: Float, f: Int, fn: Float) -> Float:
-    area = 0.5 * np.linalg.norm(np.cross(pos[f[:, 1]] - pos[f[:, 0]], pos[f[:, 2]] - pos[f[:, 0]]), axis=1)
+    area = 0.5 * np.linalg.norm(
+        np.cross(pos[f[:, 1]] - pos[f[:, 0]], pos[f[:, 2]] - pos[f[:, 0]]), axis=1
+    )
     vn = np.zeros_like(pos)
     for k in range(3):
         np.add.at(vn, f[:, k], fn * area[:, None])
@@ -581,8 +649,18 @@ def longest_edge(pos: Float, f: Int) -> float:
     return float(np.linalg.norm(pos[f[:, [1, 2, 0]]] - pos[f], axis=-1).max())
 
 
-def nearest_facing(pos: Float, f: Int, fn: Float, table: Int, X: Float, NX: Float, dist: float,
-                   tree=None, chunk: int = 4000, e: float | None = None) -> tuple[Float, Int, Float, Float]:
+def nearest_facing(
+    pos: Float,
+    f: Int,
+    fn: Float,
+    table: Int,
+    X: Float,
+    NX: Float,
+    dist: float,
+    tree=None,
+    chunk: int = 4000,
+    e: float | None = None,
+) -> tuple[Float, Int, Float, Float]:
     """nearest_facing_chunk over the points in chunks (bounded memory; the same result).
     tree, e: the KD tree of pos and the longest edge, when already known."""
     from scipy.spatial import cKDTree
@@ -590,14 +668,20 @@ def nearest_facing(pos: Float, f: Int, fn: Float, table: Int, X: Float, NX: Floa
     X, NX = np.atleast_2d(X), np.atleast_2d(NX)
     tree = cKDTree(pos) if tree is None else tree
     e = longest_edge(pos, f) if e is None else e
-    parts = [_nearest_facing_chunk(pos, f, fn, table, X[i:i + chunk], NX[i:i + chunk], dist, tree, e)
-             for i in range(0, len(X), chunk)]
+    parts = [
+        _nearest_facing_chunk(
+            pos, f, fn, table, X[i : i + chunk], NX[i : i + chunk], dist, tree, e
+        )
+        for i in range(0, len(X), chunk)
+    ]
     if not parts:
         return np.zeros(0), np.zeros(0, np.int64), np.zeros((0, 3)), np.zeros((0, 3))
     return tuple(np.concatenate([p[k] for p in parts]) for k in range(4))  # type: ignore[return-value]
 
 
-def _nearest_facing_chunk(pos, f, fn, table, X, NX, dist, tree, e) -> tuple[Float, Int, Float, Float]:
+def _nearest_facing_chunk(
+    pos, f, fn, table, X, NX, dist, tree, e
+) -> tuple[Float, Int, Float, Float]:
     """For points X (n, 3) with normals NX: the nearest point of a facing triangle of
     (pos, f) within dist (surface distance). Returns (distance, inf where none; face, -1;
     closest point; barycentric weights). table: the vertex-to-face table of f; e: its
@@ -620,7 +704,9 @@ def _nearest_facing_chunk(pos, f, fn, table, X, NX, dist, tree, e) -> tuple[Floa
     fc = cand.ravel()
     ok = fc >= 0
     qi, fc = qi[ok], fc[ok]
-    keep = np.sum(fn[fc] * NX[qi], 1) < FACING  # facing first: far fewer pairs to de-duplicate
+    keep = (
+        np.sum(fn[fc] * NX[qi], 1) < FACING
+    )  # facing first: far fewer pairs to de-duplicate
     qi, fc = qi[keep], fc[keep]
     key = np.unique(qi * len(f) + fc)
     qi, fc = key // len(f), key % len(f)
@@ -633,12 +719,26 @@ def _nearest_facing_chunk(pos, f, fn, table, X, NX, dist, tree, e) -> tuple[Floa
     first = order[np.r_[True, qi[order][1:] != qi[order][:-1]]]
     w = d[first] <= dist
     sel = first[w]
-    out_d[qi[sel]], out_f[qi[sel]], out_p[qi[sel]], out_b[qi[sel]] = d[sel], fc[sel], q[sel], bary[sel]
+    out_d[qi[sel]], out_f[qi[sel]], out_p[qi[sel]], out_b[qi[sel]] = (
+        d[sel],
+        fc[sel],
+        q[sel],
+        bary[sel],
+    )
     return out_d, out_f, out_p, out_b
 
 
-def touching_vertices(pos: Float, f: Int, table: Int, sign: Float, delta: float, white: "Locator | None",
-                      verts: Int | None = None, tree=None, e: float | None = None) -> npt.NDArray[np.bool_]:
+def touching_vertices(
+    pos: Float,
+    f: Int,
+    table: Int,
+    sign: Float,
+    delta: float,
+    white: "Locator | None",
+    verts: Int | None = None,
+    tree=None,
+    e: float | None = None,
+) -> npt.NDArray[np.bool_]:
     """Which vertices (all, or `verts` only: the rest False) touch (see above): within
     delta of a facing pial triangle or of the white surface. tree, e: the KD tree of pos
     and the longest edge, when already known."""
@@ -652,15 +752,23 @@ def touching_vertices(pos: Float, f: Int, table: Int, sign: Float, delta: float,
     # only vertices with a facing vertex nearby can touch a facing triangle; test those
     if verts is None:
         pairs = tree.query_pairs(delta + e, output_type="ndarray")
-        cand = np.unique(pairs[np.sum(vn[pairs[:, 0]] * vn[pairs[:, 1]], 1) < 0].ravel()) if len(pairs) else np.zeros(0, np.int64)
+        cand = (
+            np.unique(pairs[np.sum(vn[pairs[:, 0]] * vn[pairs[:, 1]], 1) < 0].ravel())
+            if len(pairs)
+            else np.zeros(0, np.int64)
+        )
     else:
         verts = np.asarray(verts, np.int64)
-        nb = cKDTree(pos[verts]).sparse_distance_matrix(tree, delta + e, output_type="ndarray")
+        nb = cKDTree(pos[verts]).sparse_distance_matrix(
+            tree, delta + e, output_type="ndarray"
+        )
         qi, vj = nb["i"].astype(np.int64), nb["j"].astype(np.int64)
         opp = np.sum(vn[verts[qi]] * vn[vj], 1) < 0
         cand = verts[np.unique(qi[opp])]
     if cand.size:
-        d, _, _, _ = nearest_facing(pos, f, fn, table, pos[cand], vn[cand], delta, tree, e=e)
+        d, _, _, _ = nearest_facing(
+            pos, f, fn, table, pos[cand], vn[cand], delta, tree, e=e
+        )
         touch[cand[np.isfinite(d)]] = True
     if white is not None:
         q = np.arange(len(pos)) if verts is None else verts
@@ -674,8 +782,15 @@ def touching_vertices(pos: Float, f: Int, table: Int, sign: Float, delta: float,
     return touch
 
 
-def touching_faces(pos: Float, f: Int, table: Int, sign: Float, delta: float, white: "Locator | None",
-                   cross: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]:
+def touching_faces(
+    pos: Float,
+    f: Int,
+    table: Int,
+    sign: Float,
+    delta: float,
+    white: "Locator | None",
+    cross: npt.NDArray[np.bool_],
+) -> npt.NDArray[np.bool_]:
     """Triangles of (pos, f) that touch: a vertex touching (touching_vertices), and the
     triangle itself not crossing."""
     return touching_vertices(pos, f, table, sign, delta, white)[f].any(1) & ~cross
@@ -694,15 +809,30 @@ class SurfaceSession:
     carved contact move to the click. v, n: voxels and outward unit normals; affine:
     voxel -> world mm."""
 
-    def __init__(self, v, f, n, affine=None, range_mm=2.0, sd_mm=0.5, sd_edit_mm=0.03,
-                 contact_radius_mm=1.0):
+    def __init__(
+        self,
+        v,
+        f,
+        n,
+        affine=None,
+        range_mm=2.0,
+        sd_mm=0.5,
+        sd_edit_mm=0.03,
+        contact_radius_mm=1.0,
+    ):
         import pial_height as P
 
         self.P, self.h = P, P.H_MM
-        self.v, self.f, self.n = np.asarray(v, np.float64), np.asarray(f, np.int64), np.asarray(n, np.float64)
+        self.v, self.f, self.n = (
+            np.asarray(v, np.float64),
+            np.asarray(f, np.int64),
+            np.asarray(n, np.float64),
+        )
         self.affine = np.eye(4) if affine is None else np.asarray(affine, np.float64)
         self.prior = Prior(self.v * self.h, self.f, range_mm, sd_mm)
-        self.free = [Field(self.prior, np.zeros(len(self.v)), sd_edit_mm) for _ in range(3)]
+        self.free = [
+            Field(self.prior, np.zeros(len(self.v)), sd_edit_mm) for _ in range(3)
+        ]
         self.loc = Locator(self.v, self.f)
         # each triangle's normal turned to the base surface's outward side, once
         raw = face_normals(self.v, self.f)
@@ -731,7 +861,11 @@ class SurfaceSession:
     def _observe(self, e: Edit, x, idx, w, P0) -> None:
         """The three components share the prior and the row, so one column serves all."""
         target = (x - P0) * self.h
-        col = self.prior.cov_times(self.free[0].row(Obs(np.asarray(idx, np.int64), np.asarray(w, np.float64), 0.0)))
+        col = self.prior.cov_times(
+            self.free[0].row(
+                Obs(np.asarray(idx, np.int64), np.asarray(w, np.float64), 0.0)
+            )
+        )
         for a, fd in enumerate(self.free):
             e.obs.append((f"free{a}", fd.add(idx, w, float(target[a]), col)))
         e.miss_mm.append(float(np.linalg.norm(x - P0)) * self.h)
@@ -739,14 +873,26 @@ class SurfaceSession:
     def _facing(self, x, n1):
         """A contact point's other sheet: the nearest facing triangle within the contact
         radius (nearest_facing, the touching definitions' facing test and distance)."""
-        d, fi, q, b = nearest_facing(self.v, self.f, self.fn, self.loc.table, x[None], n1[None],
-                                     self.contact_radius, self.loc.tree)
+        d, fi, q, b = nearest_facing(
+            self.v,
+            self.f,
+            self.fn,
+            self.loc.table,
+            x[None],
+            n1[None],
+            self.contact_radius,
+            self.loc.tree,
+        )
         if not np.isfinite(d[0]):
             return None
         return q[0], fi[0], b[0]
 
-    def touching(self, pos, delta_vox: float, white: "Locator | None", cross) -> npt.NDArray[np.bool_]:
-        return touching_faces(pos, self.f, self.loc.table, self.sign, delta_vox, white, cross)
+    def touching(
+        self, pos, delta_vox: float, white: "Locator | None", cross
+    ) -> npt.NDArray[np.bool_]:
+        return touching_faces(
+            pos, self.f, self.loc.table, self.sign, delta_vox, white, cross
+        )
 
     def rebuild(self, points) -> list[Edit]:
         """All edits from scratch, from a list of (kind, x_vox) or, for a drag,
@@ -770,10 +916,18 @@ class SurfaceSession:
                 r = self.drag_vertex(p[2])
                 e.vertex = r
                 if last_drag[r] == i:
-                    self._observe(e, x, np.array([r, r, r]), np.array([1.0, 0.0, 0.0]), self.v[r])
-                    e.miss_mm = [float(np.linalg.norm(self.v[r] - np.asarray(p[2]))) * self.h]
+                    self._observe(
+                        e, x, np.array([r, r, r]), np.array([1.0, 0.0, 0.0]), self.v[r]
+                    )
+                    e.miss_mm = [
+                        float(np.linalg.norm(self.v[r] - np.asarray(p[2]))) * self.h
+                    ]
                     if len(p) > 3 and p[3]:
-                        self.add_pushes(e, [self._finite(t) for t, _ in p[3]], [self.drag_vertex(fr) for _, fr in p[3]])
+                        self.add_pushes(
+                            e,
+                            [self._finite(t) for t, _ in p[3]],
+                            [self.drag_vertex(fr) for _, fr in p[3]],
+                        )
             else:
                 P0, F, B = self.loc.closest(x[None])
                 self._observe(e, x, self.f[F[0]], B[0], P0[0])
@@ -793,7 +947,9 @@ class SurfaceSession:
         k0 = names["free0"]
         idx = self.free[0].obs[k0].idx[0]
         for a in range(3):
-            self.free[a].obs[names[f"free{a}"]].y = float((x[a] - self.v[idx][a]) * self.h)
+            self.free[a].obs[names[f"free{a}"]].y = float(
+                (x[a] - self.v[idx][a]) * self.h
+            )
         e.vox = x.tolist()
         e.mm = self.to_mm(x).tolist()
 
@@ -826,8 +982,18 @@ class SurfaceSession:
         cols = self.prior.cov_times(A)
         for j, (q, x) in enumerate(zip(verts, targets_vox, strict=True)):
             d = (np.asarray(x) - self.v[q]) * self.h
-            obs = [(f"free{a}", fd.add(np.array([q, q, q]), np.array([1.0, 0.0, 0.0]), float(d[a]), cols[:, j]))
-                   for a, fd in enumerate(self.free)]
+            obs = [
+                (
+                    f"free{a}",
+                    fd.add(
+                        np.array([q, q, q]),
+                        np.array([1.0, 0.0, 0.0]),
+                        float(d[a]),
+                        cols[:, j],
+                    ),
+                )
+                for a, fd in enumerate(self.free)
+            ]
             e.pushes.append([int(q), obs, np.asarray(x, np.float64).copy()])
 
     def set_push_target(self, e: Edit, j: int, x_vox) -> None:

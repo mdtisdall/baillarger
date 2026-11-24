@@ -43,7 +43,9 @@ def main():
         keep = (Z["cls"] == 0) & (Z["tracer"] == 0) & ~Z["near_face"] & (Z["ns"] > 20)
         idx = np.flatnonzero(keep)
         L = (Z["ns"][idx] - 1) * 0.04
-        res["open_thickness_p10_50_90"] = np.percentile(L, [10, 50, 90]).round(3).tolist()
+        res["open_thickness_p10_50_90"] = (
+            np.percentile(L, [10, 50, 90]).round(3).tolist()
+        )
         pos = Z["pos"][idx]
         for e in (1, 2):
             lg = np.log(np.maximum(B["p"].echoes[..., e].astype(float), 1.0))
@@ -54,7 +56,7 @@ def main():
             prof = np.full((idx.size, NBIN), np.nan)
             edges = np.linspace(0, 1, NBIN + 1)
             for a, t in enumerate(idx):
-                p = pos[a, :Z["ns"][t]].astype(float)
+                p = pos[a, : Z["ns"][t]].astype(float)
                 vals = ndi.map_coordinates(det, p.T, order=1, mode="nearest")
                 rel = np.arange(p.shape[0]) / (p.shape[0] - 1)
                 b = np.minimum((rel * NBIN).astype(int), NBIN - 1)
@@ -65,14 +67,33 @@ def main():
             d_ctx = ndi.distance_transform_edt(~ctx)
             wm_lvl = float(np.median(dall[wm & (d_ctx >= 2) & (d_ctx <= 3)]))
             fl_lvl = float(np.median(dall[(rim == 1) & (d_ctx >= 2) & (d_ctx <= 3)]))
-            res[f"echo{e + 1}"] = dict(profile=med.round(5).tolist(), wm_level=round(wm_lvl, 5),
-                                       fluid_level=round(fl_lvl, 5), hp_stat=round(hp_stat(det, ctx), 5),
-                                       profile_range=round(float(np.nanmax(med) - np.nanmin(med)), 5))
+            res[f"echo{e + 1}"] = dict(
+                profile=med.round(5).tolist(),
+                wm_level=round(wm_lvl, 5),
+                fluid_level=round(fl_lvl, 5),
+                hp_stat=round(hp_stat(det, ctx), 5),
+                profile_range=round(float(np.nanmax(med) - np.nanmin(med)), 5),
+            )
         coh = Z["coh"][ctx]
-        res["coh_p10_25_50_75_90"] = np.percentile(coh, [10, 25, 50, 75, 90]).round(3).tolist()
+        res["coh_p10_25_50_75_90"] = (
+            np.percentile(coh, [10, 25, 50, 75, 90]).round(3).tolist()
+        )
         out[site] = res
-        print(site, json.dumps({k: (v if not isinstance(v, dict) else {kk: vv for kk, vv in v.items() if kk != "profile"})
-                                for k, v in res.items()}, indent=1), flush=True)
+        print(
+            site,
+            json.dumps(
+                {
+                    k: (
+                        v
+                        if not isinstance(v, dict)
+                        else {kk: vv for kk, vv in v.items() if kk != "profile"}
+                    )
+                    for k, v in res.items()
+                },
+                indent=1,
+            ),
+            flush=True,
+        )
     out["bins"] = NBIN
     json.dump(out, open(f"{WORK}/fold_features.json", "w"), indent=1)
 

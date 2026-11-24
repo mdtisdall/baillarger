@@ -30,18 +30,60 @@ CROP = Path(os.environ.get("STOP_FIELD_CROP", "/nonexistent"))
 
 def _icosphere(r: float, levels: int) -> tuple[np.ndarray, np.ndarray]:
     t = (1 + 5**0.5) / 2
-    V = np.array([[-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t],
-                  [0, -1, -t], [0, 1, -t], [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]], float)
-    F = np.array([[0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11], [1, 5, 9], [5, 11, 4],
-                  [11, 10, 2], [10, 7, 6], [7, 1, 8], [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8],
-                  [3, 8, 9], [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]])
+    V = np.array(
+        [
+            [-1, t, 0],
+            [1, t, 0],
+            [-1, -t, 0],
+            [1, -t, 0],
+            [0, -1, t],
+            [0, 1, t],
+            [0, -1, -t],
+            [0, 1, -t],
+            [t, 0, -1],
+            [t, 0, 1],
+            [-t, 0, -1],
+            [-t, 0, 1],
+        ],
+        float,
+    )
+    F = np.array(
+        [
+            [0, 11, 5],
+            [0, 5, 1],
+            [0, 1, 7],
+            [0, 7, 10],
+            [0, 10, 11],
+            [1, 5, 9],
+            [5, 11, 4],
+            [11, 10, 2],
+            [10, 7, 6],
+            [7, 1, 8],
+            [3, 9, 4],
+            [3, 4, 2],
+            [3, 2, 6],
+            [3, 6, 8],
+            [3, 8, 9],
+            [4, 9, 5],
+            [2, 4, 11],
+            [6, 2, 10],
+            [8, 6, 7],
+            [9, 8, 1],
+        ]
+    )
     for _ in range(levels):
         E = np.sort(np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]), 1)
         u, inv = np.unique(E, axis=0, return_inverse=True)
         m = len(V) + inv.reshape(3, -1).T  # midpoints of edges 01, 12, 20
         V = np.vstack([V, 0.5 * (V[u[:, 0]] + V[u[:, 1]])])
-        F = np.concatenate([np.stack([F[:, 0], m[:, 0], m[:, 2]], 1), np.stack([F[:, 1], m[:, 1], m[:, 0]], 1),
-                            np.stack([F[:, 2], m[:, 2], m[:, 1]], 1), m])
+        F = np.concatenate(
+            [
+                np.stack([F[:, 0], m[:, 0], m[:, 2]], 1),
+                np.stack([F[:, 1], m[:, 1], m[:, 0]], 1),
+                np.stack([F[:, 2], m[:, 2], m[:, 1]], 1),
+                m,
+            ]
+        )
     return r * V / np.linalg.norm(V, axis=1, keepdims=True), F
 
 
@@ -52,7 +94,9 @@ def stop_weights(labels: np.ndarray) -> np.ndarray:
     return c
 
 
-def stop_energy(c: np.ndarray, geo: dict[str, Any], F: np.ndarray, nv: int, h: float) -> tuple[float, np.ndarray]:
+def stop_energy(
+    c: np.ndarray, geo: dict[str, Any], F: np.ndarray, nv: int, h: float
+) -> tuple[float, np.ndarray]:
     """The dense E_stop = Σ c f, f = clip(0.5 - s/h, 0, 1) in the
     signed-distance band and 1 inside Σ, 0 outside, off it; and ∂E_stop/∂V
     (nv, 3). On the ramp (0 < f < 1), ∂f/∂s = -1/h and ∂s/∂V_i = -w_i u
@@ -77,8 +121,16 @@ def stop_energy(c: np.ndarray, geo: dict[str, Any], F: np.ndarray, nv: int, h: f
 
 
 @nb.njit(cache=True)
-def _band_pairs(V: np.ndarray, F: np.ndarray, vox: np.ndarray, shape: np.ndarray, band: float,
-                lin: np.ndarray, face: np.ndarray, d2: np.ndarray) -> int:
+def _band_pairs(
+    V: np.ndarray,
+    F: np.ndarray,
+    vox: np.ndarray,
+    shape: np.ndarray,
+    band: float,
+    lin: np.ndarray,
+    face: np.ndarray,
+    d2: np.ndarray,
+) -> int:
     """Every (voxel, face) pair with the voxel centre within band (mm) of
     the face, face by face: the voxel's linear index, the face, the squared
     distance. With arrays of length 0: the count only."""
@@ -115,8 +167,13 @@ def _band_pairs(V: np.ndarray, F: np.ndarray, vox: np.ndarray, shape: np.ndarray
     return n
 
 
-def band_pairs_sorted(V_mm: np.ndarray, F: np.ndarray, vox: np.ndarray, shape: tuple[int, ...],
-                      band_vox: float = SB.BAND_VOX) -> tuple[dict[str, np.ndarray], int]:
+def band_pairs_sorted(
+    V_mm: np.ndarray,
+    F: np.ndarray,
+    vox: np.ndarray,
+    shape: tuple[int, ...],
+    band_vox: float = SB.BAND_VOX,
+) -> tuple[dict[str, np.ndarray], int]:
     """stop_field.band_sparse as it was before the slabs and threads (the
     reference): every (voxel, face) pair within the band, sorted by voxel,
     distance and face, the first of each voxel taken. Also returns the
@@ -135,7 +192,9 @@ def band_pairs_sorted(V_mm: np.ndarray, F: np.ndarray, vox: np.ndarray, shape: t
     first = np.r_[True, lin[1:] != lin[:-1]] if n else np.zeros(0, bool)
     ties = int((first[:-1] & ~first[1:] & (d2[1:] == d2[:-1])).sum()) if n else 0
     lin, fc = lin[first], fc[first]
-    ijk = np.stack(np.unravel_index(lin, tuple(int(x) for x in shp)), 1).astype(np.int64)
+    ijk = np.stack(np.unravel_index(lin, tuple(int(x) for x in shp)), 1).astype(
+        np.int64
+    )
     x = ijk * vox
     A, B, C = Vc[Fc[fc, 0]], Vc[Fc[fc, 1]], Vc[Fc[fc, 2]]
     w = SB._closest_weights(x, A, B, C)
@@ -165,9 +224,25 @@ def _same_band(a: dict[str, np.ndarray], b: dict[str, np.ndarray]) -> None:
 
 def _cube(lo: float, hi: float) -> tuple[np.ndarray, np.ndarray]:
     """A cube's surface, two triangles per side, outward."""
-    V = np.array([[x, y, z] for x in (lo, hi) for y in (lo, hi) for z in (lo, hi)], float)
-    F = np.array([[0, 1, 3], [0, 3, 2], [4, 6, 7], [4, 7, 5], [0, 4, 5], [0, 5, 1],
-                  [2, 3, 7], [2, 7, 6], [0, 2, 6], [0, 6, 4], [1, 5, 7], [1, 7, 3]])
+    V = np.array(
+        [[x, y, z] for x in (lo, hi) for y in (lo, hi) for z in (lo, hi)], float
+    )
+    F = np.array(
+        [
+            [0, 1, 3],
+            [0, 3, 2],
+            [4, 6, 7],
+            [4, 7, 5],
+            [0, 4, 5],
+            [0, 5, 1],
+            [2, 3, 7],
+            [2, 7, 6],
+            [0, 2, 6],
+            [0, 6, 4],
+            [1, 5, 7],
+            [1, 7, 3],
+        ]
+    )
     return V, F
 
 
@@ -189,7 +264,9 @@ def test_band_sparse_is_the_sorted_pairs_band(workers: int | None) -> None:
     Vc, Fc = _cube(5 * h, 20 * h)
     ref, ties = band_pairs_sorted(Vc, Fc, np.array([h, h, h]), (26, 26, 26))
     assert ties > 1000
-    _same_band(ref, SF.band_sparse(Vc, Fc, np.array([h, h, h]), (26, 26, 26), workers=workers))
+    _same_band(
+        ref, SF.band_sparse(Vc, Fc, np.array([h, h, h]), (26, 26, 26), workers=workers)
+    )
 
 
 def test_band_sparse_of_no_face_in_the_grid_is_empty() -> None:
@@ -211,10 +288,18 @@ def test_band_sparse_is_the_dense_band() -> None:
         assert np.allclose(a[k], b[k], atol=1e-13)
 
 
-def _dense(labels: np.ndarray, vox: np.ndarray, V: np.ndarray, F: np.ndarray) -> tuple[float, np.ndarray]:
+def _dense(
+    labels: np.ndarray, vox: np.ndarray, V: np.ndarray, F: np.ndarray
+) -> tuple[float, np.ndarray]:
     band = SB.signed_distance_band(V, F, vox, labels.shape)
     inside, _ = SB.inside_from_band(band, labels.shape)
-    return stop_energy(stop_weights(labels), {"band": band, "inside": inside}, F, len(V), float(vox.mean()))
+    return stop_energy(
+        stop_weights(labels),
+        {"band": band, "inside": inside},
+        F,
+        len(V),
+        float(vox.mean()),
+    )
 
 
 def test_stop_field_on_a_growing_sphere() -> None:
@@ -225,7 +310,9 @@ def test_stop_field_on_a_growing_sphere() -> None:
     vox = np.array([h, h, h])
     x = (np.indices((n, n, n)).transpose(1, 2, 3, 0) - (n - 1) / 2) * h
     r = np.linalg.norm(x, axis=-1)
-    labels = np.where(r < 0.8, 41, np.where(r < 1.4, CS.CORTEX, CS.OUTSIDE)).astype(np.int16)
+    labels = np.where(r < 0.8, 41, np.where(r < 1.4, CS.CORTEX, CS.OUTSIDE)).astype(
+        np.int16
+    )
     V0, F = _icosphere(1.0, 3)
     c = (n - 1) / 2 * h
     ev = SF.StopField(SimpleNamespace(labels=labels, vox=vox))
@@ -237,7 +324,10 @@ def test_stop_field_on_a_growing_sphere() -> None:
         assert np.allclose(st.grad, g, atol=1e-10), k
 
 
-@pytest.mark.skipif(not RUN.exists() or not CROP.exists(), reason="no saved stop run (STOP_FIELD_RUN, STOP_FIELD_CROP)")
+@pytest.mark.skipif(
+    not RUN.exists() or not CROP.exists(),
+    reason="no saved stop run (STOP_FIELD_RUN, STOP_FIELD_CROP)",
+)
 def test_stop_field_along_a_real_run() -> None:
     """Along the saved Σ of a no-τ run (a step and a remesh between two
     snapshots): ∂E/∂V is the dense one's. E is not compared here: on a crop
@@ -257,5 +347,11 @@ def test_stop_field_along_a_real_run() -> None:
         e_last = st.E
         if k % 10 == 0:
             band = SB.signed_distance_band(V, F, vox, labels.shape)
-            _, g = stop_energy(c, {"band": band, "inside": np.zeros(labels.shape, bool)}, F, len(V), float(vox.mean()))
+            _, g = stop_energy(
+                c,
+                {"band": band, "inside": np.zeros(labels.shape, bool)},
+                F,
+                len(V),
+                float(vox.mean()),
+            )
             assert np.allclose(st.grad, g, atol=1e-9), k

@@ -389,7 +389,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=Path,
         action="append",
         default=[],
-        help="label edits on the dseg's grid (a label-edits/1 .npy diff, as the "
+        help="label edits on the dseg's grid (a label-edits/1 .tsv diff, as the "
         "viewer's paint mode writes); repeatable",
     )
     a = p.parse_args(argv)

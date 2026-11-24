@@ -46,7 +46,7 @@ def _paths() -> dict[str, Path] | None:
         return None
     p = dict(
         dseg=anat / f"{SES}_desc-wmtopo_dseg.nii.gz",
-        edits=anat / f"{SES}_desc-wmtopo_edits.npy",
+        edits=anat / f"{SES}_desc-wmtopo_edits.tsv",
         white=anat / f"{SES}_hemi-R_white.surf.gii",
     )
     return p if all(q.is_file() for q in p.values()) else None

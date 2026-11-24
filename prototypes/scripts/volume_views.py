@@ -39,7 +39,11 @@ def section_traces(Z, G, ax, k, Pk, trace_of, tv_set, vox):
     a1 = facing[np.argmin(np.linalg.norm((c0 - v[facing]) * vox, axis=1))]
     g1 = dijkstra(G, indices=a1, limit=30.0)
     other = facing[~(g1[facing] < 5.0)]
-    anchors = [a1] + ([other[np.argmin(np.linalg.norm((c0 - v[other]) * vox, axis=1))]] if other.size else [])
+    anchors = [a1] + (
+        [other[np.argmin(np.linalg.norm((c0 - v[other]) * vox, axis=1))]]
+        if other.size
+        else []
+    )
     _, comp = connected_components(G[band][:, band], directed=False)
     out = []
     for anc in anchors:

@@ -43,10 +43,17 @@ def main() -> None:
         Lw = (pr.kappa**2 * sp.diags(pr.mass) + pr.K).tocsr()
         b = rng.normal(size=Lw.shape[0])
         resid = float(np.linalg.norm(Lw @ pr.lu.solve(b) - b) / np.linalg.norm(b))
-        r = dict(vertices=len(v), welded_away=pr.n_welded, relative_residual=resid,
-                 faces=len(f), seconds_matrices=round(pr.seconds_matrices, 2),
-                 seconds_factor=round(pr.seconds_factor, 2), seconds_load=round(load, 2),
-                 factor_nnz=int(pr.lu.L.nnz + pr.lu.U.nnz), peak_gb_after_load=round(peak_gb(), 2))
+        r = dict(
+            vertices=len(v),
+            welded_away=pr.n_welded,
+            relative_residual=resid,
+            faces=len(f),
+            seconds_matrices=round(pr.seconds_matrices, 2),
+            seconds_factor=round(pr.seconds_factor, 2),
+            seconds_load=round(load, 2),
+            factor_nnz=int(pr.lu.L.nnz + pr.lu.U.nnz),
+            peak_gb_after_load=round(peak_gb(), 2),
+        )
         fd = S.Field(pr, np.full(len(v), 2.5))
         add_ms, corr_ms, moved = [], [], []
         prev = np.zeros(len(v))
@@ -66,9 +73,11 @@ def main() -> None:
         pr.set_range(1.0, 0.5)
         fd.refresh()
         r.update(
-            add_ms_median=round(float(np.median(add_ms)), 1), add_ms_max=round(float(np.max(add_ms)), 1),
+            add_ms_median=round(float(np.median(add_ms)), 1),
+            add_ms_max=round(float(np.max(add_ms)), 1),
             correction_ms_at_1_10_20=[round(corr_ms[i], 1) for i in (0, 9, 19)],
-            moved_vertices_median=int(np.median(moved)), moved_vertices_max=int(np.max(moved)),
+            moved_vertices_median=int(np.median(moved)),
+            moved_vertices_max=int(np.max(moved)),
             seconds_change_range_with_20_edits=round(time.perf_counter() - t, 2),
             peak_gb=round(peak_gb(), 2),
         )

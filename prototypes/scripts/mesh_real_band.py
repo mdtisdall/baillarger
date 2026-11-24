@@ -63,7 +63,9 @@ def main():
     del nh, g, gh, coh
     log("orientation")
     S = surfaces(wm, sigmas=(1.0, 1.5), scales=(2.0,), taubin=())
-    X = np.stack(np.meshgrid(*[np.arange(n, dtype=float) for n in wm.shape], indexing="ij"), -1)
+    X = np.stack(
+        np.meshgrid(*[np.arange(n, dtype=float) for n in wm.shape], indexing="ij"), -1
+    )
     near = ctx & (d_wm <= 1.0) & (dface >= 2.0)
     allc = ctx & (dface >= 2.0)
     for ratio in (1.0, 3.0):
@@ -72,13 +74,24 @@ def main():
         for nm in ("raw", "white_mesh s1", "twice 0.32mm"):
             t = time.time()
             if nm == "raw":
-                seeds = wm & ndi.binary_dilation(ctx, ndi.generate_binary_structure(3, 1))
+                seeds = wm & ndi.binary_dilation(
+                    ctx, ndi.generate_binary_structure(3, 1)
+                )
                 k = np.flatnonzero(seeds.ravel())
-                out = M.march_band(Mt, ctx | seeds, seeds, np.zeros(k.size), np.zeros(k.size),
-                                   X.reshape(-1, 3)[k], spacing=vox)
+                out = M.march_band(
+                    Mt,
+                    ctx | seeds,
+                    seeds,
+                    np.zeros(k.size),
+                    np.zeros(k.size),
+                    X.reshape(-1, 3)[k],
+                    spacing=vox,
+                )
             else:
                 v, f, _ = S[nm]
-                sd, ts, ss, rs = M.surface_seeds(ctx, wm, X, M.mesh_closest(v, f), D, band=2.5)
+                sd, ts, ss, rs = M.surface_seeds(
+                    ctx, wm, X, M.mesh_closest(v, f), D, band=2.5
+                )
                 out = M.march_band(Mt, ctx, sd, ts * h, ss * h, rs, spacing=vox)
             reached = np.isfinite(out.arrival)
             r = {}
@@ -100,9 +113,11 @@ def main():
                 r[f"rootjump_{tag}_p95"] = float(np.percentile(J, 95))
                 r[f"rootjump_{tag}_p999"] = float(np.percentile(J, 99.9))
             res.setdefault("march", {})[f"{nm} | ratio {ratio:g}"] = r
-            log(f"{nm:14s} ratio {ratio:g}: >1 mm root jumps near WM {r['coll_near']:,} ({r['coll_near_frac']:.4f}),"
+            log(
+                f"{nm:14s} ratio {ratio:g}: >1 mm root jumps near WM {r['coll_near']:,} ({r['coll_near_frac']:.4f}),"
                 f" all cortex {r['coll_all']:,} ({r['coll_all_frac']:.4f}); jump p95 {r['rootjump_near_p95']:.2f}"
-                f" p99.9 {r['rootjump_near_p999']:.2f} voxels/step [{time.time() - t:.0f}s]")
+                f" p99.9 {r['rootjump_near_p999']:.2f} voxels/step [{time.time() - t:.0f}s]"
+            )
             json.dump(res, open(OUT, "w"), indent=1)
         del Mt, D
     # ---- thin WM: sign and foot at 1x and 2x
@@ -114,10 +129,22 @@ def main():
     if keep.any():
         around = ctx & (ndi.distance_transform_edt(~keep) <= 2.0)
         P1 = np.argwhere(around).astype(float)
-        sub = np.array([[a, b, c] for a in (-0.25, 0.25) for b in (-0.25, 0.25) for c in (-0.25, 0.25)])
+        sub = np.array(
+            [
+                [a, b, c]
+                for a in (-0.25, 0.25)
+                for b in (-0.25, 0.25)
+                for c in (-0.25, 0.25)
+            ]
+        )
         P2 = (P1[:, None, :] + sub[None]).reshape(-1, 3)
         starts = {"voxel faces": M.mesh_closest(*M.voxel_face_mesh(wm))}
-        for nm in ("binary contour", "white_mesh s1", "white_mesh s1.5", "twice 0.32mm"):
+        for nm in (
+            "binary contour",
+            "white_mesh s1",
+            "white_mesh s1.5",
+            "twice 0.32mm",
+        ):
             v, f, _ = S[nm]
             starts[nm] = M.mesh_closest(v, f)
         starts["implicit s0.5"] = M.implicit_closest(wm, 0.5)
@@ -131,8 +158,10 @@ def main():
                 r[f"inside_{tag}"] = float(np.mean(de < 0))
                 r[f"far_{tag}"] = float(np.mean(far))
             res.setdefault("thin", {})[nm] = r
-            log(f"thin WM sides, {nm:16s}: inside 1x {r['inside_1x']:.4f} 2x {r['inside_2x']:.4f};"
-                f" foot > 2 voxels 1x {r['far_1x']:.4f} 2x {r['far_2x']:.4f}")
+            log(
+                f"thin WM sides, {nm:16s}: inside 1x {r['inside_1x']:.4f} 2x {r['inside_2x']:.4f};"
+                f" foot > 2 voxels 1x {r['far_1x']:.4f} 2x {r['far_2x']:.4f}"
+            )
         res["thin_points_1x"] = int(len(P1))
     json.dump(res, open(OUT, "w"), indent=1)
     log("done")

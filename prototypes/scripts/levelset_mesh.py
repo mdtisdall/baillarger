@@ -113,14 +113,17 @@ class Mesh:
         return self.verts * self.vox
 
 
-def closest(mesh: Mesh, pts: Float, k: int = 24) -> tuple[Float, Float, Float, Int, Float]:
+def closest(
+    mesh: Mesh, pts: Float, k: int = 24
+) -> tuple[Float, Float, Float, Int, Float]:
     """Signed distance (voxels, > 0 on the side the normals point to), foot point, outward normal at the
     foot (barycentric), triangle and barycentric coordinates, for points (n, 3) in voxel coordinates.
     Candidates: the k triangles with the nearest centroids (in voxels)."""
     cen = mesh.verts[mesh.faces].mean(1)
     _, cand = cKDTree(cen).query(pts, k=k)
-    dist, foot, bary, tri = _closest(np.ascontiguousarray(pts, float), cand.astype(np.int64),
-                                     mesh.verts, mesh.faces)
+    dist, foot, bary, tri = _closest(
+        np.ascontiguousarray(pts, float), cand.astype(np.int64), mesh.verts, mesh.faces
+    )
     nrm = np.einsum("ij,ijk->ik", bary, mesh.normals[mesh.faces[tri]])
     nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-12
     sgn = np.sign(np.sum((pts - foot) * nrm, 1))
@@ -152,14 +155,19 @@ def fem(mesh: Mesh) -> tuple[sparse.csc_matrix, Float]:
         cols += [j, i, i, j]
         vals += [-0.5 * cot, -0.5 * cot, 0.5 * cot, 0.5 * cot]
         np.add.at(area, f[:, k], 0.5 * cr / 3)
-    C = sparse.csc_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(nv, nv))
+    C = sparse.csc_matrix(
+        (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(nv, nv),
+    )
     return C, np.maximum(area, 1e-12)
 
 
 def edge_graph(mesh: Mesh) -> sparse.csr_matrix:
     """Mesh edges with their lengths in mm."""
     f = mesh.faces
-    E = np.unique(np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), 1), axis=0)
+    E = np.unique(
+        np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), 1), axis=0
+    )
     ln = np.linalg.norm(mesh.mm[E[:, 0]] - mesh.mm[E[:, 1]], axis=1)
     G = sparse.coo_matrix((ln, (E[:, 0], E[:, 1])), shape=(len(mesh.verts),) * 2)
     return (G + G.T).tocsr()
@@ -191,7 +199,9 @@ class MeshField:
         E = np.zeros((self.n, len(probe)))
         E[probe, np.arange(len(probe))] = 1
         X = lu.solve(E)
-        if self.alpha == 2:  # Q^-1 = K^-1 M K^-1 / tau: var_i = |M^1/2 K^-1 e_i|^2 / tau
+        if (
+            self.alpha == 2
+        ):  # Q^-1 = K^-1 M K^-1 / tau: var_i = |M^1/2 K^-1 e_i|^2 / tau
             v = (self.area[:, None] * X**2).sum(0).mean()
             tau = v / sig**2
             Q = tau * (K @ self.Minv @ K)
@@ -206,7 +216,9 @@ class MeshField:
         xi = rng.standard_normal(self.n)
         if self.alpha == 2:  # x = K^-1 M^1/2 xi / sqrt(tau)
             return p["lu"].solve(np.sqrt(self.area) * xi) / np.sqrt(p["tau"])
-        raise NotImplementedError("predictive SDs are only implemented for the second-order field")
+        raise NotImplementedError(
+            "predictive SDs are only implemented for the second-order field"
+        )
 
     def _prior_inv(self, p, r):
         """The prior covariance times r: K^-1 M K^-1 r / tau (alpha 2) or K^-1 r / tau (alpha 1)."""
@@ -214,8 +226,17 @@ class MeshField:
             return p["lu"].solve(self.area * p["lu"].solve(r)) / p["tau"]
         return p["lu"].solve(r) / p["tau"]
 
-    def fit(self, y: Float, trend: bool = True, m_mu: float = M_MU, nsamp: int = 0, at: Int | None = None,
-            seed: int = 1, direct: bool = False, rtol: float = 1e-8) -> dict:
+    def fit(
+        self,
+        y: Float,
+        trend: bool = True,
+        m_mu: float = M_MU,
+        nsamp: int = 0,
+        at: Int | None = None,
+        seed: int = 1,
+        direct: bool = False,
+        rtol: float = 1e-8,
+    ) -> dict:
         """y: log budget per vertex (nan: no evidence). Returns the posterior mean of log t per vertex,
         (m, a0) and, with nsamp > 0, the predictive SD (posterior plus noise) at the vertices `at`.
         The posterior precision Q = P + A^T A / eps^2 is solved by conjugate gradients preconditioned
@@ -250,7 +271,7 @@ class MeshField:
             out = np.empty_like(x)
             out[:n] = pz["Q"] @ x[:n]
             if trend:
-                out[n:2 * n] = pw["Q"] @ x[n:2 * n]
+                out[n : 2 * n] = pw["Q"] @ x[n : 2 * n]
             out[sc0:] = x[sc0:] / sc_var
             return out
 
@@ -258,7 +279,7 @@ class MeshField:
             out = np.empty_like(r)
             out[:n] = self._prior_inv(pz, r[:n])
             if trend:
-                out[n:2 * n] = self._prior_inv(pw, r[n:2 * n])
+                out[n : 2 * n] = self._prior_inv(pw, r[n : 2 * n])
             out[sc0:] = r[sc0:] * sc_var
             return out
 
@@ -270,21 +291,27 @@ class MeshField:
             lu = splu((P + AtA).tocsc())
             solve = lu.solve
         else:
+
             def solve(b, x0=None):
                 x, info = cg(Qop, b, x0=x0, rtol=rtol, maxiter=2000, M=Mop)
                 if info != 0:
                     raise RuntimeError(f"cg did not converge ({info})")
                 return x
+
         xhat = solve(Pmul(pm) + A.T @ y[o] / SIG_EPS**2)
 
         def pred(x):
             out = x[:n] + x[im]
             if trend:
-                out = out + H * (x[n:2 * n] + x[ia])
+                out = out + H * (x[n : 2 * n] + x[ia])
             return out
 
-        res = dict(mu=pred(xhat), m=float(xhat[im]), a0=float(xhat[ia]) if trend else 0.0,
-                   a=(xhat[n:2 * n] + xhat[ia]) if trend else np.zeros(n))
+        res = dict(
+            mu=pred(xhat),
+            m=float(xhat[im]),
+            a0=float(xhat[ia]) if trend else 0.0,
+            a=(xhat[n : 2 * n] + xhat[ia]) if trend else np.zeros(n),
+        )
         if nsamp and at is not None:
             rng = np.random.default_rng(seed)
             S, A0s = [], []
@@ -292,7 +319,7 @@ class MeshField:
                 x0 = pm.copy()
                 x0[:n] += self._sample_prior(pz, rng)
                 if trend:
-                    x0[n:2 * n] += self._sample_prior(pw, rng)
+                    x0[n : 2 * n] += self._sample_prior(pw, rng)
                     x0[ia] += A0_SD * rng.standard_normal()
                 x0[im] += M_SD * rng.standard_normal()
                 yp = y[o] + SIG_EPS * rng.standard_normal(len(o))
@@ -305,7 +332,9 @@ class MeshField:
         return res
 
 
-def pieces_without_evidence(mesh: Mesh, has: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]:
+def pieces_without_evidence(
+    mesh: Mesh, has: npt.NDArray[np.bool_]
+) -> npt.NDArray[np.bool_]:
     """Per vertex: True where the vertex's connected piece of the mesh holds no evidence."""
     G = edge_graph(mesh)
     npc, lab = connected_components(G, directed=False)

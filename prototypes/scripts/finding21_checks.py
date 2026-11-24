@@ -55,7 +55,9 @@ def sides(work, data):
     B = C.load(lo, hi, "PCC_SPL_p1_run")
     nh, _ = C.tensor_normal(B)
     G = _shell_graph(pts, nrm)
-    print("point | collision classes within 1 mm (sheet/junction/edge) | side a, b roots (ITK) | straight / along-surface (mm) | walls")
+    print(
+        "point | collision classes within 1 mm (sheet/junction/edge) | side a, b roots (ITK) | straight / along-surface (mm) | walls"
+    )
     cv = np.argwhere(ctype > 0)
     for k, q in enumerate(P):
         n_ = nh[tuple(q)]
@@ -78,7 +80,9 @@ def sides(work, data):
             eu = geo = np.nan
         wl = lambda r: ("1" if w1[r] else ("2" if w2[r] else "-")) if r >= 0 else "?"
         itk = lambda r: tuple(int(c) + 1 for c in pts[r]) if r >= 0 else None
-        print(f"{k + 1:2d} | {cnt} | {itk(ra)}, {itk(rb)} | {eu:.2f} / {geo:.2f} | {wl(ra)}, {wl(rb)}")
+        print(
+            f"{k + 1:2d} | {cnt} | {itk(ra)}, {itk(rb)} | {eu:.2f} / {geo:.2f} | {wl(ra)}, {wl(rb)}"
+        )
     # facing pairs at the sheet near the points, and the grown root pieces (as collide2.py builds them)
     sheet = np.argwhere(ctype == 1)
     dP = np.min(np.linalg.norm((sheet[:, None, :] - P[None]) * VOX, axis=2), 1)
@@ -89,7 +93,16 @@ def sides(work, data):
         for sgn in (1, -1):
             q = np.clip(sheet + sgn * d, 0, shp - 1)
             r1, r2 = root[tuple(sheet.T)], root[tuple(q.T)]
-            ok = (r1 >= 0) & (r2 >= 0) & (np.linalg.norm((pts[np.maximum(r1, 0)] - pts[np.maximum(r2, 0)]) * VOX, axis=1) > 2.0)
+            ok = (
+                (r1 >= 0)
+                & (r2 >= 0)
+                & (
+                    np.linalg.norm(
+                        (pts[np.maximum(r1, 0)] - pts[np.maximum(r2, 0)]) * VOX, axis=1
+                    )
+                    > 2.0
+                )
+            )
             pairs.append(np.c_[r1[ok], r2[ok]])
     pairs = np.vstack(pairs)
     R = np.unique(pairs)
@@ -99,7 +112,9 @@ def sides(work, data):
     comp = -np.ones(len(pts), int)
     comp[M] = labM
     same = comp[pairs[:, 0]] == comp[pairs[:, 1]]
-    print(f"facing root pairs near the points: {len(pairs):,}; both roots in one piece: {same.sum():,} ({same.mean():.0%})")
+    print(
+        f"facing root pairs near the points: {len(pairs):,}; both roots in one piece: {same.sum():,} ({same.mean():.0%})"
+    )
     print("pieces (voxels):", sorted(np.bincount(labM).tolist(), reverse=True))
     a, b = pairs[same][0]
     sub = G[M][:, M]
@@ -120,10 +135,21 @@ def sides(work, data):
         seg[tuple(v)] = 5
     seg[ctype == 1] = 6
     for q in P:
-        for d in [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]:
+        for d in [
+            (0, 0, 0),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ]:
             seg[tuple(q + d)] = 7
     ref = nib.load(f"{data}/PCC_SPL_p1_run_echo2_detrended.nii.gz")
-    nib.save(nib.Nifti1Image(seg, ref.affine), f"{data}/PCC_SPL_p1_run_walls_diag_overlay.nii.gz")
+    nib.save(
+        nib.Nifti1Image(seg, ref.affine),
+        f"{data}/PCC_SPL_p1_run_walls_diag_overlay.nii.gz",
+    )
     open(f"{data}/PCC_SPL_p1_run_walls_diag_labels.txt", "w").write(
         '    0     0    0    0        0  0  0    "Clear Label"\n'
         '    1   255  220    0      0.5  1  1    "WM boundary"\n'
@@ -132,7 +158,8 @@ def sides(work, data):
         '    4    60  230  230        1  1  1    "Sheet roots grown 1 mm (one piece holds both sides)"\n'
         '    5   255  255  255        1  1  1    "A path joining the two sides through that piece"\n'
         '    6   255   40  220      0.6  1  1    "Sheet"\n'
-        '    7   255    0    0        1  1  1    "Your points"\n')
+        '    7   255    0    0        1  1  1    "Your points"\n'
+    )
     print("wrote PCC_SPL_p1_run_walls_diag_overlay.nii.gz")
 
 
@@ -159,20 +186,26 @@ def roots(work, data):
     thick = mx[tuple(pts[rr].T)]
     inner = B["dface"][tuple(pts.T)] >= 6
     allthick = mx[tuple(pts.T)]
-    print(f"piece 3 sheet: {piece.sum()} voxels, {len(rr)} roots; WM half-thickness at the roots median {np.median(thick):.2f} mm "
-          f"(p10 {np.percentile(thick, 10):.2f}); all inner WM boundary median {np.median(allthick[inner]):.2f} (p10 {np.percentile(allthick[inner], 10):.2f})")
+    print(
+        f"piece 3 sheet: {piece.sum()} voxels, {len(rr)} roots; WM half-thickness at the roots median {np.median(thick):.2f} mm "
+        f"(p10 {np.percentile(thick, 10):.2f}); all inner WM boundary median {np.median(allthick[inner]):.2f} (p10 {np.percentile(allthick[inner], 10):.2f})"
+    )
     print(f"roots spread (mm) {np.round(np.ptp(pts[rr], 0) * VOX, 1)}")
     e3 = np.log(np.maximum(B["p"].echoes[..., 2].astype(float), 1.0))
     rm = np.zeros(root.shape, bool)
     rm[tuple(pts[rr].T)] = True
     zone = B["ctx"] & (ndi.distance_transform_edt(~rm, sampling=VOX) <= 1.0)
     dwm = ndi.distance_transform_edt(~B["wm"], sampling=VOX)
-    thr = (np.median(e3[B["wm"] & (din >= 0.5)]) + np.median(e3[B["ctx"] & (dwm >= 1.0)])) / 2
+    thr = (
+        np.median(e3[B["wm"] & (din >= 0.5)]) + np.median(e3[B["ctx"] & (dwm >= 1.0)])
+    ) / 2
     allr = np.zeros(root.shape, bool)
     allr[tuple(pts[inner].T)] = True
     ref = B["ctx"] & (ndi.distance_transform_edt(~allr, sampling=VOX) <= 1.0)
-    print(f"cortex-labelled voxels within 1 mm of the roots that read WM-dark in echo 3: {np.mean(e3[zone] < thr):.0%} "
-          f"(all inner WM boundary: {np.mean(e3[ref] < thr):.0%})")
+    print(
+        f"cortex-labelled voxels within 1 mm of the roots that read WM-dark in echo 3: {np.mean(e3[zone] < thr):.0%} "
+        f"(all inner WM boundary: {np.mean(e3[ref] < thr):.0%})"
+    )
     seg = np.zeros(root.shape, np.uint8)
     seg[B["wm"]] = 1
     seg[B["shell"]] = 2
@@ -181,7 +214,9 @@ def roots(work, data):
     seg[piece] = 5
     seg[(ctype == 3) & (seg == 0)] = 6
     ref_img = nib.load(f"{data}/PCC_SPL_p3_echo2_detrended.nii.gz")
-    nib.save(nib.Nifti1Image(seg, ref_img.affine), f"{data}/PCC_SPL_p3_roots_overlay.nii.gz")
+    nib.save(
+        nib.Nifti1Image(seg, ref_img.affine), f"{data}/PCC_SPL_p3_roots_overlay.nii.gz"
+    )
     open(f"{data}/PCC_SPL_p3_roots_labels.txt", "w").write(
         '    0     0    0    0        0  0  0    "Clear Label"\n'
         '    1   255  240  170      0.35 1  1    "WM (aseg)"\n'
@@ -189,7 +224,8 @@ def roots(work, data):
         '    3    60  230  230      0.35 1  1    "Cortex whose columns start at the sheet\'s roots"\n'
         '    4    40  120  255        1  1  1    "The sheet\'s roots on the WM"\n'
         '    5   255   40  220        1  1  1    "Piece 3 sheet"\n'
-        '    6    60  200  255      0.4  1  1    "Sheet edge elsewhere"\n')
+        '    6    60  200  255      0.4  1  1    "Sheet edge elsewhere"\n'
+    )
     print("wrote PCC_SPL_p3_roots_overlay.nii.gz")
 
 
@@ -200,7 +236,10 @@ def strip(work, data, point=(82, 78, 71)):
     dwm = ndi.distance_transform_edt(~B["wm"], sampling=VOX)
     din = ndi.distance_transform_edt(B["wm"], sampling=VOX)
     e3s = ndi.gaussian_filter(E[2], 0.7)
-    thr = (np.median(E[2][B["wm"] & (din >= 0.5)]) + np.median(E[2][B["ctx"] & (dwm >= 1.0)])) / 2
+    thr = (
+        np.median(E[2][B["wm"] & (din >= 0.5)])
+        + np.median(E[2][B["ctx"] & (dwm >= 1.0)])
+    ) / 2
     dark = B["ctx"] & (e3s < thr)
     lab, _ = ndi.label(dark, structure=ndi.generate_binary_structure(3, 1))
     if lab[tuple(q)] == 0:
@@ -211,37 +250,65 @@ def strip(work, data, point=(82, 78, 71)):
     reg = lab == cid
     vv = np.argwhere(reg) + 1
     dpiece = ndi.distance_transform_edt(~piece, sampling=VOX)
-    print(f"at ITK {tuple(point)}: label {int(B['rim'][tuple(q)])} (3 = cortex), smoothed log echo 3 {e3s[tuple(q)]:.2f} (midway WM/cortex {thr:.2f}); "
-          f"{dwm[tuple(q)]:.2f} mm from the WM label, {dpiece[tuple(q)]:.2f} mm from the sheet")
-    print(f"connected WM-dark cortex-labelled region: {reg.sum()} voxels, ITK i {vv[:, 0].min()}-{vv[:, 0].max()}, j {vv[:, 1].min()}-{vv[:, 1].max()}, "
-          f"k {vv[:, 2].min()}-{vv[:, 2].max()}; touching the WM label: {int(np.sum(reg & ndi.binary_dilation(B['wm'])))}")
+    print(
+        f"at ITK {tuple(point)}: label {int(B['rim'][tuple(q)])} (3 = cortex), smoothed log echo 3 {e3s[tuple(q)]:.2f} (midway WM/cortex {thr:.2f}); "
+        f"{dwm[tuple(q)]:.2f} mm from the WM label, {dpiece[tuple(q)]:.2f} mm from the sheet"
+    )
+    print(
+        f"connected WM-dark cortex-labelled region: {reg.sum()} voxels, ITK i {vv[:, 0].min()}-{vv[:, 0].max()}, j {vv[:, 1].min()}-{vv[:, 1].max()}, "
+        f"k {vv[:, 2].min()}-{vv[:, 2].max()}; touching the WM label: {int(np.sum(reg & ndi.binary_dilation(B['wm'])))}"
+    )
     near = ndi.distance_transform_edt(~reg, sampling=VOX) <= 3.0
     dfl = ndi.distance_transform_edt(B["rim"] != 1, sampling=VOX)
     groups = {
         "the dark region": reg,
         "WM nearby (>= 0.5 mm inside)": B["wm"] & (din >= 0.5) & near,
-        "cortex nearby (>= 1 mm from WM and fluid)": B["ctx"] & (dwm >= 1.0) & (dfl >= 0.5) & near & ~reg,
+        "cortex nearby (>= 1 mm from WM and fluid)": B["ctx"]
+        & (dwm >= 1.0)
+        & (dfl >= 0.5)
+        & near
+        & ~reg,
         "deep cortex nearby (< 0.5 mm from WM)": B["ctx"] & (dwm < 0.5) & near & ~reg,
-        "Fomblin nearby (>= 0.5 mm in)": (B["rim"] == 1) & (ndi.distance_transform_edt(B["rim"] == 1, sampling=VOX) >= 0.5)
+        "Fomblin nearby (>= 0.5 mm in)": (B["rim"] == 1)
+        & (ndi.distance_transform_edt(B["rim"] == 1, sampling=VOX) >= 0.5)
         & (ndi.distance_transform_edt(~reg, sampling=VOX) <= 6.0),
-        "cortex next to fluid nearby": B["ctx"] & ndi.binary_dilation(B["rim"] == 1) & near & ~reg,
+        "cortex next to fluid nearby": B["ctx"]
+        & ndi.binary_dilation(B["rim"] == 1)
+        & near
+        & ~reg,
     }
     print("group: n | log echo 1 / 2 / 3 (medians) | decay, log e1 - log e3")
     for nm, g in groups.items():
         if g.sum():
             v = [np.median(e[g]) for e in E]
-            print(f"  {nm:44s} {g.sum():6d} | {v[0]:.2f} / {v[1]:.2f} / {v[2]:.2f} | {np.median(E[0][g] - E[2][g]):.2f}")
+            print(
+                f"  {nm:44s} {g.sum():6d} | {v[0]:.2f} / {v[1]:.2f} / {v[2]:.2f} | {np.median(E[0][g] - E[2][g]):.2f}"
+            )
     path = f"{data}/PCC_SPL_p3_roots_overlay.nii.gz"
     seg = np.asarray(nib.load(path).dataobj).copy()
     seg[seg >= 7] = 0
     seg[reg] = 8
-    for d in [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]:
+    for d in [
+        (0, 0, 0),
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    ]:
         seg[tuple(q + d)] = 9
     nib.save(nib.Nifti1Image(seg, nib.load(path).affine), path)
     lab_path = f"{data}/PCC_SPL_p3_roots_labels.txt"
-    L = [x for x in open(lab_path).read().splitlines() if not x.strip().startswith(("7 ", "8 ", "9 "))]
-    L += [f'    8   150   60  255        1  1  1    "WM-dark cortex-labelled region connected to {tuple(point)}"',
-          f'    9   255    0    0        1  1  1    "The point {tuple(point)}"']
+    L = [
+        x
+        for x in open(lab_path).read().splitlines()
+        if not x.strip().startswith(("7 ", "8 ", "9 "))
+    ]
+    L += [
+        f'    8   150   60  255        1  1  1    "WM-dark cortex-labelled region connected to {tuple(point)}"',
+        f'    9   255    0    0        1  1  1    "The point {tuple(point)}"',
+    ]
     open(lab_path, "w").write("\n".join(L) + "\n")
     print("updated PCC_SPL_p3_roots_overlay.nii.gz")
 
@@ -254,6 +321,12 @@ if __name__ == "__main__":
     elif cmd == "roots":
         roots(work, data)
     elif cmd == "strip":
-        strip(work, data, tuple(int(v) for v in sys.argv[4:7]) if len(sys.argv) >= 7 else (82, 78, 71))
+        strip(
+            work,
+            data,
+            tuple(int(v) for v in sys.argv[4:7])
+            if len(sys.argv) >= 7
+            else (82, 78, 71),
+        )
     else:
         raise SystemExit(f"unknown subcommand {cmd}")

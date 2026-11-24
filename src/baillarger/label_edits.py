@@ -5,8 +5,10 @@ label. It holds no history. The dseg command (baillarger.white_dseg --edits)
 applies the diff to the input labels before the automatic correction, and
 the correction changes the edited voxels last. Nothing else applies edits.
 
-Two files: the records (.npy, EDITS_DTYPE, sorted by index, each index once)
-and the sidecar (.json). write replaces both files under an exclusive lock
+Two files: the records (a BIDS tabular file, .tsv: the columns i, j, k and
+label, sorted by i, j, k, each voxel once; tsv_bytes) and the sidecar
+(.json). One diff has one form of its records: the same diff gives the same
+bytes. write replaces both files under an exclusive lock
 (fileops.flock on their directory): the records first, then the sidecar.
 read holds a shared lock and checks the records against the sidecar's SHA256
 and Count, and the diff against the grid, affine and hemisphere that the
@@ -18,10 +20,18 @@ other's voxels; its step after the write (after), under the same lock, keeps
 a second record (the viewer's answer log) in step with the diff.
 
 paint and restore change a diff in memory; differ compares two diffs.
+
+standard_path gives the one edits file of a hemisphere, from the path of its
+input labels: a derivatives root "labeledits" beside the input's root. The
+first write into a BIDS root makes its dataset_description.json.
+
+The command `python -m baillarger.label_edits convert PATH.npy` converts a
+diff of the earlier form (EDITS_DTYPE records in a .npy) to the .tsv, once
+(convert).
 """
 
+import argparse
 import hashlib
-import io
 import json
 import logging
 from collections.abc import Callable
@@ -35,7 +45,9 @@ import numpy.typing as npt
 from baillarger.bids import (
     Key,
     SidecarSpec,
+    dataset_description,
     derivative_path,
+    entities,
     provenance,
     read_sidecar,
     sidecar_path,
@@ -58,12 +70,31 @@ EDITS_SPEC = SidecarSpec(
         Key("Shape", "array of integers", True, "the grid's shape"),
         Key("Affine", "array of numbers", True, "voxel to mm, 4 x 4, by rows"),
         Key("Count", "integer", True, "number of edited voxels"),
-        Key("SHA256", "string", True, "SHA-256 of the .npy file"),
+        Key("SHA256", "string", True, "SHA-256 of the .tsv file"),
         Key("Provenance", "object", True, "Created, Function, Version, Commit, Dirty"),
+        Key("i", "object", True, "the column i (BIDS: Description)"),
+        Key("j", "object", True, "the column j (BIDS: Description)"),
+        Key("k", "object", True, "the column k (BIDS: Description)"),
+        Key("label", "object", True, "the column label (BIDS: Description)"),
     ),
 )
 
-#: one edited voxel: its linear index (C order of the grid) and its label
+#: the columns of the records file, in their order
+COLUMNS = ("i", "j", "k", "label")
+
+#: the sidecar's description of each column (BIDS, tabular files)
+COLUMN_KEYS = {
+    "i": dict(Description="the voxel's index on the grid's first axis"),
+    "j": dict(Description="the voxel's index on the grid's second axis"),
+    "k": dict(Description="the voxel's index on the grid's third axis"),
+    "label": dict(
+        Description="the voxel's edited label (label-set/1): it replaces the "
+        "voxel's input label"
+    ),
+}
+
+#: one edited voxel in the earlier form of the records (a .npy): its linear
+#: index (C order of the grid) and its label. Only convert reads it.
 EDITS_DTYPE = np.dtype([("index", "<i8"), ("label", "<i4")])
 
 #: the label of "no entry" in an undo, and of the eraser in paint: the voxel
@@ -110,12 +141,6 @@ class Edits:
         if bad:
             raise ValueError(f"labels {bad} are not in label-set/1")
 
-    def records(self) -> npt.NDArray[np.void]:
-        """The diff as EDITS_DTYPE records (the .npy file's content)."""
-        out = np.zeros(len(self), EDITS_DTYPE)
-        out["index"], out["label"] = self.index, self.label
-        return out
-
 
 def _edits(index: npt.ArrayLike, label: npt.ArrayLike) -> Edits:
     return Edits(np.asarray(index, np.int64), np.asarray(label, np.int32))
@@ -131,21 +156,103 @@ def empty() -> Edits:
 
 def bids_path(root: Path, ents: dict[str, str], hemi: str) -> Path:
     """The diff of a hemisphere of the input with entities ents, in the
-    derivatives root: sub-<sub>_ses-<ses>_hemi-<h>_desc-labeledits_edits.npy."""
-    return derivative_path(root, ents, "edits", ".npy", desc="labeledits", hemi=hemi)
+    derivatives root: sub-<sub>_ses-<ses>_hemi-<h>_desc-labeledits_edits.tsv."""
+    return derivative_path(root, ents, "edits", ".tsv", desc="labeledits", hemi=hemi)
+
+
+#: the derivatives root of the edits files, beside the input labels' root
+ROOT_NAME = "labeledits"
+
+
+def _bids_root(path: Path) -> Path | None:
+    """The root of a file at <root>/sub-<sub>/ses-<ses>/anat/<file>, None for
+    a file elsewhere."""
+    anat = path.parent
+    ses, sub = anat.parent, anat.parent.parent
+    if (
+        anat.name == "anat"
+        and ses.name.startswith("ses-")
+        and sub.name.startswith("sub-")
+    ):
+        return sub.parent
+    return None
+
+
+def standard_path(inp: Path, hemisphere: str) -> Path:
+    """The edits file of the hemisphere of the input labels at inp
+    (docs/formats/label-edits.md, The standard file): for input labels at
+    <derivatives>/<root>/sub-<sub>/ses-<ses>/anat/<file>,
+    <derivatives>/labeledits/sub-<sub>/ses-<ses>/anat/
+    sub-<sub>_ses-<ses>_hemi-<h>_desc-labeledits_edits.tsv. Raises ValueError
+    for input labels that are not in sub-<sub>/ses-<ses>/anat/ of a root."""
+    p = Path(inp).absolute()
+    root = _bids_root(p)
+    ents = entities(p)
+    if root is None or (
+        p.parent.parent.name != f"ses-{ents['ses']}"
+        or p.parent.parent.parent.name != f"sub-{ents['sub']}"
+    ):
+        raise ValueError(
+            f"{p}: the input labels are not in sub-<sub>/ses-<ses>/anat/ of a "
+            "derivatives root"
+        )
+    return bids_path(root.parent / ROOT_NAME, ents, hemisphere)
 
 
 def edits_paths(path: Path) -> dict[str, Path]:
-    """The two files of the diff at path (a .npy): records and sidecar."""
-    if not path.name.endswith(".npy"):
-        raise ValueError(f"{path.name}: the diff is a .npy file")
+    """The two files of the diff at path (a .tsv): records and sidecar."""
+    if not path.name.endswith(".tsv"):
+        raise ValueError(f"{path.name}: the diff is a .tsv file")
     return dict(records=path, sidecar=sidecar_path(path))
 
 
-def _npy_bytes(edits: Edits) -> bytes:
-    raw = io.BytesIO()
-    np.save(raw, edits.records(), allow_pickle=False)
-    return raw.getvalue()
+def tsv_bytes(edits: Edits, shape: tuple[int, ...]) -> bytes:
+    """The records file of a diff on a grid of this shape: the header line,
+    then one line for each voxel (i, j, k, label), in the order of the
+    linear index (= sorted by i, j, k), tab-separated, with \\n line ends."""
+    ijk = np.stack(np.unravel_index(edits.index, shape), 1)
+    rows = np.column_stack([ijk, edits.label]).astype(np.int64).tolist()
+    lines = ["\t".join(COLUMNS)] + [f"{i}\t{j}\t{k}\t{lab}" for i, j, k, lab in rows]
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def parse_tsv(data: bytes, shape: tuple[int, ...]) -> Edits:
+    """The diff in the records file data (tsv_bytes) on a grid of this shape.
+    Raises ValueError for a missing or other column, a line with another
+    number of fields, a value that is not an integer, a voxel outside the
+    grid, lines that are not sorted by i, j, k, a voxel given twice, a label
+    not in label-set/1, or a file in another form than tsv_bytes gives (line
+    ends, spaces, signs, leading zeros)."""
+    try:
+        lines = data.decode("ascii").split("\n")
+    except UnicodeDecodeError:
+        raise ValueError("the records are not ASCII text") from None
+    if lines[-1] != "":
+        raise ValueError("the records do not end with a line end")
+    head = lines[0].split("\t")
+    missing = [c for c in COLUMNS if c not in head]
+    if missing:
+        raise ValueError(f"the column(s) {missing} are missing")
+    if tuple(head) != COLUMNS:
+        raise ValueError(f"the columns are {head}, not {list(COLUMNS)}")
+    cells = [ln.split("\t") for ln in lines[1:-1]]
+    if any(len(c) != len(COLUMNS) for c in cells):
+        raise ValueError(f"a line does not have {len(COLUMNS)} fields")
+    try:
+        rows = np.array(cells, dtype=np.int64).reshape(-1, len(COLUMNS))
+    except (ValueError, OverflowError):
+        raise ValueError("a value is not an integer") from None
+    ijk, lab = rows[:, :3], rows[:, 3]
+    if len(rows) and not np.all((ijk >= 0) & (ijk < np.asarray(shape))):
+        raise ValueError("an edited voxel is outside the grid")
+    if np.any(lab != lab.astype(np.int32)):
+        raise ValueError("a label is not in label-set/1")
+    idx = np.ravel_multi_index(tuple(ijk.T), shape) if len(rows) else []
+    e = _edits(idx, lab)
+    e.check(shape)
+    if tsv_bytes(e, shape) != data:
+        raise ValueError("the records are not in the form that the writer gives")
+    return e
 
 
 def _stat(path: Path) -> tuple[int, int, int, int]:
@@ -225,6 +332,7 @@ def _sidecar(
         Count=len(edits),
         SHA256=sha,
         Provenance=provenance(function),
+        **COLUMN_KEYS,
     )
     EDITS_SPEC.check(side)
     return side
@@ -236,16 +344,12 @@ def _side_bytes(side: dict[str, Any]) -> bytes:
 
 def _repair(path: Path, side: dict[str, Any], data: bytes, sha: str) -> Edits:
     """The records of a write that stopped between its two renames, checked
-    on the sidecar's grid (Edits.check), and a new sidecar for them: the old
+    on the sidecar's grid (parse_tsv), and a new sidecar for them: the old
     sidecar's Description, Hemisphere, Shape and Affine, with the records'
     Count and SHA256. Call with the exclusive lock held. Raises ValueError
     if the records are not a valid diff on that grid."""
     try:
-        rec = np.load(io.BytesIO(data), allow_pickle=False)
-        if rec.dtype != EDITS_DTYPE or rec.ndim != 1:
-            raise ValueError(f"the records are not {EDITS_DTYPE}")
-        e = _edits(rec["index"], rec["label"])
-        e.check(tuple(side["Shape"]))
+        e = parse_tsv(data, tuple(side["Shape"]))
     except ValueError as err:
         raise ValueError(
             f"{path.name}: the records do not agree with the sidecar's SHA-256 "
@@ -284,19 +388,19 @@ def _load(
         return known, side
     data = _read_records(p["records"])
     sha = hashlib.sha256(data).hexdigest()
-    rec = np.load(io.BytesIO(data), allow_pickle=False)
-    if sha != side["SHA256"] or rec.ndim != 1 or len(rec) != side["Count"]:
+    if sha != side["SHA256"]:
         if not repair:
             raise _Stale
         e = _repair(path, side, data, sha)
         return Current(e, sha, ident), read_sidecar(p["sidecar"], EDITS_SPEC)
-    if rec.dtype != EDITS_DTYPE:
-        raise ValueError(f"{path.name}: the records are not {EDITS_DTYPE}")
-    e = _edits(rec["index"], rec["label"])
     try:
-        e.check(tuple(side["Shape"]))
+        e = parse_tsv(data, tuple(side["Shape"]))
     except ValueError as err:
         raise ValueError(f"{path.name}: {err}") from err
+    if len(e) != side["Count"]:
+        raise ValueError(
+            f"{path.name}: {len(e)} records, but the sidecar's Count is {side['Count']}"
+        )
     return Current(e, sha, ident), side
 
 
@@ -310,10 +414,11 @@ def _write_locked(
     description: str,
     labels_checked: bool = False,
 ) -> Current:
-    """write, with the exclusive lock held."""
+    """write, with the exclusive lock held. The first write into a BIDS root
+    makes its dataset_description.json."""
     p = edits_paths(path)
     edits.check(tuple(shape), labels=not labels_checked)
-    data = _npy_bytes(edits)
+    data = tsv_bytes(edits, tuple(shape))
     sha = hashlib.sha256(data).hexdigest()
     side = _sidecar(
         edits,
@@ -324,6 +429,9 @@ def _write_locked(
         description=description,
         function="baillarger.label_edits.write",
     )
+    root = _bids_root(path.absolute())
+    if root is not None:
+        dataset_description(root)
     write_atomic(p["records"], data)
     write_atomic(p["sidecar"], _side_bytes(side))
     return Current(edits, sha, _stat(p["records"]))
@@ -341,7 +449,7 @@ def write(
     affine: npt.ArrayLike,
     description: str = DESCRIPTION,
 ) -> Current:
-    """Write the diff at path (a .npy) and its sidecar (label-edits/1). Each
+    """Write the diff at path (a .tsv) and its sidecar (label-edits/1). Each
     file is written as a new file in the same directory, then renamed over the
     old one (the records first, then the sidecar; fileops.write_atomic), under
     an exclusive lock on the directory. Raises ValueError for a diff that is
@@ -367,7 +475,7 @@ def read_with_sidecar(
     affine: npt.ArrayLike | None = None,
     hemisphere: str | None = None,
 ) -> tuple[Edits, dict[str, Any], str]:
-    """The diff at path, its sidecar and the SHA-256 of its .npy file, read
+    """The diff at path, its sidecar and the SHA-256 of its .tsv file, read
     under a shared lock. If the records do not agree with the sidecar's
     SHA256 or Count (a write that stopped between its two renames), the
     sidecar is older than the records: the records are checked on the
@@ -625,3 +733,74 @@ def differ(a: Edits, b: Edits) -> tuple[Int, Int32]:
     la, lb = _entries(a, idx), _entries(b, idx)
     d = la != lb
     return idx[d], la[d]
+
+
+# ------------------------------------------------------------ the converter
+
+
+def convert(npy: Path) -> Path:
+    """Convert a diff of the earlier form (EDITS_DTYPE records in a .npy,
+    with its sidecar) to the .tsv next to it, once. The .npy's sidecar has
+    the same path as the .tsv's, so it is first copied to <npy>.json (for
+    example x_edits.npy.json); the .npy is not changed. Checks the .npy
+    against its sidecar (SHA256, Count) and on its grid, writes the .tsv and
+    its sidecar (write; Description, Hemisphere, Shape and Affine of the old
+    sidecar), reads them back, and checks that the diff is the same. Raises
+    ValueError if the .npy does not agree with its sidecar, if the .tsv or
+    <npy>.json is already there, or if the diff read back differs. Returns
+    the path of the .tsv."""
+    npy = Path(npy)
+    if npy.suffix != ".npy":
+        raise ValueError(f"{npy.name}: not a .npy diff")
+    tsv, side_p = npy.with_suffix(".tsv"), sidecar_path(npy)
+    keep = npy.with_name(npy.name + ".json")
+    for p in (tsv, keep):
+        if p.exists():
+            raise ValueError(f"{p}: already there (a converted diff?)")
+    data = npy.read_bytes()
+    raw = side_p.read_bytes()
+    side = json.loads(raw)
+    if side.get("SpecVersion") != EDITS_SPEC.version:
+        raise ValueError(f"{side_p.name}: not a {EDITS_SPEC.version} sidecar")
+    if hashlib.sha256(data).hexdigest() != side["SHA256"]:
+        raise ValueError(f"{npy.name}: the records do not agree with the SHA-256")
+    rec = np.load(npy, allow_pickle=False)
+    if rec.dtype != EDITS_DTYPE or rec.ndim != 1 or len(rec) != side["Count"]:
+        raise ValueError(f"{npy.name}: not {side['Count']} {EDITS_DTYPE} records")
+    shape = tuple(int(s) for s in side["Shape"])
+    e = _edits(rec["index"], rec["label"])
+    e.check(shape)
+    write_atomic(keep, raw)
+    write(
+        tsv,
+        e,
+        hemisphere=side["Hemisphere"],
+        shape=shape,
+        affine=np.reshape(side["Affine"], (4, 4)),
+        description=side["Description"],
+    )
+    back = read(tsv, shape=shape, hemisphere=side["Hemisphere"])
+    if not (
+        np.array_equal(back.index, e.index) and np.array_equal(back.label, e.label)
+    ):
+        raise ValueError(f"{tsv.name}: the diff read back is not the .npy's diff")
+    log.info(f"{npy.name}: {len(e)} voxels converted to {tsv.name}")
+    return tsv
+
+
+def main(argv: list[str] | None = None) -> None:
+    ap = argparse.ArgumentParser(description="the label edits (label-edits/1)")
+    sub = ap.add_subparsers(dest="command", required=True)
+    c = sub.add_parser(
+        "convert", help="convert a .npy diff to the .tsv next to it, once"
+    )
+    c.add_argument("npy", type=Path, help="the .npy diff")
+    a = ap.parse_args(argv)
+    tsv = convert(a.npy)
+    print(f"written: {tsv}")
+    print(f"written: {sidecar_path(tsv)}")
+    print(f"kept: {a.npy}, {a.npy.with_name(a.npy.name + '.json')}")
+
+
+if __name__ == "__main__":
+    main()

@@ -6,6 +6,7 @@ that no script names a data directory:
     TOP_NOISE   orient's noise model (JSON)
     TOP_ECHOES  the echo NIfTI files in echo order, separated by ":"
 """
+
 import os
 from pathlib import Path
 

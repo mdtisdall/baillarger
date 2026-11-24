@@ -33,7 +33,9 @@ class Model:
     hard: list = field(default_factory=list)  # (a, b, lo, hi) arrays
     hinge: list = field(default_factory=list)  # (a, b, t, w) arrays
     tie: list = field(default_factory=list)  # (a, b, L, w) arrays
-    table: list = field(default_factory=list)  # (a, b, T): T (m, Ka_max, Kb_max), T[p, k_a, k_b]; nan padding
+    table: list = field(
+        default_factory=list
+    )  # (a, b, T): T (m, Ka_max, Kb_max), T[p, k_a, k_b]; nan padding
 
     @property
     def n(self):
@@ -43,7 +45,10 @@ class Model:
 def _cat(terms, k):
     if not terms:
         return [np.zeros(0, int if j < 2 or k == "hard" else float) for j in range(4)]
-    return [np.concatenate([np.atleast_1d(np.asarray(t[j])) for t in terms]) for j in range(4)]
+    return [
+        np.concatenate([np.atleast_1d(np.asarray(t[j])) for t in terms])
+        for j in range(4)
+    ]
 
 
 def energy(M, k):
@@ -51,7 +56,15 @@ def energy(M, k):
     k = np.asarray(k, int)
     x = np.asarray(M.o, int) + k
     start = np.r_[0, np.cumsum(np.asarray(M.K, int))]
-    e = float(np.concatenate([np.asarray(u, float) for u in M.unary])[start[:-1] + k].sum()) if M.n else 0.0
+    e = (
+        float(
+            np.concatenate([np.asarray(u, float) for u in M.unary])[
+                start[:-1] + k
+            ].sum()
+        )
+        if M.n
+        else 0.0
+    )
     a, b, lo, hi = _cat(M.hard, "hard")
     if a.size and np.any((x[b] - x[a] < lo) | (x[b] - x[a] > hi)):
         return np.inf
@@ -104,7 +117,11 @@ def cut(M, extra_unary=None):
     """baillarger.surfcut.cut: exact minimum of unary + hard + hinge terms (ties ignored).
     extra_unary: dict i -> (K_i,) added to variable i's unary. Returns labels k (n,). Raises if the
     hard bounds are infeasible."""
-    extra = None if extra_unary is None else {int(i): np.asarray(v, np.float64) for i, v in extra_unary.items()}
+    extra = (
+        None
+        if extra_unary is None
+        else {int(i): np.asarray(v, np.float64) for i, v in extra_unary.items()}
+    )
     return SC.cut(_to_sc(M), extra)
 
 

@@ -111,14 +111,25 @@ def main() -> None:
         x2 = intersecting_faces(p2, s.f)[0]
         r = dict(
             roughness_mm=pct(r0[keep]),
-            roughness_by_kind_mm={P.TOP_NAMES[k]: pct(r0[keep & (kind == k)]) for k in P.TOP_NAMES},
+            roughness_by_kind_mm={
+                P.TOP_NAMES[k]: pct(r0[keep & (kind == k)]) for k in P.TOP_NAMES
+            },
             share_rough_over_0p16=round(float(np.mean(r0[keep] > 0.16)), 3),
-            share_rough_over_0p16_by_kind={P.TOP_NAMES[k]: round(float(np.mean(r0[keep & (kind == k)] > 0.16)), 3)
-                                           if (keep & (kind == k)).any() else None for k in P.TOP_NAMES},
-            intersecting_faces=int(x0.sum()), intersecting_faces_inside=int((x0 & fk).sum()),
-            smoothed=dict(roughness_mm=pct(r2[keep]), share_rough_over_0p16=round(float(np.mean(r2[keep] > 0.16)), 3),
-                          intersecting_faces=int(x2.sum()), intersecting_faces_inside=int((x2 & fk).sum()),
-                          change_mm=pct(np.abs(t2 - t)[keep] * h, (50, 90, 99))),
+            share_rough_over_0p16_by_kind={
+                P.TOP_NAMES[k]: round(float(np.mean(r0[keep & (kind == k)] > 0.16)), 3)
+                if (keep & (kind == k)).any()
+                else None
+                for k in P.TOP_NAMES
+            },
+            intersecting_faces=int(x0.sum()),
+            intersecting_faces_inside=int((x0 & fk).sum()),
+            smoothed=dict(
+                roughness_mm=pct(r2[keep]),
+                share_rough_over_0p16=round(float(np.mean(r2[keep] > 0.16)), 3),
+                intersecting_faces=int(x2.sum()),
+                intersecting_faces_inside=int((x2 & fk).sum()),
+                change_mm=pct(np.abs(t2 - t)[keep] * h, (50, 90, 99)),
+            ),
         )
         res[base] = r
         print(base, json.dumps(r, indent=1), flush=True)
@@ -129,14 +140,29 @@ def main() -> None:
             sl = [slice(None)] * 3
             sl[a] = c[a]
             o = [i for i in range(3) if i != a]
-            ax.imshow(img[tuple(sl)].T, cmap="gray", origin="lower", vmin=-0.25, vmax=0.25, interpolation="nearest")
-            for pts, col, lw in ((s.v, "#1baf7a", 0.8), (p0, "#eb6834", 0.7), (p2, "#2a78d6", 1.0)):
+            ax.imshow(
+                img[tuple(sl)].T,
+                cmap="gray",
+                origin="lower",
+                vmin=-0.25,
+                vmax=0.25,
+                interpolation="nearest",
+            )
+            for pts, col, lw in (
+                (s.v, "#1baf7a", 0.8),
+                (p0, "#eb6834", 0.7),
+                (p2, "#2a78d6", 1.0),
+            ):
                 for sg in P.plane_section(pts, s.f, a, float(c[a])):
                     ax.plot(sg[:, o[0]], sg[:, o[1]], color=col, lw=lw)
             ax.set_title(f"plane {'ijk'[a]} = {c[a]}", fontsize=10)
-            ax.set_xticks([]); ax.set_yticks([])
-        fig.suptitle(f"M1S1, base '{base}': white surface (green), base top (orange), robustly smoothed top (blue); "
-                     "echo 2, trend removed", fontsize=11)
+            ax.set_xticks([])
+            ax.set_yticks([])
+        fig.suptitle(
+            f"M1S1, base '{base}': white surface (green), base top (orange), robustly smoothed top (blue); "
+            "echo 2, trend removed",
+            fontsize=11,
+        )
         fig.tight_layout()
         fig.savefig(f"{figdir}/pial_base_{base}.png", dpi=110)
         plt.close(fig)

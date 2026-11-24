@@ -56,8 +56,13 @@ def run(out):
     ctx = (rim == 3) & ~miss
     m = ctx.astype(float)
     k = F.P1[2]
-    lo = np.array([min(F.P1[0], F.P2[0]) - 30, min(F.P1[1], F.P2[1]) - 30, k - 30]).clip(0)
-    hi = np.minimum(np.array([max(F.P1[0], F.P2[0]) + 31, max(F.P1[1], F.P2[1]) + 31, k + 31]), rim.shape)
+    lo = np.array(
+        [min(F.P1[0], F.P2[0]) - 30, min(F.P1[1], F.P2[1]) - 30, k - 30]
+    ).clip(0)
+    hi = np.minimum(
+        np.array([max(F.P1[0], F.P2[0]) + 31, max(F.P1[1], F.P2[1]) + 31, k + 31]),
+        rim.shape,
+    )
     box = tuple(slice(a, b) for a, b in zip(lo, hi))
     rb, mb, missb = rim[box], m[box], miss[box]
     e = {i: np.log(np.maximum(p.echoes[box + (i,)].astype(float), 1.0)) for i in (1, 2)}
@@ -68,23 +73,37 @@ def run(out):
     wm = rb == 2
     shell = wm & ~ndi.binary_erosion(wm)
     kk = k - lo[2]
-    a = (F.P1[0] - lo[0], F.P1[1] - lo[1]); b = (F.P2[0] - lo[0], F.P2[1] - lo[1])
+    a = (F.P1[0] - lo[0], F.P1[1] - lo[1])
+    b = (F.P2[0] - lo[0], F.P2[1] - lo[1])
     path = F.boundary_path(shell[:, :, kk], a, b)
     arc = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(path, axis=0).T))]) * vox[0]
 
     # per-voxel eigen-analysis on the slice
-    M = np.stack([np.stack([Tc[0], Tc[1], Tc[2]], -1), np.stack([Tc[1], Tc[3], Tc[4]], -1),
-                  np.stack([Tc[2], Tc[4], Tc[5]], -1)], -2)[:, :, kk]
+    M = np.stack(
+        [
+            np.stack([Tc[0], Tc[1], Tc[2]], -1),
+            np.stack([Tc[1], Tc[3], Tc[4]], -1),
+            np.stack([Tc[2], Tc[4], Tc[5]], -1),
+        ],
+        -2,
+    )[:, :, kk]
     w, V = np.linalg.eigh(M)
     n = V[..., :, 2]
     coh = (w[..., 2] - w[..., 1]) / np.maximum(w[..., 2] + w[..., 1], 1e-12)
     ctx_s = ctx[box][:, :, kk]
     coh = np.where(ctx_s, coh, np.nan)
-    outp = np.where(ctx_s, np.degrees(np.arcsin(np.clip(np.abs(n[..., 2]), 0, 1))), np.nan)
+    outp = np.where(
+        ctx_s, np.degrees(np.arcsin(np.clip(np.abs(n[..., 2]), 0, 1))), np.nan
+    )
 
     field = lambda x: F.normal_at(Tc, x)
-    cols = {"exit": "#1f78b4", "facing WM": "#33a02c", "length": "#e31a1c",
-            "other": "#ff7f00", "missing": "#6a3d9a"}
+    cols = {
+        "exit": "#1f78b4",
+        "facing WM": "#33a02c",
+        "length": "#e31a1c",
+        "other": "#ff7f00",
+        "missing": "#6a3d9a",
+    }
     traces = []
     for i, j in path:
         sd = (i, j, kk)
@@ -98,11 +117,16 @@ def run(out):
     yl = (path[:, 1].min() - 18, path[:, 1].max() + 18)
     fig, axs = plt.subplots(1, 4, figsize=(24, 7.5))
     for ax in axs:
-        ax.set_xlim(*xl); ax.set_ylim(*yl); ax.set_aspect("equal")
-        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_xlim(*xl)
+        ax.set_ylim(*yl)
+        ax.set_aspect("equal")
+        ax.set_xticks([])
+        ax.set_yticks([])
     # 1: streamlines by outcome, in-plane projection
     ax = axs[0]
-    ax.imshow(np.where(ctx_s, sl, np.nan).T, origin="lower", cmap="gray", vmin=-v, vmax=v)
+    ax.imshow(
+        np.where(ctx_s, sl, np.nan).T, origin="lower", cmap="gray", vmin=-v, vmax=v
+    )
     ax.contour(shell[:, :, kk].T, levels=[0.5], colors="y", linewidths=0.8)
     for pts, st in traces:
         ax.plot(pts[:, 0], pts[:, 1], "-", c=cols[st], lw=1.0)
@@ -128,11 +152,24 @@ def run(out):
     ax2.axhline(0, c="k", lw=0.5)
     # 3: layer strokes coloured by coherence
     ax = axs[2]
-    ax.imshow(np.where(ctx_s, sl, np.nan).T, origin="lower", cmap="gray", vmin=-v, vmax=v, alpha=0.6)
+    ax.imshow(
+        np.where(ctx_s, sl, np.nan).T,
+        origin="lower",
+        cmap="gray",
+        vmin=-v,
+        vmax=v,
+        alpha=0.6,
+    )
     segs, cc = [], []
     for x in range(int(xl[0]), int(xl[1]), 2):
         for y in range(int(yl[0]), int(yl[1]), 2):
-            if x < 0 or y < 0 or x >= ctx_s.shape[0] or y >= ctx_s.shape[1] or not ctx_s[x, y]:
+            if (
+                x < 0
+                or y < 0
+                or x >= ctx_s.shape[0]
+                or y >= ctx_s.shape[1]
+                or not ctx_s[x, y]
+            ):
                 continue
             nx, ny = n[x, y, 0], n[x, y, 1]
             tx, ty = -ny, nx
@@ -152,20 +189,27 @@ def run(out):
     # 4: how far the normal tilts out of the slice
     ax = axs[3]
     im = ax.imshow(outp.T, origin="lower", cmap="magma_r", vmin=0, vmax=90)
-    fig.colorbar(im, ax=ax, shrink=0.7, label="layer normal's tilt out of the slice (deg)")
+    fig.colorbar(
+        im, ax=ax, shrink=0.7, label="layer normal's tilt out of the slice (deg)"
+    )
     ax.contour(shell[:, :, kk].T, levels=[0.5], colors="y", linewidths=0.8)
     ax.plot(path[:, 0], path[:, 1], "c-", lw=2)
     ax.set_title("normal out of plane: 0 = in slice, 90 = along k")
     # mark the gap
     gap = [c_ for c_, (_, st) in enumerate(traces) if st != "facing WM"]
-    fig.suptitle("V1V2 slice k = 27 fused stretch: failing streamlines and the data orientation "
-                 f"(seeds along the yellow path, {arc[-1]:.1f} mm)", fontsize=14)
+    fig.suptitle(
+        "V1V2 slice k = 27 fused stretch: failing streamlines and the data orientation "
+        f"(seeds along the yellow path, {arc[-1]:.1f} mm)",
+        fontsize=14,
+    )
     fig.savefig(out, dpi=105, bbox_inches="tight")
     stats = {}
     for pts, st in traces:
         stats.setdefault(st, []).append(np.abs(pts[:, 2] - kk).max() * vox[2])
     for st, vv in stats.items():
-        print(f"{st}: {len(vv)} streamlines, max out-of-slice travel median {np.median(vv):.2f} mm")
+        print(
+            f"{st}: {len(vv)} streamlines, max out-of-slice travel median {np.median(vv):.2f} mm"
+        )
     print("wrote", out)
 
 

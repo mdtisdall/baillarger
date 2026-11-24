@@ -55,12 +55,21 @@ H_MM = 0.16
 OUT, CTX, FLUID, WM = 0, 1, 2, 3
 # why a column stopped
 CAP, ENTER_WM, LEFT, FLUID_END, NO_DIRECTION = 1, 2, 3, 4, 5
-STOP_NAMES = {CAP: "length cap", ENTER_WM: "entered WM", LEFT: "left the domain",
-              FLUID_END: "end of the fluid extension", NO_DIRECTION: "no direction"}
+STOP_NAMES = {
+    CAP: "length cap",
+    ENTER_WM: "entered WM",
+    LEFT: "left the domain",
+    FLUID_END: "end of the fluid extension",
+    NO_DIRECTION: "no direction",
+}
 # how a model's top was placed
 TOP_FLUID, TOP_FOREIGN, TOP_RIDGE, TOP_NONE = 1, 2, 3, 4
-TOP_NAMES = {TOP_FLUID: "fluid", TOP_FOREIGN: "another front", TOP_RIDGE: "ridge of arrival",
-             TOP_NONE: "none (column end)"}
+TOP_NAMES = {
+    TOP_FLUID: "fluid",
+    TOP_FOREIGN: "another front",
+    TOP_RIDGE: "ridge of arrival",
+    TOP_NONE: "none (column end)",
+}
 
 
 # ------------------------------------------------------------------ white surface
@@ -97,8 +106,16 @@ class Geometry:
     codes: npt.NDArray[np.int8]  # OUT, CTX, FLUID, WM
 
 
-def march_from_mesh(v: Float, f: Int, wm: Bool, ctx: Bool, fluid: Bool, direction: Float,
-                    ratio: float, band: float = 2.5) -> Geometry:
+def march_from_mesh(
+    v: Float,
+    f: Int,
+    wm: Bool,
+    ctx: Bool,
+    fluid: Bool,
+    direction: Float,
+    ratio: float,
+    band: float = 2.5,
+) -> Geometry:
     """One unweighted march from the white mesh through cortex and fluid. direction:
     unit vectors (..., 3) (zero: isotropic there); ratio: cost across it."""
     dom = ctx | fluid
@@ -112,7 +129,14 @@ def march_from_mesh(v: Float, f: Int, wm: Bool, ctx: Bool, fluid: Bool, directio
     codes[ctx] = CTX
     codes[fluid] = FLUID
     codes[wm] = WM
-    return Geometry(out.arrival, out.length, out.root, np.asarray(direction, np.float64), ratio, codes)
+    return Geometry(
+        out.arrival,
+        out.length,
+        out.root,
+        np.asarray(direction, np.float64),
+        ratio,
+        codes,
+    )
 
 
 def characteristic_field(g: Geometry) -> npt.NDArray[np.float32]:
@@ -138,23 +162,37 @@ def _interp_vec(F, x, ref, signed):
     vector is first turned to agree with ref (unsigned fields, e.g. the layer normal).
     Corners whose vector is zero are left out. Returns a unit vector, or zeros."""
     nx, ny, nz = F.shape[0], F.shape[1], F.shape[2]
-    i0 = int(np.floor(x[0])); j0 = int(np.floor(x[1])); k0 = int(np.floor(x[2]))
-    fx = x[0] - i0; fy = x[1] - j0; fz = x[2] - k0
+    i0 = int(np.floor(x[0]))
+    j0 = int(np.floor(x[1]))
+    k0 = int(np.floor(x[2]))
+    fx = x[0] - i0
+    fy = x[1] - j0
+    fz = x[2] - k0
     out = np.zeros(3)
     wsum = 0.0
     for di in range(2):
         for dj in range(2):
             for dk in range(2):
-                i = i0 + di; j = j0 + dj; k = k0 + dk
+                i = i0 + di
+                j = j0 + dj
+                k = k0 + dk
                 if i < 0 or j < 0 or k < 0 or i >= nx or j >= ny or k >= nz:
                     continue
-                w = (fx if di else 1 - fx) * (fy if dj else 1 - fy) * (fz if dk else 1 - fz)
-                a = F[i, j, k, 0]; b = F[i, j, k, 1]; c = F[i, j, k, 2]
+                w = (
+                    (fx if di else 1 - fx)
+                    * (fy if dj else 1 - fy)
+                    * (fz if dk else 1 - fz)
+                )
+                a = F[i, j, k, 0]
+                b = F[i, j, k, 1]
+                c = F[i, j, k, 2]
                 if a == 0.0 and b == 0.0 and c == 0.0:
                     continue
                 if not signed and a * ref[0] + b * ref[1] + c * ref[2] < 0:
                     w = -w
-                out[0] += w * a; out[1] += w * b; out[2] += w * c
+                out[0] += w * a
+                out[1] += w * b
+                out[2] += w * c
                 wsum += abs(w)
     n = np.sqrt(out[0] ** 2 + out[1] ** 2 + out[2] ** 2)
     if wsum < 0.25 or n < 1e-9:
@@ -166,20 +204,30 @@ def _interp_vec(F, x, ref, signed):
 def _interp_scalar(F, x):
     """Trilinear interpolation of a finite scalar field (nan corners left out)."""
     nx, ny, nz = F.shape
-    i0 = int(np.floor(x[0])); j0 = int(np.floor(x[1])); k0 = int(np.floor(x[2]))
-    fx = x[0] - i0; fy = x[1] - j0; fz = x[2] - k0
+    i0 = int(np.floor(x[0]))
+    j0 = int(np.floor(x[1]))
+    k0 = int(np.floor(x[2]))
+    fx = x[0] - i0
+    fy = x[1] - j0
+    fz = x[2] - k0
     s = 0.0
     wsum = 0.0
     for di in range(2):
         for dj in range(2):
             for dk in range(2):
-                i = i0 + di; j = j0 + dj; k = k0 + dk
+                i = i0 + di
+                j = j0 + dj
+                k = k0 + dk
                 if i < 0 or j < 0 or k < 0 or i >= nx or j >= ny or k >= nz:
                     continue
                 val = F[i, j, k]
                 if not np.isfinite(val):
                     continue
-                w = (fx if di else 1 - fx) * (fy if dj else 1 - fy) * (fz if dk else 1 - fz)
+                w = (
+                    (fx if di else 1 - fx)
+                    * (fy if dj else 1 - fy)
+                    * (fz if dk else 1 - fz)
+                )
                 s += w * val
                 wsum += w
     if wsum < 1e-9:
@@ -189,15 +237,43 @@ def _interp_scalar(F, x):
 
 @njit(cache=True)
 def _code(codes, x):
-    i = int(np.floor(x[0] + 0.5)); j = int(np.floor(x[1] + 0.5)); k = int(np.floor(x[2] + 0.5))
-    if i < 0 or j < 0 or k < 0 or i >= codes.shape[0] or j >= codes.shape[1] or k >= codes.shape[2]:
+    i = int(np.floor(x[0] + 0.5))
+    j = int(np.floor(x[1] + 0.5))
+    k = int(np.floor(x[2] + 0.5))
+    if (
+        i < 0
+        or j < 0
+        or k < 0
+        or i >= codes.shape[0]
+        or j >= codes.shape[1]
+        or k >= codes.shape[2]
+    ):
         return -1
     return codes[i, j, k]
 
 
 @njit(cache=True)
-def _trace_all(p0, n0, C, T, N, codes, h, L_max, fluid_ext, wm_grace, rec, K, out_pts, out_n,
-               ridge_s, fluid_s, stop_s, stop_why, ext_used):
+def _trace_all(
+    p0,
+    n0,
+    C,
+    T,
+    N,
+    codes,
+    h,
+    L_max,
+    fluid_ext,
+    wm_grace,
+    rec,
+    K,
+    out_pts,
+    out_n,
+    ridge_s,
+    fluid_s,
+    stop_s,
+    stop_why,
+    ext_used,
+):
     nrec = int(round(rec / h))
     for r in range(p0.shape[0]):
         x = p0[r].copy()
@@ -217,11 +293,13 @@ def _trace_all(p0, n0, C, T, N, codes, h, L_max, fluid_ext, wm_grace, rec, K, ou
             if mode == 0 and s > wm_grace:
                 d1 = _interp_vec(C, x, d, True)
                 ok = (d1[0] != 0.0 or d1[1] != 0.0 or d1[2] != 0.0) and (
-                    d1[0] * d[0] + d1[1] * d[1] + d1[2] * d[2] > 0.0)
+                    d1[0] * d[0] + d1[1] * d[1] + d1[2] * d[2] > 0.0
+                )
                 if ok:
                     d2 = _interp_vec(C, x + 0.5 * h * d1, d1, True)
                     ok = (d2[0] != 0.0 or d2[1] != 0.0 or d2[2] != 0.0) and (
-                        d2[0] * d1[0] + d2[1] * d1[1] + d2[2] * d1[2] > 0.0)
+                        d2[0] * d1[0] + d2[1] * d1[1] + d2[2] * d1[2] > 0.0
+                    )
                 if ok:
                     Tn = _interp_scalar(T, x + h * d2)
                     ok = Tn > Tx
@@ -240,7 +318,8 @@ def _trace_all(p0, n0, C, T, N, codes, h, L_max, fluid_ext, wm_grace, rec, K, ou
                 # leaving the WM: along the characteristics where defined, else the normal
                 d1 = _interp_vec(C, x, d, True)
                 if (d1[0] != 0.0 or d1[1] != 0.0 or d1[2] != 0.0) and (
-                        d1[0] * d[0] + d1[1] * d[1] + d1[2] * d[2] > 0.0):
+                    d1[0] * d[0] + d1[1] * d[1] + d1[2] * d[2] > 0.0
+                ):
                     d2 = d1
             if mode == 1:
                 d1 = _interp_vec(N, x, d, False)
@@ -293,9 +372,18 @@ class Columns:
     extended: Bool  # the column was extended past a ridge in cortex
 
 
-def trace_columns(v: Float, n: Float, g: Geometry, C, layer_normal: Float, h: float = 0.25,
-                  L_max_mm: float = 5.0, fluid_mm: float = 1.0, grace: float = 1.0,
-                  rec: float = 0.5) -> Columns:
+def trace_columns(
+    v: Float,
+    n: Float,
+    g: Geometry,
+    C,
+    layer_normal: Float,
+    h: float = 0.25,
+    L_max_mm: float = 5.0,
+    fluid_mm: float = 1.0,
+    grace: float = 1.0,
+    rec: float = 0.5,
+) -> Columns:
     """Trace every vertex's column (see the module docstring). layer_normal: unit,
     unsigned (zero where unknown). Lengths in voxels except the _mm arguments."""
     L_max = L_max_mm / H_MM
@@ -309,14 +397,33 @@ def trace_columns(v: Float, n: Float, g: Geometry, C, layer_normal: Float, h: fl
     stop_why = np.zeros(nv, np.int64)
     ext = np.zeros(nv, np.bool_)
     T = np.where(np.isfinite(g.arrival), g.arrival, np.nan)
-    _trace_all(np.ascontiguousarray(v, np.float64), np.ascontiguousarray(n, np.float64),
-               np.ascontiguousarray(C, np.float64), T, np.ascontiguousarray(layer_normal, np.float64),
-               g.codes, h, L_max, fluid_mm / H_MM, grace, rec, K, pts, cnt, ridge_s, fluid_s, stop_s,
-               stop_why, ext)
+    _trace_all(
+        np.ascontiguousarray(v, np.float64),
+        np.ascontiguousarray(n, np.float64),
+        np.ascontiguousarray(C, np.float64),
+        T,
+        np.ascontiguousarray(layer_normal, np.float64),
+        g.codes,
+        h,
+        L_max,
+        fluid_mm / H_MM,
+        grace,
+        rec,
+        K,
+        pts,
+        cnt,
+        ridge_s,
+        fluid_s,
+        stop_s,
+        stop_why,
+        ext,
+    )
     seg = np.linalg.norm(np.diff(pts, axis=1), axis=-1)
     s = np.concatenate([np.zeros((nv, 1)), np.cumsum(np.nan_to_num(seg), 1)], 1)
     s[np.arange(K)[None, :] >= cnt[:, None]] = np.nan
-    return Columns(pts.astype(np.float32), cnt, s, ridge_s, fluid_s, stop_s, stop_why, ext)
+    return Columns(
+        pts.astype(np.float32), cnt, s, ridge_s, fluid_s, stop_s, stop_why, ext
+    )
 
 
 def point_at(cols: Columns, t: Float, rows: Int | None = None) -> Float:
@@ -329,7 +436,9 @@ def point_at(cols: Columns, t: Float, rows: Int | None = None) -> Float:
     ok = np.isfinite(t)
     S = cols.s[rows]
     # first sample at or beyond t (the arc lengths increase along a column)
-    idx = np.sum(np.where(np.isfinite(S), S, np.inf) < np.where(ok, t, -np.inf)[:, None], 1)
+    idx = np.sum(
+        np.where(np.isfinite(S), S, np.inf) < np.where(ok, t, -np.inf)[:, None], 1
+    )
     good = ok & (idx >= 1) & (idx < cols.n[rows])
     j = np.flatnonzero(good)
     r, i = rows[j], idx[j]
@@ -345,7 +454,9 @@ def point_at(cols: Columns, t: Float, rows: Int | None = None) -> Float:
 
 
 def _sample_trilinear(F: Float, P: Float) -> Float:
-    return ndi.map_coordinates(F, P.reshape(-1, 3).T, order=1, mode="nearest").reshape(P.shape[:-1])
+    return ndi.map_coordinates(F, P.reshape(-1, 3).T, order=1, mode="nearest").reshape(
+        P.shape[:-1]
+    )
 
 
 def top_label(cols: Columns, fluid: Bool) -> tuple[Float, Int]:
@@ -390,11 +501,19 @@ def near_patches(setup, sep_min: float) -> Int:
         d = dijkstra(setup.graph, indices=src, limit=sep_min)
         i, j = np.nonzero(d[:, reps] <= sep_min)
         keys.append((i + c0).astype(np.int64) * npatch + j)
-    return np.unique(np.concatenate(keys + [np.arange(npatch, dtype=np.int64) * (npatch + 1)]))
+    return np.unique(
+        np.concatenate(keys + [np.arange(npatch, dtype=np.int64) * (npatch + 1)])
+    )
 
 
-def top_onepass(cols: Columns, label: Int, near_keys: Int, npatch: int, fluid: Bool,
-                own_from: float = 1.0) -> tuple[Float, Int]:
+def top_onepass(
+    cols: Columns,
+    label: Int,
+    near_keys: Int,
+    npatch: int,
+    fluid: Bool,
+    own_from: float = 1.0,
+) -> tuple[Float, Int]:
     """Arc length of the first sample in fluid or in a far front's territory, placed
     midway between it and the sample before. The column's own patch: the label of its
     first cortex sample at least own_from voxels up. near_keys: from near_patches."""
@@ -437,19 +556,35 @@ def _click(length, root, x, same):
     weight: across a ridge the corners belong to different fronts, and averaging their
     roots gives a point on neither."""
     nx, ny, nz = length.shape
-    i0 = int(np.floor(x[0])); j0 = int(np.floor(x[1])); k0 = int(np.floor(x[2]))
-    fx = x[0] - i0; fy = x[1] - j0; fz = x[2] - k0
-    ws = np.zeros(8); ii = np.zeros((8, 3), np.int64); ok = np.zeros(8, np.bool_)
+    i0 = int(np.floor(x[0]))
+    j0 = int(np.floor(x[1]))
+    k0 = int(np.floor(x[2]))
+    fx = x[0] - i0
+    fy = x[1] - j0
+    fz = x[2] - k0
+    ws = np.zeros(8)
+    ii = np.zeros((8, 3), np.int64)
+    ok = np.zeros(8, np.bool_)
     c = 0
     for di in range(2):
         for dj in range(2):
             for dk in range(2):
-                i = i0 + di; j = j0 + dj; k = k0 + dk
-                ii[c, 0] = i; ii[c, 1] = j; ii[c, 2] = k
-                ws[c] = (fx if di else 1 - fx) * (fy if dj else 1 - fy) * (fz if dk else 1 - fz)
-                ok[c] = (0 <= i < nx and 0 <= j < ny and 0 <= k < nz)
+                i = i0 + di
+                j = j0 + dj
+                k = k0 + dk
+                ii[c, 0] = i
+                ii[c, 1] = j
+                ii[c, 2] = k
+                ws[c] = (
+                    (fx if di else 1 - fx)
+                    * (fy if dj else 1 - fy)
+                    * (fz if dk else 1 - fz)
+                )
+                ok[c] = 0 <= i < nx and 0 <= j < ny and 0 <= k < nz
                 if ok[c]:
-                    ok[c] = np.isfinite(length[i, j, k]) and np.isfinite(root[i, j, k, 0])
+                    ok[c] = np.isfinite(length[i, j, k]) and np.isfinite(
+                        root[i, j, k, 0]
+                    )
                 c += 1
     ref = -1
     for c in range(8):
@@ -459,20 +594,28 @@ def _click(length, root, x, same):
     if ref < 0:
         return np.nan, R
     r0 = root[ii[ref, 0], ii[ref, 1], ii[ref, 2]]
-    sw = 0.0; sl = 0.0; sr = np.zeros(3)
+    sw = 0.0
+    sl = 0.0
+    sr = np.zeros(3)
     for c in range(8):
         if not ok[c]:
             continue
         rc = root[ii[c, 0], ii[c, 1], ii[c, 2]]
-        if (rc[0] - r0[0]) ** 2 + (rc[1] - r0[1]) ** 2 + (rc[2] - r0[2]) ** 2 > same * same:
+        if (rc[0] - r0[0]) ** 2 + (rc[1] - r0[1]) ** 2 + (
+            rc[2] - r0[2]
+        ) ** 2 > same * same:
             continue
         # the corner's arc length carried to x along its column (unit root -> corner);
         # with all 8 corners kept these terms cancel (sum w_c x_c = x)
-        u0 = ii[c, 0] - rc[0]; u1 = ii[c, 1] - rc[1]; u2 = ii[c, 2] - rc[2]
+        u0 = ii[c, 0] - rc[0]
+        u1 = ii[c, 1] - rc[1]
+        u2 = ii[c, 2] - rc[2]
         un = np.sqrt(u0 * u0 + u1 * u1 + u2 * u2)
         ds = 0.0
         if un > 1e-9:
-            ds = (u0 * (x[0] - ii[c, 0]) + u1 * (x[1] - ii[c, 1]) + u2 * (x[2] - ii[c, 2])) / un
+            ds = (
+                u0 * (x[0] - ii[c, 0]) + u1 * (x[1] - ii[c, 1]) + u2 * (x[2] - ii[c, 2])
+            ) / un
         sw += ws[c]
         sl += ws[c] * (length[ii[c, 0], ii[c, 1], ii[c, 2]] + ds)
         sr += ws[c] * rc

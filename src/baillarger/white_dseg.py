@@ -24,9 +24,9 @@ of changes: the whole-hemisphere surface (baillarger.white_surf).
 The command writes the corrected segmentation (desc-wmtopo_dseg), the
 changed voxels (desc-wmtopofixes_dseg), the fix table and the fix diff, with
 their .tsv and .json sidecars (docs/formats/wm-dseg.md), and a copy of the
-label edits that it used. EDITS is the diff of the label edits (a .npy,
-baillarger.label_edits, docs/formats/label-edits.md): it is applied to the
-input labels before the automatic correction.
+label edits that it used (desc-wmtopo_edits.tsv). EDITS is the diff of the
+label edits (a .tsv, baillarger.label_edits, docs/formats/label-edits.md): it
+is applied to the input labels before the automatic correction.
 """
 
 import argparse
@@ -145,7 +145,7 @@ def output_paths(dseg: Path) -> dict[str, Path]:
     """The outputs of the dseg command (write_wm_topo) whose corrected
     segmentation is at dseg, by role, in the directory of dseg: dseg, fixes
     (desc-wmtopofixes_dseg), table (the fix table), diff (the fix diff) and
-    edits (the copy of the label edits). Raises ValueError if dseg is not
+    edits (the copy of the label edits, a .tsv). Raises ValueError if dseg is not
     named as dseg_path names it."""
     d = Path(dseg)
     ents = entities(d)
@@ -160,7 +160,7 @@ def output_paths(dseg: Path) -> dict[str, Path]:
         fixes=at("dseg", ".nii.gz", "wmtopofixes"),
         table=at("fixes", ".tsv", "wmtopofixes"),
         diff=at("diff", ".npy", "wmtopofixes"),
-        edits=at("edits", ".npy", "wmtopo"),
+        edits=at("edits", ".tsv", "wmtopo"),
     )
 
 
@@ -636,7 +636,7 @@ def _write_tsv(path: Path, names: dict[int, str]) -> None:
 
 def write_wm_topo(aseg: Path, out: Path, edits: Path | None = None) -> dict[str, Path]:
     """The dseg command: wm_topo of the aseg at aseg, with the label edits at
-    edits (a .npy diff, docs/formats/label-edits.md) if given, written to the
+    edits (a .tsv diff, docs/formats/label-edits.md) if given, written to the
     BIDS derivatives root out (docs/formats/wm-dseg.md). The output keeps a
     copy of the diff that it used (role "edits"; the empty diff if edits is
     None). Raises ValueError for a diff on another grid. Returns the paths
@@ -819,7 +819,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     ap.add_argument("aseg", type=Path, help="a BIDS-named segmentation (NIfTI)")
     ap.add_argument(
-        "--edits", type=Path, help="the label edits (a .npy diff, label-edits/1)"
+        "--edits", type=Path, help="the label edits (a .tsv diff, label-edits/1)"
     )
     ap.add_argument("--out", required=True, type=Path, help="BIDS derivatives root")
     a = ap.parse_args(argv)

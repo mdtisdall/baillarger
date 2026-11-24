@@ -54,7 +54,9 @@ def make_A(dev):
 
 def make_B(dev):
     st = _stencils()
-    k6 = torch.as_tensor(np.stack([k for k, _ in st]), device=dev)[:, None]  # (6,1,3,3,3)
+    k6 = torch.as_tensor(np.stack([k for k, _ in st]), device=dev)[
+        :, None
+    ]  # (6,1,3,3,3)
     w = torch.as_tensor([2.0 * w for _, w in st], device=dev)
     kback = (k6[:, 0] * w[:, None, None, None])[None]  # (1,6,3,3,3): weighted sum back
 
@@ -195,7 +197,16 @@ def solve_crops(a):
         for label, kw in variants:
             t = time.perf_counter()
             phi, info = AA.thin_plate(
-                sdf, mask, 5.0, 0.02, "mps", 8000, 1e-4, stop="surface", quiet=True, **kw
+                sdf,
+                mask,
+                5.0,
+                0.02,
+                "mps",
+                8000,
+                1e-4,
+                stop="surface",
+                quiet=True,
+                **kw,
             )
             dt = time.perf_counter() - t
             if ref is None:
@@ -203,8 +214,11 @@ def solve_crops(a):
             near = np.abs(ref) < 1.0
             diff = float(np.abs(phi - ref)[near].max())
             lv = [(d["iterations"], d["seconds"]) for d in info["levels"]]
-            print(f"crop at {lo} {label:24s}: {dt:6.1f} s; levels (iterations, s) {lv}; "
-                  f"max |phi - baseline| near the surface {diff:.1e}", flush=True)
+            print(
+                f"crop at {lo} {label:24s}: {dt:6.1f} s; levels (iterations, s) {lv}; "
+                f"max |phi - baseline| near the surface {diff:.1e}",
+                flush=True,
+            )
 
 
 def main():
@@ -214,10 +228,14 @@ def main():
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--cpu-max", type=int, default=192)
     ap.add_argument("--skip-conv", action="store_true", help="leave out A and B")
-    ap.add_argument("--solve", type=Path, help="a dseg: iterations to converge on crops of it")
+    ap.add_argument(
+        "--solve", type=Path, help="a dseg: iterations to converge on crops of it"
+    )
     ap.add_argument("--crop", type=int, default=192)
     a = ap.parse_args()
-    print(f"torch {torch.__version__}, CPU threads {torch.get_num_threads()}", flush=True)
+    print(
+        f"torch {torch.__version__}, CPU threads {torch.get_num_threads()}", flush=True
+    )
 
     # correctness: the three gradients agree (on the CPU, small)
     rng = np.random.default_rng(0)
@@ -225,10 +243,13 @@ def main():
     dev = torch.device("cpu")
     gA, gB, gC, gF = make_A(dev)(x), make_B(dev)(x), make_C(dev)(x), make_F(dev)(x)
     inner = (slice(2, -2),) * 3
-    print(f"check: |B - A| max {float((gB - gA).abs().max()):.2e}, "
-          f"|C - A| max {float((gC - gA).abs().max()):.2e}, "
-          f"|F - A| max (2 voxels from the edge) {float((gF - gA)[inner].abs().max()):.2e}, "
-          f"|A| max {float(gA.abs().max()):.2f}; fused taps {len(fused_taps())}", flush=True)
+    print(
+        f"check: |B - A| max {float((gB - gA).abs().max()):.2e}, "
+        f"|C - A| max {float((gC - gA).abs().max()):.2e}, "
+        f"|F - A| max (2 voxels from the edge) {float((gF - gA)[inner].abs().max()):.2e}, "
+        f"|A| max {float(gA.abs().max()):.2f}; fused taps {len(fused_taps())}",
+        flush=True,
+    )
     if a.solve is not None:
         solve_crops(a)
         return
@@ -240,12 +261,19 @@ def main():
             if name == "cpu" and n > a.cpu_max:
                 continue
             nv = n**3
-            x = torch.as_tensor(rng.standard_normal((n, n, n)).astype(np.float32), device=dev)
+            x = torch.as_tensor(
+                rng.standard_normal((n, n, n)).astype(np.float32), device=dev
+            )
             inside = x > 0
             free = torch.ones_like(inside)
             fixed = x.clone()
             row = []
-            for label, make in (("A", make_A), ("B", make_B), ("C", make_C), ("F", make_F)):
+            for label, make in (
+                ("A", make_A),
+                ("B", make_B),
+                ("C", make_C),
+                ("F", make_F),
+            ):
                 if label in ("A", "B") and a.skip_conv:
                     continue
                 try:
@@ -255,10 +283,19 @@ def main():
                 except Exception as e:  # e.g. an op MPS does not support
                     row.append(f"{label} grad FAILED {type(e).__name__}: {str(e)[:60]}")
             gC = make_C(dev)
-            it_rb = time_it(iteration(gC, dev, x, inside, free, fixed, True), dev, a.reps)
-            it_no = time_it(iteration(gC, dev, x, inside, free, fixed, False), dev, a.reps)
-            row.append(f"C iteration {1e3 * it_rb:8.1f} (readback) {1e3 * it_no:8.1f} (none)")
-            print(f"{name:4s} {n:4d}^3 = {nv / 1e6:6.2f} M: " + " | ".join(row), flush=True)
+            it_rb = time_it(
+                iteration(gC, dev, x, inside, free, fixed, True), dev, a.reps
+            )
+            it_no = time_it(
+                iteration(gC, dev, x, inside, free, fixed, False), dev, a.reps
+            )
+            row.append(
+                f"C iteration {1e3 * it_rb:8.1f} (readback) {1e3 * it_no:8.1f} (none)"
+            )
+            print(
+                f"{name:4s} {n:4d}^3 = {nv / 1e6:6.2f} M: " + " | ".join(row),
+                flush=True,
+            )
             del x, inside, free, fixed
             if name == "mps":
                 torch.mps.empty_cache()

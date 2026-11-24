@@ -643,9 +643,9 @@ def test_sites_need_the_log_and_the_edits(files: dict[str, Path]) -> None:
     VR.add_arguments(ap)
     for argv in (
         ["--sites", "q.tsv", "--log", "l.jsonl"],
-        ["--sites", "q.tsv", "--edits", "e.npy"],
+        ["--sites", "q.tsv", "--edits", "e.tsv"],
         ["--log", "l.jsonl"],
-        ["--log", "l.jsonl", "--edits", "e.npy"],
+        ["--log", "l.jsonl", "--edits", "e.tsv"],
     ):
         a = ap.parse_args(argv)
         with pytest.raises(ValueError):

@@ -36,7 +36,9 @@ def test_qpbo_against_brute_force(seed):
 
     def restricted(cert, lab):
         b = np.inf
-        for k in itertools.product(*[range(K) if not c else [l] for K, c, l in zip(M.K, cert, lab)]):
+        for k in itertools.product(
+            *[range(K) if not c else [l] for K, c, l in zip(M.K, cert, lab)]
+        ):
             b = min(b, WC.energy(M, np.array(k)))
         return b
 
@@ -65,7 +67,9 @@ def fold_min_wc(M, fix=None):
 
     from baillarger.surfcut import Model
 
-    return fold_min(Model(np.asarray(M.K), np.asarray(M.o), M.unary, M.hard, M.hinge, M.tie), fix)
+    return fold_min(
+        Model(np.asarray(M.K), np.asarray(M.o), M.unary, M.hard, M.hinge, M.tie), fix
+    )
 
 
 def folded_model(rng, n_side=12, K=14):
@@ -77,14 +81,31 @@ def folded_model(rng, n_side=12, K=14):
     unary = [np.round(rng.normal(size=K) * 0.6, 3) for _ in range(n)]
     hinge = []
     for i in range(n - 1):  # A: 0..n_side-1, then B continues round the fold
-        hinge.append((np.array([i]), np.array([i + 1]), np.array([int(rng.integers(-1, 2))]),
-                      np.array([round(float(rng.uniform(0.2, 0.8)), 3)])))
-    hard = [(np.array([i]), np.array([i + 1]), np.array([-3]), np.array([3])) for i in range(n - 1)]
+        hinge.append(
+            (
+                np.array([i]),
+                np.array([i + 1]),
+                np.array([int(rng.integers(-1, 2))]),
+                np.array([round(float(rng.uniform(0.2, 0.8)), 3)]),
+            )
+        )
+    hard = [
+        (np.array([i]), np.array([i + 1]), np.array([-3]), np.array([3]))
+        for i in range(n - 1)
+    ]
     tie = []
-    for i in range(n_side - 2):  # facing columns: A's i against B's mirror, away from the fold
+    for i in range(
+        n_side - 2
+    ):  # facing columns: A's i against B's mirror, away from the fold
         j = n - 1 - i
-        tie.append((np.array([i]), np.array([j]), np.array([int(rng.integers(K - 2, K + 4))]),
-                    np.array([round(float(rng.uniform(0.3, 1.0)), 3)])))
+        tie.append(
+            (
+                np.array([i]),
+                np.array([j]),
+                np.array([int(rng.integers(K - 2, K + 4))]),
+                np.array([round(float(rng.uniform(0.3, 1.0)), 3)]),
+            )
+        )
     return WC.Model(Ks, o, unary, hard, hinge, tie)
 
 
@@ -94,8 +115,10 @@ def test_qpbo_against_exact_folded(seed):
     M = folded_model(rng)
     best = fold_min_wc(M)
     r = check_against(M, best, lambda cert, lab: fold_min_wc(M, (cert, lab)))
-    print(f"seed {seed}: optimum {best:.3f}, qpbo {r['energy']:.3f}, bound {r['lower_bound']:.3f}, "
-          f"certified {r['certified'].mean():.0%}")
+    print(
+        f"seed {seed}: optimum {best:.3f}, qpbo {r['energy']:.3f}, bound {r['lower_bound']:.3f}, "
+        f"certified {r['certified'].mean():.0%}"
+    )
 
 
 @pytest.mark.parametrize("seed", range(30))
@@ -120,7 +143,9 @@ def test_reduce_is_exact(seed):
         if np.isfinite(e):
             assert abs(e - er) < 1e-6
         else:
-            assert er >= 1e5  # a broken bound touching a free variable shows as the big cost
+            assert (
+                er >= 1e5
+            )  # a broken bound touching a free variable shows as the big cost
 
 
 @pytest.mark.parametrize("seed", range(20))
@@ -147,7 +172,9 @@ def test_qpbo_with_tables(seed, kind):
 
     def restricted(cert, lab):
         b = np.inf
-        for k in itertools.product(*[range(K) if not c else [l] for K, c, l in zip(M.K, cert, lab)]):
+        for k in itertools.product(
+            *[range(K) if not c else [l] for K, c, l in zip(M.K, cert, lab)]
+        ):
             b = min(b, WC.energy(M, np.array(k)))
         return b
 

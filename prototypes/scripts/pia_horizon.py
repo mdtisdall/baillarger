@@ -47,8 +47,20 @@ PAIR_MM, NDOT, H_SCALE, SMOOTH_MM = 0.25, 0.7, 0.8, 0.08
 G_BAND = (0.8, 1.2)
 BANDS = [(0.15, 0.25), (0.4, 0.6), (0.8, 1.2), (1.6, 2.4)]
 OPEN, CROSS, OWN, TOCONTACT, FAILED = range(5)
-CNAME = {OPEN: "open", CROSS: "crossing", OWN: "own bank", TOCONTACT: "to the contact", FAILED: "failed"}
-CCOL = {OPEN: "#1baf7a", CROSS: "#2a78d6", OWN: "#eb6834", TOCONTACT: "#c79a00", FAILED: "#e34948"}
+CNAME = {
+    OPEN: "open",
+    CROSS: "crossing",
+    OWN: "own bank",
+    TOCONTACT: "to the contact",
+    FAILED: "failed",
+}
+CCOL = {
+    OPEN: "#1baf7a",
+    CROSS: "#2a78d6",
+    OWN: "#eb6834",
+    TOCONTACT: "#c79a00",
+    FAILED: "#e34948",
+}
 HOR = ["top", "far WM", "profile, top"]
 HCOL = {"top": "#ffffff", "far WM": "#30d5ff", "profile, top": "#2a78d6"}
 T0 = time.time()
@@ -74,7 +86,7 @@ def score(c, ic, Z):
     tree = cKDTree((P * vox).astype(float))
     off, pts = [], []
     for t in ic:
-        p = pos[t, :ns[t]].astype(float) * vox
+        p = pos[t, : ns[t]].astype(float) * vox
         d, k = tree.query(p)
         i = int(np.argmin(d))
         if d[i] <= 0.3 and np.isfinite(c[t]):
@@ -85,11 +97,14 @@ def score(c, ic, Z):
         return dict(traces=0, points=0)
     per = np.array([np.median(np.abs(off[pts == k])) for k in np.unique(pts)])
     sgn = np.array([np.median(off[pts == k]) for k in np.unique(pts)])
-    return dict(traces=int(off.size), points=int(per.size),
-                abs_median_per_point_median=round(float(np.median(per)), 3),
-                abs_median_per_point_p90=round(float(np.percentile(per, 90)), 3),
-                signed_median_per_point_median=round(float(np.median(sgn)), 3),
-                per_point={int(k): round(float(m), 3) for k, m in zip(np.unique(pts), per)})
+    return dict(
+        traces=int(off.size),
+        points=int(per.size),
+        abs_median_per_point_median=round(float(np.median(per)), 3),
+        abs_median_per_point_p90=round(float(np.percentile(per, 90)), 3),
+        signed_median_per_point_median=round(float(np.median(sgn)), 3),
+        per_point={int(k): round(float(m), 3) for k, m in zip(np.unique(pts), per)},
+    )
 
 
 def trend_and_g(H, top, root, nr, idx):
@@ -100,10 +115,19 @@ def trend_and_g(H, top, root, nr, idx):
     r = top[idx] - mu[idx]
     sl = {f"{lo}-{hi} mm": slopes(root[idx], nr[idx], r, (lo, hi)) for lo, hi in BANDS}
     g = float(np.percentile(sl[f"{G_BAND[0]}-{G_BAND[1]} mm"], A.g_pct))
-    info = dict(m=round(float(m), 4), a=round(float(a), 4), tops=int(idx.size), g=round(g, 4),
-                top_p5_50_95=np.percentile(top[idx], [5, 50, 95]).round(3).tolist(),
-                slopes_p50_95_99={k: dict(pairs=int(s.size), pcts=np.percentile(s, [50, 95, 99]).round(3).tolist())
-                                  for k, s in sl.items()})
+    info = dict(
+        m=round(float(m), 4),
+        a=round(float(a), 4),
+        tops=int(idx.size),
+        g=round(g, 4),
+        top_p5_50_95=np.percentile(top[idx], [5, 50, 95]).round(3).tolist(),
+        slopes_p50_95_99={
+            k: dict(
+                pairs=int(s.size), pcts=np.percentile(s, [50, 95, 99]).round(3).tolist()
+            )
+            for k, s in sl.items()
+        },
+    )
     return mu, g, sl, info
 
 
@@ -122,7 +146,9 @@ def run():
     loc[iu] = np.arange(iu.size)
     depths = D0 + STEP * np.arange(int(round((D1 - D0) / STEP)) + 1)
     K = depths.size
-    summary = dict(site=SITE, traces=int(iu.size), open_traces=int(is_open.sum()), labels=K)
+    summary = dict(
+        site=SITE, traces=int(iu.size), open_traces=int(is_open.sum()), labels=K
+    )
 
     # ---- data cost, every trace
     F = fv[:, iu].astype(float)
@@ -136,7 +162,7 @@ def run():
     den = ndi.gaussian_filter1d(Mk.astype(float), sig, axis=1, mode="constant")
     Es = np.where(Mk & (den > 0.5), num / np.maximum(den, 1e-6), 0.0)
     j0 = int(round(D0 / STEP))
-    D = Es[:, j0:j0 + K].copy()
+    D = Es[:, j0 : j0 + K].copy()
     if D.shape[1] < K:
         D = np.pad(D, ((0, 0), (0, K - D.shape[1])))
     del E, Es, num, den
@@ -147,7 +173,9 @@ def run():
     pref = np.zeros_like(D)
     pref[loc[io]] = np.where(at_top, 0.0, Pc)
     summary["open preference P"] = round(Pc, 3)
-    summary["open tops beyond the label range (always overridden)"] = int(np.sum(~at_top.any(1)))
+    summary["open tops beyond the label range (always overridden)"] = int(
+        np.sum(~at_top.any(1))
+    )
 
     # ---- the graph: every pair of neighbours
     pr = cKDTree(root[iu]).query_pairs(PAIR_MM, output_type="ndarray")
@@ -161,31 +189,62 @@ def run():
     for st in (1, 2):
         mu, g, sl, info = trend_and_g(H, top, root, nr, idx)
         lo, hi = PL.bound_labels(mu[pr[:, 1]] - mu[pr[:, 0]], g * dist, STEP)
-        say(f"stage {st}: trend m {info['m']} a {info['a']:+}; g {g:.3f} mm/mm from {idx.size:,} open tops")
+        say(
+            f"stage {st}: trend m {info['m']} a {info['a']:+}; g {g:.3f} mm/mm from {idx.size:,} open tops"
+        )
         cl = PL.min_surface(D + pref, loc[pr], lo, hi)
         c = np.full(len(tv), np.nan)
         c[iu] = depths[cl]
         kept = np.abs(c[io] - top[io]) <= STEP / 2 + 1e-9
         long_ = top[io] > 3.5
-        info.update({
-            "open tops kept": int(kept.sum()), "open tops overridden": int((~kept).sum()),
-            "overridden, of tops over 3.5 mm (diagnostic split only)": round(float(np.mean(~kept[long_])), 3),
-            "overridden, of tops up to 3.5 mm": round(float(np.mean(~kept[~long_])), 3),
-            "overridden: c minus top, p5/50/95 (mm)": np.percentile((c[io] - top[io])[~kept], [5, 50, 95]).round(3).tolist()
-            if (~kept).any() else None,
-            "c by class, p5/50/95 (mm)": {CNAME[k]: np.percentile(c[keep & (cls == k)], [5, 50, 95]).round(3).tolist()
-                                         for k in CNAME if np.any(keep & (cls == k))},
-            "c at the lowest label (fraction)": round(float(np.mean(cl == 0)), 4)})
+        info.update(
+            {
+                "open tops kept": int(kept.sum()),
+                "open tops overridden": int((~kept).sum()),
+                "overridden, of tops over 3.5 mm (diagnostic split only)": round(
+                    float(np.mean(~kept[long_])), 3
+                ),
+                "overridden, of tops up to 3.5 mm": round(
+                    float(np.mean(~kept[~long_])), 3
+                ),
+                "overridden: c minus top, p5/50/95 (mm)": np.percentile(
+                    (c[io] - top[io])[~kept], [5, 50, 95]
+                )
+                .round(3)
+                .tolist()
+                if (~kept).any()
+                else None,
+                "c by class, p5/50/95 (mm)": {
+                    CNAME[k]: np.percentile(c[keep & (cls == k)], [5, 50, 95])
+                    .round(3)
+                    .tolist()
+                    for k in CNAME
+                    if np.any(keep & (cls == k))
+                },
+                "c at the lowest label (fraction)": round(float(np.mean(cl == 0)), 4),
+            }
+        )
         say(f"stage {st}: min cut done; open tops overridden {int((~kept).sum()):,}")
         stages.append(info)
         c_st.append(c)
-        idx = io[kept]  # consistent open tops: the trend and g are measured again on them
+        idx = io[
+            kept
+        ]  # consistent open tops: the trend and g are measured again on them
         last = (mu, g, sl)
     summary["stages"] = stages
     c = c_st[-1]
     mu, g, sl = last
-    np.savez_compressed(f"{WORK}/pia_{SITE}.npz", c=c, c_stage1=c_st[0], mu=mu, H=H, keep=keep, is_open=is_open,
-                        g=g, depths=depths)
+    np.savez_compressed(
+        f"{WORK}/pia_{SITE}.npz",
+        c=c,
+        c_stage1=c_st[0],
+        mu=mu,
+        H=H,
+        keep=keep,
+        is_open=is_open,
+        g=g,
+        depths=depths,
+    )
 
     # ---- scores
     if len(Z["P"]):
@@ -195,14 +254,27 @@ def run():
             # an open trace whose top was overridden crossed a contact: score it too
             moved = is_open & (np.abs(cc - top) > STEP / 2 + 1e-9)
             sc[f"first pia, stage {st} (crossing, to the contact)"] = score(cc, ic, Z)
-            sc[f"first pia, stage {st} (crossing, to the contact, overridden open)"] = score(
-                cc, np.flatnonzero(keep & (np.isin(cls, [CROSS, TOCONTACT]) | moved)), Z)
-            sc[f"first pia, stage {st} (every trace)"] = score(cc, np.flatnonzero(keep), Z)
+            sc[f"first pia, stage {st} (crossing, to the contact, overridden open)"] = (
+                score(
+                    cc,
+                    np.flatnonzero(keep & (np.isin(cls, [CROSS, TOCONTACT]) | moved)),
+                    Z,
+                )
+            )
+            sc[f"first pia, stage {st} (every trace)"] = score(
+                cc, np.flatnonzero(keep), Z
+            )
         for h in ["profile, top"]:
-            sc[h + " (crossing, to the contact)"] = score(Z["H_" + h].astype(float), ic, Z)
+            sc[h + " (crossing, to the contact)"] = score(
+                Z["H_" + h].astype(float), ic, Z
+            )
         summary["at the points (|horizon - point depth|, mm)"] = sc
     json.dump(summary, open(f"{WORK}/pia_{SITE}.json", "w"), indent=1)
-    printable = {k: v_ for k, v_ in summary.items() if k != "at the points (|horizon - point depth|, mm)"}
+    printable = {
+        k: v_
+        for k, v_ in summary.items()
+        if k != "at the points (|horizon - point depth|, mm)"
+    }
     print(json.dumps(printable, indent=1))
     if "at the points (|horizon - point depth|, mm)" in summary:
         for k, s in summary["at the points (|horizon - point depth|, mm)"].items():
@@ -212,11 +284,25 @@ def run():
 
 
 def figures(Z, c, sl, g):
-    tv, ns, fv, cls, pos, P, vox = Z["tv"], Z["ns"], Z["fv"], Z["cls"], Z["pos"], Z["P"], Z["vox"]
+    tv, ns, fv, cls, pos, P, vox = (
+        Z["tv"],
+        Z["ns"],
+        Z["fv"],
+        Z["cls"],
+        Z["pos"],
+        Z["P"],
+        Z["vox"],
+    )
     keep = ~Z["near_face"] & (ns > 1)
     fig, axs = plt.subplots(1, 1, figsize=(8, 5))
     for k, s in sl.items():
-        axs.hist(s, np.linspace(0, 2, 81), histtype="step", density=True, label=f"{k} (p99 {np.percentile(s, 99):.2f})")
+        axs.hist(
+            s,
+            np.linspace(0, 2, 81),
+            histtype="step",
+            density=True,
+            label=f"{k} (p99 {np.percentile(s, 99):.2f})",
+        )
     axs.axvline(g, c="k", ls="--", label=f"g = {g:.3f}")
     axs.set_xlabel("|change in detrended open top| / distance (mm per mm)")
     axs.set_title(f"{SITE}: slopes of the open top by root distance")
@@ -233,8 +319,15 @@ def figures(Z, c, sl, g):
     tv_set[tv] = True
     trace_of = -np.ones(len(v), int)
     trace_of[tv] = np.arange(len(tv))
-    rows = [(k, bi, tr, d) for k in planes
-            for bi, (tr, d) in enumerate(section_traces(Z, G, ax, k, P[np.abs(P[:, ax] - k) <= 2], trace_of, tv_set, vox))]
+    rows = [
+        (k, bi, tr, d)
+        for k in planes
+        for bi, (tr, d) in enumerate(
+            section_traces(
+                Z, G, ax, k, P[np.abs(P[:, ax] - k) <= 2], trace_of, tv_set, vox
+            )
+        )
+    ]
     depth = np.arange(0, 6.0 + 1e-9, STEP)
     vmax = np.nanpercentile(np.abs(fv[0][keep]), 97)
     fig, axs = plt.subplots(len(rows), 1, figsize=(20, 6 * len(rows)), squeeze=False)
@@ -246,23 +339,48 @@ def figures(Z, c, sl, g):
             m_ = min(ns[t], depth.size)
             img[:m_, j] = fv[0, t, :m_]
         ext = [dist[0], dist[-1], depth[-1], 0] if tr.size > 1 else None
-        a.imshow(img, aspect="auto", cmap="gray", vmin=-vmax, vmax=vmax, extent=ext, interpolation="nearest")
+        a.imshow(
+            img,
+            aspect="auto",
+            cmap="gray",
+            vmin=-vmax,
+            vmax=vmax,
+            extent=ext,
+            interpolation="nearest",
+        )
         for h in HOR:
-            a.plot(dist, Z["H_" + h][tr], "." if h == "profile, top" else "-", c=HCOL[h], ms=4, lw=1, label=h)
+            a.plot(
+                dist,
+                Z["H_" + h][tr],
+                "." if h == "profile, top" else "-",
+                c=HCOL[h],
+                ms=4,
+                lw=1,
+                label=h,
+            )
         cc = np.where(keep[tr], c[tr], np.nan)
         a.plot(dist, cc, "-", c="#ff2bd6", lw=1.6, label="first pia (this tracker)")
         for j, t in enumerate(tr):
-            p = pos[t, :ns[t]].astype(float) * vox
+            p = pos[t, : ns[t]].astype(float) * vox
             d_ = np.linalg.norm(p[:, None] - (Pk * vox)[None], axis=2)
             if d_.min() <= 0.3:
-                a.plot(dist[j], np.unravel_index(np.argmin(d_), d_.shape)[0] * STEP, "*", c="#ffd23f", ms=9)
+                a.plot(
+                    dist[j],
+                    np.unravel_index(np.argmin(d_), d_.shape)[0] * STEP,
+                    "*",
+                    c="#ffd23f",
+                    ms=9,
+                )
         for j, t in enumerate(tr):
             a.plot(dist[j], depth[-1] - 0.08, "s", ms=4, c=CCOL[int(cls[t])])
         a.set_ylim(depth[-1], 0)
         a.set_ylabel("depth from the root (mm)")
         a.set_xlabel("position along the white surface (mm)")
-        a.set_title(f"plane {'ijk'[ax]} = {k}, bank {bi + 1}: echo 2; magenta: first pia; ★ your points; "
-                    f"strip: class (green open, blue crossing, orange own bank, gold to contact, red failed)", fontsize=10)
+        a.set_title(
+            f"plane {'ijk'[ax]} = {k}, bank {bi + 1}: echo 2; magenta: first pia; ★ your points; "
+            f"strip: class (green open, blue crossing, orange own bank, gold to contact, red failed)",
+            fontsize=10,
+        )
         if ri == 0:
             a.legend(fontsize=8, loc="lower right", ncol=3)
     fig.tight_layout()
