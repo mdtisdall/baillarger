@@ -3,7 +3,7 @@
 Status: Parts 1 to 6 are built and merged: Part 1 (#168, #175), Part 2 (#181), Part 3
 (#195), Part 4a (#197), Part 4b (core #171, join #198), Part 5 (core #167, #172,
 #177, join #196) and Part 6 (core #219, join #220, #223, the grow log #224). Part 7
-(the standard edits file) is planned, not built, and has decisions to make.
+(the standard edits file) is planned, not built, and has two decisions to make.
 
 ## Goal
 
@@ -393,11 +393,17 @@ standard file, if it is there. `--edits PATH` gives another file, and `--no-edit
 runs with no edits. The command logs the edits file that it uses. The pane's button
 gives `--edits` with the file that the viewer writes, as now.
 
+**The grow log.** It is a debugging log of the grow brush, and it is off by default
+(User, 2026-11-23). The viewer option `--grow-log PATH` switches it on and gives its
+file. Without the option, the viewer writes no grow log, and nothing is written next
+to the edits file but the edits. The log is not a record of the edits, and no code
+reads it.
+
 **Not changed.** The format `label-edits/1` apart from the decision below; the undo
 stack (memory, one viewer run); the dseg's copy of the edits (the pending edits need
 it); the check of the outputs' identity after a regeneration.
 
-**To decide** (each with a recommendation; none is built before its decision):
+**To decide** (each with a recommendation; neither is built before its decision):
 
 1. **The records: `.npy` or TSV.** The file's name follows BIDS, but the suffix
    `edits` and the extension `.npy` are not in the standard. A TSV (`i`, `j`, `k`,
@@ -411,9 +417,6 @@ it); the check of the outputs' identity after a regeneration.
    `--edits`, the viewer starts with editing off. The pane shows the path of the edits
    file and a switch. Each write is refused until the user has switched editing on.
    The page never sends a path.
-3. **The grow log.** It is next to the edits, it has no format document, and no code
-   reads it. Recommended: off by default, on with a viewer option, with its path
-   given by that option.
 
 Tests: `standard_path` of input labels in a derivatives root gives the path above, and
 refuses input labels that are not in `sub-<sub>/ses-<ses>/anat/` of a root; a viewer
@@ -421,7 +424,8 @@ without `--edits` on a phantom writes its paint into the standard file, and make
 root's `dataset_description.json`; a viewer with `--edits` writes into that file and
 makes no standard file; the regeneration without `--edits` gives the same files as
 with `--edits` on the standard file; `--no-edits` gives the same files as a root with
-no standard file.
+no standard file; a viewer without `--grow-log` writes no grow log after a grow, a
+paint and an undo, and a viewer with it writes their lines into that file.
 
 ## Order of the PRs
 
@@ -450,7 +454,7 @@ the cores into the routes and the pane, and they meet in a few shared files.
 | 4b | `antialias.py` (start, held), `white_surf.py` (the field derivative, the blocks' re-march), its format doc, their tests | `viewer/review.py` (route, working field), the 3D view and the slices (blocks) | the preview contract |
 | 5 | a new `regenerate` command, its tests | `viewer/review.py` (the subprocess), `static/review.js` (state, message) | the command's arguments |
 | 6 | `label_grow.py` (new), `tests/test_label_grow.py` | `viewer/review.py` (`/review/grow`, the echoes), `static/review.js` (grow mode, the proposal, accept) | the `label_grow` contract |
-| 7 | `label_edits.py` (`standard_path`), `regenerate.py` (`--edits` optional, `--no-edits`), `docs/formats/label-edits.md`, their tests | `viewer/review.py` (`--edits` optional; the guard), `static/review.js` (the guard) | the decisions of Part 7, `standard_path` |
+| 7 | `label_edits.py` (`standard_path`), `regenerate.py` (`--edits` optional, `--no-edits`), `docs/formats/label-edits.md`, their tests | `viewer/review.py` (`--edits` optional; the guard; `--grow-log`), `static/review.js` (the guard) | the decisions of Part 7, `standard_path` |
 
 Waves:
 
@@ -569,6 +573,8 @@ The joins use these interfaces. A core must keep them, or change this plan first
   input labels that are not in `sub-<sub>/ses-<ses>/anat/` of a derivatives root.
 - Part 7: `python -m baillarger.regenerate INPUT [--edits EDITS | --no-edits] --root
   ROOT`. With neither option, the edits are the standard file, if it is there.
+- Part 7: the grow log is written only with the viewer option `--grow-log PATH`, into
+  that file (`.jsonl`, with its sidecar `grow-log/1`). `review.grow_log_path` goes.
 
 ## Not in this plan
 
