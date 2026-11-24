@@ -423,8 +423,7 @@ was the guard against a write from the wrong viewer. The switch replaces it.
   the edits file and a switch. `POST /review/editing {on}` sets it, for this viewer
   run only. The page never sends a path.
 - While editing is off, each write is refused and nothing is written: a paint, an
-  answer, an accept-fix, an undo and a regeneration. The edits file and its root are
-  not made. The reads work: the pending edits, the previews and the grow proposal.
+  answer, an accept-fix and an undo. The edits file and its root are not made. The reads work: the pending edits, the previews and the grow proposal.
 - With `--edits PATH`, editing is on at start, as now: the path in the command is the
   deliberate act.
 - The viewer does not switch editing on if the dseg has no copy of the edits that it
@@ -433,8 +432,25 @@ was the guard against a write from the wrong viewer. The switch replaces it.
 
 **The regeneration.** `python -m baillarger.regenerate INPUT --root ROOT` uses the
 standard file, if it is there. `--edits PATH` gives another file, and `--no-edits`
-runs with no edits. The command logs the edits file that it uses. The pane's button
-gives `--edits` with the file that the viewer writes, as now.
+runs with no edits. The command logs the edits file that it uses.
+
+**The regeneration is a command-line call only** (User, 2026-11-23). The pane's
+regenerate button goes, with all that serves it: the routes `/review/regenerate`, the
+subprocess under `scripts/memguard` (`review.Regeneration`, `regen_cap_gb` and the
+`REGEN_*` values), the closing of the paint mode while it runs, and the button, the
+state and the log lines in `review.js`.
+
+- The user runs the command in a terminal, under `scripts/memguard` (about 20 min, a
+  peak of about 22 GB on the laptop).
+- The pane shows the command for its hemisphere as text to copy
+  (`Review.regenerate_argv`, which stays): `GET /review/queue` gives it as
+  `regenerate_command`. With an edits file at the standard path, the command has no
+  `--edits`.
+- The check of the outputs' identity stays. When the command has replaced the
+  outputs, the review refuses each write until the viewer restarts, and the pane says
+  so. The overrides are in the command's output.
+- A write into the edits while the command runs is a valid edit. The command read
+  the diff once, at its start, so this edit is pending after the restart.
 
 **The grow log.** It is a debugging log of the grow brush, and it is off by default
 (User, 2026-11-23). The viewer option `--grow-log PATH` switches it on and gives its
@@ -463,11 +479,16 @@ missing; the tests of Part 1 for the stopped write and the lock pass on the TSV;
 converter's `.tsv` reads back equal to the `.npy` diff, and the `.npy` files are
 still there.
 
-Tests of the switch: without `--edits`, a paint, an answer, an undo and a regeneration
-before the switch are refused, and no file and no root are made; after the switch a
+Tests of the switch: without `--edits`, a paint, an answer and an undo before the
+switch are refused, and no file and no root are made; after the switch a
 paint writes; the pending edits and a preview work with editing off; with `--edits`,
 editing is on at start; on an output set with no readable copy of the edits, the
 switch is refused.
+
+Tests of the regeneration from the command line: `/review/regenerate` is not a route;
+`GET /review/queue` gives the command, without `--edits` for a standard edits file
+and with it for another file; after the outputs are replaced, a paint is refused
+until a new viewer starts (the test of Part 5, kept).
 
 ## Order of the PRs
 
@@ -497,7 +518,7 @@ the cores into the routes and the pane, and they meet in a few shared files.
 | 4b | `antialias.py` (start, held), `white_surf.py` (the field derivative, the blocks' re-march), its format doc, their tests | `viewer/review.py` (route, working field), the 3D view and the slices (blocks) | the preview contract |
 | 5 | a new `regenerate` command, its tests | `viewer/review.py` (the subprocess), `static/review.js` (state, message) | the command's arguments |
 | 6 | `label_grow.py` (new), `tests/test_label_grow.py` | `viewer/review.py` (`/review/grow`, the echoes), `static/review.js` (grow mode, the proposal, accept) | the `label_grow` contract |
-| 7 | `label_edits.py` (the TSV, `standard_path`, the converter), `white_dseg.py` (the copy as a TSV), `regenerate.py` (`--edits` optional, `--no-edits`), `docs/formats/label-edits.md`, `wm-dseg.md`, their tests | `viewer/review.py` (`--edits` optional; `/review/editing`; `--grow-log`), `static/review.js` (the path and the switch) | `standard_path`, the `/review/editing` contract |
+| 7 | `label_edits.py` (the TSV, `standard_path`, the converter), `white_dseg.py` (the copy as a TSV), `regenerate.py` (`--edits` optional, `--no-edits`), `docs/formats/label-edits.md`, `wm-dseg.md`, their tests | `viewer/review.py` (`--edits` optional; `/review/editing`; `--grow-log`; the regenerate button goes), `static/review.js` (the path and the switch; the regenerate button goes) | `standard_path`, the `/review/editing` contract |
 
 Waves:
 
@@ -622,6 +643,8 @@ The joins use these interfaces. A core must keep them, or change this plan first
   (`edits` is the path of the edits file), or `{error}` if the dseg has no readable
   copy of the edits. `GET /review/queue` also gives `editing` and `edits`. With
   editing off, each write route answers `{error}` and writes nothing.
+- Part 7: `POST /review/regenerate` and `GET /review/regenerate` go. `GET
+  /review/queue` also gives `regenerate_command` (the command line, a string).
 - Part 7: the grow log is written only with the viewer option `--grow-log PATH`, into
   that file (`.jsonl`, with its sidecar `grow-log/1`). `review.grow_log_path` goes.
 
