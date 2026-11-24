@@ -368,7 +368,7 @@ GROW_LOG_SPEC = SidecarSpec(
 def grow_log_path(edits: Path) -> Path:
     """The grow log of the edits at edits (a .npy): its name with the suffix
     growlog and the extension .jsonl (module docstring, Grow log)."""
-    stem = edits.name.removesuffix(".npy")
+    stem = edits.name.removesuffix(".tsv")
     stem = stem.removesuffix("_edits") if stem.endswith("_edits") else stem
     return edits.with_name(stem + "_growlog.jsonl")
 

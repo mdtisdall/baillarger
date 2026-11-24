@@ -699,7 +699,7 @@ def main(argv: list[str] | None = None) -> None:
         "--volume", type=Path, action="append", default=[], help="another volume"
     )
     ap.add_argument("--white", type=Path, help="a white-surf/1 .surf.gii")
-    ap.add_argument("--edits", type=Path, help="a label-edits/1 .npy")
+    ap.add_argument("--edits", type=Path, help="a label-edits/1 .tsv")
     ap.add_argument("--no-overview", action="store_true", help="write no overview")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--centre-mm", type=float, nargs=3, metavar=("X", "Y", "Z"))

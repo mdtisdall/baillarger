@@ -42,7 +42,7 @@ of its source.
 | The white surface: the `white-surf/1` set | `white`, `white.dat`, `white.json`, `normals`, `normals.dat`, `normlen`, `normlen.dat`, `keys`, `keys.dat`, `blocks` | The white surface of the crop (below) |
 | `…_hemi-<h>_desc-antialias_white.nii`, `.json` | `field`, `field.json` | The box of the antialiased field, `white-antialias/1`, with `BoxOrigin` (0, 0, 0) and `BoxShape` the crop's grid |
 | The overview: the `white-overview/1` files | `overview.overview`, `overview.ids`, `overview.carry`, `overview.carry_dat`, `overview.sidecar` | An overview made again from the crop's white surface (`write_white_overview`), not cut from the source overview |
-| The label edits, `.npy` and `.json` | `edits`, `edits.json` | The entries of the diff inside the box, on the crop's grid (`label-edits/1`: `Shape` and `Affine` of the crop). The labels of the crop do not change |
+| The label edits, `.tsv` and `.json` | `edits`, `edits.json` | The entries of the diff inside the box, on the crop's grid (`label-edits/1`: `Shape` and `Affine` of the crop). The labels of the crop do not change |
 | `sub-<sub>_ses-<ses>_desc-crop_box.json` | (none) | Sidecar, `crop/1` |
 
 `ROOT/dataset_description.json` (`DatasetType` `derivative`) is written if

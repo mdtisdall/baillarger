@@ -330,7 +330,7 @@ def test_label_edits_change_only_the_labels(
     vals = np.array([0, 0, 0, 42], np.int32)
     idx = np.ravel_multi_index(tuple(pts.T), grid).astype(np.int64)
     order = np.argsort(idx)
-    diff = tmp_path / "sub-T01_ses-S1_hemi-R_desc-labeledits_edits.npy"
+    diff = tmp_path / "sub-T01_ses-S1_hemi-R_desc-labeledits_edits.tsv"
     LE.write(
         diff,
         LE.Edits(idx[order], vals[order]),
