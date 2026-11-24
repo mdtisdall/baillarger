@@ -608,7 +608,7 @@ def _link_all(
 
 
 @njit(cache=True)
-def _faces_round(vhead: Int, cnext: Int, v: int) -> Int:
+def live_faces_round(vhead: Int, cnext: Int, v: int) -> Int:
     """The faces round vertex v, in the order of its corner list."""
     n = 0
     c = vhead[v]
@@ -624,9 +624,9 @@ def _faces_round(vhead: Int, cnext: Int, v: int) -> Int:
 
 
 @njit(cache=True)
-def _neighbours_of(F: Int, vhead: Int, cnext: Int, v: int) -> Int:
+def live_neighbours(F: Int, vhead: Int, cnext: Int, v: int) -> Int:
     """The vertices that share a face with v (each once, v not included)."""
-    fs = _faces_round(vhead, cnext, v)
+    fs = live_faces_round(vhead, cnext, v)
     out = np.empty(2 * len(fs), np.int64)
     k = 0
     for f in fs:
@@ -646,9 +646,9 @@ def _neighbours_of(F: Int, vhead: Int, cnext: Int, v: int) -> Int:
 
 
 @njit(cache=True)
-def _edge_faces_of(F: Int, vhead: Int, cnext: Int, a: int, b: int) -> Int:
+def live_edge_faces(F: Int, vhead: Int, cnext: Int, a: int, b: int) -> Int:
     """The faces round a that have b, in the order of a's corner list."""
-    fs = _faces_round(vhead, cnext, a)
+    fs = live_faces_round(vhead, cnext, a)
     out = np.empty(len(fs), np.int64)
     k = 0
     for f in fs:
@@ -1458,16 +1458,16 @@ class Checker:
 
     def faces_of(self, v: int) -> Int:
         """The faces round vertex v."""
-        return _faces_round(self._vhead, self._cnext, v)
+        return live_faces_round(self._vhead, self._cnext, v)
 
     def neighbours_of(self, v: int) -> Int:
         """The vertices that share a face with v (each once, in no fixed
         order)."""
-        return _neighbours_of(self._F, self._vhead, self._cnext, v)
+        return live_neighbours(self._F, self._vhead, self._cnext, v)
 
     def edge_faces(self, a: int, b: int) -> Int:
         """The faces of edge (a, b), in the order of faces_of(a)."""
-        return _edge_faces_of(self._F, self._vhead, self._cnext, a, b)
+        return live_edge_faces(self._F, self._vhead, self._cnext, a, b)
 
     def rebuild(self, links: int = 0) -> None:
         """The grid again from the live faces: cell = gap + the largest face

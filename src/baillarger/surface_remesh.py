@@ -64,7 +64,7 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -77,6 +77,7 @@ from scipy.spatial import cKDTree
 from baillarger import mesh_checks as MC
 from baillarger._jit import njit
 from baillarger.decimate import closest_points
+from baillarger.mesh_checks import live_edge_faces, live_neighbours
 
 Float = npt.NDArray[np.float64]
 Int = npt.NDArray[np.int64]
@@ -87,7 +88,7 @@ HI, LO = 4.0 / 3.0, 4.0 / 5.0
 
 
 @intrinsic
-def _fma(typingctx: Any, a: Any, b: Any, c: Any) -> Any:
+def _fma_intrinsic(typingctx: Any, a: Any, b: Any, c: Any) -> Any:
     """a × b + c rounded once (llvm.fma)."""
     sig = types.float64(types.float64, types.float64, types.float64)
 
@@ -99,6 +100,10 @@ def _fma(typingctx: Any, a: Any, b: Any, c: Any) -> Any:
         return builder.call(fn, args)
 
     return sig, codegen
+
+
+#: _fma_intrinsic as compiled code calls it
+_fma = cast(Callable[[float, float, float], float], _fma_intrinsic)
 
 
 @njit(cache=True, inline="always")
@@ -352,6 +357,56 @@ class _Assignment:
     S: dict[int, Float]
     C: dict[int, int]
     removed: set[int]
+
+
+@njit(cache=True)
+def _flip_next(
+    F: Int, vhead: Int, cnext: Int, rim: Bool, E: Int, start: int
+) -> tuple[int, int, int, int, int, int, int]:
+    """The first edge of E from index start whose flip Remesher.flip would
+    try (the valences nearer to 6 inside, 4 on the rim; no edge c-d yet;
+    no valence of a or b below 3): its index and a, b, c, d (oriented as
+    flip orients them) and its faces f, g; index -1 if none. Read only."""
+    for i in range(start, len(E)):
+        a, b = E[i, 0], E[i, 1]
+        if vhead[a] < 0:
+            continue
+        ef = live_edge_faces(F, vhead, cnext, a, b)
+        if len(ef) != 2:
+            continue
+        f, g = ef[0], ef[1]
+        k = 0
+        while F[f, k] != a:
+            k += 1
+        if F[f, (k + 1) % 3] != b:
+            a, b = b, a
+            k = 0
+            while F[f, k] != a:
+                k += 1
+        c = F[f, (k + 2) % 3]
+        d = -1
+        for r in range(3):
+            if F[g, r] != a and F[g, r] != b:
+                d = F[g, r]
+                break
+        nc = live_neighbours(F, vhead, cnext, c)
+        if (nc == d).any():
+            continue
+        va = len(live_neighbours(F, vhead, cnext, a))
+        vb = len(live_neighbours(F, vhead, cnext, b))
+        vc = len(nc)
+        vd = len(live_neighbours(F, vhead, cnext, d))
+        ta, tb = 4 if rim[a] else 6, 4 if rim[b] else 6
+        tc, td = 4 if rim[c] else 6, 4 if rim[d] else 6
+        before = (va - ta) ** 2 + (vb - tb) ** 2 + (vc - tc) ** 2 + (vd - td) ** 2
+        va, vb, vc, vd = va - 1, vb - 1, vc + 1, vd + 1
+        if min(va, vb) < 3:
+            continue
+        after = (va - ta) ** 2 + (vb - tb) ** 2 + (vc - tc) ** 2 + (vd - td) ** 2
+        if after >= before:
+            continue
+        return i, a, b, c, d, f, g
+    return -1, 0, 0, 0, 0, 0, 0
 
 
 class Remesher:
@@ -808,15 +863,20 @@ class Remesher:
         return n
 
     def flip_all(self) -> int:
-        """Flip the edges whose flip improves the valences."""
+        """Flip the edges whose flip improves the valences: flip() on each
+        edge in turn, with the test before the try compiled (_flip_next)."""
         E, _ = self._edges()
-        n = 0
-        for a, b in E:
-            a, b = int(a), int(b)
-            if len(self.chk.faces_of(a)) == 0 or b not in self.nbrs(a):
-                continue
-            n += bool(self.flip(a, b))
-        return n
+        n, i = 0, 0
+        chk = self.chk
+        while True:
+            i, a, b, c, d, f, g = _flip_next(
+                chk._F, chk._vhead, chk._cnext, self.rim, E, i
+            )
+            if i < 0:
+                return n
+            r = self._try("flip", remove_faces=[f, g], add_faces=[[c, a, d], [c, d, b]])
+            n += r is not None
+            i += 1
 
     def relax_all(self, lam: float = 0.5, mu: float = -0.53) -> int:
         """One Taubin step: a sweep with lam, then one with mu. Each sweep is

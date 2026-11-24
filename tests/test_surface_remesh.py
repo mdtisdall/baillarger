@@ -202,3 +202,29 @@ def test_compiled_neighbours_and_edge_faces_are_as_before() -> None:
         for b in old:
             want = [int(x) for x in fs if b in F[x]]
             assert chk.edge_faces(a, b).tolist() == want
+
+
+@pytest.mark.parametrize("mesh", [sphere, sheet])
+def test_compiled_flip_all_is_the_loop_of_flips(mesh: Any) -> None:
+    """flip_all (its test compiled) makes the same flips, in the same order,
+    as flip() on each edge in turn; after collapses, so that valences are
+    uneven."""
+    V, F = mesh()
+
+    def made() -> SR.Remesher:
+        ref = SR.Reference(V, F, np.full(len(V), 2.5))
+        rm = SR.Remesher(ref, V.copy(), F.copy(), GAP)
+        rm.collapse_all()
+        return rm
+
+    a, b = made(), made()
+    E, _ = b._edges()
+    n_loop = 0
+    for x, y in E:
+        x, y = int(x), int(y)
+        if len(b.chk.faces_of(x)) == 0 or y not in b.nbrs(x):
+            continue
+        n_loop += bool(b.flip(x, y))
+    assert a.flip_all() == n_loop > 0
+    for p, q in zip(a.chk.export(), b.chk.export(), strict=True):
+        assert np.array_equal(p, q)
