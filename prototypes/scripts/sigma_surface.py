@@ -400,7 +400,7 @@ class SigmaRemesher(SR.Remesher):
 
 def remesh(
     m: Mesh, gap: float, target: float | np.ndarray, fold_cos: float, h: float, passes: int = 1,
-    collapse: bool = True, log: list[dict[str, Any]] | None = None,
+    collapse: bool = True, log: list[dict[str, Any]] | None = None, carry: dict[str, Any] | None = None,
 ) -> tuple[Mesh, int, int]:
     """Σ remeshed toward a target edge length (one, or per vertex; e.g.
     StartSizes) with SigmaRemesher: `passes`
@@ -410,10 +410,34 @@ def remesh(
     the new Σ (m itself when nothing changed) and the numbers of splits and
     collapses. log: gets one record per round run (splits, collapses, flips,
     the refused tries by reason, seconds of each part), and one for the
-    setup (the Remesher and its Checker) and the result."""
+    setup (the Remesher and its Checker) and the result.
+
+    carry: a holder that the caller keeps between calls. The refusals that this
+    call remembers (gap, crossing, crease) are stored in it, and the next call
+    reuses them where nothing within the checks' reach has changed since (the
+    same result; Remesher.memo_import). The log's last record gets
+    memo_carried_in, memo_carried_alive and memo_carried_out."""
     t0 = time.time()
     rm = SigmaRemesher(m, gap, target, fold_cos, h)
+    n_in = n_alive = 0
+    if carry is not None and rm.memo:
+        n_in, n_alive = rm.memo_import(carry.get("memo"))
     t_setup = time.time() - t0
+    carry_s = 0.0
+
+    def keep() -> int:
+        nonlocal carry_s
+        if carry is None or not rm.memo:
+            return 0
+        t = time.time()
+        carry["memo"] = rm.memo_export(*rm.chk.export())
+        carry_s = round(time.time() - t, 3)
+        return len(carry["memo"]["entries"])
+
+    def info(n_out: int) -> dict[str, Any]:
+        if carry is None or not rm.memo:
+            return {}
+        return {"memo_carried_in": n_in, "memo_carried_alive": n_alive, "memo_carried_out": n_out, "carry_s": carry_s}
     sp = co = fl = 0
     for k in range(passes):
         before = Counter(rm.refused)
@@ -433,13 +457,16 @@ def remesh(
         if s1 == 0 and c1 == 0 and f1 == 0:
             break
     if sp == 0 and co == 0 and fl == 0:
+        n_out = keep()
         if log is not None:
-            log.append({"setup_s": round(t_setup, 3), "result_s": 0.0})
+            log.append({"setup_s": round(t_setup, 3), "result_s": 0.0, **info(n_out)})
         return m, 0, 0
     t5 = time.time()
     out = rm.result()
+    t_res = round(time.time() - t5, 3)
+    n_out = keep()
     if log is not None:
-        log.append({"setup_s": round(t_setup, 3), "result_s": round(time.time() - t5, 3)})
+        log.append({"setup_s": round(t_setup, 3), "result_s": t_res, **info(n_out)})
     return out, sp, co
 
 
