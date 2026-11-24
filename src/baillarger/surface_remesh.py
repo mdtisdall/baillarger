@@ -550,8 +550,11 @@ class Remesher:
             self.Cf = np.r_[self.Cf, np.zeros(k, np.int64)]
 
     def nbrs(self, v: int) -> set[int]:
-        """The neighbours of vertex v."""
-        return set(self.chk.neighbours_of(v).tolist())
+        """The neighbours of vertex v. The set is built as the uncompiled
+        code built it (the corners of v's faces in order, v included, then
+        v taken out), so that it iterates in the same order: relax_all sums
+        the neighbours' positions in that order."""
+        return set(self.chk.F[self.chk.faces_of(v)].ravel().tolist()) - {v}
 
     def edge_faces(self, a: int, b: int) -> list[int]:
         """The faces of edge (a, b)."""

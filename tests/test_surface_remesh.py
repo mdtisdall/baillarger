@@ -204,6 +204,21 @@ def test_compiled_neighbours_and_edge_faces_are_as_before() -> None:
             assert chk.edge_faces(a, b).tolist() == want
 
 
+def test_the_neighbour_sets_iterate_as_before() -> None:
+    """Remesher.nbrs is the set that the uncompiled code built, iterated in
+    the same order: relax_all sums V[list(nbrs)] in that order, so another
+    order changes the bits of every relaxed position. After a remesh, so
+    that ids are large and the faces round each vertex are reordered."""
+    v, f = sphere()
+    rm, _ = run(v, f, 0.7)
+    F = rm.chk.F
+    live = np.unique(F[F[:, 0] >= 0])
+    assert len(live) > 100
+    for a in live.tolist():
+        old = {int(u) for x in rm.chk.faces_of(a) for u in F[x]} - {a}
+        assert list(rm.nbrs(a)) == list(old), a
+
+
 @pytest.mark.parametrize("mesh", [sphere, sheet])
 def test_compiled_flip_all_is_the_loop_of_flips(mesh: Any) -> None:
     """flip_all (its test compiled) makes the same flips, in the same order,
