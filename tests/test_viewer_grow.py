@@ -8,7 +8,7 @@ from typing import Any
 import nibabel as nib
 import numpy as np
 import pytest
-from edits_helpers import edits, write_edits
+from edits_helpers import edits, write_dseg_sidecar, write_edits
 from test_viewer_review import SHAPE, A, diff, files, paint_only, paint_strokes
 
 from baillarger.viewer import review as VR
@@ -126,17 +126,9 @@ def test_grow_sees_the_labels_on_the_screen(files: dict[str, Path]) -> None:
     assert np.array_equal(got, want)
 
 
-def test_the_grow_log(files: dict[str, Path], tmp_path: Path) -> None:
-    """A grow, its accept and an undo each write one line of the grow log;
-    the sidecar is written with the first line. Without echoes there is no
-    log."""
-    import json
-
-    from baillarger.bids import read_sidecar, sidecar_path
-
-    rv = grow_review(files, None)
-    assert rv.grow_log is None
-    rv = VR.Review(
+def grow_logged(files: dict[str, Path], tmp_path: Path, log: Path | None) -> VR.Review:
+    write_dseg_sidecar(files["dseg"], files["input"])
+    return VR.Review(
         None,
         None,
         files["edits"],
@@ -145,10 +137,13 @@ def test_the_grow_log(files: dict[str, Path], tmp_path: Path) -> None:
         A,
         None,
         echoes=write_echoes(tmp_path),
+        grow_log=log,
     )
-    assert rv.grow_log is not None
-    path = VR.grow_log_path(files["edits"])
-    assert path.name.endswith("_growlog.jsonl") and not path.exists()
+
+
+def grow_paint_undo(rv: VR.Review) -> dict[str, Any]:
+    """A grow, the paint that accepts its proposal, and an undo: the grow's
+    answer."""
     out = wait(rv, rv.post("/review/grow", dict(strokes=strokes())))
     acc = [
         dict(
@@ -161,6 +156,38 @@ def test_the_grow_log(files: dict[str, Path], tmp_path: Path) -> None:
     ]
     rv.post("/review/paint", dict(strokes=acc, grow_job=out["job"]))
     rv.post("/review/undo", {})
+    return out
+
+
+def test_without_grow_log_no_grow_log_is_written(
+    files: dict[str, Path], tmp_path: Path
+) -> None:
+    """Without --grow-log: after a grow, a paint and an undo, nothing but the
+    edits is written next to the edits file, and no grow log anywhere."""
+    rv = grow_logged(files, tmp_path, None)
+    assert rv.grow_log is None
+    grow_paint_undo(rv)
+    assert not [p for p in tmp_path.rglob("*") if "growlog" in p.name]
+    assert not list(tmp_path.rglob("*.jsonl"))
+    rv.close()
+
+
+def test_the_grow_log(files: dict[str, Path], tmp_path: Path) -> None:
+    """With --grow-log PATH: a grow, its accept and an undo each write one
+    line into PATH; the sidecar is written with the first line."""
+    import argparse
+    import json
+
+    from baillarger.bids import read_sidecar, sidecar_path
+
+    ap = argparse.ArgumentParser()
+    VR.add_arguments(ap)
+    path = tmp_path / "debug" / "grow.jsonl"
+    path.parent.mkdir()
+    assert ap.parse_args(["--grow-log", str(path)]).grow_log == path
+    rv = grow_logged(files, tmp_path, path)
+    assert rv.grow_log is not None and not path.exists()
+    out = grow_paint_undo(rv)
     lines = [json.loads(x) for x in path.read_text().splitlines()]
     assert [x["event"] for x in lines] == ["grow", "paint", "undo"]
     g, p, u = lines
@@ -173,6 +200,7 @@ def test_the_grow_log(files: dict[str, Path], tmp_path: Path) -> None:
     )
     side = read_sidecar(sidecar_path(path), VR.GROW_LOG_SPEC)
     assert side["Edits"] == str(files["edits"]) and side["Hemisphere"] == "R"
+    rv.close()
 
 
 def test_a_paint_back_to_the_dseg_s_own_edit_is_written(files: dict[str, Path]) -> None:

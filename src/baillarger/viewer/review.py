@@ -31,7 +31,9 @@ until it is answered, so that its kind does not change how the reviewer looks
 Routes (Review.get, Review.post), JSON:
 - GET /review/queue: the session's sites (or the ranked sites before a
   session), each {id, kind, rank, score, state}; the session; the label
-  classes of a scribble; the grid's affine; the log's path.
+  classes of a scribble; the grid's affine; the log's path; editing and
+  edits (Editing, below); regenerate_command and regenerate_off
+  (Regenerate, below); outputs_changed (Outputs replaced, below).
 - POST /review/session {random_share, seed} or {resume: true}.
 - GET /review/next[?site=i,j,k]: the next site not shown (or the site named);
   the log records it as shown. {site: {id, kind, rank, voxel, mm,
@@ -91,57 +93,45 @@ Routes (Review.get, Review.post), JSON:
 - GET /review/surface-preview/cut?job=&axis=&mm=: the plane cut of the
   shown blocks (viewer.outlines.plane_cut; the same float32 segment ends,
   world mm, as /outline).
-- POST /review/regenerate: start the regenerate command (Regenerate, below).
-  GET /review/regenerate: its state. Both give {status, log, overrides,
-  error, outputs_changed, cap_gb, viewer_gb, command, seconds}.
+- POST /review/editing {on: true | false}: editing on or off for this
+  viewer run (Editing, below). {editing, edits}, or {error} if the dseg has
+  no copy of the edits that it can read.
 
 Outputs replaced. At start, the review records the identity (os.stat:
 device, inode, mtime) of the dseg, the queue, the dseg's fix diff and the
-dseg's copy of the edits. If one of them changes while the viewer runs
-(regenerate replaced the outputs), a paint, an answer, an accept-fix, an undo
-and /review/pending are refused with an error that says to restart the
-viewer, and nothing is written: the review's labels, its
-queue and the fix ids of its rows are those of the old outputs. The check is
-made under the edits' file lock, before each write into the edits.
+dseg's copy of the edits. If one of them changes while the viewer runs (the
+regenerate command replaced the outputs), a paint, an answer, an accept-fix,
+an undo and /review/pending are refused with an error that says to restart
+the viewer, and nothing is written: the review's labels, its queue and the
+fix ids of its rows are those of the old outputs. The check is made under
+the edits' file lock, before each write into the edits. /review/queue gives
+the names of the changed outputs (outputs_changed), so the pane says so.
 
-Regenerate. POST /review/regenerate starts the command `python -m
-baillarger.regenerate INPUT [--edits EDITS] --root ROOT` (INPUT: the input
-labels; EDITS: the label edits, when there are some; ROOT: the derivatives
-root of the dseg, which must be the dseg that the command writes) as a
-subprocess under scripts/memguard, in a new process group. It does not run
-in a thread of baillarger.viewer.jobs: it is a separate process with its own
-memory cap. One run at a time; a start is refused while a run is in
-progress, and after the outputs were replaced (the identity check above).
-- The cap (regen_cap_gb): REGEN_CAP_GB (about 1.5 times the measured peak of
-  REGEN_PEAK_GB on the laptop), made smaller if the physical memory less the
-  viewer's own resident memory (the viewer process and its children, at the
-  start) less REGEN_RESERVE_GB is smaller. memguard counts only the run's
-  processes, so the viewer's memory is taken off the cap here. A start is
-  refused if the cap is then below the peak.
-- The state: idle, running, done or failed. log: the last
-  jobs.LOG_LINES lines of the command's stdout and stderr (merged).
-  overrides: the command's override lines (regenerate.override_line), each
-  {fix, kind, voxel, voxels}: a fix that changes edited voxels, its voxel,
-  and the number of edited voxels that it changes.
-- While the command runs, the review refuses each write into the label edits
-  (a paint, an answer, an accept-fix, an undo): the command reads the edits
-  once, at its start, so a later write would not be in the new outputs. The
-  page closes its paint mode.
-- When the command ends with exit code 0 (done), it has replaced the
-  outputs (the dseg, the queue, the fix diff and the dseg's copy of the
-  edits): the identity check refuses each write and /review/pending until
-  the viewer restarts.
-- A failed run (another exit code; 137: the memory cap stopped it) reports
-  the exit code and the last line of its log. The command keeps the old
-  outputs if it fails before its moves; then the writes are allowed again.
-  outputs_changed is true if the identity check finds a changed output (the
-  dseg, the queue, the fix diff or the dseg's copy of the edits) after the
-  run (it failed during its moves): the writes and /review/pending stay
-  refused, and the next
-  run (after a restart of the viewer) finishes the moves first
-  (regenerate.finish).
-- Review.close stops a run (SIGTERM to its process group). A run that stops
-  before its moves leaves the old outputs.
+Regenerate. The regeneration is a command-line call only
+(docs/plans/label-editing.md, Part 7): the user runs `python -m
+baillarger.regenerate INPUT [--edits EDITS | --no-edits] --root ROOT` in a
+terminal, under scripts/memguard. /review/queue gives the command for this
+review as text (regenerate_command; Review.regenerate_argv): INPUT the
+input labels, ROOT the derivatives root of the dseg (which must be the dseg
+that the command writes), no --edits when the edits file is the standard
+one (label_edits.standard_path), --edits EDITS for another file with
+edits, and --no-edits for another file that is not there yet (the viewer's
+edits are then empty). If the dseg is not in a derivatives root,
+regenerate_command is null and regenerate_off says why.
+
+Editing (Part 7). The review writes into the label edits only while editing
+is on. Editing is on at start when the viewer has --edits (the path in the
+command is the deliberate act), and off without it: the edits file is then
+the standard one of the dseg's input labels (for_white), which every viewer
+on an output set of the same input labels finds. POST /review/editing sets
+it for this viewer run; the page never sends a path. While editing is off, a
+paint, an answer (accept-fix and manual-paint too) and an undo are refused
+with an error, and nothing is written: no edits file, no root and no log
+record. The reads work: the pending edits, the previews, the surface
+preview and the grow proposal. Editing is not switched on if the dseg has no
+copy of the edits that the review can read (an output set from before the
+TSV form): the set needs a regeneration first. /review/queue gives editing
+and edits (the path).
 
 Each write holds the review's lock and is flushed to the disk before the
 response (EditLog appends and fsyncs; label_edits.update replaces the files of
@@ -267,10 +257,11 @@ shows the proposal; an accepted proposal is a POST /review/paint of its
 voxels, so it is one write and one undo. Without echoes 2 and 3 the route
 refuses, and /review/queue says why (grow_off).
 
-Grow log. With the grow brush on, the review appends one JSON object per line
-to the grow log (grow_log_path: next to the edits, suffix growlog, .jsonl,
-with a sidecar of GROW_LOG_SPEC). It is a record for diagnosis and replay,
-not an input of any step. Each line has time (ISO 8601) and event:
+Grow log. Only with the viewer option --grow-log PATH (Review(grow_log=)),
+the review appends one JSON object per line to that file (.jsonl, with a
+sidecar of GROW_LOG_SPEC); without it, no grow log is written. It is a
+debugging record of the grow brush, not an input of any step. Each line has
+time (ISO 8601) and event:
 - grow: job, strokes [{label, voxels}], settings; then proposal {voxels,
   labels}, box and seconds, or error.
 - paint: strokes, grow_job (the accepted proposal's job, or null), voxels
@@ -279,8 +270,8 @@ not an input of any step. Each line has time (ISO 8601) and event:
 - surface: job, stroke_voxels, revision, kept and solves (their summaries),
   preview_blocks and seconds; or stopped, or error.
 
-Paint only. With no queue and no log (sites and log None; the viewer's
---edits alone), the review has the paint routes only; the hemisphere comes
+Paint only. With no queue and no log (sites and log None; the viewer
+without --sites), the review has the paint routes only; the hemisphere comes
 from the dseg's sidecar (wm-dseg/1).
 """
 
@@ -289,9 +280,7 @@ import hashlib
 import json
 import multiprocessing
 import os
-import re
-import signal
-import subprocess
+import shlex
 import sys
 import threading
 import time
@@ -316,7 +305,7 @@ from baillarger.bids import (
 )
 from baillarger.labels import CORTEX_LABEL, LUT_NAMES, WM_LABEL
 from baillarger.viewer import surface_preview as SP
-from baillarger.viewer.jobs import LOG_LINES, Jobs
+from baillarger.viewer.jobs import Jobs
 from baillarger.wm_edits import EditLog, read_log
 from baillarger.wm_sites import read_random_sites, read_sites
 
@@ -363,14 +352,6 @@ GROW_LOG_SPEC = SidecarSpec(
         Key("Provenance", "object", True, "Created, Function, Version, Commit, Dirty"),
     ),
 )
-
-
-def grow_log_path(edits: Path) -> Path:
-    """The grow log of the edits at edits (a .npy): its name with the suffix
-    growlog and the extension .jsonl (module docstring, Grow log)."""
-    stem = edits.name.removesuffix(".tsv")
-    stem = stem.removesuffix("_edits") if stem.endswith("_edits") else stem
-    return edits.with_name(stem + "_growlog.jsonl")
 
 
 class GrowLog:
@@ -673,200 +654,6 @@ class _Worker:
 
 #: the regenerate command, without its arguments
 REGENERATE = (sys.executable, "-m", "baillarger.regenerate")
-#: the script that caps the memory of the command's processes
-MEMGUARD = Path(__file__).resolve().parents[3] / "scripts" / "memguard"
-#: the peak resident memory of a regenerate run on the laptop (GB, measured)
-REGEN_PEAK_GB = 22
-#: the memory cap of a run (GB): about 1.5 times the peak
-REGEN_CAP_GB = 33
-#: the memory (GB) kept for the system and other programs: not given to the
-#: run or the viewer
-REGEN_RESERVE_GB = 8
-#: an override line of the command (regenerate.override_line)
-OVERRIDE_LINE = re.compile(
-    r"^override: fix (\d+) \((\S+)\) at voxel (\d+),(\d+),(\d+) "
-    r"changes (\d+) edited voxels$"
-)
-GB = 1024**3
-
-
-def parse_override(line: str) -> dict[str, Any] | None:
-    """An override line of the command as {fix, kind, voxel, voxels}, or None
-    for another line."""
-    m = OVERRIDE_LINE.match(line)
-    if m is None:
-        return None
-    g = m.groups()
-    return dict(
-        fix=int(g[0]),
-        kind=g[1],
-        voxel=[int(g[2]), int(g[3]), int(g[4])],
-        voxels=int(g[5]),
-    )
-
-
-def physical_bytes() -> int:
-    """The physical memory of the machine."""
-    return int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
-
-
-def tree_rss_bytes(pid: int) -> int:
-    """The resident memory of the process pid and all its descendants (ps, as
-    scripts/memguard reads it)."""
-    out = subprocess.run(
-        ["ps", "-A", "-o", "pid=,ppid=,rss="],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    rss: dict[int, int] = {}
-    kids: dict[int, list[int]] = {}
-    for line in out.splitlines():
-        f = line.split()
-        if len(f) != 3:
-            continue
-        p, pp, kb = int(f[0]), int(f[1]), int(f[2])
-        rss[p] = kb
-        kids.setdefault(pp, []).append(p)
-    total, todo = 0, [pid]
-    while todo:
-        p = todo.pop()
-        total += rss.get(p, 0)
-        todo += kids.get(p, [])
-    return total * 1024
-
-
-def regen_cap_gb(viewer_bytes: int, total_bytes: int) -> int:
-    """The memory cap of a run (module docstring, Regenerate): REGEN_CAP_GB,
-    or less if the physical memory less the viewer's memory less
-    REGEN_RESERVE_GB is less. Raises ValueError if the cap is then below
-    REGEN_PEAK_GB."""
-    free = (total_bytes - viewer_bytes) // GB - REGEN_RESERVE_GB
-    cap = min(REGEN_CAP_GB, free)
-    if cap < REGEN_PEAK_GB:
-        raise ValueError(
-            f"regenerate needs about {REGEN_PEAK_GB} GB: the machine has "
-            f"{total_bytes / GB:.0f} GB, the viewer uses {viewer_bytes / GB:.1f} GB "
-            f"and {REGEN_RESERVE_GB} GB stay free, so only {max(cap, 0)} GB are "
-            f"left; stop the viewer and run the command in a shell"
-        )
-    return cap
-
-
-class Regeneration:
-    """One run of the regenerate command as a subprocess under memguard, and
-    its state (module docstring, Regenerate)."""
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()  # state and proc
-        self.proc: subprocess.Popen[str] | None = None
-        self.thread: threading.Thread | None = None
-        self.t0 = 0.0
-        self.state: dict[str, Any] = dict(
-            status="idle",
-            log=[],
-            overrides=[],
-            error=None,
-            outputs_changed=False,
-            cap_gb=None,
-            viewer_gb=None,
-            command=None,
-            seconds=None,
-        )
-        #: called when the run ends, before its state changes: True if an
-        #: output changed (Review._outputs_changed)
-        self.changed: Callable[[], bool] = lambda: False
-
-    @property
-    def running(self) -> bool:
-        with self.lock:
-            return bool(self.state["status"] == "running")
-
-    def status(self) -> dict[str, Any]:
-        with self.lock:
-            out = dict(self.state, log=list(self.state["log"]))
-            if out["status"] == "running":
-                out["seconds"] = time.monotonic() - self.t0
-            return out
-
-    def start(self, argv: Sequence[str], cap_gb: int, viewer_gb: float) -> None:
-        """Start argv under memguard with the cap. Raises RuntimeError if a
-        run is in progress."""
-        if not MEMGUARD.is_file():
-            raise ValueError(f"no memguard script at {MEMGUARD}")
-        cmd = [str(MEMGUARD), str(cap_gb), *argv]
-        with self.lock:
-            if self.state["status"] == "running":
-                raise RuntimeError("a regenerate run is in progress")
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                start_new_session=True,
-                env=dict(os.environ, PYTHONUNBUFFERED="1"),
-            )
-            self.proc, self.t0 = proc, time.monotonic()
-            self.state = dict(
-                status="running",
-                log=[],
-                overrides=[],
-                error=None,
-                outputs_changed=False,
-                cap_gb=cap_gb,
-                viewer_gb=round(viewer_gb, 1),
-                command=" ".join(cmd),
-                seconds=0.0,
-            )
-            self.thread = threading.Thread(
-                target=self._read, args=(proc,), daemon=True, name="regenerate"
-            )
-            self.thread.start()
-
-    def _read(self, proc: "subprocess.Popen[str]") -> None:
-        """Read the run's lines until it ends, then set its end state."""
-        assert proc.stdout is not None
-        for raw in proc.stdout:
-            line = raw.rstrip("\n")
-            o = parse_override(line)
-            with self.lock:
-                log = self.state["log"]
-                log.append(line)
-                del log[:-LOG_LINES]
-                if o is not None:
-                    self.state["overrides"].append(o)
-        code = proc.wait()
-        changed = self.changed()
-        with self.lock:
-            self.state["seconds"] = time.monotonic() - self.t0
-            if code == 0:
-                self.state["status"] = "done"
-                return
-            last = [x for x in self.state["log"] if not x.startswith("memguard:")]
-            why = (
-                f"the memory cap ({self.state['cap_gb']} GB) stopped the run"
-                if code == 137
-                else (last[-1] if last else "no output")
-            )
-            self.state.update(
-                status="failed",
-                error=f"exit code {code}: {why}",
-                outputs_changed=changed,
-            )
-
-    def stop(self) -> None:
-        """Stop a run (SIGTERM to its process group) and wait for its end."""
-        with self.lock:
-            proc, th = self.proc, self.thread
-        if proc is not None and proc.poll() is None:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        if th is not None:
-            th.join()
 
 
 # ------------------------------------------------------------------ the review
@@ -874,14 +661,16 @@ class Regeneration:
 
 class Review:
     """The review on the server: the queue, the answer log at log, the label
-    edits at edits (a .npy diff, made at the first answer or paint that
-    changes a label), the session, the choices and the undo stack of the
+    edits at edits (label-edits/1, made at the first answer or paint
+    that changes a label), the session, the choices and the undo stack of the
     paints (module docstring). labels() gives the segmentation's voxels (the
     whole grid, read once: the label pyramid's level 0); random(n, seed) the
     random sites (wm_sites.read_random_sites); inputs the input labels
     (default: white_dseg.input_labels(dseg)). regenerate: the regenerate
     command without its arguments (module docstring, Regenerate). With sites
-    and log None, the review is paint only (module docstring). Raises
+    and log None, the review is paint only (module docstring). editing: on
+    at start (module docstring, Editing). grow_log: the grow log's file, or
+    None for no grow log (module docstring, Grow log). Raises
     ValueError if the edits are on another grid or of the other hemisphere,
     or if only one of sites and log is given."""
 
@@ -900,6 +689,8 @@ class Review:
         surface: Path | None = None,
         device: str | None = None,
         echoes: Sequence[Path] | None = None,
+        editing: bool = True,
+        grow_log: Path | None = None,
     ) -> None:
         import nibabel as nib
 
@@ -1002,16 +793,15 @@ class Review:
         self.gjobs: Jobs[dict[str, Any]] = Jobs(
             log=lambda m: None, keep_in_memory=PREVIEWS_KEPT
         )
-        #: the grow log (module docstring, Grow log), with the grow brush on
+        #: the grow log (module docstring, Grow log), only with its file
         self.grow_log: GrowLog | None = None
-        if self.grow_off() is None:
-            self.grow_log = GrowLog(
-                grow_log_path(self.edits), self.edits, self.hemi, self.shape
-            )
-        #: the regenerate run (module docstring, Regenerate)
+        if grow_log is not None:
+            self.grow_log = GrowLog(Path(grow_log), self.edits, self.hemi, self.shape)
+        #: the regenerate command without its arguments (module docstring,
+        #: Regenerate)
         self.regenerate_command = list(regenerate)
-        self.regen = Regeneration()
-        self.regen.changed = lambda: bool(self._changed_outputs())
+        #: the writes into the edits are allowed (module docstring, Editing)
+        self.editing = bool(editing)
         last = self._log.sessions() if self._log is not None else []
         if last:
             self._resume(last[-1])
@@ -1025,7 +815,7 @@ class Review:
         """The answer log. Raises ValueError for a review that is paint only."""
         if self._log is None:
             raise ValueError(
-                "paint only: the viewer runs with --edits alone (no queue, no log)"
+                "paint only: the viewer runs without --sites (no queue, no log)"
             )
         return self._log
 
@@ -1127,6 +917,12 @@ class Review:
 
     def queue(self) -> dict[str, Any]:
         st = self.states()
+        cmd: str | None = None
+        off: str | None = None
+        try:
+            cmd = shlex.join(self.regenerate_argv())
+        except ValueError as exc:
+            off = str(exc)
         rows = self.order if self.session is not None else self._ranked()
         return dict(
             sites=[
@@ -1139,6 +935,10 @@ class Review:
             affine=self.affine.tolist(),
             log=None if self.log_path is None else str(self.log_path),
             edits=str(self.edits),
+            editing=self.editing,
+            regenerate_command=cmd,
+            regenerate_off=off,
+            outputs_changed=self._changed_outputs(),
             hemisphere=self.hemi,
             paint_only=self.paint_only,
             undo_depth=len(self.undo),
@@ -1214,6 +1014,32 @@ class Review:
                 f"nothing was written"
             )
 
+    def _need_editing(self) -> None:
+        """Raises ValueError if editing is off (module docstring, Editing)."""
+        if not self.editing:
+            raise ValueError(
+                f"editing is off: switch it on in the pane to write into "
+                f"{self.edits}; nothing was written"
+            )
+
+    def set_editing(self, on: bool) -> dict[str, Any]:
+        """Editing on or off for this viewer run (module docstring, Editing):
+        {editing, edits}. Raises ValueError, and leaves editing off, if it is
+        to go on and the dseg has no copy of the edits that it can read."""
+        with self.lock:
+            if on:
+                try:
+                    self._dseg_edits()
+                except (ValueError, OSError) as exc:
+                    raise ValueError(
+                        f"editing stays off: the dseg has no copy of the edits that "
+                        f"the viewer can read ({exc}); the output set needs a "
+                        f"regeneration (regenerate_command), then a restart of the "
+                        f"viewer"
+                    ) from exc
+            self.editing = bool(on)
+            return dict(editing=self.editing, edits=str(self.edits))
+
     def _update(
         self,
         fn: Callable[[label_edits.Current], label_edits.Edits | None],
@@ -1224,16 +1050,12 @@ class Review:
         (label_edits.paint, label_edits.restore). First, under the edits'
         file lock, refuse if the outputs were replaced (_check_outputs).
         after: the step after the write, under the same file lock (if it
-        raises, the edits are written back; label_edits.update). Refused too
-        while a regenerate runs (module docstring, Regenerate). Call with the
-        lock held."""
+        raises, the edits are written back; label_edits.update). Refused,
+        before the edits' file or lock is touched, while editing is off
+        (module docstring, Editing). Call with the lock held."""
+        self._need_editing()
 
         def checked(cur: label_edits.Current) -> label_edits.Edits | None:
-            if self.regen.running:
-                raise ValueError(
-                    "regenerate runs: it read the label edits at its start, so "
-                    "the paint mode is closed until it ends; nothing was written"
-                )
             self._check_outputs()
             return fn(cur)
 
@@ -1401,6 +1223,7 @@ class Review:
     ) -> dict[str, Any]:
         """A paint (module docstring): {voxels, undo_depth}. grow_job: the
         job of the grow proposal that the strokes accept (the grow log)."""
+        self._need_editing()
         v, lab = self.paint_voxels(strokes)
         with self.lock:
             undo, _ = self._commit(v, lab)
@@ -1545,6 +1368,7 @@ class Review:
         earlier entries written back (label_edits.restore). {voxels,
         undo_depth}. Raises ValueError if the stack is empty, or if another
         writer changed the edits since the top write (_pop_undo)."""
+        self._need_editing()
         with self.lock:
             if not self.undo:
                 raise ValueError("nothing to undo in this viewer run")
@@ -1741,9 +1565,7 @@ class Review:
             w.proc.join()
 
     def close(self) -> None:
-        """Stop the preview worker and wait for its job to end; stop a
-        regenerate run (Regeneration.stop)."""
-        self.regen.stop()
+        """Stop the preview worker and wait for its job to end."""
         self._stop_worker(replaced=False)
         self._sstops += 1
         for jobs in (self.jobs, self.sjobs):
@@ -1856,6 +1678,7 @@ class Review:
         that lock and no undo entry is pushed, so the edits and the undo
         stack are as they were, and the error is the log's."""
         s = self._need()
+        self._need_editing()
         c = parse_site(site)
         r = self._find(c)
         if (choice == MANUAL) != (strokes is not None):
@@ -1918,8 +1741,10 @@ class Review:
     # -------------------------------------------------------------- regenerate
     def regenerate_argv(self) -> list[str]:
         """The regenerate command with its arguments (module docstring,
-        Regenerate). Raises ValueError if the dseg is not the one that the
-        command writes in the dseg's derivatives root."""
+        Regenerate): no --edits for the standard edits file, --edits for
+        another file with edits, --no-edits for another file that is not
+        there. Raises ValueError if the dseg is not the one that the command
+        writes in the dseg's derivatives root."""
         inp = (self.inputs or white_dseg.input_labels(self.dseg)).resolve()
         dseg = self.dseg.resolve()
         root = dseg.parents[3] if len(dseg.parents) > 3 else dseg.parent
@@ -1931,23 +1756,16 @@ class Review:
                 f"{inp.name} in a derivatives root"
             )
         argv = [*self.regenerate_command, str(inp), "--root", str(root)]
+        edits = self.edits.resolve()
+        try:
+            standard: Path | None = label_edits.standard_path(inp, self.hemi)
+        except ValueError:  # the input labels are not in a derivatives root
+            standard = None
+        if standard is not None and edits == standard.resolve():
+            return argv
         if label_edits.edits_paths(self.edits)["sidecar"].exists():
-            argv += ["--edits", str(self.edits.resolve())]
-        return argv
-
-    def regenerate(self) -> dict[str, Any]:
-        """Start a regenerate run (module docstring, Regenerate): its state.
-        Raises ValueError if the outputs were replaced, if a run is in
-        progress, or if the memory is too small (regen_cap_gb)."""
-        with self.lock:  # no write into the edits is in progress
-            if self.regen.running:
-                raise ValueError("a regenerate run is in progress")
-            self._check_outputs()
-            argv = self.regenerate_argv()
-            viewer = tree_rss_bytes(os.getpid())
-            cap = regen_cap_gb(viewer, physical_bytes())
-            self.regen.start(argv, cap, viewer / GB)
-        return self.regen.status()
+            return [*argv, "--edits", str(edits)]
+        return [*argv, "--no-edits"]
 
     # -------------------------------------------------------------- surface preview
     def _surface(self) -> SP.SurfacePreview:
@@ -2236,8 +2054,6 @@ class Review:
             return self.job(q["job"])
         if path == "/review/pending":
             return self.pending()
-        if path == "/review/regenerate":
-            return self.regen.status()
         if path == "/review/surface-preview":
             return self.surface_job(q["job"], int(q.get("since", -1)))
         if path == "/review/grow":
@@ -2293,8 +2109,11 @@ class Review:
             return self.grow(list(req["strokes"]))
         if path == "/review/undo":
             return self.undo_last()
-        if path == "/review/regenerate":
-            return self.regenerate()
+        if path == "/review/editing":
+            on = req.get("on")
+            if not isinstance(on, bool):
+                raise ValueError("give on: true or false")
+            return self.set_editing(on)
         if path == "/review/surface-preview":
             return self.surface_preview(
                 list(req.get("strokes") or []), int(req.get("since", -1))
@@ -2345,7 +2164,7 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
         "--sites",
         type=Path,
         help="with --white: the review queue (a desc-wmsites_sites.tsv, wm-sites/1); "
-        "needs --log and --edits",
+        "needs --log",
     )
     ap.add_argument(
         "--log",
@@ -2356,9 +2175,29 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--edits",
         type=Path,
-        help="with --white: the label edits (.npy, label-edits/1) that the answers "
-        "and the paint mode write into, made at the first write that changes a "
-        "label; there is no default path. Without --sites: paint only",
+        help="with --white: another label edits file (label-edits/1) than the "
+        "standard one, for tests and scratch runs; editing is then on at start. "
+        "Default: the standard edits file of the dseg's input labels "
+        "(label_edits.standard_path), with editing off until it is switched on "
+        "in the review pane",
+    )
+    ap.add_argument(
+        "--grow-log",
+        type=Path,
+        help="with --white: write the grow brush's debugging log (.jsonl, "
+        "grow-log/1) into this file; default: no grow log",
+    )
+
+
+def standard_edits(dseg: Path) -> Path:
+    """The standard edits file of the dseg (module docstring, Editing): that
+    of its input labels (white_dseg.input_labels) and its hemisphere
+    (label_edits.standard_path). Raises ValueError (or OSError) if the dseg
+    has no readable sidecar or its input labels are not in a derivatives
+    root."""
+    side = white_dseg.dseg_sidecar(Path(dseg))
+    return label_edits.standard_path(
+        white_dseg.input_labels(Path(dseg)), str(side["Hemisphere"])
     )
 
 
@@ -2370,33 +2209,41 @@ def for_white(
     affine: Arr,
     echoes: Sequence[Path] | None = None,
 ) -> Review | None:
-    """The review of --white mode: with --sites (--log and --edits are then
-    needed), or paint only with --edits alone; None with neither. echoes:
-    echoes 2 and 3, for the grow brush (None: the grow brush is off)."""
-    if a.sites is None:
-        if a.log is not None:
-            raise ValueError("--log needs --sites")
-        if a.edits is None:
-            return None
-        return Review(
-            None, None, a.edits, dseg, labels, affine, None, surface=surf, echoes=echoes
-        )
-    if a.log is None:
+    """The review of --white mode: with --sites (--log is then needed), or
+    paint only without. The edits file: --edits (editing on at start), else
+    the standard one of the dseg (standard_edits; editing off at start).
+    None only without --sites and --edits when the dseg has no standard
+    edits file (no readable sidecar, or input labels outside a derivatives
+    root): the viewer then has no review. echoes: echoes 2 and 3, for the
+    grow brush (None: the grow brush is off)."""
+    if a.sites is None and a.log is not None:
+        raise ValueError("--log needs --sites")
+    if a.sites is not None and a.log is None:
         raise ValueError("--sites needs --log: the log's path (there is no default)")
-    if a.edits is None:
-        raise ValueError(
-            "--sites needs --edits: the label edits' path (there is no default)"
-        )
+    edits = a.edits
+    if edits is None:
+        try:
+            edits = standard_edits(dseg)
+        except (ValueError, OSError) as exc:
+            if a.sites is not None:
+                raise ValueError(
+                    f"no standard edits file for {dseg} ({exc}): give --edits"
+                ) from exc
+            print(f"review: none ({exc})", flush=True)
+            return None
+    sites = a.sites is not None
     return Review(
         a.sites,
         a.log,
-        a.edits,
+        edits,
         dseg,
         labels,
         affine,
-        lambda n, seed: read_random_sites(surf, n, seed),
+        (lambda n, seed: read_random_sites(surf, n, seed)) if sites else None,
         surface=surf,
         echoes=echoes,
+        editing=a.edits is not None,
+        grow_log=getattr(a, "grow_log", None),
     )
 
 

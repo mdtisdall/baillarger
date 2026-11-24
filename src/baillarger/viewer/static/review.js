@@ -32,11 +32,16 @@
 // A plug-in of the brick pane (window.BVP, as static/overlays.js): it draws the previews and the strokes on #bvo, takes the
 // pointer in brush mode, and puts its own pane in place of the surface pane when the server has a review (/review/queue).
 //
-// Regenerate: the button starts the regenerate command on the server (POST /review/regenerate), a subprocess under
-// scripts/memguard. The pane polls its state (GET /review/regenerate) and shows its log lines. The paint mode is closed
-// while it runs (the command read the label edits at its start). When it ends, the pane shows the overrides (each fix that
-// changes edited voxels: the fix, its voxel, the number of edited voxels) and asks for a restart of the viewer; the server
-// refuses each write into the edits until the restart. A failed run shows its error; the old outputs stay.
+// Editing (/review/editing): the pane shows the path of the label edits file and a switch. The server writes into the edits
+// only while editing is on: on at start with --edits, off without it (the standard edits file of the dseg's input labels,
+// which every viewer of the same input labels finds). The page never sends a path. While editing is off, a paint, an
+// answer and an undo are refused and nothing is written; the strokes, the previews, the pending edits and the grow
+// proposal work. The server refuses the switch if the dseg has no copy of the edits that it can read (regenerate first).
+//
+// Regenerate: a command-line call only. The pane shows the command for this hemisphere as text to copy
+// (/review/queue: regenerate_command), to run in a terminal under scripts/memguard. When the command has replaced the
+// outputs, the server refuses each write into the edits until the viewer restarts; the pane then says so and closes the
+// paint mode (/review/queue: outputs_changed, read again after a refused write that asks for a restart).
 //
 // Surface preview (/review/surface-preview): after each stroke in paint mode, clear, paint, site answer and undo, and at
 // the start, the pane asks the server for the white surface after the label edits and the paint strokes not yet submitted
@@ -62,14 +67,13 @@ const COL = { answer: "rgba(64, 224, 255, 0.85)", correction: "rgba(255, 140, 0,
 const STROKE_RGB = { wm: [245, 245, 245], cortex: [255, 70, 90], outside: [70, 140, 255], input: [255, 0, 255] };
 const PREVIEW_POLL_MS = 400;
 const SURF_COL = { cut: "rgba(64, 255, 128, 0.95)", working: [0.45, 0.7, 1.0], preview: [0.3, 1.0, 0.5] };
-const REGEN_POLL_MS = 1000;
 // the most preview voxels drawn on one tile; above it the tile draws the first MAX_DRAWN and says so. Measured with R.bench
 // on the laptop (Chrome, 1200 x 800): 13,189 squares in 3.3 ms, so 50,000 take about 12.5 ms, within one frame at 60 fps
 const MAX_DRAWN = 50000;
 const R = window.REVIEW = {
   api: null, on: false, meta: null, sites: [], session: null, cur: null, t0: 0, choice: null, params: {}, preview: null,
   previewSeq: 0, sp: { on: true, off: "", seq: 0, rev: -1, job: null, cells: 0, working: new Map(), preview: new Map(), cuts: new Map(), gl: null, show3d: false },
-  regen: null, pending: null, pendingSeq: 0, grow: false, proposal: null, growSeq: 0, labelRGBA: new Map(), brush: false, mode: "paint", cls: null, radius: 1, undoDepth: 0, strokes: [], stroke: null, s0: 0, inv: null, A: null, revealed: new Map(),
+  pending: null, pendingSeq: 0, grow: false, proposal: null, growSeq: 0, labelRGBA: new Map(), brush: false, mode: "paint", cls: null, radius: 1, undoDepth: 0, strokes: [], stroke: null, s0: 0, inv: null, A: null, revealed: new Map(),
 };
 
 // ------------------------------------------------------------------ helpers
@@ -79,7 +83,10 @@ async function post(u, body) {
   const j = await r.json(); if (!r.ok || j.error) throw new Error(j.error || `${r.status}`); return j;
 }
 async function getj(u) { const r = await fetch(u); const j = await r.json(); if (!r.ok || j.error) throw new Error(j.error || `${r.status}`); return j; }
-function say(m, bad) { const el = $("rvmsg"); el.textContent = m; el.style.color = bad ? "#ff6b6b" : "var(--mute)"; if (bad) R.api.log("review: " + m); }
+function say(m, bad) {
+  const el = $("rvmsg"); el.textContent = m; el.style.color = bad ? "#ff6b6b" : "var(--mute)"; if (bad) R.api.log("review: " + m);
+  if (bad && /restart the viewer/.test(m) && !closed()) refresh().catch(() => {});   // the outputs were replaced: the pane says so (editsBar)
+}
 const mm2vox = w => R.api.affApply(R.inv, w).map(x => Math.round(x));
 const vox2mm = v => R.api.affApply(R.A, v);
 // the voxel axis along world axis n (the grid's axis nearest it), and the other two
@@ -111,10 +118,12 @@ function pane() {
   <div class="pbar" id="rvsurf"><label title="the white surface after the edits and the strokes: a local solve of the antialiased field, approximate">
     <input type="checkbox" id="rvspon" checked> surface preview</label>
     <button id="rv3d" title="key v: the 3D view in place of this pane, and back">3D view (v)</button><span id="rvsps" style="white-space:pre-wrap"></span></div>
-  <div class="pbar" id="rvregen"><button id="rvrgo" title="run the regenerate command on the label edits (about 20 min and 22 GB on the laptop)">regenerate the outputs</button>
-    <span id="rvrstate" style="white-space:pre-wrap"></span></div>
-  <pre id="rvrlog" style="display:none;max-height:120px;overflow-y:auto;margin:0 8px;font-size:11px;white-space:pre-wrap"></pre>
-  <div id="rvrover" style="display:none;max-height:160px;overflow-y:auto;font-size:12px"></div>
+  <div class="pbar" id="rvedits"><label title="the server writes into the label edits only while editing is on (this viewer run)">
+    <input type="checkbox" id="rvedon"> editing</label> label edits: <code id="rvepath" style="user-select:all;word-break:break-all"></code>
+    <span id="rvestate" style="white-space:pre-wrap"></span></div>
+  <div class="pbar" id="rvregen" style="white-space:pre-wrap"><span title="the regeneration is a command-line call: about 20 min and a peak of about 22 GB on the laptop">regenerate in a terminal, under scripts/memguard:</span>
+    <button id="rvrcopy" title="copy the command">copy</button>
+    <code id="rvrcmd" style="display:block;user-select:all;word-break:break-all;font-size:11px"></code></div>
   <div class="pbar"><span id="rvmsg" style="color:var(--mute)"></span></div>
   <div id="rvtable" style="overflow-y:auto;flex:1;min-height:0;font-size:12px"></div>
   <div class="help" style="position:static;padding:2px 8px">keys: 1–7 choices · t thicken radius · Enter submit · s skip · n next ·
@@ -133,13 +142,17 @@ function pane() {
     const why = closed(); if (why && $("rvbon").checked) { $("rvbon").checked = false; say(why, true); }
     R.brush = $("rvbon").checked; R.api.draw();
   };
+  $("rvedon").onchange = () => setEditing($("rvedon").checked);
+  $("rvrcopy").onclick = async () => {
+    try { await navigator.clipboard.writeText($("rvrcmd").textContent); say("the regenerate command is copied"); }
+    catch (e) { say(`copy: ${e.message}; select the command and copy it`, true); }
+  };
   $("rvmode").onchange = () => setMode($("rvmode").value);
   $("rvcls").onchange = () => { R.cls = $("rvcls").value; };
   $("rvrad").onchange = () => { R.radius = Number($("rvrad").value); };
   $("rvssub").onclick = submitStrokes; $("rvsclr").onclick = clearStrokes; $("rvundo").onclick = undo;
   $("rvaccept").onclick = accept;
   $("rvgrow").onchange = () => setGrow($("rvgrow").checked);
-  $("rvrgo").onclick = regenerate;
   $("rvspon").onchange = () => { R.sp.on = $("rvspon").checked; if (R.sp.on) surfacePreview(); else { R.sp.seq++; showSurface(); } };
   $("rv3d").onclick = () => show3d(!R.sp.show3d);
 }
@@ -226,7 +239,7 @@ function table() {
 async function refresh() {
   const q = await getj("/review/queue");
   R.sites = q.sites; R.session = q.session; R.meta = q; R.undoDepth = q.undo_depth;
-  sessionBar(); table(); strokesInfo();
+  sessionBar(); table(); editsBar(); strokesInfo();
 }
 
 // ------------------------------------------------------------------ a session, its sites, the answers
@@ -352,60 +365,30 @@ async function skip() {
   say(`site ${R.cur.id} skipped`); R.preview = null; await refresh(); await next();
 }
 
-// ------------------------------------------------------------------ regenerate
-// why the writes into the edits are closed (a run in progress, or a run that replaced the outputs), or "" when they are open
+// ------------------------------------------------------------------ editing and regenerate
+// why the writes into the edits are closed (the regenerate command replaced the outputs), or "" when they are open
 function closed() {
-  const st = R.regen && R.regen.status;
-  if (st === "running") return "regenerate runs: the paint mode is closed until it ends";
-  if (st === "done" || (st === "failed" && R.regen.outputs_changed)) return "the outputs were regenerated: restart the viewer";
-  return "";
+  const ch = R.meta && R.meta.outputs_changed;
+  return ch && ch.length ? `the outputs were regenerated (${ch.join(", ")} changed): restart the viewer` : "";
 }
-async function regenerate() {
-  if (R.strokes.length || R.stroke) { say("submit or clear the strokes first (Esc)", true); return; }
-  if (!confirm("Regenerate the dseg, the white surface, its overview and the sites from the label edits?\n" +
-    "It takes about 20 min and about 22 GB on the laptop. The paint mode is closed while it runs, " +
-    "and the viewer must restart after it.")) return;
-  let r; try { r = await post("/review/regenerate", {}); } catch (e) { say(e.message, true); return; }
-  showRegen(r); say("regenerate started"); pollRegen();
+async function setEditing(on) {
+  let r; try { r = await post("/review/editing", { on }); }
+  catch (e) { $("rvedon").checked = R.meta.editing; say(e.message, true); return; }
+  R.meta.editing = r.editing; editsBar();
+  say(r.editing ? `editing on: paints and answers write into ${r.edits}` : "editing off: nothing is written into the label edits");
 }
-async function pollRegen() {
-  while (R.regen && R.regen.status === "running") {
-    await new Promise(ok => setTimeout(ok, REGEN_POLL_MS));
-    try { showRegen(await getj("/review/regenerate")); } catch (e) { say(e.message, true); return; }
-  }
-}
-function showRegen(r) {
-  const was = R.regen && R.regen.status; R.regen = r;
-  const st = r.status, min = r.seconds === null ? "" : ` ${(r.seconds / 60).toFixed(1)} min`, why = closed();
-  $("rvrgo").disabled = st === "running" || !!why;
-  const cap = r.cap_gb === null ? "" : ` · memory cap ${r.cap_gb} GB (the viewer used ${r.viewer_gb} GB at the start)`;
-  $("rvrstate").textContent = {
-    idle: "",
-    running: `running${min}${cap}. The paint mode is closed: the command read the label edits at its start.`,
-    done: `done in${min}. Restart the viewer to see the new outputs. Until the restart, each paint, answer, accept-fix and undo is refused.`,
-    failed: `failed after${min}: ${r.error}. ` + (r.outputs_changed
-      ? "Some outputs were replaced: restart the viewer, then run regenerate again (it finishes the moves first)."
-      : "The old outputs stay."),
-  }[st] || st;
-  $("rvrstate").style.color = st === "failed" ? "#ff6b6b" : st === "done" ? "#ffd23f" : "";
-  const log = $("rvrlog"); log.style.display = r.log.length ? "" : "none";
-  const end = log.scrollTop + log.clientHeight >= log.scrollHeight - 4; log.textContent = r.log.join("\n"); if (end) log.scrollTop = log.scrollHeight;
-  const ov = $("rvrover");
-  if (st === "done") {
-    ov.style.display = "";
-    ov.innerHTML = r.overrides.length
-      ? `<div style="padding:2px 8px"><b>${r.overrides.length} fixes change edited voxels</b> (the correction overrides these edits). Row: go to the voxel.</div>
-        <table><tr><th>fix</th><th style="text-align:left">kind</th><th>voxel</th><th>edited voxels</th></tr>${r.overrides.map((o, k) =>
-          `<tr data-k="${k}"><td>${o.fix}</td><td style="text-align:left">${esc(o.kind)}</td><td>${o.voxel.join(",")}</td><td>${o.voxels}</td></tr>`).join("")}</table>`
-      : `<div style="padding:2px 8px">No fix changes edited voxels.</div>`;
-    for (const tr of ov.querySelectorAll("tr[data-k]")) tr.onclick = () => { R.api.crossHere(vox2mm(r.overrides[Number(tr.dataset.k)].voxel)); R.api.update(); };
-  } else ov.style.display = "none";
+// the edits file, the switch, the regenerate command and, after the outputs were replaced, the closed paint mode
+function editsBar() {
+  const q = R.meta, why = closed();
+  $("rvedon").checked = q.editing; $("rvepath").textContent = q.edits;
+  $("rvestate").textContent = why ? ` · ${why}; each write is refused` : q.editing ? "" : " · editing off: paints and answers are refused";
+  $("rvestate").style.color = why ? "#ff6b6b" : q.editing ? "" : "#ffd23f";
+  $("rvrcmd").textContent = q.regenerate_command || `none: ${q.regenerate_off}`;
+  $("rvrcopy").disabled = !q.regenerate_command;
   if (why) {   // the paint mode is closed: the brush off, its strokes dropped
-    R.brush = false; $("rvbon").checked = false; R.strokes = []; R.stroke = null; R.preview = null; strokesInfo(); R.api.draw();
+    R.brush = false; $("rvbon").checked = false; R.strokes = []; R.stroke = null; R.preview = null; R.api.draw();
   }
-  for (const id of ["rvbon", "rvssub", "rvsubmit"]) $(id).disabled = !!why;
-  if (why) $("rvundo").disabled = true;
-  if (was === "running" && st !== "running") { say(st === "done" ? "regenerate done: restart the viewer" : `regenerate failed: ${r.error}`, st !== "done"); refresh(); }
+  for (const id of ["rvbon", "rvssub", "rvsubmit", "rvedon"]) $(id).disabled = !!why;
 }
 
 // ------------------------------------------------------------------ scribbles
@@ -696,10 +679,10 @@ const hooks = {
       R.labelRGBA = new Map(Object.entries(M.table || {}).map(([v, e]) => [Number(v), e.rgba]));
     } catch { /* no labels volume */ }
     pending();
-    try { showRegen(await getj("/review/regenerate")); pollRegen(); } catch (e) { say(e.message, true); }
     if (window.VIEWER) window.VIEWER.hooks.draw3d.push(draw3d);
     surfacePreview();   // the working field: the stored field and the pending edits
-    say(q.paint_only ? `paint only: label edits ${q.edits}` : `edit log: ${q.log} · label edits: ${q.edits}`);
+    say((q.paint_only ? `paint only: label edits ${q.edits}` : `edit log: ${q.log} · label edits: ${q.edits}`) +
+      (q.editing ? "" : " · editing is off: switch it on to write"));
   },
   draw2d, text, pointer,
 };
