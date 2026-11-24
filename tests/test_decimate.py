@@ -569,3 +569,125 @@ def test_eps_in_is_one_sided() -> None:
     _, _, d2 = _rules_run(D.Rules(eps_in=0.3), eps=1.2)
     _, _, d3 = _rules_run(D.Rules(), eps=0.3)
     assert np.array_equal(d2.faces, d3.faces)
+
+
+_ALL_RULES = dict(
+    eps_in=0.8, normal_cos=float(np.cos(np.radians(30))), shape=float(np.sqrt(2))
+)
+
+
+@pytest.mark.parametrize("mesh", [sphere, torus, two_spheres])
+def test_the_census_changes_nothing_and_finds_no_free_edge_in_one_block(
+    mesh: object,
+) -> None:
+    """With one block (no block borders) the decimation stops when every edge
+    is refused, so the census of its result finds none free; and the census
+    changes nothing in the result."""
+    v, f = mesh()  # type: ignore[operator]
+    r = D.Rules(size=np.full(len(v), 2.5), **_ALL_RULES)
+    for rules in (None, r):
+        a = D.decimate(v, f, 0.4, 1000.0, workers=1, log=lambda s: None, rules=rules)
+        b = D.decimate(
+            v,
+            f,
+            0.4,
+            1000.0,
+            workers=1,
+            log=lambda s: None,
+            rules=rules,
+            with_census=True,
+        )
+        for x, y in ((a.vertex_ids, b.vertex_ids), (a.faces, b.faces)):
+            np.testing.assert_array_equal(x, y)
+        np.testing.assert_array_equal(a.cids, b.cids)
+        for pa, pb in zip(a.passes, b.passes, strict=True):
+            assert {**pa, "seconds": 0} == {**pb, "seconds": 0}
+        assert a.census is None
+        c = b.census
+        assert c is not None and c["edges"] > 0
+        assert c["free"] == 0 and c["removable"] == 0
+        assert c["stuck"] == c["vertices"]
+        # every vertex has only interior edges: each tried edge is counted
+        assert sum(c["masks"].values()) <= c["edges"]
+        refused = sum(sum(p["refused"].values()) for p in b.passes)
+        assert refused > 0
+
+
+def test_the_census_compiled_is_the_python_census() -> None:
+    v, f = torus()
+    r = D.Rules(size=np.full(len(v), 2.0), **_ALL_RULES)
+    M = D.Mesh(
+        v=v,
+        f=f,
+        Q=D.quadrics(v, f),
+        cptr=np.zeros(len(f) + 1, np.int64),
+        cids=np.zeros(0, np.int64),
+        N=D.normals(v, f),
+    )
+    M, _ = D.decimate_pass(M, 0.4, 8.0, workers=1, rules=r)  # carried points
+    pin = np.zeros(len(v), bool)
+    pin[::17] = True
+    a = D.census(M, 0.4, pin, r)
+    b = D.census(M, 0.4, pin, r, reference=True)
+    assert a == b
+    assert a["free"] > 0  # the block borders of one pass left free edges
+    assert a["pinned"] > 0
+    assert set(a["failing"]) == set(D.REASONS)
+
+
+def test_a_free_edge_in_the_census_collapses_and_a_refused_one_does_not() -> None:
+    """The census agrees with the worker one edge at a time: a block with
+    every vertex locked but a and b collapses a into b exactly when the census
+    found the edge free."""
+    v, f = sphere()
+    r = D.Rules(size=np.full(len(v), 2.5), **_ALL_RULES)
+    M = D.Mesh(
+        v=v,
+        f=f,
+        Q=D.quadrics(v, f),
+        cptr=np.zeros(len(f) + 1, np.int64),
+        cids=np.zeros(0, np.int64),
+        N=D.normals(v, f),
+    )
+    M, _ = D.decimate_pass(M, 0.4, 6.0, workers=1, rules=r)
+    vid, inv = np.unique(M.f, return_inverse=True)
+    F = inv.reshape(-1, 3).astype(np.int64)
+
+    def block(locked: npt.NDArray[np.bool_]) -> D.Block:
+        return D.Block(
+            gids=vid,
+            P=v[vid],
+            locked=locked,
+            Q=M.Q[vid],
+            F=F,
+            cptr=M.cptr,
+            cids=M.cids,
+            cpos=v[M.cids],
+            N=M.N[vid],
+            cnrm=M.N[M.cids],
+            size=r.size[vid] if r.size is not None else None,
+        )
+
+    rule = r.scalars(0.4)
+    rows = D.decimate_block(block(np.zeros(len(vid), bool)), 0.4, rule, census=True)
+    assert rows.census is not None
+    masks = {(int(a), int(b)): int(m) for a, b, m in rows.census}
+    rng = np.random.default_rng(0)
+    keys = list(masks)
+    free = [k for k in keys if masks[k] == 0]
+    stuck = [k for k in keys if masks[k] != 0]
+    assert free and stuck
+    pick = [free[i] for i in rng.choice(len(free), 20)]
+    pick += [stuck[i] for i in rng.choice(len(stuck), 40)]
+    for a, b in pick:
+        lock = np.ones(len(vid), bool)
+        lock[[a, b]] = False
+        out = D.decimate_block_py(block(lock), 0.4, rule)
+        # only a -> b and b -> a are tried, each once unless one collapses
+        m_ab, m_ba = masks[a, b], masks[b, a]
+        assert out.collapses == int(m_ab == 0 or m_ba == 0)
+        if out.collapses == 0:
+            first = [k for k in range(len(D.REASONS)) for _ in range(out.refused[k])]
+            assert len(first) == 2
+            x, y = (1 << first[0]), (1 << first[1])
+            assert (m_ab & x and m_ba & y) or (m_ab & y and m_ba & x)

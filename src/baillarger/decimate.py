@@ -43,6 +43,13 @@ agree with rules on.
 
 A rejected collapse is tried again when the region around a or b changes.
 
+Why it stops (a diagnostic; the result is the same with it on or off): each
+pass counts its refused tries by the first test that failed (REASONS), and
+census() tries every edge of the result on the whole mesh as one block, with
+no change, and gives each the mask of all the tests it fails, so it shows
+which test binds where the decimation ended (and which edges only a block
+border stopped).
+
 Repair: the distance bound lets faces that stand for two sheets of the input
 closer than about 2 eps cross (on the hemisphere white surface at 0.1 mm, its
 sheets come within 0.05 to 0.2 mm of each other at necks and thin passages: 251
@@ -296,6 +303,34 @@ def _ratio(la: float, lb: float, lc: float, n2: float) -> float:
     return la * lb * lc / den if den > 0.0 else math.inf
 
 
+# ---------------------------------------------------------------- refusals
+#: Why a collapse is refused, one bit each, in the order the tests run: the
+#: link condition (test 1: the topology), a moved face turned by 90 degrees or
+#: more (test 2), the size (rule 7) and shape (rule 8) rules, an input vertex
+#: too far from its new face on its inner side (eps: the face moved outward of
+#: the input) or on its outer side (eps_in, rule 5: the face moved inward), a
+#: new face at 90 degrees or more to the input it stands for (test 4) or
+#: beyond the normal rule's angle (rule 6).
+REASONS = (
+    "link",
+    "fold",
+    "size",
+    "shape",
+    "eps_out",
+    "eps_in",
+    "normal",
+    "normal_cos",
+)
+REFUSE_LINK = 1
+REFUSE_FOLD = 2
+REFUSE_SIZE = 4
+REFUSE_SHAPE = 8
+REFUSE_EPS_OUT = 16
+REFUSE_EPS_IN = 32
+REFUSE_NORMAL = 64
+REFUSE_NORMAL_COS = 128
+
+
 # ---------------------------------------------------------------- one block
 @dataclass
 class Block:
@@ -325,16 +360,27 @@ class BlockResult:
     cids: Int
     collapses: int
     qv: Int | None = None  # the vertices that Q is of (None: all)
+    # refused tries by their first failing test (index: REASONS)
+    refused: Int = field(default_factory=lambda: np.zeros(len(REASONS), np.int64))
+    # census: (k, 3) rows a, b (block indices), the mask of failing tests
+    census: Int | None = None
 
 
 def decimate_block_py(
-    B: Block, eps: float, rule: tuple[float, float, float, float] | None = None
+    B: Block,
+    eps: float,
+    rule: tuple[float, float, float, float] | None = None,
+    census: bool = False,
 ) -> BlockResult:
     """Collapse the block's edges whose ends are both unlocked, cheapest first,
     while a collapse passes the three tests (module docstring). The reference,
     in Python, for decimate_block: the faces round a vertex are taken in
     increasing order, which decides the nearest new face of a point that is
-    equally near two, and the order of the points a face carries."""
+    equally near two, and the order of the points a face carries. The result
+    counts the refused tries by their first failing test (refused).
+    census: collapse nothing; instead, try every directed edge (a, b) with
+    both ends unlocked (a by increasing index, b by increasing index) and
+    give each with the mask of all the tests it fails (BlockResult.census)."""
     P: list[Vec] = [tuple(p) for p in B.P.tolist()]
     gid: list[int] = B.gids.tolist()
     locked: list[bool] = B.locked.tolist()
@@ -375,17 +421,21 @@ def decimate_block_py(
     def has_face(x: int, y: int, z: int) -> bool:
         return any(y in F[i] and z in F[i] for i in vf[x])
 
-    def collapse(a: int, b: int) -> bool:
+    def collapse(a: int, b: int, census: bool = False) -> int:
+        """0 if a collapses into b (done unless census), else the reason
+        (REFUSE_*): the first test that fails, or with census every test
+        that fails (nothing is changed)."""
         fa = sorted(vf[a])
         shared = [i for i in fa if b in F[i]]
         if len(shared) != 2:
-            return False
+            return REFUSE_LINK
         opp = {x for i in shared for x in F[i]} - {a, b}
         if len(opp) != 2 or nbrs(a) & nbrs(b) != opp:
-            return False
+            return REFUSE_LINK
         c, d = opp
         if has_face(a, c, d) and has_face(b, c, d):
-            return False
+            return REFUSE_LINK
+        fail = 0
         moved = [i for i in fa if i not in shared]
         new: list[tuple[Vec, Vec, Vec]] = []
         n1s: list[Vec] = []
@@ -397,7 +447,9 @@ def decimate_block_py(
             n0 = _cross(_sub(old[1], old[0]), _sub(old[2], old[0]))
             n1 = _cross(_sub(tri[1], tri[0]), _sub(tri[2], tri[0]))
             if _dot(n0, n1) <= 0:
-                return False
+                if not census:
+                    return REFUSE_FOLD
+                fail |= REFUSE_FOLD
             if size or shape > 0:
                 la, lb, lc = (
                     math.sqrt(_dot(e, e))
@@ -418,7 +470,9 @@ def decimate_block_py(
                 if size:
                     lim = size_f * min(size[b if x == a else x] for x in F[i])
                     if max(la, lb, lc) > lim and max(la, lb, lc) > max(oa, ob, oc):
-                        return False
+                        if not census:
+                            return REFUSE_SIZE
+                        fail |= REFUSE_SIZE
                 if shape > 0:
                     worst_new = max(
                         worst_new, _ratio(la, lb, lc, math.sqrt(_dot(n1, n1)))
@@ -441,7 +495,9 @@ def decimate_block_py(
                     ),
                 )
             if worst_new > worst_old:
-                return False
+                if not census:
+                    return REFUSE_SHAPE
+                fail |= REFUSE_SHAPE
         pts = [(gid[a], P[a], N[a])] + [p for i in fa for p in carried[i]]
         home: list[int] = []
         for _, p, _ in pts:
@@ -451,7 +507,15 @@ def decimate_block_py(
             if eps_in != eps and _dot(_sub(p, new[k][0]), n1s[k]) >= 0:
                 lim = eps_in
             if ds[k] > lim:
-                return False
+                # the point on the outer side of its face: the face is inward
+                why = (
+                    REFUSE_EPS_IN
+                    if _dot(_sub(p, new[k][0]), n1s[k]) >= 0
+                    else REFUSE_EPS_OUT
+                )
+                if not census:
+                    return why
+                fail |= why
             home.append(k)
         # each new face faces the way of the input surface it stands for: its
         # corners' and its carried vertices' input normals, summed
@@ -466,12 +530,19 @@ def decimate_block_py(
         for m in range(len(moved)):
             dn = _dot(n1s[m], S[m])
             if dn <= 0:
-                return False
+                if not census:
+                    return REFUSE_NORMAL
+                fail |= REFUSE_NORMAL
+                continue
             if cos_t > 0:
                 l1 = math.sqrt(_dot(n1s[m], n1s[m]))
                 if dn < cos_t * l1 * math.sqrt(_dot(S[m], S[m])):
                     if dn * math.sqrt(_dot(n0s[m], n0s[m])) < _dot(n0s[m], S[m]) * l1:
-                        return False
+                        if not census:
+                            return REFUSE_NORMAL_COS
+                        fail |= REFUSE_NORMAL_COS
+        if census:
+            return fail
         for i in shared:
             alive[i] = False
             for x in F[i]:
@@ -484,15 +555,42 @@ def decimate_block_py(
         for (g, p, nq), k in zip(pts, home, strict=True):
             carried[moved[k]].append((g, p, nq))
         vf[a] = set()
-        return True
+        return 0
 
+    refused = np.zeros(len(REASONS), np.int64)
+    if census:
+        edges = [
+            (a, b, collapse(a, b, census=True))
+            for a in range(len(P))
+            if not locked[a]
+            for b in sorted(nbrs(a))
+            if not locked[b]
+        ]
+        return BlockResult(
+            F=B.F.copy(),
+            Q=B.Q.copy(),
+            cptr=B.cptr.copy(),
+            cids=B.cids.copy(),
+            collapses=0,
+            refused=refused,
+            census=np.array(edges, np.int64).reshape(-1, 3),
+        )
     n = 0
+    last = None
     while heap:
-        _, a, b, sa, sb = heapq.heappop(heap)
+        top = heapq.heappop(heap)
+        # a repeated entry pops right after the first; it would change nothing
+        # (decimate_block pushes it once), and is not tried or counted again
+        if top == last:
+            continue
+        last = top
+        _, a, b, sa, sb = top
         if sa != stamp[a] or sb != stamp[b] or not vf[a] or b not in nbrs(a):
             continue
         around = nbrs(a)
-        if not collapse(a, b):
+        why = collapse(a, b)
+        if why:
+            refused[why.bit_length() - 1] += 1
             continue
         n += 1
         Q[b] = tuple(x + y for x, y in zip(Q[a], Q[b], strict=True))
@@ -511,6 +609,7 @@ def decimate_block_py(
         cptr=np.r_[0, np.cumsum(counts)].astype(np.int64),
         cids=np.array([g for i in keep for g, *_ in carried[i]], np.int64),
         collapses=n,
+        refused=refused,
     )
 
 
@@ -686,8 +785,10 @@ def _nb_collapse(
     size_f: float,
     shape: float,
     size: Float,
-) -> bool:
-    """collapse() of decimate_block_py: a into b if the tests pass."""
+    census: bool,
+) -> int:
+    """collapse() of decimate_block_py: a into b if the tests pass (0), else
+    the reason; with census, the mask of every failing test, and no change."""
     na = cnt[a]
     fa = vf[a, :na].copy()
     shared = np.empty(na, np.int64)
@@ -698,7 +799,7 @@ def _nb_collapse(
             shared[ns] = fa[j]
             ns += 1
     if ns != 2:
-        return False
+        return REFUSE_LINK
     opp = np.empty(6, np.int64)
     no = 0
     for j in range(2):
@@ -707,19 +808,20 @@ def _nb_collapse(
                 opp[no] = y
                 no += 1
     if no != 2:
-        return False
+        return REFUSE_LINK
     Na, Nb = _nb_nbrs(a, F, vf, cnt), _nb_nbrs(b, F, vf, cnt)
     common = 0
     for y in Na:
         if _nb_has(Nb, y):
             if not _nb_has(opp[:2], y):
-                return False
+                return REFUSE_LINK
             common += 1
     if common != 2:
-        return False
+        return REFUSE_LINK
     c, d = opp[0], opp[1]
     if _nb_has_face(a, c, d, F, vf, cnt) and _nb_has_face(b, c, d, F, vf, cnt):
-        return False
+        return REFUSE_LINK
+    fail = 0
     moved = np.empty(na - 2, np.int64)
     nm = 0
     for j in range(na):
@@ -753,7 +855,9 @@ def _nb_collapse(
             f1x * f2y - f1y * f2x,
         )
         if n0x * n1x + n0y * n1y + n0z * n1z <= 0:
-            return False
+            if not census:
+                return REFUSE_FOLD
+            fail |= REFUSE_FOLD
         if use_size or shape > 0:
             g0x, g0y, g0z = T[2, 0] - T[1, 0], T[2, 1] - T[1, 1], T[2, 2] - T[1, 2]
             la = np.sqrt(f1x * f1x + f1y * f1y + f1z * f1z)
@@ -769,7 +873,9 @@ def _nb_collapse(
                 s2 = size[b] if t[2] == a else size[t[2]]
                 lim = size_f * min(s0, s1, s2)
                 if max(la, lb, lc) > lim and max(la, lb, lc) > max(oa, ob, oc):
-                    return False
+                    if not census:
+                        return REFUSE_SIZE
+                    fail |= REFUSE_SIZE
             if shape > 0:
                 worst_new = max(
                     worst_new,
@@ -800,7 +906,9 @@ def _nb_collapse(
                 ),
             )
         if worst_new > worst_old:
-            return False
+            if not census:
+                return REFUSE_SHAPE
+            fail |= REFUSE_SHAPE
     # the points: a (a new node), then the nodes of a's faces in order
     npts = 1
     for j in range(na):
@@ -851,7 +959,16 @@ def _nb_collapse(
             ) * n1[bk, 2] >= 0:
                 lim = eps_in
         if best > lim:
-            return False
+            T = tri[bk]
+            side = (
+                (p[0] - T[0, 0]) * n1[bk, 0]
+                + (p[1] - T[0, 1]) * n1[bk, 1]
+                + (p[2] - T[0, 2]) * n1[bk, 2]
+            )
+            why = REFUSE_EPS_IN if side >= 0 else REFUSE_EPS_OUT
+            if not census:
+                return why
+            fail |= why
         home[q] = bk
     # each new face faces the way of the input surface it stands for (the same
     # sums, in the same order, as decimate_block_py)
@@ -871,7 +988,10 @@ def _nb_collapse(
     for m in range(nm):
         dn = n1[m, 0] * S[m, 0] + n1[m, 1] * S[m, 1] + n1[m, 2] * S[m, 2]
         if dn <= 0:
-            return False
+            if not census:
+                return REFUSE_NORMAL
+            fail |= REFUSE_NORMAL
+            continue
         if cos_t > 0:
             l1 = np.sqrt(
                 n1[m, 0] * n1[m, 0] + n1[m, 1] * n1[m, 1] + n1[m, 2] * n1[m, 2]
@@ -884,7 +1004,11 @@ def _nb_collapse(
                     n0[m, 0] * n0[m, 0] + n0[m, 1] * n0[m, 1] + n0[m, 2] * n0[m, 2]
                 )
                 if dn * l0 < d0 * l1:
-                    return False
+                    if not census:
+                        return REFUSE_NORMAL_COS
+                    fail |= REFUSE_NORMAL_COS
+    if census:
+        return fail
     # commit
     nn[0] += 1
     for j in range(2):
@@ -911,7 +1035,7 @@ def _nb_collapse(
             nxt[tail[i]] = k
         tail[i] = k
     cnt[a] = 0
-    return True
+    return 0
 
 
 @njit(cache=True)
@@ -939,9 +1063,11 @@ def _nb_block(
     size_f: float,
     shape: float,
     size: Float,
-) -> tuple[Int, Float, Int, Int, int, int]:
+    census: bool,
+) -> tuple[Int, Float, Int, Int, int, int, Int, Int]:
     """decimate_block on arrays. Returns faces kept, quadrics, the carried CSR,
-    the collapses and the pushes."""
+    the collapses, the pushes, the refused tries by first failing test and the
+    census rows (decimate_block_py)."""
     n, m = P.shape[0], F0.shape[0]
     F, Q = F0.copy(), Q0.copy()
     alive = np.ones(m, np.bool_)
@@ -975,6 +1101,52 @@ def _nb_block(
             else:
                 nxt[tail[i]] = j
             tail[i] = j
+    refused = np.zeros(8, np.int64)
+    if census:
+        k = 0
+        for a in range(n):
+            if not locked[a]:
+                k += cnt[a]
+        rows = np.empty((k, 3), np.int64)  # an interior vertex: as many edges as faces
+        k = 0
+        for a in range(n):
+            if locked[a]:
+                continue
+            for b in np.sort(_nb_nbrs(a, F, vf, cnt)):
+                if locked[b]:
+                    continue
+                if k == rows.shape[0]:
+                    grown = np.empty((2 * k + 1, 3), np.int64)
+                    grown[:k] = rows
+                    rows = grown
+                rows[k, 0], rows[k, 1] = a, b
+                rows[k, 2] = _nb_collapse(
+                    a,
+                    b,
+                    eps,
+                    P,
+                    gid,
+                    F,
+                    alive,
+                    vf,
+                    cnt,
+                    head,
+                    tail,
+                    nxt,
+                    node_g,
+                    node_p,
+                    nn,
+                    N,
+                    node_n,
+                    eps_in,
+                    cos_t,
+                    size_f,
+                    shape,
+                    size,
+                    True,
+                )
+                k += 1
+        return F0.copy(), Q, cptr.copy(), cids.copy(), 0, 0, refused, rows[:k]
     stamp = np.zeros(n, np.int64)
     heap = [(0.0, 0, 0, 0, 0)]
     heap.pop()
@@ -996,7 +1168,7 @@ def _nb_block(
             continue
         if cnt[b] + cnt[a] > vf.shape[1]:
             vf = _nb_grow(vf, cnt[b] + cnt[a])
-        if not _nb_collapse(
+        why = _nb_collapse(
             a,
             b,
             eps,
@@ -1019,7 +1191,14 @@ def _nb_block(
             size_f,
             shape,
             size,
-        ):
+            False,
+        )
+        if why:
+            r = 0
+            while why > 1:
+                why >>= 1
+                r += 1
+            refused[r] += 1
             continue
         ncol += 1
         for r in range(10):
@@ -1079,15 +1258,18 @@ def _nb_block(
                 o += 1
                 k = nxt[k]
             r += 1
-    return Fk, Q, ptr, out_c, ncol, pushes
+    return Fk, Q, ptr, out_c, ncol, pushes, refused, np.zeros((0, 3), np.int64)
 
 
 def decimate_block(
-    B: Block, eps: float, rule: tuple[float, float, float, float] | None = None
+    B: Block,
+    eps: float,
+    rule: tuple[float, float, float, float] | None = None,
+    census: bool = False,
 ) -> BlockResult:
     """decimate_block_py compiled (numba): the same result, bit for bit."""
     eps_in, cos_t, size_f, shape = _scalars(rule, eps)
-    F, Q, cptr, cids, n, _ = _nb_block(
+    F, Q, cptr, cids, n, _, refused, rows = _nb_block(
         np.ascontiguousarray(B.P, np.float64),
         np.ascontiguousarray(B.gids, np.int64),
         np.ascontiguousarray(B.locked, np.bool_),
@@ -1106,8 +1288,17 @@ def decimate_block(
         np.ascontiguousarray(
             B.size if (B.size is not None and size_f > 0) else np.zeros(0), np.float64
         ),
+        census,
     )
-    return BlockResult(F=F, Q=Q, cptr=cptr, cids=cids, collapses=int(n))
+    return BlockResult(
+        F=F,
+        Q=Q,
+        cptr=cptr,
+        cids=cids,
+        collapses=int(n),
+        refused=refused,
+        census=rows if census else None,
+    )
 
 
 def _run_block(
@@ -1119,7 +1310,13 @@ def _run_block(
     r = decimate_block_py(B, eps, rule) if reference else decimate_block(B, eps, rule)
     qv = np.unique(r.F)
     return BlockResult(
-        F=r.F, Q=r.Q[qv], cptr=r.cptr, cids=r.cids, collapses=r.collapses, qv=qv
+        F=r.F,
+        Q=r.Q[qv],
+        cptr=r.cptr,
+        cids=r.cids,
+        collapses=r.collapses,
+        qv=qv,
+        refused=r.refused,
     )
 
 
@@ -1258,7 +1455,9 @@ def decimate_pass(
         Q[gids if r.qv is None else gids[r.qv]] = r.Q
         out[j] = (
             gids,
-            BlockResult(r.F, np.zeros((0, 10)), r.cptr, r.cids, r.collapses),
+            BlockResult(
+                r.F, np.zeros((0, 10)), r.cptr, r.cids, r.collapses, refused=r.refused
+            ),
         )
 
     reused = 0
@@ -1311,6 +1510,9 @@ def decimate_pass(
         [csr_take(M.cptr, M.cids, keep)] + [(r.cptr, r.cids) for _, r in results]
     )
     lap("join")
+    refused = np.zeros(len(REASONS), np.int64)
+    for _, r in results:
+        refused += r.refused
     summary = dict(
         blocks=len(results),
         faces_before=len(f),
@@ -1318,6 +1520,8 @@ def decimate_pass(
         collapses=sum(r.collapses for _, r in results),
         reused=reused,
         locked=int(locked.sum()),
+        # refused tries, by the first test that failed (reused blocks included)
+        refused=dict(zip(REASONS, refused.tolist(), strict=True)),
     )
     M2 = Mesh(v=v, f=f_new.astype(np.int64), Q=Q, cptr=cptr, cids=cids, N=M.N)
     return M2, summary
@@ -1340,6 +1544,81 @@ class Decimated:
     passes: list[dict[str, Any]] = field(default_factory=list)
     repairs: list[dict[str, Any]] = field(default_factory=list)
     pinned: Int = field(default_factory=lambda: np.zeros(0, np.int64))
+    census: dict[str, Any] | None = None
+
+
+def census(
+    M: Mesh,
+    eps: float,
+    pinned: npt.NDArray[np.bool_],
+    rules: Rules | None = None,
+    reference: bool = False,
+) -> dict[str, Any]:
+    """Why the decimation stopped: every directed edge (a, b) of the mesh M
+    whose ends are both unlocked (not on the mesh's boundary, not pinned) is
+    tried as a collapse of a into b, on the whole mesh as one block (no block
+    borders), and nothing is changed. Each gets the mask of all the tests it
+    fails (REASONS). Counts:
+
+    rim, pinned: vertices locked (a directed edge with a locked end is not
+    tried); edges: directed edges tried; free: those that pass every test, so
+    were stopped only by a block border (locked in the last pass); per reason,
+    edges failing it at all and failing it alone; vertices: unlocked vertices,
+    removable (some edge from it is free) and stuck; per reason, stuck vertices
+    with an edge failing that test alone (dropping that one test would free
+    them); masks: the 16 commonest masks of failing edges."""
+    vid, inv = np.unique(M.f, return_inverse=True)
+    F = inv.reshape(-1, 3).astype(np.int64)
+    rim = boundary_vertices(F, len(vid))
+    pin = pinned[vid] & ~rim
+    vsize = None if rules is None or rules.size is None else np.asarray(rules.size)
+    B = Block(
+        gids=vid,
+        P=M.v[vid],
+        locked=rim | pin,
+        Q=M.Q[vid],
+        F=F,
+        cptr=M.cptr,
+        cids=M.cids,
+        cpos=M.v[M.cids],
+        N=M.N[vid],
+        cnrm=M.N[M.cids],
+        size=None if vsize is None else vsize[vid],
+    )
+    rule = None if rules is None else rules.scalars(eps)
+    work = decimate_block_py if reference else decimate_block
+    rows = work(B, eps, rule, census=True).census
+    assert rows is not None
+    a, mask = rows[:, 0], rows[:, 2]
+    names = list(zip(REASONS, (1 << np.arange(len(REASONS))).tolist(), strict=True))
+    free_v = np.zeros(len(vid), bool)
+    free_v[a[mask == 0]] = True
+    tried = np.zeros(len(vid), bool)
+    tried[a] = True
+    stuck = tried & ~free_v
+    out: dict[str, Any] = dict(
+        rim=int(rim.sum()),
+        pinned=int(pin.sum()),
+        edges=len(rows),
+        free=int((mask == 0).sum()),
+        failing=dict((n, int((mask & b != 0).sum())) for n, b in names),
+        failing_alone=dict((n, int((mask == b).sum())) for n, b in names),
+        vertices=int(tried.sum()),
+        removable=int(free_v.sum()),
+        stuck=int(stuck.sum()),
+    )
+    freed = {}
+    for n, b in names:
+        x = np.zeros(len(vid), bool)
+        x[a[mask == b]] = True
+        freed[n] = int((x & stuck).sum())
+    out["stuck_freed_by_dropping"] = freed
+    m, c = np.unique(mask[mask != 0], return_counts=True)
+    top = np.argsort(-c, kind="stable")[:16]
+    out["masks"] = {
+        "+".join(n for n, b in names if int(m[i]) & b): int(c[i]) for i in top
+    }
+    return out
 
 
 def carried_distances(v: Float, f: Int, cptr: Int, cids: Int) -> Float:
@@ -1438,6 +1717,7 @@ def reorder(D: Decimated, order: npt.ArrayLike) -> Decimated:
         passes=D.passes,
         repairs=D.repairs,
         pinned=D.pinned,
+        census=D.census,
     )
 
 
@@ -1454,6 +1734,7 @@ def decimate(
     max_rounds: int = 10,
     pinned: npt.ArrayLike | None = None,
     rules: Rules | None = None,
+    with_census: bool = False,
 ) -> Decimated:
     """Decimate mesh (v, f) within eps (in v's units) on blocks of side
     `block`: `passes` passes, on the grid shifted by half a block in every
@@ -1463,7 +1744,10 @@ def decimate(
     pinning what they stand for, until none do (a block
     whose inputs did not change is reused, not run); RuntimeError after
     max_rounds. rules: further tests of each collapse (Rules); carried
-    distances are then within max(eps, rules.eps_in)."""
+    distances are then within max(eps, rules.eps_in). Each pass's summary
+    counts its refused tries by the first test that failed (refused).
+    with_census: also census() of the result (Decimated.census), which
+    changes nothing else."""
     lap = _Laps(log)
     V = np.asarray(v, np.float64)
     Fa = np.asarray(f, np.int64)
@@ -1548,6 +1832,9 @@ def decimate(
         )
     d = carried_distances(V, M.f, M.cptr, M.cids)
     lap("distances")
+    cen = census(M, eps, pin, rules, reference) if with_census else None
+    if with_census:
+        lap("census")
     return Decimated(
         vertex_ids=vid,
         faces=np.searchsorted(vid, M.f).astype(np.int64),
@@ -1557,4 +1844,5 @@ def decimate(
         passes=out,
         repairs=repairs,
         pinned=np.flatnonzero(pin),
+        census=cen,
     )
