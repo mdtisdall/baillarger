@@ -3,7 +3,7 @@
 Status: Parts 1 to 6 are built and merged: Part 1 (#168, #175), Part 2 (#181), Part 3
 (#195), Part 4a (#197), Part 4b (core #171, join #198), Part 5 (core #167, #172,
 #177, join #196) and Part 6 (core #219, join #220, #223, the grow log #224). Part 7
-(the standard edits file) is planned, not built, and has two decisions to make.
+(the standard edits file) is planned, not built.
 
 ## Goal
 
@@ -40,7 +40,8 @@ not come from that log.
 
 - The edits of a hemisphere are one diff: the difference between the input labels and
   the labels after the user's edits. It has each edited voxel and its label, in one
-  sparse file (`label-edits/1`, below) at a standard BIDS path (Part 7).
+  sparse file (`label-edits/1`, below) at a standard BIDS path (Part 7). Part 7
+  makes its records a TSV.
   `white_dseg --edits` reads the diff. Nothing else applies edits.
 - The tool keeps the edits file whole: the hash, the write that replaces the file, the
   lock, and the undo of one viewer run. It keeps no history of the file. Version
@@ -367,7 +368,7 @@ version-control this file does so as for any other file of a BIDS hierarchy.
 
 - A hemisphere has one edits file. Its path comes from the input labels:
 
-  `<derivatives>/labeledits/sub-<sub>/ses-<ses>/anat/sub-<sub>_ses-<ses>_hemi-<h>_desc-labeledits_edits.npy`
+  `<derivatives>/labeledits/sub-<sub>/ses-<ses>/anat/sub-<sub>_ses-<ses>_hemi-<h>_desc-labeledits_edits.tsv`
 
   with its sidecar. `<derivatives>` is the directory that holds the derivatives root
   of the input labels (the root is the directory above the input's
@@ -382,11 +383,53 @@ version-control this file does so as for any other file of a BIDS hierarchy.
 - The tool does not version the file. No command, launch entry or document of the
   project gives version control as a step of editing.
 
+**The records are a TSV** (User, 2026-11-23). `label-edits/1` is edited in place
+(version 1).
+
+- The records file is a BIDS tabular file, `..._desc-labeledits_edits.tsv`: a header
+  line, then one line for each edited voxel, with the columns `i`, `j`, `k` (the
+  voxel's indices on the grid) and `label`, all integers, separated by tabs, with
+  `\n` line ends. The lines are sorted by `i`, then `j`, then `k` (the order of the
+  linear index), and each voxel is in the file one time. The name follows BIDS; the
+  suffix `edits` is ours.
+- The sidecar keeps its keys. It also describes the four columns, as BIDS does for a
+  tabular file. `SHA256` is the hash of the `.tsv` file. The writer is deterministic:
+  the same diff gives the same bytes.
+- In memory the diff is `label_edits.Edits`, as now (`index`, `label`). Only
+  `label_edits` reads and writes the file. The writes, the lock, the check of the
+  hash and the repair of a stopped write do not change.
+- The dseg's copy of the edits has the same form: `..._desc-wmtopo_edits.tsv`.
+- A version control tool shows a change of the file voxel by voxel. The cost is the
+  size: about 0.2 MB for 10,425 voxels, in proportion to the edited voxels. A write
+  replaces the whole file, as now.
+- The one `.npy` diff that exists (the user's) is converted one time:
+  `python -m baillarger.label_edits convert PATH.npy` writes the `.tsv` and its
+  sidecar next to it, reads them back, and checks that the diff is the same. It does
+  not delete the `.npy` files. Then a regeneration gives the output set a `.tsv`
+  copy. After that, no code reads a `.npy` diff, and a later PR removes the command.
+
 **The viewer.** Without `--edits`, the viewer finds the file from the surface: the
 surface's dseg, then the dseg's input labels (`white_dseg.input_labels`), then the
 standard path. A hemisphere with no edits file starts with the empty diff. `--edits
 PATH` stays, for another file: the tests, and a run on a scratch copy. `--sites` needs
 `--log`, as now; the answer log has no standard path in this part.
+
+**Editing is switched on in the pane** (User, 2026-11-23). With the rule, each viewer
+on an output set of the same input labels finds the same file: an old set that was
+renamed, and a scratch set made from the real input labels. The explicit `--edits`
+was the guard against a write from the wrong viewer. The switch replaces it.
+
+- Without `--edits`, the viewer starts with editing off. The pane shows the path of
+  the edits file and a switch. `POST /review/editing {on}` sets it, for this viewer
+  run only. The page never sends a path.
+- While editing is off, each write is refused and nothing is written: a paint, an
+  answer, an accept-fix, an undo and a regeneration. The edits file and its root are
+  not made. The reads work: the pending edits, the previews and the grow proposal.
+- With `--edits PATH`, editing is on at start, as now: the path in the command is the
+  deliberate act.
+- The viewer does not switch editing on if the dseg has no copy of the edits that it
+  can read (an output set from before the TSV). The pane says that the set needs a
+  regeneration.
 
 **The regeneration.** `python -m baillarger.regenerate INPUT --root ROOT` uses the
 standard file, if it is there. `--edits PATH` gives another file, and `--no-edits`
@@ -399,33 +442,32 @@ file. Without the option, the viewer writes no grow log, and nothing is written 
 to the edits file but the edits. The log is not a record of the edits, and no code
 reads it.
 
-**Not changed.** The format `label-edits/1` apart from the decision below; the undo
-stack (memory, one viewer run); the dseg's copy of the edits (the pending edits need
-it); the check of the outputs' identity after a regeneration.
-
-**To decide** (each with a recommendation; neither is built before its decision):
-
-1. **The records: `.npy` or TSV.** The file's name follows BIDS, but the suffix
-   `edits` and the extension `.npy` are not in the standard. A TSV (`i`, `j`, `k`,
-   `label`, sorted) with the same sidecar is a BIDS tabular file, and a version
-   control tool shows its changes voxel by voxel. The cost is the size: about 0.2 MB
-   for 10,425 voxels, in proportion to the edited voxels. The dseg's copy takes the
-   same form. Recommended: TSV.
-2. **The guard, in place of the explicit `--edits`.** With the rule, each viewer on an
-   output set of the same input labels finds the same file: an old set that was
-   renamed, and a scratch set made from the real input labels. Recommended: without
-   `--edits`, the viewer starts with editing off. The pane shows the path of the edits
-   file and a switch. Each write is refused until the user has switched editing on.
-   The page never sends a path.
+**Not changed.** The sidecar's keys of `label-edits/1`, and `label_edits.Edits`; the
+undo stack (memory, one viewer run); the dseg's copy of the edits apart from its
+form (the pending edits need it); the check of the outputs' identity after a
+regeneration.
 
 Tests: `standard_path` of input labels in a derivatives root gives the path above, and
 refuses input labels that are not in `sub-<sub>/ses-<ses>/anat/` of a root; a viewer
-without `--edits` on a phantom writes its paint into the standard file, and makes the
-root's `dataset_description.json`; a viewer with `--edits` writes into that file and
+without `--edits` on a phantom, with editing switched on, writes its paint into the
+standard file, and makes the root's `dataset_description.json`; a viewer with `--edits` writes into that file and
 makes no standard file; the regeneration without `--edits` gives the same files as
 with `--edits` on the standard file; `--no-edits` gives the same files as a root with
 no standard file; a viewer without `--grow-log` writes no grow log after a grow, a
 paint and an undo, and a viewer with it writes their lines into that file.
+
+Tests of the TSV: write and read give the same diff; the same diff gives the same
+bytes; the file has the header and the columns above, sorted; a reader refuses a file
+that is not sorted, has a voxel two times or outside the grid, or has a column
+missing; the tests of Part 1 for the stopped write and the lock pass on the TSV; the
+converter's `.tsv` reads back equal to the `.npy` diff, and the `.npy` files are
+still there.
+
+Tests of the switch: without `--edits`, a paint, an answer, an undo and a regeneration
+before the switch are refused, and no file and no root are made; after the switch a
+paint writes; the pending edits and a preview work with editing off; with `--edits`,
+editing is on at start; on an output set with no readable copy of the edits, the
+switch is refused.
 
 ## Order of the PRs
 
@@ -438,7 +480,8 @@ The joins merge in this order. The cores can merge earlier (see Parallel work).
 5. Part 4b.
 6. Part 5.
 7. Part 6: its core, then its join.
-8. Part 7: its core, then its join, after the decisions of Part 7.
+8. Part 7: its core, then its join. Then the one-time conversion of the user's edits
+   file and a regeneration, on the user's instruction.
 
 ## Parallel work
 
@@ -454,7 +497,7 @@ the cores into the routes and the pane, and they meet in a few shared files.
 | 4b | `antialias.py` (start, held), `white_surf.py` (the field derivative, the blocks' re-march), its format doc, their tests | `viewer/review.py` (route, working field), the 3D view and the slices (blocks) | the preview contract |
 | 5 | a new `regenerate` command, its tests | `viewer/review.py` (the subprocess), `static/review.js` (state, message) | the command's arguments |
 | 6 | `label_grow.py` (new), `tests/test_label_grow.py` | `viewer/review.py` (`/review/grow`, the echoes), `static/review.js` (grow mode, the proposal, accept) | the `label_grow` contract |
-| 7 | `label_edits.py` (`standard_path`), `regenerate.py` (`--edits` optional, `--no-edits`), `docs/formats/label-edits.md`, their tests | `viewer/review.py` (`--edits` optional; the guard; `--grow-log`), `static/review.js` (the guard) | the decisions of Part 7, `standard_path` |
+| 7 | `label_edits.py` (the TSV, `standard_path`, the converter), `white_dseg.py` (the copy as a TSV), `regenerate.py` (`--edits` optional, `--no-edits`), `docs/formats/label-edits.md`, `wm-dseg.md`, their tests | `viewer/review.py` (`--edits` optional; `/review/editing`; `--grow-log`), `static/review.js` (the path and the switch) | `standard_path`, the `/review/editing` contract |
 
 Waves:
 
@@ -573,6 +616,12 @@ The joins use these interfaces. A core must keep them, or change this plan first
   input labels that are not in `sub-<sub>/ses-<ses>/anat/` of a derivatives root.
 - Part 7: `python -m baillarger.regenerate INPUT [--edits EDITS | --no-edits] --root
   ROOT`. With neither option, the edits are the standard file, if it is there.
+- Part 7: the records of a diff are a `.tsv` (`i`, `j`, `k`, `label`); the functions
+  of `label_edits` above keep their arguments and results.
+- Part 7: `POST /review/editing {on: true | false}`. Response: `{editing, edits}`
+  (`edits` is the path of the edits file), or `{error}` if the dseg has no readable
+  copy of the edits. `GET /review/queue` also gives `editing` and `edits`. With
+  editing off, each write route answers `{error}` and writes nothing.
 - Part 7: the grow log is written only with the viewer option `--grow-log PATH`, into
   that file (`.jsonl`, with its sidecar `grow-log/1`). `review.grow_log_path` goes.
 
