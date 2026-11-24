@@ -25,7 +25,7 @@ start = rm.measures(1.0)
 log = SR.remesh(rm, 1.0, max_passes=4)
 V, F = rm.chk.V, rm.chk.F
 h = hashlib.sha1(np.ascontiguousarray(V).tobytes() + np.ascontiguousarray(F).tobytes()).hexdigest()[:12]
-print(json.dumps(dict(dot=SR.DOT_ORDER, hits=rm.memo_hits,
+print(json.dumps(dict(dot=getattr(SR, "DOT_ORDER", None), hits=getattr(rm, "memo_hits", None), src=SR.__file__,
     angle=[start["face_angle_p50_90_99_max"][3], log[-1]["face_angle_p50_90_99_max"][3]],
     passes=[[r.get("splits"), r.get("collapses"), r.get("flips")] for r in log], hash=h)))
 """
@@ -62,18 +62,45 @@ def machine() -> dict[str, object]:
     return out
 
 
-@pytest.mark.parametrize("case", ["a", "b", "c", "d"])
-def test_ci_diag(case: str) -> None:
-    rep: dict[str, object] = {"case": case, "machine": machine()}
-    runs = []
-    for seed in range(3):
-        env = dict(os.environ, PYTHONHASHSEED=str(seed))
+AVX512 = "AVX512F AVX512CD AVX512_KNL AVX512_KNM AVX512_SKX AVX512_CLX AVX512_CNL AVX512_ICL AVX512_SPR AVX512VL AVX512BW AVX512DQ AVX512VNNI AVX512IFMA AVX512VBMI AVX512VBMI2 AVX512BITALG AVX512VPOPCNTDQ AVX512BF16 AVX512FP16"
+
+
+def main_src(tmp: str) -> str:
+    """A copy of src/ with main's versions of the three changed modules."""
+    import shutil
+
+    here = os.path.dirname(__file__)
+    dst = os.path.join(tmp, "mainsrc")
+    shutil.copytree(
+        os.path.join(here, "..", "src"),
+        dst,
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    for f in ("surface_remesh", "mesh_checks", "_jit"):
+        shutil.copy(
+            os.path.join(here, "_diag_main", f + ".py.txt"),
+            os.path.join(dst, "baillarger", f + ".py"),
+        )
+    return dst
+
+
+def test_ci_diag(tmp_path: object) -> None:
+    tmp = str(tmp_path)
+    rep: dict[str, object] = {"machine": machine()}
+    ms = main_src(tmp)
+    variants = {
+        "pr": {},
+        "pr_np_no_avx512": {"NPY_DISABLE_CPU_FEATURES": AVX512},
+        "pr_numba_v3": {"NUMBA_CPU_NAME": "x86-64-v3", "NUMBA_CACHE_DIR": tmp + "/nc1"},
+        "main": {"PYTHONPATH": ms},
+        "main_np_no_avx512": {"PYTHONPATH": ms, "NPY_DISABLE_CPU_FEATURES": AVX512},
+    }
+    for name, extra in variants.items():
+        env = dict(os.environ, **extra)
         p = subprocess.run(
             [sys.executable, "-c", BODY], env=env, capture_output=True, text=True
         )
-        runs.append(
-            p.stdout.strip().splitlines()[-1] if p.stdout.strip() else p.stderr[-500:]
+        rep[name] = (
+            p.stdout.strip().splitlines()[-1] if p.stdout.strip() else p.stderr[-800:]
         )
-    rep["runs"] = runs
-    rep["same_in_all"] = len(set(runs)) == 1
     pytest.fail("CIDIAG " + json.dumps(rep))
