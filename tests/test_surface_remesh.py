@@ -4,6 +4,7 @@ remesher must keep them apart), an open sheet with a box rim (corners stay,
 the rim stays on the box), and a slab with a thin fin (the normal check and
 the outward bound)."""
 
+from collections import Counter
 from typing import Any
 
 import numpy as np
@@ -293,3 +294,126 @@ def test_the_memo_of_refusals_changes_nothing(mesh: str) -> None:
     assert la == lb  # the same edits and refusals, pass by pass
     if mesh == "two_sheets":
         assert hits > 0  # the memo answered some tries
+
+
+# ------------------------------------------------ the early gap refusal
+
+
+def _reason(r: MC.EditCheck) -> str:
+    """The reason Remesher._try takes from the checks, in its order."""
+    if r.gap_pairs:
+        return "gap"
+    if r.intersecting_pairs or r.vertex_fold_pairs:
+        return "cross"
+    return "crease" if r.creases else ""
+
+
+def small_two_sheets() -> tuple[np.ndarray, np.ndarray]:
+    """Two_sheets on a coarser grid (fewer tries)."""
+    s = np.linspace(0.0, 10.0, 21)
+    X, Y = np.meshgrid(s, s, indexing="ij")
+    V = np.c_[X.ravel(), Y.ravel(), (5 + np.sin(X / 4) * np.cos(Y / 5)).ravel()]
+    n = len(s)
+    F = []
+    for i in range(n - 1):
+        for j in range(n - 1):
+            a, b, c, d = i * n + j, (i + 1) * n + j, (i + 1) * n + j + 1, i * n + j + 1
+            F += [[a, b, c], [a, c, d]]
+    up = 0.2 + 0.4 * np.clip((V[:, 0] - 4) / 2, 0, 1)
+    Fa = np.array(F, np.int64)
+    return np.r_[V, V + np.c_[0 * up, 0 * up, up]], np.r_[Fa, Fa + len(V)]
+
+
+#: passes of the early-gap tests (the larger meshes: fewer, for the time).
+#: two_sheets has gap refusals; sphere, a closed mesh, has none (its tries
+#: test the other reasons); u_plate is left out for its time
+PASSES = {"two_sheets": 1, "small_two_sheets": 4, "sphere": 2}
+
+MESHES = {
+    "two_sheets": two_sheets,
+    "small_two_sheets": small_two_sheets,
+    "sphere": sphere,
+}
+
+
+@pytest.mark.parametrize("mesh", list(MESHES))
+def test_the_early_gap_refusal_gives_the_full_kernels_reason(mesh: str) -> None:
+    """For every try of a real remesh (every kind): the reason with the
+    gap test at the edit's own vertices first equals the reason of the full
+    kernel, and an early refusal is a gap refusal of the full kernel."""
+    V0, F0 = MESHES[mesh]()
+    ref = SR.Reference(V0, F0, np.full(len(V0), 2.0))
+    rm = SR.Remesher(ref, V0.copy(), F0.copy(), GAP)
+    rm.memo = False  # every try reaches the Checker
+    chk = rm.chk
+    orig = chk.propose
+    kind = [""]
+    tries: Counter[tuple[str, str]] = Counter()  # (kind, what) -> number
+
+    def wrapped(**kw: Any) -> MC.EditCheck:
+        kw.pop("first_gap")  # the remesher's own choice: True
+        full = orig(**kw, first_gap=False)
+        r_full = _reason(full)
+        chk.rollback()
+        early = orig(**kw, first_gap=True)
+        r_early = _reason(early)
+        chk.rollback()
+        assert r_early == r_full
+        if early.early:
+            assert r_full == "gap"
+            assert early.gap_pairs >= 1
+            tries[kind[0], "early"] += 1
+        elif r_full == "gap":
+            tries[kind[0], "full_gap"] += 1
+        tries[kind[0], "all"] += 1
+        return orig(**kw, first_gap=True)
+
+    chk.propose = wrapped  # type: ignore[assignment]
+    try_ = rm._try
+
+    def tagged(k: str, *a: Any, **kw: Any) -> Any:
+        kind[0] = k
+        return try_(k, *a, **kw)
+
+    rm._try = tagged  # type: ignore[assignment]
+    SR.remesh(rm, 1.0, max_passes=PASSES[mesh])
+    kinds = {k for k, _ in tries}
+    assert "collapse" in kinds or mesh != "two_sheets"
+    for k in kinds:
+        if tries[k, "early"] or tries[k, "full_gap"]:
+            print(mesh, k, tries[k, "early"], tries[k, "full_gap"])
+    if mesh in ("two_sheets", "small_two_sheets"):
+        gaps = {k for k in kinds if tries[k, "early"] or tries[k, "full_gap"]}
+        assert gaps
+        for k in gaps:
+            assert tries[k, "early"] > 0, k  # each kind with gap refusals
+
+
+@pytest.mark.parametrize("mesh", list(MESHES))
+def test_a_run_with_the_early_gap_test_is_the_run_without(mesh: str) -> None:
+    V0, F0 = MESHES[mesh]()
+    out = []
+    for first_gap in (False, True):
+        ref = SR.Reference(V0, F0, np.full(len(V0), 2.0))
+        rm = SR.Remesher(ref, V0.copy(), F0.copy(), GAP)
+        rm.first_gap = first_gap
+        hits: list[int] = []
+
+        def progress(
+            rec: dict[str, Any], rm: SR.Remesher = rm, h: list[int] = hits
+        ) -> None:
+            h.append(rm.memo_hits)
+
+        log = SR.remesh(rm, 1.0, max_passes=PASSES[mesh], progress=progress)
+        out.append(
+            (
+                rm.chk.export(),
+                [(r["refused"], r["splits"], r["collapses"], r["flips"]) for r in log],
+                hits,
+            )
+        )
+    (a, la, ha), (b, lb, hb) = out
+    for x, y in zip(a, b, strict=True):
+        assert np.array_equal(x, y)
+    assert la == lb
+    assert ha == hb

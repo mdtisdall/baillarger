@@ -1280,6 +1280,139 @@ def _check_kernel(
 
 
 @njit(cache=True)
+def _gap_at_own(
+    M: _Live,
+    K: _Marks,
+    cv: Int, addf: Int, every: bool,
+) -> tuple[int, Int, Int]:  # fmt: skip
+    """The gap test of _check_kernel at the edit's own vertices only: cv
+    (the live ones) and the vertices of the changed faces (addf and the faces
+    round cv), each once. They are always among the kernel's affected
+    vertices (a vertex of a changed face is at distance 0 from it), so a gap
+    pair here is a gap pair of the full kernel too.
+
+    The per-vertex test below (the ring, the stamp, _patch, the marks) MUST
+    stay equal to the gap test of _check_kernel with want_dmin=False; compare
+    the two texts when you change one.
+
+    Returns the first own vertex with a gap pair (-1 if none; it stops
+    there), and, with `every` (a test aid: no stop), the own vertices and
+    for each one whether it has a gap pair (1 or 0); else both are empty."""
+    (
+        V,
+        F,
+        vhead,
+        cnext,
+        cprev,
+        fcell,
+        gnext,
+        gprev,
+        hkey,
+        hhead,
+        vfree,
+        ffree,
+        cnt,
+        prm,
+        lo,
+    ) = M
+    vA, vbad, vfac, vx, stamp, ring, queue, fC, fbad, fcr = K
+    cell, Rmax, gap, rloc = prm[_CELL], prm[_RMAX], prm[_GAP], prm[_RLOC]
+    want_dmin = False
+    cnt[_MARK] += 1
+    m = cnt[_MARK]
+    # the changed faces
+    cf = [int(x) for x in range(0)]
+    for f in addf:
+        if F[f, 0] >= 0 and fC[f] != m:
+            fC[f] = m
+            cf.append(f)
+    for v in cv:
+        c = vhead[v]
+        while c >= 0:
+            g = c // 3
+            c = cnext[c]
+            if fC[g] != m:
+                fC[g] = m
+                cf.append(g)
+    # the own vertices
+    av = [int(x) for x in range(0)]
+    for v in cv:
+        if vhead[v] >= 0 and vA[v] != m:
+            vA[v] = m
+            av.append(v)
+    for f in cf:
+        for w in range(3):
+            u = F[f, w]
+            if vA[u] != m:
+                vA[u] = m
+                av.append(u)
+    hit = np.zeros(len(av) if every else 0, np.int64)
+    radg = int(np.ceil((gap + Rmax) / cell))
+    for ip in range(len(av)):
+        p = av[ip]
+        cnt[_MARK] += 1
+        mp = cnt[_MARK]
+        ring[p] = mp
+        c = vhead[p]
+        while c >= 0:
+            g = c // 3
+            c = cnext[c]
+            ring[F[g, 0]] = mp
+            ring[F[g, 1]] = mp
+            ring[F[g, 2]] = mp
+        i0, j0, k0 = (
+            _q(V[p, 0], lo[0], cell),
+            _q(V[p, 1], lo[1], cell),
+            _q(V[p, 2], lo[2], cell),
+        )
+        built = False
+        for _rep in range(2):  # pass 0: is any face near? pass 1: with the patch
+            near = False
+            for i in range(max(i0 - radg, 0), min(i0 + radg, _KMAX) + 1):
+                for j in range(max(j0 - radg, 0), min(j0 + radg, _KMAX) + 1):
+                    for k in range(max(k0 - radg, 0), min(k0 + radg, _KMAX) + 1):
+                        key = _pack(i, j, k)
+                        s = _hslot(hkey, key)
+                        if hkey[s] != key:
+                            continue
+                        f = hhead[s]
+                        while f >= 0:
+                            g = f
+                            f = gnext[f]
+                            a, b, cc = F[g, 0], F[g, 1], F[g, 2]
+                            if a == p or b == p or cc == p:
+                                continue
+                            if built and (
+                                stamp[a] == mp or stamp[b] == mp or stamp[cc] == mp
+                            ):
+                                continue
+                            if (
+                                not built
+                                and not want_dmin
+                                and (ring[a] == mp or ring[b] == mp or ring[cc] == mp)
+                            ):
+                                continue
+                            d = _ptd(V, p, a, b, cc)
+                            if not built:
+                                if d < gap or want_dmin:
+                                    near = True
+                                continue
+                            if d < gap:  # a gap pair at p
+                                if not every:
+                                    return p, hit, hit
+                                hit[ip] = 1
+            if built or not near:
+                break
+            _patch(p, V, F, vhead, cnext, rloc, stamp, mp, queue)
+            built = True
+    own = np.empty(len(av) if every else 0, np.int64)
+    if every:
+        for i in range(len(av)):
+            own[i] = av[i]
+    return -1, own, hit
+
+
+@njit(cache=True)
 def _closest_kernel(
     M: _Live, P: Float, r: float, Q: Float, d: Float, face: Int
 ) -> None:
@@ -1368,6 +1501,12 @@ class EditCheck:
     #: the ids the edit gave to its new vertices and faces
     new_vertices: Int
     new_faces: Int
+    #: True: Checker.propose(first_gap=True) refused the edit at once for a
+    #: gap pair at one of its own vertices. Only the reason is meaningful
+    #: then (gap_pairs >= 1, and no other check ran): bad, facing, the
+    #: crossing and crease fields, affected and dmin are empty, and
+    #: gap_pairs is 1, not the count of the full kernel.
+    early: bool = False
 
     @property
     def ok(self) -> bool:
@@ -1529,15 +1668,24 @@ class Checker:
         add_faces: npt.ArrayLike | None = None,
         add_vertices: npt.ArrayLike | None = None,
         want_dmin: bool = False,
+        first_gap: bool = False,
     ) -> EditCheck:
         """Make an edit and check it; commit() keeps it, rollback() undoes
         it. In this order: add_vertices (positions) become new vertices,
         remove_faces go, the vertices `move` go to `to`, add_faces come (a
         vertex -1 - j in add_faces is new vertex j). A vertex left with no
-        face is freed at commit."""
+        face is freed at commit.
+
+        first_gap: test the gap at the edit's own vertices first, and if one
+        has a gap pair, return at once an EditCheck with early=True (gap_pairs
+        1, the other fields empty: only the reason "gap" is meaningful). The
+        full kernel would also report a gap pair, so a caller that uses only
+        the first reason gets the same answer faster. Otherwise (and always
+        without first_gap) the full checks run."""
         r = self._propose(
-            move, to, remove_faces, add_faces, add_vertices, want_dmin, True
-        )
+            move, to, remove_faces, add_faces, add_vertices, want_dmin, True,
+            first_gap,
+        )  # fmt: skip
         assert r is not None
         return r
 
@@ -1564,6 +1712,7 @@ class Checker:
         add_vertices: npt.ArrayLike | None,
         want_dmin: bool,
         check: bool,
+        first_gap: bool = False,
     ) -> EditCheck | None:
         if self._pending is not None:
             raise RuntimeError("an edit is pending: commit() or rollback() first")
@@ -1589,12 +1738,16 @@ class Checker:
         if not check:
             return None
         cv = np.r_[mv, newv]
-        return self._run(cv, newf, Told, False, True, want_dmin, newv, newf)
+        return self._run(cv, newf, Told, False, True, want_dmin, newv, newf, first_gap)
 
     def _run(
         self, cv: Int, addf: Int, Told: Float, full: bool, cross: bool,
-        want_dmin: bool, newv: Int, newf: Int,
+        want_dmin: bool, newv: Int, newf: Int, first_gap: bool = False,
     ) -> EditCheck:  # fmt: skip
+        if first_gap and not full:
+            if _gap_at_own(self._M(), self._K(), cv, addf, False)[0] >= 0:
+                e, ef = np.zeros(0, np.int64), np.zeros(0, np.float64)
+                return EditCheck(e, e, 1, e, 0, 0, e, 0, e, ef, newv, newf, early=True)
         r = _check_kernel(self._M(), self._K(), cv, addf, Told, full, cross, want_dmin)
         bad, fac, ng, xf, ni, nf, crf, ncr, av, dmin = r
         return EditCheck(bad, fac, ng, xf, ni, nf, crf, ncr, av, dmin, newv, newf)

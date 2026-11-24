@@ -472,6 +472,10 @@ class Remesher:
     #: remember the refusals of the gap, crossing and crease checks (see
     #: _memo_grid); False: check every try (the same result, slower)
     memo: bool = True
+    #: test the gap at an edit's own vertices before the full checks; a
+    #: refusal uses only the reason, which is "gap" either way (the result is
+    #: the same, faster). False: the full checks every time (tests)
+    first_gap: bool = True
 
     def __init__(
         self,
@@ -752,6 +756,7 @@ class Remesher:
             remove_faces=rem,
             add_faces=add_faces,
             add_vertices=add_vertices,
+            first_gap=self.first_gap,
         )
         reason, state = "", None
         if r.gap_pairs:

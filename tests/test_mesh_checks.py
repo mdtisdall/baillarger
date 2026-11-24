@@ -565,3 +565,141 @@ def test_closest_is_the_brute_force_closest() -> None:
                 assert np.linalg.norm(Q[i] - p) == pytest.approx(d[i], abs=1e-12)
             else:
                 assert f[i] == -1 and not np.isfinite(d[i])
+
+
+# ------------------------------------------------ the early gap refusal
+
+
+def hovering_triangle() -> tuple[Float, Int, dict[str, Any]]:
+    """A valid mesh (gap 0.3): a flat 7 × 7 grid of unit squares and a tiny
+    triangle 0.5 above the centroid of face f, far from f's vertices. The
+    edit moves vertex a of f up by 1: f's plane then passes about 0.17 below
+    the tiny triangle, whose vertices are not the edit's own."""
+    V, F = flat_grid(7)
+    f = int(np.flatnonzero((F == 3 * 7 + 3).any(1))[0])
+    a = int(F[f, 0])
+    c = V[F[f]].mean(0) + [0.0, 0.0, 0.5]
+    V = np.r_[V, [c, c + [0.02, 0, 0], c + [0, 0.02, 0]]]
+    F = np.r_[F, [[len(V) - 3, len(V) - 2, len(V) - 1]]]
+    edit: dict[str, Any] = dict(move=[a], to=V[[a]] + [0.0, 0.0, 1.0])
+    return V, F.astype(np.int64), edit
+
+
+def own_gap(chk: C.Checker, r: C.EditCheck, every: bool) -> tuple[int, Int, Int]:
+    """_gap_at_own on the pending edit (cv = moved + new vertices)."""
+    assert chk._pending is not None
+    cv = np.r_[chk._pending[0], r.new_vertices].astype(np.int64)
+    return C._gap_at_own(chk._M(), chk._K(), cv, r.new_faces, every)
+
+
+def test_a_gap_at_a_non_own_vertex_is_found_by_the_full_kernel_only() -> None:
+    V, F, e = hovering_triangle()
+    chk = C.Checker(C.Topology.of(F, len(V)), V, 0.3)
+    assert chk.check_all().ok
+    r = chk.propose(**e, want_dmin=True)
+    first, own, hit = own_gap(chk, r, True)
+    assert first == -1  # the early test passes the edit on ...
+    assert own_gap(chk, r, False)[0] == -1
+    assert r.gap_pairs >= 1  # ... and the full kernel refuses it
+    pos = {int(p): i for i, p in enumerate(r.affected)}
+    assert set(own.tolist()) <= set(pos)
+    assert (r.dmin[[pos[int(p)] for p in own]] >= 0.3).all()  # own: no gap
+    assert not hit.any()
+    assert (r.dmin < 0.3).any()  # a non-own affected vertex has the gap
+    chk.rollback()
+    r2 = chk.propose(**e, first_gap=True)
+    assert not r2.early and r2.gap_pairs >= 1
+    chk.rollback()
+    audit(chk)
+
+
+def test_gap_and_crossing_together_are_a_gap_with_or_without_the_early_test() -> None:
+    V, F = flat_grid(5)
+    V2, F2 = flat_grid(5, z=0.5)
+    chk = C.Checker(C.Topology.of(np.r_[F, F2 + len(V)], 2 * len(V)), np.r_[V, V2], 0.3)
+    assert chk.check_all().ok
+    a = len(V) + 12  # the centre of the upper grid, over vertex 12
+    e: dict[str, Any] = dict(move=[a], to=[[2.0, 2.0, -0.05]])
+    r = chk.propose(**e)
+    assert r.gap_pairs >= 1 and r.intersecting_pairs >= 1
+    chk.rollback()
+    r1 = chk.propose(**e, first_gap=True)
+    assert r1.early and r1.gap_pairs >= 1
+    chk.rollback()
+
+
+@pytest.mark.parametrize(
+    ("mesh", "gap", "step"), [("slabs", 0.15, 0.2), ("sphere", 0.3, 0.8)]
+)
+def test_the_own_vertex_gap_test_is_the_kernels_gap_test_vertex_by_vertex(
+    mesh: str, gap: float, step: float
+) -> None:
+    """For many edits: the gap test at each own vertex says gap pair exactly
+    when the kernel's dmin there (want_dmin) is below gap; the first-gap
+    answer is the first own vertex with a pair; first_gap=True gives the same
+    verdict (gap or not) as the full kernel."""
+    rng = np.random.default_rng(2)
+    V, F = sphere() if mesh == "sphere" else slabs(2, 16)
+    chk = C.Checker(C.Topology.of(F, len(V)), V, gap)
+    tried = pairs = early = 0
+    while tried < 150:
+        e = random_edit(chk, rng, step)
+        if e is None:
+            continue
+        tried += 1
+        r = chk.propose(**e, want_dmin=True)
+        first, own, hit = own_gap(chk, r, True)
+        pos = {int(p): i for i, p in enumerate(r.affected)}
+        assert set(own.tolist()) <= set(pos)
+        for p, h in zip(own.tolist(), hit.tolist(), strict=True):
+            assert bool(h) == bool(r.dmin[pos[p]] < gap)
+        f1 = own_gap(chk, r, False)[0]
+        assert (f1 >= 0) == bool(hit.any())
+        if f1 >= 0:
+            assert hit[own.tolist().index(f1)] == 1
+            assert r.gap_pairs >= 1
+            early += 1
+        pairs += r.gap_pairs > 0
+        chk.rollback()
+        r1 = chk.propose(**e, first_gap=True)
+        assert r1.early == (f1 >= 0)
+        assert (r1.gap_pairs > 0) == (r.gap_pairs > 0)
+        if r1.ok:
+            chk.commit()
+        else:
+            chk.rollback()
+    assert pairs >= early
+    if mesh == "slabs":
+        assert early > 5  # the early path ran
+    audit(chk)
+
+
+def test_propose_without_first_gap_and_a_kept_edit_are_the_old_answer() -> None:
+    rng = np.random.default_rng(3)
+    V, F = sphere()
+    chk = C.Checker(C.Topology.of(F, len(V)), V, 0.3)
+    n = kept = 0
+    while n < 40:
+        e = random_edit(chk, rng, 0.8)
+        if e is None:
+            continue
+        n += 1
+        a = chk.propose(**e)
+        chk.rollback()
+        b = chk.propose(**e, first_gap=False)
+        chk.rollback()
+        c = chk.propose(**e, first_gap=True)
+        assert not a.early and not b.early
+        for x in (b, c) if not c.early else (b,):
+            for k in a.__dict__:
+                u, w = getattr(a, k), getattr(x, k)
+                if isinstance(u, np.ndarray):
+                    np.testing.assert_array_equal(u, w)
+                else:
+                    assert u == w
+        if c.ok:
+            chk.commit()
+            kept += 1
+        else:
+            chk.rollback()
+    assert kept > 3
